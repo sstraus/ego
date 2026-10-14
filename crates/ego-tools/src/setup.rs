@@ -386,6 +386,43 @@ pub fn inventory_admitted(
             });
         }
     }
+    // Derived sources are operator-owned paths, not model-selected authority.
+    // Keep the catalogue finite and inspect presence only; never create caches.
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let cargo = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".cargo"));
+        let rustup = std::env::var_os("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".rustup"));
+        let source = |key: &str| {
+            if std::env::var_os(key).is_some() {
+                format!("operator {key}")
+            } else {
+                "operator HOME default".into()
+            }
+        };
+        for (path, reason) in [
+            (
+                cargo.join("registry"),
+                format!("derived Cargo registry cache ({})", source("CARGO_HOME")),
+            ),
+            (
+                cargo.join("git"),
+                format!("derived Cargo Git cache ({})", source("CARGO_HOME")),
+            ),
+            (
+                rustup.join("downloads"),
+                format!("derived rustup downloads ({})", source("RUSTUP_HOME")),
+            ),
+            (
+                rustup.join("tmp"),
+                format!("derived rustup temporary cache ({})", source("RUSTUP_HOME")),
+            ),
+        ] {
+            probes.push(Probe::Metadata { path, reason });
+        }
+    }
     probes.truncate(64);
     probes
 }

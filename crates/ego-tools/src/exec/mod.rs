@@ -75,6 +75,44 @@ pub fn setup_write_root_safe(
         &CanonPath::new(target),
     ))
 }
+/// Policy-only write reach for setup, sharing Adaptive's captured floor contract.
+/// This does not construct a backend or prove a filesystem mutation will succeed.
+pub fn setup_write_reachable(
+    policy: &RunConfinement,
+    target: &CanonPath,
+) -> Result<bool, ProcessError> {
+    if !setup_write_root_safe(
+        target.as_path().parent().unwrap_or(target.as_path()),
+        target.as_path(),
+    )? {
+        return Ok(false);
+    }
+    if adaptive::floor::blocks(target.as_path(), policy) {
+        return Ok(false);
+    }
+    if policy.roots().iter().any(|root| {
+        root.access() == ego_core::permit::RootAccess::Read && target.is_or_under(root.path())
+    }) {
+        return Ok(false);
+    }
+    Ok(match policy.level() {
+        ego_core::permit::Confinement::Workspace | ego_core::permit::Confinement::Adaptive => {
+            target.is_or_under(policy.workspace())
+                || policy.roots().iter().any(|root| {
+                    root.access() == ego_core::permit::RootAccess::ReadWrite
+                        && target.is_or_under(root.path())
+                })
+                || policy.adaptive_perimeter().is_some_and(|perimeter| {
+                    perimeter
+                        .writable
+                        .iter()
+                        .any(|root| target.is_or_under(root))
+                })
+        }
+        _ => false,
+    })
+}
+
 /// Captured native executable reach only; no backend admission or subprocess.
 /// A successful answer is not proof of command policy or dependency health.
 pub fn setup_exec_reachable(

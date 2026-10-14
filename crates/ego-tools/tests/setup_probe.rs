@@ -239,6 +239,53 @@ fn setup_absent_write_refuses_aliases_credentials_and_missing_parents() {
     }
 }
 
+// Catches: setup omits operator-derived default cache sources and cannot explain deduplication.
+#[test]
+fn setup_inventory_names_default_cargo_cache_derivation_without_creating_it() {
+    let root = tempfile::tempdir().unwrap();
+    let probes = ego_tools::setup::inventory(root.path());
+    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("Cargo registry cache") && reason.contains("derived"))), "derived default cache provenance missing");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+// Catches: derived writable reach reopens Adaptive instruction/read-only floors.
+#[test]
+fn setup_adaptive_write_reach_subtracts_captured_floors() {
+    use ego_core::permit::{
+        AdaptivePerimeter, Confinement, ProfileRoot, RootAccess, RunConfinement,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let cache = root.path().join("cache");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&cache).unwrap();
+    let policy = RunConfinement::new(Confinement::Adaptive, false, CanonPath::new(&workspace))
+        .unwrap()
+        .with_adaptive_perimeter(AdaptivePerimeter {
+            home: CanonPath::new(root.path()),
+            writable: vec![CanonPath::new(&cache)],
+            credentials: vec![],
+            controls: vec![],
+        });
+    assert!(
+        ego_tools::exec::setup_write_reachable(&policy, &CanonPath::new(cache.join("output")))
+            .unwrap()
+    );
+    assert!(
+        !ego_tools::exec::setup_write_reachable(&policy, &CanonPath::new(cache.join("AGENTS.md")))
+            .unwrap()
+    );
+    let readonly = policy.with_roots(vec![ProfileRoot::new(
+        CanonPath::new(&cache),
+        RootAccess::Read,
+    )]);
+    assert!(
+        !ego_tools::exec::setup_write_reachable(&readonly, &CanonPath::new(cache.join("output")))
+            .unwrap()
+    );
+    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+}
+
 // Catches: tool presence or write policy is mislabeled as a successful execution/effect.
 #[test]
 fn setup_tool_presence_and_write_intent_never_claim_effect_success() {

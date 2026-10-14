@@ -55,7 +55,14 @@ fn operation_admitted(
     path: &CanonPath,
     write: bool,
 ) -> bool {
-    if write && effective.sandbox != Some(ego_core::permit::Confinement::Workspace) {
+    if write
+        && !matches!(
+            effective.sandbox,
+            Some(
+                ego_core::permit::Confinement::Workspace | ego_core::permit::Confinement::Adaptive
+            )
+        )
+    {
         return false;
     }
     if write && ego_core::config::Ruleset::is_credential_path(path) {
@@ -64,6 +71,20 @@ fn operation_admitted(
     let Ok(roots) = crate::run::profile_roots::admit(effective, workspace) else {
         return false;
     };
+    if write {
+        let Ok(confinement) = ego_tools::exec::admit_confinement(
+            effective.sandbox.unwrap_or_default(),
+            effective.network == ego_core::config::Network::Off,
+            workspace.clone(),
+        ) else {
+            return false;
+        };
+        if !ego_tools::exec::setup_write_reachable(&confinement.with_roots(roots.clone()), path)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
     let policy = PolicyEngine::new(
         workspace.clone(),
         effective.mode.unwrap_or(ego_core::config::Mode::Default),
@@ -271,10 +292,29 @@ pub(crate) fn preview(
         }
         let write = matches!(probes.get(finding.id), Some(Probe::Write { .. }));
         if write
-            && (effective.sandbox != Some(ego_core::permit::Confinement::Workspace)
-                || !ego_tools::exec::setup_write_root_safe(directory, path).unwrap_or(false))
+            && (!matches!(
+                effective.sandbox,
+                Some(
+                    ego_core::permit::Confinement::Workspace
+                        | ego_core::permit::Confinement::Adaptive
+                )
+            ) || !ego_tools::exec::setup_write_root_safe(directory, path).unwrap_or(false))
         {
             continue;
+        }
+        if write && effective.sandbox == Some(ego_core::permit::Confinement::Adaptive) {
+            let Ok(captured) = ego_tools::exec::admit_confinement(
+                ego_core::permit::Confinement::Adaptive,
+                effective.network == ego_core::config::Network::Off,
+                workspace.clone(),
+            ) else {
+                continue;
+            };
+            if ego_tools::exec::setup_write_reachable(&captured, &CanonPath::new(path))
+                .unwrap_or(false)
+            {
+                continue;
+            }
         }
         let root = RootCfg {
             path: directory.to_path_buf(),
