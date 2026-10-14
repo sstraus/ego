@@ -110,6 +110,42 @@ fn metadata_no_links(_path: &Path) -> Result<fs::Metadata, String> {
 }
 
 #[cfg(unix)]
+fn absent_no_links(path: &Path) -> Result<bool, String> {
+    use nix::fcntl::{AtFlags, OFlag, openat};
+    use nix::sys::stat::{Mode, fstatat};
+    let parent = path.parent().ok_or("absence needs an existing parent")?;
+    let name = path.file_name().ok_or("absence needs an ordinary leaf")?;
+    let mut directory = fs::File::open("/").map_err(|error| error.to_string())?;
+    for part in parent.components() {
+        if let std::path::Component::Normal(name) = part {
+            directory = fs::File::from(
+                openat(
+                    &directory,
+                    Path::new(name),
+                    OFlag::O_RDONLY
+                        | OFlag::O_DIRECTORY
+                        | OFlag::O_NOFOLLOW
+                        | OFlag::O_CLOEXEC
+                        | OFlag::O_NONBLOCK,
+                    Mode::empty(),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    match fstatat(&directory, Path::new(name), AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => Ok(true),
+        Ok(_) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(not(unix))]
+fn absent_no_links(_path: &Path) -> Result<bool, String> {
+    Err("race-safe setup absence is unsupported on this platform".into())
+}
+
+#[cfg(unix)]
 fn link_target_no_links(path: &Path) -> Result<Option<PathBuf>, String> {
     use nix::fcntl::AtFlags;
     use nix::fcntl::{OFlag, openat, readlinkat};
@@ -259,9 +295,14 @@ impl ProbeReader for NativeProbeReader {
                 if ego_core::config::Ruleset::is_credential_path(&CanonPath::new(&absolute)) {
                     return Err("credential diagnostic access is forbidden".into());
                 }
-                match fs::symlink_metadata(&absolute) {
-                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => return Err(error),
+                let parent = absolute.parent().ok_or("write target has no parent")?;
+                let canonical_parent = diagnostic_path(parent)?;
+                let name = absolute
+                    .file_name()
+                    .ok_or("write target needs an ordinary leaf")?;
+                let selected = canonical_parent.join(name);
+                if !absent_no_links(&selected)? {
+                    return Err(error);
                 }
                 let parent = absolute.parent().ok_or("write target has no parent")?;
                 let ancestor = self.metadata(parent)?;
@@ -275,9 +316,8 @@ impl ProbeReader for NativeProbeReader {
                 if ego_core::config::Ruleset::is_credential_path(&CanonPath::new(&canonical)) {
                     return Err("credential diagnostic access is forbidden".into());
                 }
-                match fs::symlink_metadata(&canonical) {
-                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => return Err("write target identity changed".into()),
+                if !absent_no_links(&canonical)? {
+                    return Err("write target identity changed".into());
                 }
                 Ok(Observation {
                     requested: path.to_path_buf(),
@@ -297,8 +337,7 @@ impl ProbeReader for NativeProbeReader {
             return Err("probe canonical path changed".into());
         }
         let path = resolved.as_path();
-        let before =
-            fs::symlink_metadata(path).map_err(|error| format!("file unavailable: {error}"))?;
+        let before = metadata_no_links(path)?;
         if !before.is_file() {
             return Err("probe read requires a regular file".into());
         }
@@ -350,6 +389,20 @@ impl ProbeReader for NativeProbeReader {
 
 #[cfg(all(test, unix))]
 mod metadata_tests {
+    // Catches: an absent-leaf check traverses a replaced ancestor and accepts credential absence.
+    #[test]
+    fn setup_absence_refuses_replaced_credential_ancestor() {
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join(".ssh");
+        std::fs::create_dir(&secret).unwrap();
+        let alias = root.path().join("safe");
+        std::os::unix::fs::symlink(&secret, &alias).unwrap();
+        assert!(
+            super::absent_no_links(&alias.join("missing")).is_err(),
+            "absence check traversed credential ancestor alias"
+        );
+    }
+
     // Catches: metadata follows a replaced credential alias after diagnostic resolution.
     #[test]
     fn setup_metadata_refuses_replaced_leaf_and_ancestor_symlinks() {
