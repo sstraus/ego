@@ -1572,6 +1572,26 @@ Base and profile fields use normal per-field precedence; unset restores inherita
 and capability checks. `network="on"` is the default and never clears an
 explicit `--offline` invocation.
 
+`--read-only-dir DIR` grants reads of one session upload directory at launch.
+It is available to interactive runs, `run`, `resume`, and served protocols.
+DIR must be an existing canonical absolute directory: relative paths, `..`,
+symlink aliases, home/administrator ancestors, and directories beneath a
+writable workspace or root are refused. This launch grant does not make
+configuration `roots` writable from flags. System and host profile ceilings
+still bind; credential denials remain in force. The grant adds neither writes
+nor executable uploads. It does not change the selected sandbox level. On Linux, confined read roots
+require Landlock, since read-only bind mounts alone permit execution.
+The session perimeter lists the read root, and startup reports the read-only
+launch directory. ACP also reports `_meta.ego.readOnlyDirectory` on creation.
+
+ACP `additionalDirectories` accepts at most one directory with the same read-only
+contract on `session/new`, `session/load`, `session/resume`, and `session/fork`.
+A process-wide `--read-only-dir` and the ACP directory must name the same path.
+The directory is pinned for the session and retained in durable run selections;
+a later request cannot replace it or add one after admission. Hosts must supply the launch grant again
+when loading a session that has not yet started a run. Paths inside the grant
+are still canonicalized by each built-in tool, so symlinks cannot open siblings.
+
 Effective perimeter inspection warns when canonical roots overlap the workspace.
 A read root beneath a read-write root is refused with `nested-read-only-root`,
 including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and

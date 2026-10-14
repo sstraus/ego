@@ -853,6 +853,13 @@ pub(super) fn finish_rooted_settings(
             diagnostics.note(&warning);
         }
     }
+    if let Some(directory) = &args.read_only_dir {
+        super::read_directory::apply(&mut effective, &root, directory)?;
+        diagnostics.note(&format!(
+            "read-only launch directory: {}",
+            directory.display()
+        ));
+    }
     let roots =
         super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
 

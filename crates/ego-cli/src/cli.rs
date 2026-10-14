@@ -572,6 +572,7 @@ pub struct AcpArgs {
 /// session a host got before a served protocol could be shaped at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionShape {
+    pub read_only_dir: Option<PathBuf>,
     pub system: Option<String>,
     pub bare: bool,
     pub append_system: Option<String>,
@@ -587,6 +588,7 @@ pub struct SessionShape {
 impl From<Shape> for SessionShape {
     fn from(shape: Shape) -> Self {
         Self {
+            read_only_dir: shape.read_only_dir,
             system: shape.system,
             bare: shape.bare,
             append_system: shape.append_system,
@@ -755,6 +757,8 @@ pub enum RulesAction {
 /// The parsed command line of `ego run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
+    /// Launch-owned read grant; never accepted from a configuration layer.
+    pub read_only_dir: Option<PathBuf>,
     pub prompt: Option<String>,
     pub(crate) agent_file: Option<AgentFile>,
     pub(crate) attach: Vec<String>,
@@ -1824,6 +1828,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
     let shape = SessionShape::from(flags.shape);
 
     Ok(Args {
+        read_only_dir: shape.read_only_dir,
         prompt,
         agent_file,
         attach: flags.attach,

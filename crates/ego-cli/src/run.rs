@@ -160,6 +160,7 @@ mod headless_driver;
 use headless_driver::*;
 mod composition_root;
 pub(crate) mod profile_roots;
+pub(crate) mod read_directory;
 use composition_root::*;
 pub use composition_root::{CliPrepared, DirectPreflight, preflight_ci};
 mod execution;

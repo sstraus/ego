@@ -304,6 +304,7 @@ pub(crate) fn protocol_effective(
 /// got before these flags existed ([`SessionShape::default`]).
 pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -> Args {
     Args {
+        read_only_dir: shape.read_only_dir,
         prompt: None,
         agent_file: None,
         attach: Vec::new(),

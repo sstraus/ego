@@ -45,7 +45,7 @@ const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--noc
 
 const HELPER_FAILURE: u8 = 125;
 const MAX_RUNTIME_ROOTS: usize = 128;
-const BACKEND_REVISION: &str = "landlock-safe-reexec-v1-abi9";
+const BACKEND_REVISION: &str = "landlock-safe-reexec-v2-read-noexec-abi9";
 
 /// One immutable Linux confinement mechanism prepared for an effective run.
 /// Its capability value is only an upper bound; common production probes must
@@ -91,6 +91,31 @@ impl LandlockBackend {
         for root in &runtime_roots {
             validate_absolute_existing("runtime root", root)
                 .map_err(|error| ProcessError::Backend(error.to_string()))?;
+        }
+
+        // Landlock grants are additive: an executable ancestor would undo a
+        // read root's lack of EXECUTE rights. Refuse such overlapping authority.
+        for root in policy
+            .roots()
+            .iter()
+            .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
+        {
+            if runtime_roots
+                .iter()
+                .any(|runtime| root.path().as_path().starts_with(runtime))
+                || root
+                    .path()
+                    .as_path()
+                    .starts_with(policy.workspace().as_path())
+                || policy.roots().iter().any(|other| {
+                    other.access() == ego_core::permit::RootAccess::ReadWrite
+                        && root.path().is_or_under(other.path())
+                })
+            {
+                return Err(ProcessError::Backend(
+                    "read-only root overlaps executable authority".into(),
+                ));
+            }
         }
 
         let helper = fs::canonicalize(
@@ -399,9 +424,11 @@ fn install_ruleset(
 
     let mut readable_roots = runtime_roots.iter().cloned().collect::<BTreeSet<_>>();
     readable_roots.insert(workspace.to_path_buf());
-    readable_roots.extend(roots.iter().map(|(path, _)| path.clone()));
     for root in readable_roots {
-        ruleset = add_read_rule(ruleset, &root)?;
+        ruleset = add_read_rule(ruleset, &root, true)?;
+    }
+    for (root, writable) in roots {
+        ruleset = add_read_rule(ruleset, root, *writable)?;
     }
 
     if level == Level::Workspace {
@@ -418,16 +445,23 @@ fn install_ruleset(
     verify_restriction(ruleset.restrict_self()?)
 }
 
-fn add_read_rule(ruleset: RulesetCreated, root: &Path) -> Result<RulesetCreated, HelperError> {
+fn add_read_rule(
+    ruleset: RulesetCreated,
+    root: &Path,
+    executable: bool,
+) -> Result<RulesetCreated, HelperError> {
     let metadata = fs::metadata(root).map_err(|error| HelperError::Root {
         path: root.to_path_buf(),
         reason: error.to_string(),
     })?;
-    let access = if metadata.is_dir() {
-        make_bitflags!(AccessFs::{Execute | ReadFile | ReadDir})
+    let mut access = if metadata.is_dir() {
+        make_bitflags!(AccessFs::{ReadFile | ReadDir})
     } else {
-        make_bitflags!(AccessFs::{Execute | ReadFile})
+        make_bitflags!(AccessFs::{ReadFile})
     };
+    if executable {
+        access |= AccessFs::Execute;
+    }
     let rule = PathBeneath::new(PathFd::new(root)?, access)
         .set_compatibility(CompatLevel::HardRequirement);
     Ok(ruleset.add_rule(rule)?)
