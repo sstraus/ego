@@ -676,6 +676,20 @@ mod tests {
             Ok(_) => panic!("explicit user-config write root admitted"),
         };
         assert!(error.to_string().contains(config_dir.to_str().unwrap()));
+        // A file alias can place the selected authority inside another workspace.
+        std::fs::remove_file(&config).unwrap();
+        let alias_target = outside.join("policy.toml");
+        std::fs::write(&alias_target, "mode = 'default'\n").unwrap();
+        std::os::unix::fs::symlink(&alias_target, &config).unwrap();
+        let alias_policy =
+            RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&outside)).unwrap();
+        let error =
+            match LandlockBackend::prepare(&alias_policy, &CanonPath::new(scratch.path()), &[]) {
+                Err(error) => error,
+                Ok(_) => panic!("config-file alias workspace admitted"),
+            };
+        assert!(error.to_string().contains(alias_target.to_str().unwrap()));
+        assert_eq!(std::fs::read(&config).unwrap(), b"mode = 'default'\n");
         // An absent config directory remains protected through its existing ancestor.
         std::fs::remove_file(&config).unwrap();
         std::fs::remove_dir(&config_dir).unwrap();

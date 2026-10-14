@@ -305,7 +305,8 @@ Sources: [model identity](../../crates/ego-core/src/turn/identity.rs),
 
 Sandboxed child processes cannot write the operator user-configuration directory
 (`EGO_HOME`, or `HOME/.ego` when unset). Explicit writable roots and runtime grants
-do not lift this floor. Reads retain their existing reach. Sandbox `off` has no
+do not lift this floor. The canonical `config.toml` target is protected too
+when the file is a symlink outside that directory. Reads retain their existing reach. Sandbox `off` has no
 such native confinement.
 
 On macOS, Seatbelt denies writes under the captured directory and prevents

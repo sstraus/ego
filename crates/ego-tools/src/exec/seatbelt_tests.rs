@@ -283,3 +283,57 @@ fn user_config_write_root_cannot_rewrite_permissions() {
         );
     }
 }
+
+// Catches: a config-file symlink points outside the protected directory and reopens authority writes.
+#[test]
+fn user_config_symlink_target_cannot_rewrite_permissions() {
+    let name = "exec::seatbelt::tests::user_config_symlink_target_cannot_rewrite_permissions";
+    if std::env::var_os("EGO_CONFIG_ALIAS_CHILD").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("EGO_CONFIG_ALIAS_CHILD", "1")
+            .env("EGO_HOME", root.path().join("ego"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let workspace = fs::canonicalize(root.path()).unwrap();
+    let scratch = workspace.join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let config_dir = PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+    fs::create_dir_all(&config_dir).unwrap();
+    let target = workspace.join("operator-policy.toml");
+    fs::write(&target, "mode = 'default'\n").unwrap();
+    std::os::unix::fs::symlink(&target, config_dir.join("config.toml")).unwrap();
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    let backend = SeatbeltBackend::prepare(
+        &policy,
+        &CanonPath::new(&scratch),
+        &derived_runtime_roots().unwrap(),
+    )
+    .unwrap();
+    let write = run(
+        &backend,
+        "/bin/sh",
+        &[
+            "-c".as_ref(),
+            "printf changed > \"$1\"".as_ref(),
+            "write".as_ref(),
+            target.as_os_str(),
+        ],
+    );
+    assert!(
+        !write.status.success(),
+        "config alias write allowed: {write:?}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"mode = 'default'\n");
+    assert_eq!(
+        run(&backend, "/bin/cat", &[target.as_os_str()]).stdout,
+        b"mode = 'default'\n"
+    );
+}

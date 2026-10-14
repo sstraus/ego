@@ -17,7 +17,8 @@ pub(super) fn capture() -> Result<Vec<PathBuf>, ProcessError> {
     let selected = std::path::absolute(selected)
         .map_err(|error| ProcessError::Backend(format!("cannot resolve user config: {error}")))?;
     let canonical = super::adaptive::resolve(&selected)?;
-    let mut paths = vec![selected, canonical];
+    let config_target = super::adaptive::resolve(&selected.join("config.toml"))?;
+    let mut paths = vec![selected, canonical, config_target];
     paths.sort();
     paths.dedup();
     Ok(paths)
