@@ -45,7 +45,7 @@ const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--noc
 
 const HELPER_FAILURE: u8 = 125;
 const MAX_RUNTIME_ROOTS: usize = 128;
-const BACKEND_REVISION: &str = "landlock-safe-reexec-v2-read-noexec-abi9";
+const BACKEND_REVISION: &str = "landlock-safe-reexec-v3-user-config-floor";
 
 /// One immutable Linux confinement mechanism prepared for an effective run.
 /// Its capability value is only an upper bound; common production probes must
@@ -77,6 +77,7 @@ impl LandlockBackend {
             }
         };
         validate_private_directory(private_scratch.as_path())?;
+        super::user_config::reject_overlap(policy, private_scratch.as_path())?;
         let runtime_roots = derived_runtime_roots
             .iter()
             .map(CanonPath::as_path)
@@ -660,7 +661,28 @@ mod tests {
             message.contains("user config") && message.contains(workspace.to_str().unwrap()),
             "{message}"
         );
-        assert_eq!(std::fs::read(config).unwrap(), b"mode = 'default'\n");
+        assert_eq!(std::fs::read(&config).unwrap(), b"mode = 'default'\n");
+        use ego_core::permit::{ProfileRoot, RootAccess};
+        let outside = tempfile::tempdir().unwrap();
+        let outside = std::fs::canonicalize(outside.path()).unwrap();
+        let policy = RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&outside))
+            .unwrap()
+            .with_roots(vec![ProfileRoot::new(
+                CanonPath::new(&config_dir),
+                RootAccess::ReadWrite,
+            )]);
+        let error = match LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("explicit user-config write root admitted"),
+        };
+        assert!(error.to_string().contains(config_dir.to_str().unwrap()));
+        // An absent config directory remains protected through its existing ancestor.
+        std::fs::remove_file(&config).unwrap();
+        std::fs::remove_dir(&config_dir).unwrap();
+        assert!(LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]).is_err());
+        let policy =
+            RunConfinement::new(Confinement::Ro, false, CanonPath::new(&workspace)).unwrap();
+        assert!(LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]).is_ok());
     }
 
     /// The prefix the backend emits is the envelope the dispatcher accepts, and

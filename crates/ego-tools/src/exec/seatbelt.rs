@@ -23,7 +23,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v4-strict-credentials";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v5-user-config-floor";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -37,6 +37,7 @@ pub(crate) struct SeatbeltBackend {
 /// so the same profile can be rendered again with more of them.
 #[derive(Clone)]
 struct ProfileBase {
+    user_config: Vec<PathBuf>,
     adaptive: Option<ego_core::permit::AdaptivePerimeter>,
     level: Confinement,
     offline: bool,
@@ -78,6 +79,7 @@ impl SeatbeltBackend {
             );
         }
         let base = ProfileBase {
+            user_config: super::user_config::capture()?,
             adaptive,
             level: policy.level(),
             offline: policy.offline(),
@@ -160,6 +162,30 @@ impl SeatbeltBackend {
             grants: &grants,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
+        if base.level != Confinement::Off {
+            profile.push_str("(deny file-write*\n");
+            for directory in &base.user_config {
+                profile.push_str(&format!(
+                    "  (subpath {})\n",
+                    profile::path_literal(directory)
+                        .map_err(|error| ProcessError::Backend(error.to_string()))?
+                ));
+            }
+            profile.push_str(")\n(deny file-write-unlink\n");
+            // Renaming any ancestor would replace the captured authority too.
+            for ancestor in base
+                .user_config
+                .iter()
+                .flat_map(|directory| directory.ancestors())
+            {
+                profile.push_str(&format!(
+                    "  (literal {})\n",
+                    profile::path_literal(ancestor)
+                        .map_err(|error| ProcessError::Backend(error.to_string()))?
+                ));
+            }
+            profile.push_str(")\n");
+        }
         profile.push_str(
             &profile::deny_exec(&no_exec)
                 .map_err(|error| ProcessError::Backend(error.to_string()))?,

@@ -136,7 +136,7 @@ fn error(message: impl Into<String>) -> ProcessError {
 }
 
 /// Resolve absent paths through the nearest existing ancestor without creating it.
-fn resolve(path: &Path) -> Result<PathBuf, ProcessError> {
+pub(super) fn resolve(path: &Path) -> Result<PathBuf, ProcessError> {
     if !path.is_absolute()
         || path
             .components()
