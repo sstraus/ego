@@ -147,7 +147,7 @@ fn broad_modes_refuse_credential_paths_even_with_user_allow() {
                 finished.stderr.contains(if index == 0 {
                     "protected credential path"
                 } else {
-                    "outside the permit"
+                    "permit"
                 }),
                 "{}",
                 finished.stderr

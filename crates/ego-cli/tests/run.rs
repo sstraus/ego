@@ -1108,7 +1108,13 @@ fn a_read_outside_the_workspace_tells_the_model_the_grant_and_leaks_nothing() {
         ],
         ..Plan::default()
     });
-    let finished = Ego::against(&stub)
+    let places = Places::new();
+    places
+        .0
+        .ego(&stub)
+        .home_file("config.toml", "sandbox='workspace'\nroots=[]\n");
+    let finished = places
+        .raw_ego(&stub)
         .args([
             "--model",
             "ollama/qwen3",
@@ -1144,13 +1150,25 @@ fn the_named_roots_grant_lets_a_resumed_session_read_the_file() {
         ))
     };
     let places = Places::new();
+    places
+        .0
+        .ego(&Stub::start(Plan::default()))
+        .home_file("config.toml", "sandbox='workspace'\nroots=[]\n");
     let stub = Stub::start(Plan {
         completions: vec![read("call_a"), Reply::Sse(text("Refused."))],
         ..Plan::default()
     });
     let first = places
-        .ego(&stub)
-        .args(["--model", "ollama/qwen3", "--output", "json", "Read it"])
+        .raw_ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--output",
+            "json",
+            "Read it",
+        ])
         .run();
     assert_eq!(first.code, Some(0), "stderr: {}", first.stderr);
     assert!(
@@ -1171,17 +1189,17 @@ fn the_named_roots_grant_lets_a_resumed_session_read_the_file() {
         ..Plan::default()
     });
     let second = places
-        .ego(&stub)
+        .raw_ego(&stub)
         .subcommand("resume")
-        .args([
-            "--model",
-            "ollama/qwen3",
-            "--output",
-            "json",
-            "Read it again",
-        ])
-        .run();
-    assert_eq!(second.code, Some(0), "stderr: {}", second.stderr);
+        .args(["--model", "ollama/qwen3", support::FIXTURE_SESSION_ID])
+        .run_pty_responding("[y] yes", "y", "Read it again");
+    assert_eq!(
+        second.code,
+        Some(0),
+        "stdout: {} stderr: {}",
+        second.stdout,
+        second.stderr
+    );
     assert!(
         stub.generations()[1]
             .to_string()

@@ -888,11 +888,14 @@ fn restored_read_perimeter_keeps_broad_reads_and_credential_exclusions() {
             ));
             let allowed = path == "/sibling/public.txt"
                 || (level == Confinement::Off && path == "/captured/private/data");
-            assert_eq!(
-                matches!(result, Classification::Settled(Ok(_))),
-                allowed,
-                "{level:?}: {path}"
-            );
+            let admitted = match result {
+                Classification::Ask(pending) => matches!(
+                    futures::executor::block_on(restored.policy().settle(pending)),
+                    ego_core::permit::Resolution::Settled(Ok(_))
+                ),
+                Classification::Settled(result) => result.is_ok(),
+            };
+            assert_eq!(admitted, allowed, "{level:?}: {path}");
         }
     }
 }
