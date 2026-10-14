@@ -69,8 +69,22 @@ pub(crate) async fn observed_host(
         .map_err(UsageError)?;
     let target = args.profile.as_deref().unwrap_or("base user config");
     let target = ego_core::permit::terminal_safe(target);
-    let mut rendered =
-        format!("Setup target: {target}\nReport only; captured session authority is unchanged.\n");
+    use sha2::{Digest, Sha256};
+    let policy_digest = format!("{:x}", Sha256::digest(format!("{effective:?}").as_bytes()));
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    let mut rendered = format!(
+        "Setup target: {target}\nCaptured session authority is unchanged.\nDiagnostic timestamp: {timestamp} UTC milliseconds; policy digest: {policy_digest}\nTarget mode: {:?}; sandbox: {:?}; network: {:?}; roots source: {:?}; profile: {:?}\n",
+        effective.mode,
+        effective.sandbox,
+        effective.network,
+        effective.roots_source,
+        effective.active_profile
+    );
+    if confirmation.is_none() {
+        rendered.push_str("Report only; no human apply authority.\n");
+    }
     rendered.push_str(&interpretation);
     if let Some(home) = &home {
         match crate::setup_proposals::preview(
@@ -97,11 +111,14 @@ pub(crate) async fn observed_host(
     }
     for item in findings {
         rendered.push_str(&format!(
-            "{} {:?}: {} — {}\n",
+            "{} {:?}: {} — {}; canonical {:?}; observed={}; truncated={}\n",
             item.id,
             item.status,
             ego_core::permit::terminal_safe(&item.requested.display().to_string()),
-            item.evidence
+            item.evidence,
+            item.canonical,
+            item.observed,
+            item.truncated
         ));
     }
     Ok(rendered)

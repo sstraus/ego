@@ -109,6 +109,44 @@ fn diagnostic_path(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+#[cfg(unix)]
+fn open_regular_no_links(path: &Path) -> Result<fs::File, String> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    let mut directory = fs::File::open("/").map_err(|error| error.to_string())?;
+    let parts = path
+        .components()
+        .filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err("probe read requires a regular file".into());
+    }
+    for (index, name) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        let mut flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC;
+        if !last {
+            flags |= OFlag::O_DIRECTORY;
+        }
+        let file = fs::File::from(
+            openat(&directory, Path::new(name), flags, Mode::empty())
+                .map_err(|error| format!("probe no-link open failed: {error}"))?,
+        );
+        if last {
+            return Ok(file);
+        }
+        directory = file;
+    }
+    Err("probe read requires a regular file".into())
+}
+
+#[cfg(not(unix))]
+fn open_regular_no_links(_path: &Path) -> Result<fs::File, String> {
+    Err("race-safe setup content reads are unsupported on this platform".into())
+}
+
 impl ProbeReader for NativeProbeReader {
     fn metadata(&self, path: &Path) -> Result<Observation, String> {
         let canonical = diagnostic_path(path)?;
@@ -128,16 +166,7 @@ impl ProbeReader for NativeProbeReader {
         if !before.is_file() {
             return Err("probe read requires a regular file".into());
         }
-        let mut options = fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
-        }
-        let file = options
-            .open(path)
-            .map_err(|error| format!("probe open failed: {error}"))?;
+        let file = open_regular_no_links(path)?;
         let opened = file
             .metadata()
             .map_err(|error| format!("probe metadata failed: {error}"))?;
