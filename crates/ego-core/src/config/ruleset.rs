@@ -201,7 +201,7 @@ pub struct Ruleset {
 
 impl Ruleset {
     /// Whether a canonical path is covered by built-in credential protection.
-    pub(crate) fn is_credential_path(path: &crate::permit::CanonPath) -> bool {
+    pub fn is_credential_path(path: &crate::permit::CanonPath) -> bool {
         static RULES: std::sync::OnceLock<Vec<Rule>> = std::sync::OnceLock::new();
         let rules = RULES.get_or_init(|| {
             CREDENTIAL_READ_RULES

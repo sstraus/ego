@@ -56,17 +56,71 @@ fn observe(
     }
 }
 
+fn diagnostic_path(path: &Path) -> Result<PathBuf, String> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
+    let mut pending = absolute
+        .components()
+        .map(|part| part.as_os_str().to_os_string())
+        .collect::<VecDeque<_>>();
+    let mut resolved = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop_front() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        if part == "." {
+            continue;
+        }
+        resolved.push(&part);
+        let mut destination = resolved.clone();
+        for component in &pending {
+            destination.push(component);
+        }
+        if ego_core::config::Ruleset::is_credential_path(&CanonPath::new(&resolved))
+            || ego_core::config::Ruleset::is_credential_path(&CanonPath::new(destination))
+        {
+            return Err("credential diagnostic access is forbidden".into());
+        }
+        let metadata = fs::symlink_metadata(&resolved)
+            .map_err(|error| format!("metadata unavailable: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            links += 1;
+            if links > 32 {
+                return Err("diagnostic symlink limit exceeded".into());
+            }
+            let target = fs::read_link(&resolved).map_err(|error| error.to_string())?;
+            resolved.pop();
+            if target.is_absolute() {
+                resolved.clear();
+            }
+            for part in target.components().rev() {
+                match part {
+                    Component::CurDir => {}
+                    _ => pending.push_front(part.as_os_str().to_os_string()),
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 impl ProbeReader for NativeProbeReader {
     fn metadata(&self, path: &Path) -> Result<Observation, String> {
-        let canonical =
-            fs::canonicalize(path).map_err(|error| format!("metadata unavailable: {error}"))?;
+        let canonical = diagnostic_path(path)?;
         let metadata =
             fs::metadata(&canonical).map_err(|error| format!("metadata unavailable: {error}"))?;
         Ok(observe(path, canonical, &metadata, Vec::new(), false))
     }
 
     fn read(&self, canonical: &CanonPath, max_bytes: usize) -> Result<Observation, String> {
-        let path = canonical.as_path();
+        let resolved = diagnostic_path(canonical.as_path())?;
+        if resolved != canonical.as_path() {
+            return Err("probe canonical path changed".into());
+        }
+        let path = resolved.as_path();
         let before =
             fs::symlink_metadata(path).map_err(|error| format!("file unavailable: {error}"))?;
         if !before.is_file() {

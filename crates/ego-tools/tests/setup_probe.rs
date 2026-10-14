@@ -76,3 +76,18 @@ fn setup_instruction_alias_to_credential_is_blocked_before_content_read() {
     assert!(matches!(report[0].status, ego_core::setup::Status::Blocked));
     assert!(!report[0].observed);
 }
+
+// Catches: symlink resolution stats a credential target before checking its floor.
+#[test]
+fn setup_alias_to_missing_credential_is_refused_before_target_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let secret = root.path().join(".ssh/id_missing");
+    let alias = root.path().join("AGENTS.md");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&secret, &alias).unwrap();
+    #[cfg(not(unix))]
+    return;
+    let error = NativeProbeReader::capture().metadata(&alias).unwrap_err();
+    assert_eq!(error, "credential diagnostic access is forbidden");
+    assert!(!secret.exists());
+}

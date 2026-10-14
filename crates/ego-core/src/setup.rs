@@ -131,6 +131,9 @@ impl<'a> Controller<'a> {
         let observation = match observed {
             Ok(observation) => observation,
             Err(error) => {
+                if error == "credential diagnostic access is forbidden" {
+                    finding.status = Status::Blocked;
+                }
                 finding.evidence = crate::permit::terminal_safe(&error);
                 return finding;
             }
