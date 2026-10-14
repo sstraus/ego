@@ -13,6 +13,9 @@ fn setup_cli_has_separate_typed_target_and_no_run_flags() {
         Invocation::Setup(args) if args.profile.as_deref() == Some("dev"))
     );
     assert!(parse(&["ego", "setup", "--yolo"]).is_err());
+    assert!(
+        matches!(parse(&["ego", "setup", "--judge", "ollama/qwen3"]).unwrap(), Invocation::Setup(args) if args.judge.as_deref() == Some("ollama/qwen3"))
+    );
 }
 
 // Catches: pasted hostile instruction text creates a host setup request.

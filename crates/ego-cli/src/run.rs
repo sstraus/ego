@@ -150,7 +150,7 @@ pub use interactive_driver::{
     Ended, RunModelSwitchError, RunModelSwitchOwner, apply_resume_answers_once,
     interactive_with_mcp_registry, run_with_ci_preflight, run_with_mcp_registry,
 };
-mod composition;
+pub(crate) mod composition;
 use composition::*;
 pub(crate) use composition::{FrozenRuleResolver, rooted_path, workspace};
 mod port_adapters;

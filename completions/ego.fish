@@ -219,6 +219,7 @@ complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcomman
 complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -l json -d 'Emit the exact versioned health snapshot'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand setup" -l judge -d 'Offer a validated judge for unresolved policy; never authorizes an action' -r
 complete -c ego -n "__fish_ego_using_subcommand setup" -l profile -r
 complete -c ego -n "__fish_ego_using_subcommand setup" -l directory -r -F
 complete -c ego -n "__fish_ego_using_subcommand setup" -s h -l help -d 'Print help'

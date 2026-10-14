@@ -1104,7 +1104,7 @@ pub(super) fn chosen(
 /// canonical write-shaped input therefore exercises the same provider-facing
 /// shape without sending a generation or pretending that the provider was
 /// contacted. The exact in-turn request is checked again by `TurnLoop`.
-pub(super) fn fixed_judge_request(
+pub(crate) fn fixed_judge_request(
     identity: &ModelRef,
     request_model: &str,
     max_output_tokens: Option<u64>,
@@ -1131,7 +1131,7 @@ pub(super) fn fixed_judge_request(
     })
 }
 
-pub(super) fn validate_judge_request(
+pub(crate) fn validate_judge_request(
     identity: &ModelRef,
     capabilities: &ModelCapabilities,
     request: &GenRequest,

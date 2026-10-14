@@ -829,6 +829,9 @@ impl clap::ValueEnum for RootAccessValue {
     disable_help_subcommand = true
 )]
 pub(super) struct SetupCommand {
+    /// Offer a validated judge for unresolved policy; never authorizes an action.
+    #[arg(long)]
+    pub(super) judge: Option<String>,
     pub(super) prompt: Option<String>,
     #[arg(long)]
     pub(super) profile: Option<String>,

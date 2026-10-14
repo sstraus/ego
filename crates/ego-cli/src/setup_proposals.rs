@@ -23,6 +23,7 @@ pub(crate) struct Preview {
     pub executions: Vec<bool>,
     pub exec_before: Vec<std::path::PathBuf>,
     pub exec_after: Vec<std::path::PathBuf>,
+    pub judge: Option<String>,
     pub target: UserConfigTarget,
     pub layers: Vec<Sourced<ConfigLayer>>,
     pub identities: Vec<String>,
@@ -384,6 +385,7 @@ pub(crate) fn preview(
         executions,
         exec_before,
         exec_after,
+        judge: None,
         target,
         layers: layers.to_vec(),
         identities,
@@ -416,13 +418,14 @@ pub(crate) fn confirm_apply(
     let base = format!("{:x}", Sha256::digest(preview.batch.before().as_bytes()));
     let candidate = format!("{:x}", Sha256::digest(preview.batch.candidate().as_bytes()));
     let question = format!(
-        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}; exec directories {:?} -> {:?} (directory reach, not single executable)\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
+        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}; exec directories {:?} -> {:?} (directory reach, not single executable)\nJudge {:?}: future inference may spend money; this does not grant an action or lift network/floors\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
         preview.items,
         preview.target,
         preview.stored_before,
         preview.stored_after,
         preview.exec_before,
         preview.exec_after,
+        preview.judge,
         preview.paths
     );
     if !confirm(question) {
@@ -848,6 +851,36 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    // Catches: an already-settled Auto write is mistaken for a missing judge.
+    #[test]
+    fn setup_auto_write_needs_no_gratuitous_judge_or_allow_rule() {
+        let (_temp, workspace, _home, layers, _, _, _) =
+            fixture("sandbox='workspace'\nmode='auto'\n");
+        let effective = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
+        assert!(operation_admitted(
+            &effective,
+            &workspace,
+            &CanonPath::new(workspace.as_path().join("output")),
+            true
+        ));
+        for mode in [
+            ego_core::config::Mode::Plan,
+            ego_core::config::Mode::Default,
+            ego_core::config::Mode::Edits,
+            ego_core::config::Mode::Auto,
+            ego_core::config::Mode::Yolo,
+        ] {
+            let mut policy = effective.clone();
+            policy.mode = Some(mode);
+            assert!(operation_admitted(
+                &policy,
+                &workspace,
+                &CanonPath::new(workspace.as_path().join("input")),
+                false
+            ));
+        }
     }
 
     // Catches: a write root bypasses explicit denies or exposes instruction controls.

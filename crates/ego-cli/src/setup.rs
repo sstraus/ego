@@ -86,8 +86,24 @@ pub(crate) async fn observed_host(
         rendered.push_str("Report only; no human apply authority.\n");
     }
     rendered.push_str(&interpretation);
+    let _judge = if let Some(selected) = &args.judge {
+        match validate_setup_judge(selected, &effective, &workspace).await {
+            Ok(()) => {
+                rendered.push_str("Host-selected judge validated without generation; future judge inference may spend money. It grants no action and does not lift network/floors.\n");
+                Some(selected.as_str())
+            }
+            Err(_) => {
+                rendered
+                    .push_str("Host-selected judge unavailable/incompatible; no judge mutation.\n");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    rendered.push_str("Read-rule mapper: admitted built-in reads need no extra allow in current modes; denies/floors are never lifted.\n");
     if let Some(home) = &home {
-        match crate::setup_proposals::preview(
+        let proposal = crate::setup_proposals::preview(
             &layers,
             &effective,
             &workspace,
@@ -95,7 +111,9 @@ pub(crate) async fn observed_host(
             args.profile.as_deref(),
             active_probes,
             &findings,
-        ) {
+        );
+        rendered.push_str("Judge mapper: current closed probes contain no unresolved opaque action; no gratuitous judge mutation.\n");
+        match proposal {
             Ok(Some(preview)) => {
                 rendered.push_str(&format!("Proposed roots for items {:?}; target {:?}; exposure includes directory siblings and descendants.\nPaths: {:?}\nStored before:\n{}\nStored candidate:\n{}\nEffective result: selected operations admitted (writes policy-only); no permission/mode/sandbox/network change.\n", preview.items, preview.target, preview.paths, format_args!("roots = {:?}; document {} bytes", preview.stored_before, preview.batch.before().len()), format_args!("roots = {:?}; exec_paths = {:?}; document {} bytes", preview.stored_after, preview.exec_after, preview.batch.candidate().len())));
                 if let Some(confirm) = confirmation {
@@ -165,6 +183,67 @@ pub async fn execute(args: &SetupArgs, out: &Stdout) -> RunTermination {
             message: error.to_string(),
         },
     }
+}
+
+/// Validate the fixed production judge request through inference-only authority.
+/// Resolver metadata traffic is permitted, but no generation/refresh/command runs.
+async fn validate_setup_judge(
+    model: &str,
+    effective: &ego_core::config::Effective,
+    workspace: &ego_core::permit::CanonPath,
+) -> Result<(), String> {
+    use ego_ai::http::Http;
+    use ego_core::generator::port::Generator;
+    use std::sync::Arc;
+    let provider = model.split_once('/').ok_or("invalid model")?.0;
+    if effective
+        .auth
+        .get(provider)
+        .is_some_and(|auth| auth.credential_command.is_some())
+    {
+        return Err("setup cannot run credential commands".into());
+    }
+    let confinement = ego_core::permit::RunConfinement::new(
+        effective.sandbox.unwrap_or_default(),
+        effective.network == ego_core::config::Network::Off,
+        workspace.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let http: Arc<dyn Http> = Arc::new(crate::provider_http::ProviderHttpAdapter::inference(
+        Arc::new(ego_tools::http::InferenceHttpPorts::new(
+            confinement.clone(),
+            ego_core::turn::CancelToken::new(),
+            ego_tools::exec::HttpCallTimeout::default(),
+        )),
+    ));
+    let hosted = crate::facts::supplied(&effective.ceilings).map_err(|error| error.to_string())?;
+    let (resolved, credential) = crate::model::resolve(
+        model,
+        hosted,
+        &http,
+        &ego_ai::provider::EnvCredentials,
+        &effective.auth,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let identity = ego_core::config::ModelRef(model.to_owned());
+    let mut request = crate::run::composition::fixed_judge_request(
+        &identity,
+        &resolved.model,
+        resolved.capabilities.max_output_tokens,
+        &confinement,
+        ego_core::permit::ExecCaps::empty(),
+    );
+    request.thinking =
+        crate::model::judge_thinking(&resolved.capabilities).map_err(|error| error.to_string())?;
+    let generator =
+        ego_ai::generator::WireGenerator::new(resolved.row, resolved.wire, http, credential);
+    crate::run::composition::validate_judge_request(
+        &identity,
+        &resolved.capabilities,
+        &request,
+        |request| generator.ensure_expressible(request),
+    )
 }
 
 /// Provider output is selection data only; no effects or candidate TOML are accepted.

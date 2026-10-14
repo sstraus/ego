@@ -278,6 +278,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (setup)
 _arguments "${_arguments_options[@]}" : \
+'--judge=[Offer a validated judge for unresolved policy; never authorizes an action]:JUDGE:_default' \
 '--profile=[]:PROFILE:_default' \
 '--directory=[]:DIRECTORY:_files' \
 '-h[Print help]' \

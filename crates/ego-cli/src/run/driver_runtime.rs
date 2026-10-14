@@ -1431,6 +1431,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
                                         let setup_args = crate::cli::SetupArgs {
+                                            judge: None,
                                             prompt: (!prompt.is_empty()).then_some(prompt),
                                             profile: None,
                                             directory: Some(root.clone()),
