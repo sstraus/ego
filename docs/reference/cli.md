@@ -35,7 +35,7 @@ Run an agent from a prompt, headless.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
-- `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off
+- `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
 - `--schema-retries <SCHEMA_RETRIES>` — How many times to re-prompt on a schema mismatch
 - `--session <SESSION>` — Named session: created or attached
@@ -81,7 +81,7 @@ Continue a session; no ID = latest in this workspace.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
-- `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off
+- `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
 - `--schema-retries <SCHEMA_RETRIES>` — How many times to re-prompt on a schema mismatch
 - `--session <SESSION>` — Named session: created or attached
@@ -158,7 +158,7 @@ Continue a session; no ID = latest in this workspace.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
-- `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off
+- `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
 - `--schema-retries <SCHEMA_RETRIES>` — How many times to re-prompt on a schema mismatch
 - `--session <SESSION>` — Named session: created or attached
@@ -302,7 +302,7 @@ Serve the Agent Client Protocol on stdio or an endpoint.
 - `--max-ingress-bytes <MAX_INGRESS_BYTES>` — Maximum cumulative bytes read from one listener connection
 - `--no-tools` — Offer no tools at all
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
-- `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|adaptive|off
+- `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included
 - `--session-dir <SESSION_DIR>` — Override the store location
 - `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
@@ -326,7 +326,7 @@ Serve the Agent2Agent protocol on a local or loopback endpoint.
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help (see more with '--help')
 - `--listen <LISTEN>` — Where to serve: a socket path, or an address such as `127.0.0.1:8080`
-- `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|adaptive|off
+- `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included
 - `--session-dir <SESSION_DIR>` — Override the store location
 
 ## `ego auth`
