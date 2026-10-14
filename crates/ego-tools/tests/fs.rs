@@ -546,6 +546,23 @@ mod walking {
         assert!(scan.truncated, "hitting max_entries must be reported");
     }
 
+    // Catches: fixing only the root still lets a nested subtree hide sibling files.
+    #[test]
+    fn scan_visits_files_before_subdirectories_at_each_level_without_raising_the_cap() {
+        let tree = Tree::new();
+        tree.file("parent/.profile/a.txt", "");
+        tree.file("parent/.profile/b.txt", "");
+        tree.file("parent/visible.txt", "");
+        let mut request = ScanRequest::new(tree.canon_root());
+        request.limits.max_entries = 3;
+
+        let scan = OsFs.scan(&request).unwrap();
+
+        assert_eq!(names(&scan, EntryKind::File), ["parent/visible.txt"]);
+        assert_eq!(scan.entries.len(), 3);
+        assert!(scan.truncated);
+    }
+
     #[test]
     fn scan_returns_the_same_prefix_every_time_it_truncates() {
         // `read_dir` yields whatever order the filesystem feels like. A

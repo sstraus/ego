@@ -1379,6 +1379,31 @@ mod edit {
 mod glob {
     use super::*;
 
+    // Catches: a hidden subtree hides top-level names behind the glob entry cap.
+    #[test]
+    fn glob_finds_top_level_files_before_a_large_hidden_subtree() {
+        let ws = Workspace::new();
+        for index in 0..512 {
+            ws.file(&format!(".profile/{index:05}.txt"), "");
+        }
+        ws.file("ab-stealth.sh", "agent-browser\n");
+        ws.file("shared_browser.py", "agent-browser\n");
+
+        let content = ws.call("glob", json!({"pattern": "**/*"})).unwrap();
+        let paths: Vec<_> = content
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .collect();
+
+        assert_eq!(&paths[..2], ["ab-stealth.sh", "shared_browser.py"]);
+        assert_eq!(paths.len(), 511, "the directory also spends one entry");
+        assert!(content.contains("this answer is incomplete"), "{content}");
+        assert_eq!(
+            content,
+            ws.call("glob", json!({"pattern": "**/*"})).unwrap()
+        );
+    }
+
     #[test]
     fn glob_returns_the_paths_that_match_relative_to_the_search_root() {
         let ws = populated();
@@ -1559,6 +1584,48 @@ mod glob {
 
 mod grep {
     use super::*;
+
+    // Catches: a hidden subtree spends the entry budget before a top-level hit.
+    #[test]
+    fn grep_finds_top_level_matches_before_a_large_hidden_subtree() {
+        let ws = Workspace::new();
+        for index in 0..10_000 {
+            ws.file(&format!(".profile/{index:05}.txt"), "unrelated\n");
+        }
+        ws.file("ab-stealth.sh", "agent-browser\n");
+        ws.file("shared_browser.py", "agent-browser\n");
+
+        let content = ws.call("grep", json!({"query": "agent-browser"})).unwrap();
+
+        assert!(
+            content.contains("ab-stealth.sh:1:agent-browser"),
+            "{content}"
+        );
+        assert!(
+            content.contains("shared_browser.py:1:agent-browser"),
+            "{content}"
+        );
+        assert!(content.contains("this answer is incomplete"), "{content}");
+    }
+
+    // Catches: subtree contents spend the byte budget before a top-level hit.
+    #[test]
+    fn grep_finds_top_level_matches_before_a_hidden_subtree_spends_the_byte_budget() {
+        let ws = Workspace::new();
+        let block = "x".repeat(1024 * 1024);
+        for index in 0..65 {
+            ws.file(&format!(".profile/{index:02}.txt"), &block);
+        }
+        ws.file("ab-stealth.sh", "agent-browser\n");
+
+        let content = ws.call("grep", json!({"query": "agent-browser"})).unwrap();
+
+        assert!(
+            content.contains("ab-stealth.sh:1:agent-browser"),
+            "{content}"
+        );
+        assert!(content.contains("this answer is incomplete"), "{content}");
+    }
 
     #[test]
     fn grep_returns_matching_lines_with_their_path_and_a_one_based_line_number() {
