@@ -656,6 +656,15 @@ async fn select_backend(
         return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
             .map(|backend| (Arc::new(backend), Vec::new()));
     }
+    // A read-only bind mount permits execution. Landlock's read rights exclude
+    // EXECUTE, so read roots must use that backend and fail closed if unavailable.
+    if policy
+        .roots()
+        .iter()
+        .any(|root| root.access() == ego_core::permit::RootAccess::Read)
+    {
+        return probe::landlock(policy, cancel, limits, log).await;
+    }
     match probe::bwrap(policy, cancel.clone(), limits, log).await {
         Ok(selected)
             if selected

@@ -34,6 +34,7 @@ Run an agent from a prompt, headless.
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
+- `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
 - `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
@@ -80,6 +81,7 @@ Continue a session; no ID = latest in this workspace.
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
+- `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
 - `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
@@ -157,6 +159,7 @@ Continue a session; no ID = latest in this workspace.
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
+- `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
 - `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
@@ -302,6 +305,7 @@ Serve the Agent Client Protocol on stdio or an endpoint.
 - `--max-ingress-bytes <MAX_INGRESS_BYTES>` — Maximum cumulative bytes read from one listener connection
 - `--no-tools` — Offer no tools at all
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
+- `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|adaptive|off
 - `--session-dir <SESSION_DIR>` — Override the store location
 - `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file

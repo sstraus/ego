@@ -36,6 +36,7 @@ _arguments "${_arguments_options[@]}" : \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--sandbox=[Filesystem confinement\: ro|workspace|adaptive|off]:SANDBOX:_default' \
 '--thinking=[off|minimal|low|medium|high|xhigh|max]:THINKING:_default' \
+'--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
@@ -86,6 +87,7 @@ _arguments "${_arguments_options[@]}" : \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--sandbox=[Filesystem confinement\: ro|workspace|adaptive|off]:SANDBOX:_default' \
 '--thinking=[off|minimal|low|medium|high|xhigh|max]:THINKING:_default' \
+'--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
@@ -137,6 +139,7 @@ _arguments "${_arguments_options[@]}" : \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--sandbox=[Filesystem confinement\: ro|workspace|adaptive|off]:SANDBOX:_default' \
 '--thinking=[off|minimal|low|medium|high|xhigh|max]:THINKING:_default' \
+'--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
@@ -278,6 +281,7 @@ _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--sandbox=[The weakest confinement a session may select\: ro|workspace|adaptive|off]:SANDBOX:_default' \
+'--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \

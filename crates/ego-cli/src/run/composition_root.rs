@@ -151,6 +151,9 @@ impl CliPrepared {
             args.profile = Some(profile.to_owned());
             args.profile_source = Some(ego_core::config::Source::Flags);
         }
+        if let Some(path) = request.selections.read_only_dir() {
+            args.read_only_dir = Some(path.to_path_buf());
+        }
         args.ceiling_profile = request.selections.ceiling_profile().map(str::to_owned);
         if let Some(options) = request.selections.prompt_options() {
             args.session_prompt = options.system_prompt.clone();

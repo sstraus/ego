@@ -76,6 +76,7 @@ struct ProfileSeat {
 /// Everything one connection knows and may change for one session.
 #[derive(Debug, Clone, Default)]
 struct SessionSeat {
+    read_only_dir: Option<std::path::PathBuf>,
     chosen: Chosen,
     confinement: Option<ConfinementMeasurements>,
     profile: Option<ProfileSeat>,
@@ -217,6 +218,27 @@ impl AcpSessionControls {
         Ok(())
     }
 
+    pub(crate) fn seed_read_only_dir(
+        &self,
+        session: SessionId,
+        path: std::path::PathBuf,
+    ) -> Result<(), ControlError> {
+        let mut sessions = self.lock_sessions()?;
+        let seat = sessions.entry(session).or_default();
+        if seat
+            .read_only_dir
+            .as_ref()
+            .is_some_and(|pinned| pinned != &path)
+        {
+            return Err(ControlError::Refused {
+                control: "additionalDirectories",
+                why: "the session read-only directory is already pinned".into(),
+            });
+        }
+        seat.read_only_dir = Some(path);
+        Ok(())
+    }
+
     pub(crate) fn seed_prompt(
         &self,
         session: SessionId,
@@ -232,6 +254,12 @@ impl AcpSessionControls {
         mut selections: ego_core::run::RunSelections,
     ) -> Result<ego_core::run::RunSelections, ControlError> {
         let sessions = self.lock_sessions()?;
+        if let Some(path) = sessions
+            .get(&session)
+            .and_then(|seat| seat.read_only_dir.as_ref())
+        {
+            selections = selections.with_read_only_dir(path.clone());
+        }
         if let Some(prompt) = sessions.get(&session).and_then(|seat| seat.prompt.as_ref()) {
             selections = selections.with_prompt_options(prompt.clone());
         }

@@ -45,6 +45,7 @@ struct ProfileBase {
     runtime_roots: Vec<PathBuf>,
     exec_paths: Vec<PathBuf>,
     roots: Vec<SandboxGrant>,
+    read_only_roots: Vec<CanonPath>,
 }
 
 impl SeatbeltBackend {
@@ -87,6 +88,12 @@ impl SeatbeltBackend {
                 .map(|root| root.as_path().to_path_buf())
                 .collect(),
             exec_paths,
+            read_only_roots: policy
+                .roots()
+                .iter()
+                .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
+                .map(|root| root.path().clone())
+                .collect(),
             roots: policy
                 .roots()
                 .iter()
@@ -135,6 +142,12 @@ impl SeatbeltBackend {
             .iter()
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
+        // Read roots remain non-executable even under Adaptive's broad baseline.
+        let no_exec = no_exec
+            .iter()
+            .cloned()
+            .chain(base.read_only_roots.iter().cloned())
+            .collect::<Vec<_>>();
         let grants = base.roots.iter().chain(grants).cloned().collect::<Vec<_>>();
         let mut profile = profile::render(&ProfileInput {
             adaptive: base.adaptive.as_ref(),
@@ -148,7 +161,7 @@ impl SeatbeltBackend {
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
         profile.push_str(
-            &profile::deny_exec(no_exec)
+            &profile::deny_exec(&no_exec)
                 .map_err(|error| ProcessError::Backend(error.to_string()))?,
         );
 
