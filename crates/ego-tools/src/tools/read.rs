@@ -73,9 +73,24 @@ impl TypedTool for ReadTool {
             {
                 end = start + last.0 + 1;
             }
-            // Do not split a valid UTF-8 character at the byte cap.
-            while end > start && end < bytes.len() && (bytes[end] & 0xc0) == 0x80 {
-                end -= 1;
+            // Retreat only for a valid UTF-8 character crossing the byte cap.
+            if end < bytes.len() && (bytes[end] & 0xc0) == 0x80 {
+                for lead in (end.saturating_sub(3).max(start)..end).rev() {
+                    let width = match bytes[lead] {
+                        0xc2..=0xdf => 2,
+                        0xe0..=0xef => 3,
+                        0xf0..=0xf4 => 4,
+                        _ => continue,
+                    };
+                    let char_end = lead + width;
+                    if char_end > end
+                        && char_end <= bytes.len()
+                        && std::str::from_utf8(&bytes[lead..char_end]).is_ok()
+                    {
+                        end = lead;
+                    }
+                    break;
+                }
             }
             let mut text = String::from_utf8_lossy(&bytes[start..end]).into_owned();
             if end < bytes.len() {
