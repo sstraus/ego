@@ -278,6 +278,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (setup)
 _arguments "${_arguments_options[@]}" : \
+'*--items=[Limit proposals to these report item IDs (comma-separated)]:ITEMS:_default' \
 '--judge=[Offer a validated judge for unresolved policy; never authorizes an action]:JUDGE:_default' \
 '--profile=[]:PROFILE:_default' \
 '--directory=[]:DIRECTORY:_files' \

@@ -102,6 +102,24 @@ pub(crate) async fn observed_host(
         None
     };
     rendered.push_str("Read-rule mapper: admitted built-in reads need no extra allow in current modes; denies/floors are never lifted.\n");
+    let selected_findings = if let Some(ids) = &args.items {
+        if ids
+            .iter()
+            .any(|id| !findings.iter().any(|finding| finding.id == *id))
+        {
+            return Err(UsageError(
+                "setup selected item is not in the current report; no configuration writes".into(),
+            ));
+        }
+        findings
+            .iter()
+            .filter(|finding| ids.contains(&finding.id))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        findings.clone()
+    };
+    rendered.push_str(&format!("Accepted proposal item selection: {:?}; rerun --items ID,ID to narrow. Final confirmation still required.\n", args.items));
     if let Some(home) = &home {
         let proposal = crate::setup_proposals::preview(
             &layers,
@@ -110,7 +128,7 @@ pub(crate) async fn observed_host(
             home,
             args.profile.as_deref(),
             active_probes,
-            &findings,
+            &selected_findings,
         );
         rendered.push_str("Judge mapper: current closed probes contain no unresolved opaque action; no gratuitous judge mutation.\n");
         match proposal {

@@ -250,6 +250,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --help 'Print help'
         }
         &'ego;setup'= {
+            cand --items 'Limit proposals to these report item IDs (comma-separated)'
             cand --judge 'Offer a validated judge for unresolved policy; never authorizes an action'
             cand --profile 'profile'
             cand --directory 'directory'

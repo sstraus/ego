@@ -14,6 +14,10 @@ fn setup_cli_has_separate_typed_target_and_no_run_flags() {
     );
     assert!(parse(&["ego", "setup", "--yolo"]).is_err());
     assert!(
+        matches!(parse(&["ego", "setup", "--items", "0,2"]).unwrap(), Invocation::Setup(args) if args.items == Some(vec![0,2]))
+    );
+    assert!(parse(&["ego", "setup", "--items", "forged"]).is_err());
+    assert!(
         matches!(parse(&["ego", "setup", "--judge", "ollama/qwen3"]).unwrap(), Invocation::Setup(args) if args.judge.as_deref() == Some("ollama/qwen3"))
     );
 }

@@ -950,6 +950,50 @@ mod tests {
         );
     }
 
+    // Catches: selecting one finding still persists omitted item authority.
+    #[test]
+    fn setup_subset_only_prepares_selected_item_authority() {
+        let (_temp, workspace, home, layers, effective, mut probes, mut findings) = fixture("");
+        let second = findings[0]
+            .requested
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("other");
+        std::fs::create_dir(&second).unwrap();
+        let second = second.join("task.md");
+        std::fs::write(&second, "other").unwrap();
+        probes.push(Probe::Read {
+            path: second.clone(),
+            reason: "second".into(),
+        });
+        let mut omitted = findings[0].clone();
+        omitted.id = 1;
+        omitted.requested = second.clone();
+        omitted.canonical = Some(second.clone());
+        findings.push(omitted);
+        let selected = vec![findings[1].clone()];
+        let proposal = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &selected,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(proposal.items, vec![1]);
+        assert_eq!(proposal.stored_after.len(), 1);
+        assert_eq!(proposal.stored_after[0].path, second.parent().unwrap());
+        assert!(
+            !proposal.batch.candidate().contains(
+                &findings[0]
+                    .requested
+                    .parent()
+                    .unwrap()
+                    .display()
+                    .to_string()
+            )
+        );
+    }
+
     // Catches: a write root bypasses explicit denies or exposes instruction controls.
     #[test]
     fn setup_write_preview_refuses_denies_and_control_targets() {

@@ -829,6 +829,9 @@ impl clap::ValueEnum for RootAccessValue {
     disable_help_subcommand = true
 )]
 pub(super) struct SetupCommand {
+    /// Limit proposals to these report item IDs (comma-separated).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub(super) items: Option<Vec<usize>>,
     /// Offer a validated judge for unresolved policy; never authorizes an action.
     #[arg(long)]
     pub(super) judge: Option<String>,

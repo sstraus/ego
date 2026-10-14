@@ -1422,12 +1422,16 @@ _ego() {
             return 0
             ;;
         ego__subcmd__setup)
-            opts="-h --judge --profile --directory --help"
+            opts="-h --items --judge --profile --directory --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --items)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --judge)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

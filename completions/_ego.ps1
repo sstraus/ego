@@ -266,6 +266,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;setup' {
+            [CompletionResult]::new('--items', '--items', [CompletionResultType]::ParameterName, 'Limit proposals to these report item IDs (comma-separated)')
             [CompletionResult]::new('--judge', '--judge', [CompletionResultType]::ParameterName, 'Offer a validated judge for unresolved policy; never authorizes an action')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
             [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'directory')

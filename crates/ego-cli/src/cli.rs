@@ -541,6 +541,7 @@ pub struct HooksArgs {
 /// installation, and there is only one of those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupArgs {
+    pub items: Option<Vec<usize>>,
     pub judge: Option<String>,
     pub prompt: Option<String>,
     pub profile: Option<String>,
@@ -1472,6 +1473,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         Some("setup") => match clap_or_answer::<SetupCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Setup(SetupArgs {
+                items: parsed.items,
                 judge: parsed.judge,
                 prompt: parsed.prompt,
                 profile: parsed.profile,
