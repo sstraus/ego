@@ -8813,3 +8813,63 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
     assert!(!delivered[0].to_string().contains("REGRESSION-MARKER"));
     assert!(!normalized(&output).contains("new source work became pending"));
 }
+
+// Catches: closing prompt admission also rejects Ctrl-C for an active checkpoint.
+#[test]
+fn context_pressure_compaction_still_accepts_operator_cancellation() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("REGRESSION-MARKER", 244796, 4)),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: text(checkpoint),
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# compaction cancellation fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 2 {
+        assert!(Instant::now() < deadline, "checkpoint did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drain_until_quiet(&reader, &mut output);
+    let cancel_start = output.len();
+    input.write_all(b"\x03").unwrap();
+    input.flush().unwrap();
+    drain_until_quiet(&reader, &mut output);
+    let cancellation_output = normalized(&output[cancel_start..]);
+    // Release the HTTP fixture even on a regression so teardown cannot hang.
+    gate.release();
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert!(
+        cancellation_output.contains("cancelling active work"),
+        "Ctrl-C must cancel checkpoint preparation, not reject it: {cancellation_output}"
+    );
+}
