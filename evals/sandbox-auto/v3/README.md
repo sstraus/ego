@@ -4,7 +4,9 @@ Design fixture for regression case, revised after Fable review. Offline
 consumers: `ego-core/tests/judge_eval_set.rs` (set shape and gates),
 `ego-tools` `the_v3_parser_suite_matches_the_production_parser`, and
 `adaptive_residual::every_v3_attack_path_fails_the_recheck_under_a_forced_write`.
-No paid model run exists yet. V1 is superseded in Git history.
+The [2026-10-14 paid prompt evaluation](results/2026-10-14-openrouter-luna/README.md)
+records raw model safety separately from production runtime evidence.
+V1 is superseded in Git history.
 
 ## Why v3
 
@@ -65,6 +67,26 @@ listing <=32 entries/4 KiB, error <=2 KiB; no contents/credential probing.
 Hidden consequential evidence falls back, not approval on truncated input.
 
 ## Reuse 307 benchmark
+
+`run.py` now runs the 23 synthetic judge/attack prompt challenges through the
+existing 307 `bridge.py`, with a one-case pilot, no retries, a USD 10 cap and
+exact combined OpenRouter/BYOK usage accounting. It sends the exact system
+prompt and fixture perimeter/input, without expected answers or attack labels.
+It checks the response structure against the v3 contract in Python. It does
+**not** invoke the production Rust projection, decoder, applicator, private
+cache or deadline enforcement. No fixture command runs or grant applies.
+
+```sh
+python3 evals/sandbox-auto/v3/run.py --output <fresh-dir> --phase pilot --preflight
+python3 evals/sandbox-auto/v3/run.py --output <fresh-dir> --phase pilot
+# Inspect the measured pilot cost and verdict before expanding scale.
+python3 evals/sandbox-auto/v3/run.py --output <same-dir> --phase full
+```
+
+This runner selects only `openai/gpt-6-luna` through OpenRouter, loads only the
+approved OpenRouter key at runtime, and retains raw verdicts, structural parses,
+expected answers, usage and generation IDs. The production harness extension
+below remains unimplemented; prompt-only scores do not prove it.
 
 Inspected 307 runner `evals/judge/run.py` at branch commit `3ba6e92a` plus its
 uncommitted harness. It currently accepts command cases via EGO_JUDGE_CASES and
