@@ -446,6 +446,7 @@ impl CliPrepared {
                 bindings.human(),
             )
             .with_profile_roots(profile_roots)
+            .with_read_perimeter(&self.confinement)
             .with_coordinator_profile(self.effective.active_profile.as_ref()),
         );
         let config = TurnConfig {
