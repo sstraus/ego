@@ -58,6 +58,104 @@ fn observe(
     }
 }
 
+#[cfg(unix)]
+fn metadata_no_links(path: &Path) -> Result<fs::Metadata, String> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    let mut directory = fs::File::open("/").map_err(|error| error.to_string())?;
+    let parts = path
+        .components()
+        .filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, name) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        let mut flags = OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
+        #[cfg(target_os = "linux")]
+        {
+            flags |= OFlag::O_PATH;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            flags |= OFlag::O_EVTONLY;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            return Err("race-safe setup metadata is unsupported on this platform".into());
+        }
+        if !last {
+            flags |= OFlag::O_DIRECTORY;
+        }
+        let file = fs::File::from(
+            openat(&directory, Path::new(name), flags, Mode::empty())
+                .map_err(|error| format!("probe no-link metadata failed: {error}"))?,
+        );
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("probe metadata path became a symlink".into());
+        }
+        if last {
+            return Ok(metadata);
+        }
+        directory = file;
+    }
+    directory.metadata().map_err(|error| error.to_string())
+}
+
+#[cfg(not(unix))]
+fn metadata_no_links(_path: &Path) -> Result<fs::Metadata, String> {
+    Err("race-safe setup metadata is unsupported on this platform".into())
+}
+
+#[cfg(unix)]
+fn link_target_no_links(path: &Path) -> Result<Option<PathBuf>, String> {
+    use nix::fcntl::AtFlags;
+    use nix::fcntl::{OFlag, openat, readlinkat};
+    use nix::sys::stat::{Mode, SFlag, fstatat};
+    let mut directory = fs::File::open("/").map_err(|error| error.to_string())?;
+    let parts = path
+        .components()
+        .filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, name) in parts.iter().enumerate() {
+        let name = Path::new(name);
+        if index + 1 == parts.len() {
+            let metadata = fstatat(&directory, name, AtFlags::AT_SYMLINK_NOFOLLOW)
+                .map_err(|error| error.to_string())?;
+            if SFlag::from_bits_truncate(metadata.st_mode).contains(SFlag::S_IFLNK) {
+                return readlinkat(&directory, name)
+                    .map(|target| Some(PathBuf::from(target)))
+                    .map_err(|error| error.to_string());
+            }
+            return Ok(None);
+        }
+        directory = fs::File::from(
+            openat(
+                &directory,
+                name,
+                OFlag::O_RDONLY
+                    | OFlag::O_DIRECTORY
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(None)
+}
+
+#[cfg(not(unix))]
+fn link_target_no_links(_path: &Path) -> Result<Option<PathBuf>, String> {
+    Err("race-safe setup metadata is unsupported on this platform".into())
+}
+
 fn diagnostic_path(path: &Path) -> Result<PathBuf, String> {
     use std::collections::VecDeque;
     use std::path::Component;
@@ -86,14 +184,11 @@ fn diagnostic_path(path: &Path) -> Result<PathBuf, String> {
         {
             return Err("credential diagnostic access is forbidden".into());
         }
-        let metadata = fs::symlink_metadata(&resolved)
-            .map_err(|error| format!("metadata unavailable: {error}"))?;
-        if metadata.file_type().is_symlink() {
+        if let Some(target) = link_target_no_links(&resolved)? {
             links += 1;
             if links > 32 {
                 return Err("diagnostic symlink limit exceeded".into());
             }
-            let target = fs::read_link(&resolved).map_err(|error| error.to_string())?;
             resolved.pop();
             if target.is_absolute() {
                 resolved.clear();
@@ -150,8 +245,7 @@ fn open_regular_no_links(_path: &Path) -> Result<fs::File, String> {
 impl ProbeReader for NativeProbeReader {
     fn metadata(&self, path: &Path) -> Result<Observation, String> {
         let canonical = diagnostic_path(path)?;
-        let metadata =
-            fs::metadata(&canonical).map_err(|error| format!("metadata unavailable: {error}"))?;
+        let metadata = metadata_no_links(&canonical)?;
         Ok(observe(path, canonical, &metadata, Vec::new(), false))
     }
 
@@ -237,7 +331,7 @@ impl ProbeReader for NativeProbeReader {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    if fs::metadata(observation.canonical.as_path())
+                    if metadata_no_links(observation.canonical.as_path())
                         .map_err(|error| error.to_string())?
                         .permissions()
                         .mode()
@@ -251,6 +345,33 @@ impl ProbeReader for NativeProbeReader {
             }
         }
         Err("requested tool is missing from bounded operator PATH inventory".into())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod metadata_tests {
+    // Catches: metadata follows a replaced credential alias after diagnostic resolution.
+    #[test]
+    fn setup_metadata_refuses_replaced_leaf_and_ancestor_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let safe = root.path().join("safe");
+        let secret = root.path().join(".ssh");
+        std::fs::create_dir(&safe).unwrap();
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::write(secret.join("id_fixture"), "synthetic").unwrap();
+        let target = safe.join("target");
+        std::os::unix::fs::symlink(secret.join("id_fixture"), &target).unwrap();
+        assert!(
+            super::metadata_no_links(&target).is_err(),
+            "metadata followed replaced leaf alias"
+        );
+        std::fs::remove_file(&target).unwrap();
+        std::fs::remove_dir(&safe).unwrap();
+        std::os::unix::fs::symlink(&secret, &safe).unwrap();
+        assert!(
+            super::metadata_no_links(&safe.join("id_fixture")).is_err(),
+            "metadata followed replaced ancestor alias"
+        );
     }
 }
 
