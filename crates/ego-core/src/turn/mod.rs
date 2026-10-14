@@ -1610,7 +1610,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // the checkpoint. Later input stays terminal-owned for the successor.
         self.close_and_drain_controls(turn).await?;
         let delivered = self.deliver_pending(turn)?;
-        self.control = None;
+        // Keep the receiver attached so checkpoint generation can be cancelled
+        // even though prompt admission is closed at the history barrier.
         if let Some(cause) = self.cancel.cause() {
             return Err(CompactionError::Cancelled(cause));
         }

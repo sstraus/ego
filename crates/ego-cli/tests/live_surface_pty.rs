@@ -8817,6 +8817,16 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
 // Catches: closing prompt admission also rejects Ctrl-C for an active checkpoint.
 #[test]
 fn context_pressure_compaction_still_accepts_operator_cancellation() {
+    context_pressure_compaction_cancellation(b"\x03");
+}
+
+// Catches: the checkpoint prompt barrier rejects Esc instead of cancelling.
+#[test]
+fn context_pressure_compaction_still_accepts_escape_cancellation() {
+    context_pressure_compaction_cancellation(b"\x1b");
+}
+
+fn context_pressure_compaction_cancellation(interrupt: &[u8]) {
     let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
     let gate = ReleaseGate::new();
     let stub = Stub::start(Plan {
@@ -8859,9 +8869,18 @@ fn context_pressure_compaction_still_accepts_operator_cancellation() {
     }
     drain_until_quiet(&reader, &mut output);
     let cancel_start = output.len();
-    input.write_all(b"\x03").unwrap();
+    input.write_all(interrupt).unwrap();
     input.flush().unwrap();
-    drain_until_quiet(&reader, &mut output);
+    // Wait for settlement, not a quiet repaint interval: Esc has no notice
+    // and the checkpoint task can settle after the terminal becomes quiet.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !normalized(&output[cancel_start..]).contains("compaction was cancelled by User") {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match reader.recv_timeout(remaining) {
+            Ok(bytes) => output.extend(bytes),
+            Err(_) => break,
+        }
+    }
     let cancellation_output = normalized(&output[cancel_start..]);
     // Release the HTTP fixture even on a regression so teardown cannot hang.
     gate.release();
@@ -8869,7 +8888,7 @@ fn context_pressure_compaction_still_accepts_operator_cancellation() {
     input.flush().unwrap();
     assert!(session.quit(input).success());
     assert!(
-        cancellation_output.contains("cancelling active work"),
-        "Ctrl-C must cancel checkpoint preparation, not reject it: {cancellation_output}"
+        cancellation_output.contains("compaction was cancelled by User"),
+        "operator interrupt must cancel checkpoint preparation, not reject it: {cancellation_output}"
     );
 }
