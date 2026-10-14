@@ -398,7 +398,7 @@ pub(crate) fn preview(
 
 fn path_identity(path: &Path) -> Result<String, String> {
     use ego_core::setup::ProbeReader;
-    let observation = ego_tools::setup::NativeProbeReader::capture().metadata(path)?;
+    let observation = ego_tools::setup::NativeProbeReader::capture().write_metadata(path)?;
     Ok(format!(
         "{}:{}",
         observation.canonical, observation.identity
@@ -881,6 +881,33 @@ mod tests {
                 false
             ));
         }
+    }
+
+    // Catches: confirmation survives creation of an absent selected output.
+    #[test]
+    fn setup_absent_write_confirmation_binds_parent_and_absence() {
+        let (_temp, workspace, home, layers, effective, mut probes, findings) =
+            fixture("sandbox='workspace'\nmode='edits'");
+        std::fs::remove_file(&findings[0].requested).unwrap();
+        probes[0] = Probe::Write {
+            path: findings[0].requested.clone(),
+            reason: "new output".into(),
+        };
+        let proposal = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &findings,
+        )
+        .unwrap()
+        .unwrap();
+        let path = findings[0].requested.clone();
+        let result = confirm_apply(proposal, &workspace, &home, &|_| {
+            std::fs::write(&path, "concurrent").unwrap();
+            true
+        });
+        assert!(result.unwrap_err().to_string().contains("path changed"));
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "roots=[]\nsandbox='workspace'\nmode='edits'"
+        );
     }
 
     // Catches: a write root bypasses explicit denies or exposes instruction controls.

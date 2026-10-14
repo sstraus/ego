@@ -41,6 +41,9 @@ pub struct Observation {
 /// Read-only external effect seam. Implementations cannot be supplied by model text.
 pub trait ProbeReader {
     fn metadata(&self, path: &std::path::Path) -> Result<Observation, String>;
+    fn write_metadata(&self, path: &std::path::Path) -> Result<Observation, String> {
+        self.metadata(path)
+    }
     fn read(&self, canonical: &CanonPath, max_bytes: usize) -> Result<Observation, String>;
     fn tool(&self, name: &str) -> Result<Observation, String>;
 }
@@ -129,6 +132,7 @@ impl<'a> Controller<'a> {
         }
         let observed = match probe {
             Probe::Tool { name, .. } => self.reader.tool(name),
+            Probe::Write { path, .. } => self.reader.write_metadata(path),
             _ => self.reader.metadata(&path),
         };
         let observation = match observed {

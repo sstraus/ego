@@ -187,6 +187,58 @@ fn setup_inventory_observes_real_linked_git_layout_without_changing_it() {
     assert_eq!(std::fs::read(linked.join(".git")).unwrap(), before);
 }
 
+// Catches: a missing ordinary output loses its existing-ancestor evidence.
+#[test]
+fn setup_absent_write_target_keeps_parent_identity_without_creating_it() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("new-output");
+    let reader = NativeProbeReader::capture();
+    let policy = PolicyEngine::new(
+        CanonPath::new(root.path()),
+        Mode::Default,
+        Ruleset::default(),
+    );
+    let scope = DiagnosticScope::new(Vec::new());
+    let report = Controller::new(&reader, &policy, &scope)
+        .inspect(&[Probe::Write {
+            path: target.clone(),
+            reason: "expected output".into(),
+        }])
+        .unwrap();
+    assert_eq!(
+        report[0].canonical.as_deref(),
+        Some(target.as_path()),
+        "absent write canonical evidence missing"
+    );
+    assert!(matches!(report[0].status, ego_core::setup::Status::Blocked));
+    assert!(!target.exists());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+// Catches: absent-target handling mistakes a dangling alias/credential/missing parent for a safe output.
+#[test]
+fn setup_absent_write_refuses_aliases_credentials_and_missing_parents() {
+    let root = tempfile::tempdir().unwrap();
+    let reader = NativeProbeReader::capture();
+    assert!(
+        reader
+            .write_metadata(&root.path().join("missing/output"))
+            .is_err()
+    );
+    assert_eq!(
+        reader
+            .write_metadata(&root.path().join(".ssh/id_missing"))
+            .unwrap_err(),
+        "credential diagnostic access is forbidden"
+    );
+    #[cfg(unix)]
+    {
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(root.path().join("missing"), &alias).unwrap();
+        assert!(reader.write_metadata(&alias).is_err());
+    }
+}
+
 // Catches: tool presence or write policy is mislabeled as a successful execution/effect.
 #[test]
 fn setup_tool_presence_and_write_intent_never_claim_effect_success() {

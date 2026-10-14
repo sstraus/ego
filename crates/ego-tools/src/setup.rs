@@ -155,6 +155,48 @@ impl ProbeReader for NativeProbeReader {
         Ok(observe(path, canonical, &metadata, Vec::new(), false))
     }
 
+    fn write_metadata(&self, path: &Path) -> Result<Observation, String> {
+        match self.metadata(path) {
+            Ok(observation) => Ok(observation),
+            Err(error) => {
+                // Only one absent ordinary leaf is representable. Never treat
+                // a dangling symlink or inaccessible component as absence.
+                let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
+                if ego_core::config::Ruleset::is_credential_path(&CanonPath::new(&absolute)) {
+                    return Err("credential diagnostic access is forbidden".into());
+                }
+                match fs::symlink_metadata(&absolute) {
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err(error),
+                }
+                let parent = absolute.parent().ok_or("write target has no parent")?;
+                let ancestor = self.metadata(parent)?;
+                if ancestor.regular {
+                    return Err("write target parent is not a directory".into());
+                }
+                let name = absolute
+                    .file_name()
+                    .ok_or("write target needs an ordinary leaf")?;
+                let canonical = ancestor.canonical.as_path().join(name);
+                if ego_core::config::Ruleset::is_credential_path(&CanonPath::new(&canonical)) {
+                    return Err("credential diagnostic access is forbidden".into());
+                }
+                match fs::symlink_metadata(&canonical) {
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err("write target identity changed".into()),
+                }
+                Ok(Observation {
+                    requested: path.to_path_buf(),
+                    canonical: CanonPath::new(canonical),
+                    regular: false,
+                    bytes: Vec::new(),
+                    truncated: false,
+                    identity: format!("absent-leaf:{}", ancestor.identity),
+                })
+            }
+        }
+    }
+
     fn read(&self, canonical: &CanonPath, max_bytes: usize) -> Result<Observation, String> {
         let resolved = diagnostic_path(canonical.as_path())?;
         if resolved != canonical.as_path() {
