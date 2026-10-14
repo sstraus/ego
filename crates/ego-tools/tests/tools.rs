@@ -654,6 +654,24 @@ mod registration {
 mod read {
     use super::*;
 
+    // Catches: a binary page of continuation bytes advertises the same offset forever.
+    #[test]
+    fn binary_read_continuation_makes_forward_progress() {
+        let ws = populated();
+        let path = ws.root.join("binary.dat");
+        let mut bytes = vec![0x80; 40_000];
+        bytes.extend_from_slice(b"END-OF-FILE");
+        fs::write(&path, bytes).expect("binary file");
+        let first = ws.call("read", json!({"path": "binary.dat"})).unwrap();
+        let hint = first.rsplit(" offset=").next().expect("continuation");
+        let offset: u64 = hint.trim_end_matches(']').parse().expect("byte offset");
+        assert!(offset > 0, "binary read made no progress: {first}");
+        let next = ws
+            .call("read", json!({"path": "binary.dat", "offset": offset}))
+            .unwrap();
+        assert!(next.ends_with("END-OF-FILE"), "binary tail is unreachable");
+    }
+
     // Catches: a large file is returned whole instead of a bounded page.
     #[test]
     fn large_read_is_bounded_and_names_the_continuation_offset() {
