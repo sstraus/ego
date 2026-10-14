@@ -259,7 +259,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 }
             }
             Ok(Invocation::Setup(args)) => Ended {
-                termination: ego_cli::setup::execute(&args, &out),
+                termination: ego_cli::setup::execute(&args, &out).await,
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
