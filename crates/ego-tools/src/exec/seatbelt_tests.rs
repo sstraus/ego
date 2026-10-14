@@ -347,13 +347,24 @@ fn user_config_parent_component_does_not_refuse_sandboxed_work() {
         fs::create_dir(root.path().join("child")).unwrap();
         fs::create_dir(root.path().join("ego")).unwrap();
         fs::write(root.path().join("ego/config.toml"), "mode = 'default'\n").unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture"])
-            .env("EGO_PARENT_CONFIG_CHILD", "1")
-            .env("EGO_HOME", root.path().join("child/../ego"))
-            .output()
+        fs::create_dir_all(root.path().join("target/nested")).unwrap();
+        fs::create_dir(root.path().join("target/ego")).unwrap();
+        fs::write(
+            root.path().join("target/ego/config.toml"),
+            "mode = 'default'\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(root.path().join("target/nested"), root.path().join("link"))
             .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        for selected in ["child/../ego", "link/../ego", "child/../absent"] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("EGO_PARENT_CONFIG_CHILD", "1")
+                .env("EGO_HOME", root.path().join(selected))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{selected}: {output:?}");
+        }
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -385,5 +396,9 @@ fn user_config_parent_component_does_not_refuse_sandboxed_work() {
         ],
     );
     assert!(!write.status.success(), "config write allowed: {write:?}");
-    assert_eq!(fs::read(config).unwrap(), b"mode = 'default'\n");
+    if config.exists() {
+        assert_eq!(fs::read(config).unwrap(), b"mode = 'default'\n");
+    } else {
+        assert!(!config.parent().unwrap().exists());
+    }
 }

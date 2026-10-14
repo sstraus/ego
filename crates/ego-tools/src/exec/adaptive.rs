@@ -146,6 +146,12 @@ pub(super) fn resolve(path: &Path) -> Result<PathBuf, ProcessError> {
             "adaptive roots must be absolute and contain no parent traversal",
         ));
     }
+    resolve_filesystem(path)
+}
+
+/// Preserve filesystem traversal semantics, including parent components through
+/// symlinks. Reconstruct only ordinary missing names; never erase `..` lexically.
+pub(super) fn resolve_filesystem(path: &Path) -> Result<PathBuf, ProcessError> {
     let mut existing = path;
     let mut suffix = Vec::new();
     loop {
