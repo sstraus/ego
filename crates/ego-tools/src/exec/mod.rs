@@ -75,6 +75,34 @@ pub fn setup_write_root_safe(
         &CanonPath::new(target),
     ))
 }
+/// Captured native executable reach only; no backend admission or subprocess.
+/// A successful answer is not proof of command policy or dependency health.
+pub fn setup_exec_reachable(
+    policy: &RunConfinement,
+    target: &CanonPath,
+) -> Result<bool, ProcessError> {
+    if matches!(
+        policy.level(),
+        ego_core::permit::Confinement::Adaptive | ego_core::permit::Confinement::Off
+    ) {
+        return Ok(true);
+    }
+    #[cfg(target_os = "macos")]
+    let runtime = seatbelt::derived_runtime_roots()?;
+    #[cfg(target_os = "linux")]
+    let runtime = landlock::derived_runtime_roots()?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return Err(ProcessError::Backend(
+        "setup executable reach is unsupported on this platform".into(),
+    ));
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Ok(target.is_or_under(policy.workspace())
+        || runtime
+            .iter()
+            .chain(policy.exec_paths())
+            .any(|root| target.is_or_under(root)))
+}
+
 pub use editor_process::{EditorProcessError, run_editor_process};
 pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]

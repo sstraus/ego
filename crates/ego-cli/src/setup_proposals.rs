@@ -20,6 +20,9 @@ pub(crate) struct Preview {
     pub items: Vec<usize>,
     pub paths: Vec<std::path::PathBuf>,
     pub writes: Vec<bool>,
+    pub executions: Vec<bool>,
+    pub exec_before: Vec<std::path::PathBuf>,
+    pub exec_after: Vec<std::path::PathBuf>,
     pub target: UserConfigTarget,
     pub layers: Vec<Sourced<ConfigLayer>>,
     pub identities: Vec<String>,
@@ -84,6 +87,52 @@ fn operation_admitted(
     }
 }
 
+fn exec_admitted(effective: &Effective, workspace: &CanonPath, path: &CanonPath) -> bool {
+    use ego_core::permit::PathResolver;
+    let Ok(policy) = ego_tools::exec::admit_confinement(
+        effective.sandbox.unwrap_or_default(),
+        effective.network == ego_core::config::Network::Off,
+        workspace.clone(),
+    ) else {
+        return false;
+    };
+    let Ok(paths) = effective
+        .exec_paths
+        .iter()
+        .map(|path| ego_tools::fs::OsFs.canonicalize(path))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    if effective.roots.iter().any(|root| {
+        root.access == RootAccess::Read
+            && paths
+                .iter()
+                .any(|exec| root.path.starts_with(exec.as_path()))
+    }) {
+        return false;
+    }
+    ego_tools::exec::setup_exec_reachable(&policy.with_exec_paths(paths), path).unwrap_or(false)
+}
+
+fn batch_changes(
+    target: &UserConfigTarget,
+    roots: &[RootCfg],
+    exec: &[std::path::PathBuf],
+    change_exec: bool,
+) -> Vec<UserConfigMutation> {
+    let mut changes = root_changes(target, roots);
+    if change_exec {
+        changes.push(UserConfigMutation::ManagedSet {
+            target: target.clone(),
+            key: ManagedConfigKey::ExecPaths,
+            value: ManagedConfigValue::ExecPaths(exec.to_vec()),
+        });
+    }
+    changes
+}
+
 fn resolve_candidate(
     layers: &[Sourced<ConfigLayer>],
     candidate: &str,
@@ -138,6 +187,22 @@ pub(crate) fn preview(
             _ => None,
         })
         .unwrap_or_default();
+    let exec_before = snapshot
+        .values
+        .iter()
+        .find_map(|(key, value)| match (key, value) {
+            (ManagedConfigKey::ExecPaths, Some(ManagedConfigValue::ExecPaths(paths))) => {
+                Some(paths.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut exec_after = exec_before.clone();
+    for path in &effective.exec_paths {
+        if !exec_after.contains(path) {
+            exec_after.push(path.clone());
+        }
+    }
     let mut roots = stored.clone();
     // Roots replace a layer list. Preserve the already effective lower-layer reach.
     for root in &effective.roots {
@@ -148,8 +213,13 @@ pub(crate) fn preview(
     let mut items = Vec::new();
     let mut paths = Vec::new();
     let mut writes = Vec::new();
+    let mut executions = Vec::new();
+    let mut change_exec = false;
     for finding in findings {
-        if !matches!(finding.status, Status::Blocked) {
+        let execution = matches!(probes.get(finding.id), Some(Probe::Tool { .. }));
+        if !matches!(finding.status, Status::Blocked)
+            && !(execution && matches!(finding.status, Status::Unknown))
+        {
             continue;
         }
         if !matches!(
@@ -159,6 +229,7 @@ pub(crate) fn preview(
                     | Probe::Instructions { .. }
                     | Probe::Git { .. }
                     | Probe::Write { .. }
+                    | Probe::Tool { .. }
             )
         ) {
             continue;
@@ -176,6 +247,27 @@ pub(crate) fn preview(
         {
             continue;
         }
+        if execution {
+            if exec_admitted(effective, workspace, &CanonPath::new(path)) {
+                continue;
+            }
+            let metadata = match std::fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                _ => continue,
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = metadata;
+                continue;
+            }
+        }
         let write = matches!(probes.get(finding.id), Some(Probe::Write { .. }));
         if write
             && (effective.sandbox != Some(ego_core::permit::Confinement::Workspace)
@@ -192,18 +284,29 @@ pub(crate) fn preview(
             },
         };
         let mut proposed = roots.clone();
-        if let Some(existing) = proposed
-            .iter_mut()
-            .find(|existing| existing.path == root.path)
-        {
-            if write {
-                existing.access = RootAccess::ReadWrite;
+        let mut proposed_exec = exec_after.clone();
+        if execution && !proposed_exec.contains(&directory.to_path_buf()) {
+            proposed_exec.push(directory.to_path_buf());
+        }
+        if !execution {
+            if let Some(existing) = proposed
+                .iter_mut()
+                .find(|existing| existing.path == root.path)
+            {
+                if write {
+                    existing.access = RootAccess::ReadWrite;
+                }
+            } else {
+                proposed.push(root);
             }
-        } else {
-            proposed.push(root);
         }
         let batch = store
-            .prepare_batch(root_changes(&target, &proposed))
+            .prepare_batch(batch_changes(
+                &target,
+                &proposed,
+                &proposed_exec,
+                change_exec || execution,
+            ))
             .map_err(|error| error.to_string())?;
         let Ok(after) = resolve_candidate(layers, batch.candidate(), workspace) else {
             continue;
@@ -213,7 +316,11 @@ pub(crate) fn preview(
             || after.mode != effective.mode
             || after.sandbox != effective.sandbox
             || after.network != effective.network
-            || after.exec_paths != effective.exec_paths
+            || (!execution && !change_exec && after.exec_paths != effective.exec_paths)
+            || !effective
+                .exec_paths
+                .iter()
+                .all(|path| after.exec_paths.contains(path))
         {
             continue;
         }
@@ -225,25 +332,43 @@ pub(crate) fn preview(
         }) {
             continue;
         }
-        if !operation_admitted(&after, workspace, &CanonPath::new(path), write) {
+        if !(if execution {
+            exec_admitted(&after, workspace, &CanonPath::new(path))
+        } else {
+            operation_admitted(&after, workspace, &CanonPath::new(path), write)
+        }) {
             continue;
         }
         roots = proposed;
+        exec_after = proposed_exec;
+        change_exec |= execution;
         items.push(finding.id);
-        paths.push(finding.requested.clone());
+        paths.push(if execution {
+            path.clone()
+        } else {
+            finding.requested.clone()
+        });
         writes.push(write);
+        executions.push(execution);
     }
     if items.is_empty() {
         return Ok(None);
     }
     let batch = store
-        .prepare_batch(root_changes(&target, &roots))
+        .prepare_batch(batch_changes(&target, &roots, &exec_after, change_exec))
         .map_err(|error| error.to_string())?;
     let after = resolve_candidate(layers, batch.candidate(), workspace)?;
     if paths
         .iter()
         .zip(&writes)
-        .any(|(path, write)| !operation_admitted(&after, workspace, &CanonPath::new(path), *write))
+        .zip(&executions)
+        .any(|((path, write), execution)| {
+            !(if *execution {
+                exec_admitted(&after, workspace, &CanonPath::new(path))
+            } else {
+                operation_admitted(&after, workspace, &CanonPath::new(path), *write)
+            })
+        })
     {
         return Err("combined setup proposal is ineffective".into());
     }
@@ -256,6 +381,9 @@ pub(crate) fn preview(
         items,
         paths,
         writes,
+        executions,
+        exec_before,
+        exec_after,
         target,
         layers: layers.to_vec(),
         identities,
@@ -288,8 +416,14 @@ pub(crate) fn confirm_apply(
     let base = format!("{:x}", Sha256::digest(preview.batch.before().as_bytes()));
     let candidate = format!("{:x}", Sha256::digest(preview.batch.candidate().as_bytes()));
     let question = format!(
-        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
-        preview.items, preview.target, preview.stored_before, preview.stored_after, preview.paths
+        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}; exec directories {:?} -> {:?} (directory reach, not single executable)\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
+        preview.items,
+        preview.target,
+        preview.stored_before,
+        preview.stored_after,
+        preview.exec_before,
+        preview.exec_after,
+        preview.paths
     );
     if !confirm(question) {
         return Ok("Setup declined/cancelled; no configuration writes.\n".into());
@@ -327,6 +461,7 @@ pub(crate) fn confirm_apply(
         OsUserConfigStore::new(Arc::new(OsIo) as Arc<dyn StoreIo>, home.join("config.toml"));
     let paths = preview.paths.clone();
     let writes = preview.writes.clone();
+    let executions = preview.executions.clone();
     let result = store
         .publish_batch_checked(preview.batch, &check)
         .map_err(|error| crate::cli::UsageError(error.to_string()))?;
@@ -345,10 +480,14 @@ pub(crate) fn confirm_apply(
         "Setup publication: {:?}; resume before using changed authority.\n",
         result.publication
     );
-    for (path, write) in paths.into_iter().zip(writes) {
+    for ((path, write), execution) in paths.into_iter().zip(writes).zip(executions) {
         let status = if path_identity(&path).is_err() {
             "unknown"
-        } else if operation_admitted(&effective, workspace, &CanonPath::new(&path), write) {
+        } else if execution && exec_admitted(&effective, workspace, &CanonPath::new(&path)) {
+            "fixed executable reach (policy-only; action/dependencies unproven)"
+        } else if !execution
+            && operation_admitted(&effective, workspace, &CanonPath::new(&path), write)
+        {
             "fixed (policy-only)"
         } else {
             "still blocked"
@@ -599,6 +738,112 @@ mod tests {
                 None,
                 &probes,
                 &findings
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    // Catches: strict tool reach gets no directory proposal or loses stored exec paths.
+    #[test]
+    fn setup_exec_preview_preserves_paths_and_respects_mask() {
+        let (_temp, workspace, home, layers, effective, mut probes, mut findings) =
+            fixture("sandbox='ro'\n");
+        let path = findings[0].requested.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        probes[0] = Probe::Tool {
+            name: "fixture-tool".into(),
+            reason: "expected tool".into(),
+        };
+        findings[0].status = Status::Unknown;
+        let result = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &findings,
+        )
+        .unwrap()
+        .expect("strict executable reach proposal missing");
+        let after = resolve_candidate(&layers, result.batch.candidate(), &workspace).unwrap();
+        assert_eq!(after.exec_paths, vec![path.parent().unwrap().to_path_buf()]);
+        let existing = workspace.as_path().join("existing-bin");
+        std::fs::create_dir(&existing).unwrap();
+        let preserved = ConfigLayer::parse(
+            Source::User,
+            &format!(
+                "roots=[]\nsandbox='ro'\nexec_paths=[{:?}]",
+                existing.display().to_string()
+            ),
+        )
+        .unwrap();
+        let preserved_layers = vec![preserved];
+        let preserved_effective =
+            resolve_selected(&preserved_layers, Trust::Untrusted, None).unwrap();
+        let preserved_preview = preview(
+            &preserved_layers,
+            &preserved_effective,
+            &workspace,
+            &home,
+            None,
+            &probes,
+            &findings,
+        )
+        .unwrap()
+        .unwrap();
+        let preserved_after = resolve_candidate(
+            &preserved_layers,
+            preserved_preview.batch.candidate(),
+            &workspace,
+        )
+        .unwrap();
+        assert!(preserved_after.exec_paths.contains(&existing));
+        assert_eq!(after.permissions, effective.permissions);
+        assert_eq!(after.sandbox, effective.sandbox);
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+        let mut masked = layers;
+        masked.push(ConfigLayer::parse(Source::Flags, "exec_paths=[]").unwrap());
+        let masked_effective = resolve_selected(&masked, Trust::Untrusted, None).unwrap();
+        assert!(
+            preview(
+                &masked,
+                &masked_effective,
+                &workspace,
+                &home,
+                None,
+                &probes,
+                &findings
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    // Catches: executable reach already supplied by workspace/runtime is persisted again.
+    #[test]
+    fn setup_exec_preview_does_not_copy_runtime_or_workspace_reach() {
+        let (_temp, workspace, home, layers, effective, mut probes, mut findings) =
+            fixture("sandbox='workspace'\n");
+        probes[0] = Probe::Tool {
+            name: "fixture-tool".into(),
+            reason: "expected tool".into(),
+        };
+        findings[0].status = Status::Unknown;
+        let path = workspace.as_path().join("program");
+        std::fs::write(&path, "fixture").unwrap();
+        findings[0].canonical = Some(path);
+        assert!(
+            preview(
+                &layers, &effective, &workspace, &home, None, &probes, &findings
+            )
+            .unwrap()
+            .is_none()
+        );
+        let runtime = std::fs::canonicalize("/bin/sh").unwrap();
+        findings[0].canonical = Some(runtime);
+        assert!(
+            preview(
+                &layers, &effective, &workspace, &home, None, &probes, &findings
             )
             .unwrap()
             .is_none()
