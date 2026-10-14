@@ -39,7 +39,7 @@ pub async fn observed(workspace: PathBuf, args: &SetupArgs) -> Result<String, Us
     let policy = PolicyEngine::new(
         workspace.clone(),
         effective.mode.unwrap_or(ego_core::config::Mode::Default),
-        effective.permissions,
+        effective.permissions.clone(),
     )
     .with_profile_roots(roots);
     let reader = NativeProbeReader::capture();
@@ -48,14 +48,33 @@ pub async fn observed(workspace: PathBuf, args: &SetupArgs) -> Result<String, Us
         path: workspace.as_path().join(name),
         reason: "default setup inventory".into(),
     });
+    let active_probes = selected_probes.as_deref().unwrap_or(&probes);
     let findings = Controller::new(&reader, &policy, &scope)
-        .inspect(selected_probes.as_deref().unwrap_or(&probes))
+        .inspect(active_probes)
         .map_err(UsageError)?;
     let target = args.profile.as_deref().unwrap_or("base user config");
     let target = ego_core::permit::terminal_safe(target);
     let mut rendered =
         format!("Setup target: {target}\nReport only; captured session authority is unchanged.\n");
     rendered.push_str(&interpretation);
+    if let Some(home) = &home {
+        match crate::setup_proposals::preview(
+            &layers,
+            &effective,
+            &workspace,
+            home,
+            args.profile.as_deref(),
+            active_probes,
+            &findings,
+        ) {
+            Ok(Some(preview)) => {
+                rendered.push_str(&format!("Proposed read roots for items {:?}; target {:?}; exposure includes directory siblings and descendants.\nPaths: {:?}\nStored before:\n{}\nStored candidate:\n{}\nEffective result: selected reads admitted; no permission/mode/sandbox/network change.\n", preview.items, preview.target, preview.paths, format!("roots = {:?}; document {} bytes", preview.stored_before, preview.batch.before().len()), format!("roots = {:?}; document {} bytes", preview.stored_after, preview.batch.candidate().len())));
+            }
+            Ok(None) => rendered.push_str("No proven effective narrow mutation.\n"),
+            Err(_) => rendered
+                .push_str("Proposal unavailable: configuration cannot be safely previewed.\n"),
+        }
+    }
     for item in findings {
         rendered.push_str(&format!(
             "{} {:?}: {} — {}\n",

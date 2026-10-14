@@ -58,6 +58,7 @@ pub mod run;
 pub mod schema;
 pub mod session;
 pub mod setup;
+mod setup_proposals;
 #[allow(dead_code)] // Connected to the turn service by M4 S6 after admission is green.
 pub(crate) mod skill;
 pub mod trust;

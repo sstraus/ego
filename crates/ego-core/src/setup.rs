@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Ruleset;
-use crate::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
+use crate::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall, Resolution};
 
 /// The only model-selectable probe operations. Unknown kinds or fields fail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,7 +151,12 @@ impl<'a> Controller<'a> {
         let (status, policy_reason) = match self.policy.classify(read) {
             Classification::Settled(Ok(_)) => (Status::Ok, "target read is admitted"),
             Classification::Settled(Err(_)) => (Status::Blocked, "target read is denied"),
-            Classification::Ask(_) => (Status::Blocked, "target read needs approval"),
+            Classification::Ask(pending) => {
+                match futures::executor::block_on(self.policy.settle(pending)) {
+                    Resolution::Settled(Ok(_)) => (Status::Ok, "target read is admitted by mode"),
+                    _ => (Status::Blocked, "target read needs approval"),
+                }
+            }
         };
         finding.status = status;
         finding.evidence = format!("{policy_reason}; identity {}", observation.identity);
