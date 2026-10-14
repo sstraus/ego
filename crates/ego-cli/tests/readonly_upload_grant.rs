@@ -254,7 +254,11 @@ fn upload_grant_with_narrower_host_sandbox_ceiling_reads_on_prompt() {
     );
     assert!(response["result"].is_object(), "{response}");
     host.finish();
-    assert!(stub.generations()[1].to_string().contains("CEILING-UPLOAD-CONTENT"));
+    assert!(
+        stub.generations()[1]
+            .to_string()
+            .contains("CEILING-UPLOAD-CONTENT")
+    );
 }
 
 // Catches: a launch grant bypasses system roots ceilings or writable overlap checks.
