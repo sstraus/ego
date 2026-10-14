@@ -350,6 +350,7 @@ pub struct PreparedCall {
     tool: String,
     ops: Vec<Op>,
     background: Option<DetachedExecId>,
+    read_offset: u64,
     mcp: Option<Box<McpPreparedEnvelope>>,
     hook_http: Option<Box<HookHttpPreparedEnvelope>>,
     provenance: PreparedCallProvenance,
@@ -433,6 +434,7 @@ impl PreparedCall {
             tool: tool.into(),
             ops: vec![first],
             background: None,
+            read_offset: 0,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::Native,
@@ -453,6 +455,16 @@ impl PreparedCall {
 
     pub fn background(&self) -> Option<DetachedExecId> {
         self.background
+    }
+
+    /// Presentation offset for a file read; this grants no extra authority.
+    pub fn with_read_offset(mut self, offset: u64) -> Self {
+        self.read_offset = offset;
+        self
+    }
+
+    pub fn read_offset(&self) -> u64 {
+        self.read_offset
     }
 
     pub fn tool(&self) -> &str {
@@ -518,6 +530,7 @@ impl PreparedCall {
             tool: subject.operation_name().to_owned(),
             ops,
             background: None,
+            read_offset: 0,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -569,6 +582,7 @@ impl PreparedCall {
             tool: subject.operation_name().to_owned(),
             ops,
             background: None,
+            read_offset: 0,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -617,6 +631,7 @@ impl PreparedCall {
             tool: subject.operation_name().to_owned(),
             ops,
             background: None,
+            read_offset: 0,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -673,6 +688,7 @@ impl PreparedCall {
             tool: format!("hook_http:{hook}"),
             ops,
             background: None,
+            read_offset: 0,
             mcp: None,
             hook_http: Some(Box::new(HookHttpPreparedEnvelope {
                 hook,
@@ -867,6 +883,7 @@ impl PreparedCall {
             tool: rendered,
             ops,
             background: None,
+            read_offset: 0,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::CapturedForeign,
@@ -893,6 +910,7 @@ impl PreparedCall {
                 Op::Spawn { spec },
             ],
             background: None,
+            read_offset: 0,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::CapturedForeign,
@@ -933,6 +951,7 @@ impl PreparedCall {
             tool: rendered,
             ops,
             background: None,
+            read_offset: 0,
             mcp: None,
             hook_http: None,
             provenance: PreparedCallProvenance::CapturedForeign,

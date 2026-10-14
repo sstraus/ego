@@ -186,6 +186,14 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
             AiEvent::Stop(StopReason::ToolUse),
         ],
         vec![
+            AiEvent::ToolCall {
+                call_id: "read-spill-tail".into(),
+                name: "read".into(),
+                args: json!({"path":path, "offset":120001}).to_string(),
+            },
+            AiEvent::Stop(StopReason::ToolUse),
+        ],
+        vec![
             AiEvent::TextDelta {
                 text: "done".into(),
             },
@@ -254,7 +262,10 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
     assert_eq!(fs::read_to_string(spilled_path(foreign)).unwrap(), text);
     assert!(!foreign.model_text().contains("TAIL ONLY IN FILE"));
     assert!(serde_json::to_string(foreign).unwrap().len() < 60_000);
-    assert!(format!("{:?}", generator.calls()[1].messages).contains("TAIL ONLY IN FILE"));
+    let first_page = format!("{:?}", generator.calls()[1].messages);
+    assert!(first_page.contains("offset=8000"));
+    assert!(!first_page.contains("TAIL ONLY IN FILE"));
+    assert!(format!("{:?}", generator.calls()[2].messages).contains("TAIL ONLY IN FILE"));
 }
 
 // Catches: the threshold is off by one or small MCP results gain a notice/file.

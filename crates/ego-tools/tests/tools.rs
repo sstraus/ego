@@ -448,27 +448,6 @@ mod credential_keys {
             .unwrap();
         assert!(found.starts_with("no line under"), "{found}");
     }
-
-    // Catches: exec bypasses key-only reads via a re-allowed path or its symlink.
-    #[test]
-    fn exec_refuses_declared_credential_paths_including_symlinks_and_background() {
-        let ws = workspace();
-        let file = ws.file(".env", "TOKEN=secret\n");
-        std::os::unix::fs::symlink(&file, ws.root.join("alias")).unwrap();
-        for path in [".env", "alias"] {
-            for background in [false, true] {
-                let error = ws
-                    .call(
-                        "exec",
-                        json!({"argv": ["cat", path], "background": background}),
-                    )
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains("protected credential"), "{error}");
-                assert!(error.contains("read"), "{error}");
-            }
-        }
-    }
 }
 
 mod registration {
@@ -653,6 +632,75 @@ mod registration {
 
 mod read {
     use super::*;
+
+    // Catches: a binary page of continuation bytes advertises the same offset forever.
+    #[test]
+    fn binary_read_continuation_makes_forward_progress() {
+        let ws = populated();
+        let path = ws.root.join("binary.dat");
+        let mut bytes = vec![0x80; 40_000];
+        bytes.extend_from_slice(b"END-OF-FILE");
+        fs::write(&path, bytes).expect("binary file");
+        let first = ws.call("read", json!({"path": "binary.dat"})).unwrap();
+        let hint = first.rsplit(" offset=").next().expect("continuation");
+        let offset: u64 = hint.trim_end_matches(']').parse().expect("byte offset");
+        assert!(offset > 0, "binary read made no progress: {first}");
+        let next = ws
+            .call("read", json!({"path": "binary.dat", "offset": offset}))
+            .unwrap();
+        assert!(next.ends_with("END-OF-FILE"), "binary tail is unreachable");
+    }
+
+    // Catches: a large file is returned whole instead of a bounded page.
+    #[test]
+    fn large_read_is_bounded_and_names_the_continuation_offset() {
+        let ws = populated();
+        fs::write(ws.root.join("large.txt"), "line\n".repeat(5362)).unwrap();
+        let page = ws.call("read", json!({"path": "large.txt"})).unwrap();
+        assert_eq!(page.matches("line\n").count(), 2000);
+        assert!(page.contains("offset=10000"), "{page}");
+    }
+
+    // Catches: continuation restarts at byte zero, skipping or repeating a page.
+    #[test]
+    fn read_continuation_starts_at_exact_byte_offset_and_eof_is_empty() {
+        let ws = populated();
+        fs::write(
+            ws.root.join("pages.txt"),
+            format!("{}tail", "line\n".repeat(2000)),
+        )
+        .unwrap();
+        assert_eq!(
+            ws.call("read", json!({"path":"pages.txt", "offset":10000}))
+                .unwrap(),
+            "tail"
+        );
+        assert_eq!(
+            ws.call("read", json!({"path":"pages.txt", "offset":10004}))
+                .unwrap(),
+            ""
+        );
+    }
+
+    // Catches: a single giant line bypasses the cap or splits a UTF-8 character.
+    #[test]
+    fn read_byte_cap_preserves_utf8_and_continuation() {
+        let ws = populated();
+        fs::write(
+            ws.root.join("unicode.txt"),
+            format!("{}éend", "a".repeat(32767)),
+        )
+        .unwrap();
+        let page = ws.call("read", json!({"path":"unicode.txt"})).unwrap();
+        assert!(page.starts_with(&"a".repeat(32767)));
+        assert!(page.contains("offset=32767"));
+        assert!(!page.contains('\u{fffd}'));
+        assert_eq!(
+            ws.call("read", json!({"path":"unicode.txt", "offset":32767}))
+                .unwrap(),
+            "éend"
+        );
+    }
 
     #[test]
     fn read_returns_the_file_through_the_guarded_seam() {

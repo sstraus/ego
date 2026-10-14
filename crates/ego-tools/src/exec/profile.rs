@@ -115,6 +115,21 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
             }
             profile.push_str(")\n");
 
+            // Runtime roots are not user-admitted data roots. Keep credential
+            // files beneath them closed unless their data root is explicitly
+            // admitted. Workspace and extra roots retain their data reach.
+            profile.push_str("(deny file-read-data\n  (require-all\n");
+            profile.push_str("    (regex #\"(^|/)([.]env[^/]*|[.]ssh/.*|[.]aws/.*|[.]netrc|Keychains/.*|[^/]*[.]keychain(-db)?)(/|$)\")\n");
+            profile.push_str("    (require-not (require-any\n      (subpath ");
+            profile.push_str(&workspace);
+            profile.push_str(")\n");
+            for grant in input.grants {
+                profile.push_str("      (subpath ");
+                profile.push_str(&path_literal(grant.path.as_path())?);
+                profile.push_str(")\n");
+            }
+            profile.push_str("    )))\n)\n");
+
             // `realpath`, command lookup and `mkdir -p` lstat each ancestor of
             // a path they use, so a program under an exec path needs them
             // statable. Metadata only: no listing and no file contents.
@@ -324,6 +339,52 @@ mod tests {
         }
     }
 
+    // Catches: runtime read roots expose protected files outside admitted workspace roots.
+    #[test]
+    fn strict_credential_floor_denies_runtime_reads_but_preserves_admitted_files() {
+        let tree = tempfile::tempdir().unwrap();
+        let base = tree.path().canonicalize().unwrap();
+        let workspace = base.join("workspace");
+        let outside = base.join("outside");
+        for directory in [&workspace, &outside] {
+            std::fs::create_dir_all(directory.join(".ssh")).unwrap();
+            std::fs::write(directory.join(".ssh/synthetic"), "synthetic secret").unwrap();
+        }
+        let outside_file = outside.join(".ssh/synthetic");
+        let alias = workspace.join("credential-alias");
+        std::os::unix::fs::symlink(&outside_file, &alias).unwrap();
+        for level in [Confinement::Ro, Confinement::Workspace] {
+            let runtime = [
+                base.as_path(),
+                Path::new("/bin"),
+                Path::new("/usr"),
+                Path::new("/System"),
+            ];
+            let profile = render(&ProfileInput {
+                workspace: &workspace,
+                runtime_roots: &runtime,
+                ..input(level)
+            })
+            .unwrap();
+            let cat = |path: &Path| {
+                std::process::Command::new("/usr/bin/sandbox-exec")
+                    .args(["-p", &profile, "/bin/cat"])
+                    .arg(path)
+                    .output()
+                    .unwrap()
+            };
+            assert!(cat(&workspace.join(".ssh/synthetic")).status.success());
+            for path in [&outside_file, &alias] {
+                let output = cat(path);
+                assert!(
+                    !output.status.success(),
+                    "runtime root exposed {path:?}: {output:?}"
+                );
+                assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic secret"));
+            }
+        }
+    }
+
     #[test]
     fn workspace_grants_read_and_existence_on_both_writable_roots() {
         assert_eq!(
@@ -340,6 +401,10 @@ mod tests {
                 "  (subpath \"/scratch\")\n",
                 "  (subpath \"/work\")\n",
                 ")\n",
+                "(deny file-read-data\n  (require-all\n",
+                "    (regex #\"(^|/)([.]env[^/]*|[.]ssh/.*|[.]aws/.*|[.]netrc|Keychains/.*|[^/]*[.]keychain(-db)?)(/|$)\")\n",
+                "    (require-not (require-any\n      (subpath \"/work\")\n",
+                "    )))\n)\n",
                 "(deny file-write*\n",
                 "  (require-not (require-any\n",
                 "    (subpath \"/work\")\n",
@@ -419,7 +484,7 @@ mod tests {
             )),
             "{profile}"
         );
-        assert_eq!(profile.matches("/data/notes.txt").count(), 1, "{profile}");
+        assert_eq!(profile.matches("/data/notes.txt").count(), 2, "{profile}");
     }
 
     #[test]

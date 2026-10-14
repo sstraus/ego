@@ -1937,3 +1937,34 @@ acknowledge its pending batch. This is transport enqueue evidence, not a host
 render acknowledgement. A journal failure returns an error; replay can enqueue
 the same stable card ID again. These facts create no conversation turns and
 sanitized exports retain IDs/timestamps but omit source paths.
+
+### Bounded reads and automatic context recovery
+
+The `read` tool returns at most 2000 lines or 32 KiB of original file bytes,
+whichever comes first. A truncated page names its next original-byte `offset`.
+Pass that offset with the same `path` to continue, including inside a long line.
+UTF-8 characters are not split at the page boundary. Small files keep their
+plain-text result. The guarded filesystem read and its permission checks do not
+change; this is a provider-visible output bound, not a filesystem memory bound.
+
+Durable CLI interactive sessions, including TUIC-managed terminal sessions,
+automatically invoke the existing clean-session compaction operation at 90% of
+the last measured provider context window. An ongoing tool turn yields before
+another generation at that threshold. At the next idle boundary the host seeds
+a new durable session, activates it, and continues from the checkpoint without
+adding a synthetic human prompt. No source conversation tail is copied. Fresh
+instructions, tool definitions, accounting, and auditable lineage use the same
+transition as `/compact`.
+
+Pending prompts, questions, or live attempts prevent the transition. A failed
+automatic compaction is shown and is not automatically retried in that source
+epoch. Unknown occupancy is not estimated. A known full context still refuses
+before any request, including a compaction request: automatic recovery must
+start before exhaustion, and the threshold is not an exact fit guarantee for
+unsent growth. A 272000-token window triggers at 244800 measured tokens.
+
+ACP keeps explicit recovery because it has no standard session-transition
+contract. One-shot headless runs keep explicit recovery because they do not own
+an interactive active-session transition. Ephemeral sources cannot compact.
+Human terminal sessions use the same automatic policy as managed terminals, so
+recovery does not depend on detecting a terminal's operator.

@@ -560,6 +560,7 @@ pub(super) fn compaction_availability(pending_work: bool) -> repl::actions::Avai
 }
 
 pub(super) enum InteractiveTurnInput {
+    Checkpoint,
     Prompt(String),
     Skill(AdmittedSkillOperation),
 }

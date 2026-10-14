@@ -12,6 +12,7 @@
 
 mod catalogue;
 mod context_capacity;
+pub use context_capacity::compaction_due;
 mod control;
 mod identity;
 mod journal;
@@ -1125,6 +1126,7 @@ pub struct TurnLoop<'session, 'turn> {
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     task_usage: Option<Arc<dyn Fn() -> Usage + Send + Sync + 'turn>>,
     generation_role: GenerationRole,
+    automatic_compaction: bool,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
     retry_pause: Arc<dyn RetryPause>,
@@ -1273,6 +1275,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             active_skill_invocations: BTreeMap::new(),
             task_usage: None,
             generation_role: GenerationRole::Main,
+            automatic_compaction: false,
             retry_pause: runtime.retry_pause,
             provider_failure: None,
             turn_error_start: 0,
@@ -1629,6 +1632,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 role: GenerationRole::Compaction,
                 error,
             })?;
+        if let Some(message) = context_capacity::exhausted(
+            self.state().context,
+            profile.capabilities.max_context_tokens,
+        ) {
+            return Err(CompactionError::Internal(message));
+        }
         let request = GenRequest {
             cache: None,
             model: profile.request_model.clone(),
@@ -1829,6 +1838,18 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             title,
             goal,
         })
+    }
+
+    /// Enable pressure yielding only when the host owns a durable session transition.
+    pub fn with_automatic_compaction(mut self) -> Self {
+        self.automatic_compaction = true;
+        self
+    }
+
+    /// Continue from a checkpoint without fabricating a human-authored prompt.
+    #[expect(clippy::result_large_err, reason = "durable abandonment state")]
+    pub async fn continue_checkpoint(&mut self) -> Result<TurnOutcome, TurnAbandoned> {
+        self.run_prompts(Vec::new()).await
     }
 
     /// Run one turn: the prompt, every generation it takes to answer it, and
@@ -3515,6 +3536,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     profile.capabilities.max_context_tokens,
                 ) {
                     return self.refuse(turn, message, ExitReason::ContextOverflow);
+                }
+
+                if self.automatic_compaction && compaction_due(self.state().context) {
+                    return self.refuse(turn,
+                        "Measured context pressure requires a clean-session compaction before continuing.".to_owned(),
+                        ExitReason::ContextOverflow);
                 }
 
                 // Per candidate: a fallback runs on a different model, and the

@@ -16,6 +16,10 @@ fn sandbox_help_lists_every_accepted_parser_value() {
             .take(3)
             .collect::<Vec<_>>()
             .join(" ");
+        assert!(
+            sandbox_help.contains("off = no confinement, credentials included"),
+            "{command} must explain unconfined credential access: {sandbox_help}"
+        );
         for spelling in ["ro", "workspace", "adaptive", "off"] {
             let _: Confinement = spelling.parse().expect("accepted confinement");
             assert!(

@@ -599,6 +599,8 @@ pub(super) async fn drive_execution<S: EventSink>(
             let mut pending_attachments = args.attach.clone();
             let mut staged_images = Vec::<StagedPasteImage>::new();
             let mut epoch_start = EpochStart::Initial;
+            let mut checkpoint_pending = false;
+            let mut automatic_compaction_failed = false;
 
             // Borrow-scoped session authorities live in one lexical epoch.
             // Only owned transition data crosses the boundary where the
@@ -817,6 +819,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                             let queued = !state.unacknowledged_prompts().is_empty();
                             let asked = if resumed_turn.is_some() || queued {
                                 None
+                            } else if checkpoint_pending {
+                                checkpoint_pending = false;
+                                Some(InteractiveTurnInput::Checkpoint)
                             } else {
                                 let queue = control.status();
                                 let pending_work = queue.pending_steers > 0
@@ -831,16 +836,25 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 // The terminal owner keeps its next read active while this
                                 // coordinator drives the turn; output returns through that
                                 // same owner's bounded painter channel.
-                                let line = match seeded.take() {
-                                    Some(first) => repl::Line::Submitted(first),
-                                    None => {
-                                        seat.idle();
-                                        if let Some(status) = status.as_ref()
-                                            && status.human
-                                        {
-                                            status.seat.activate();
+                                let automatic_compaction = !automatic_compaction_failed
+                                    && !pending_work
+                                    && ego_core::turn::compaction_due(state.context);
+                                let line = if automatic_compaction {
+                                    repl::Line::HostCommand(repl::HostCommand::Action(
+                                        repl::actions::ActionId::Compact,
+                                    ))
+                                } else {
+                                    match seeded.take() {
+                                        Some(first) => repl::Line::Submitted(first),
+                                        None => {
+                                            seat.idle();
+                                            if let Some(status) = status.as_ref()
+                                                && status.human
+                                            {
+                                                status.seat.activate();
+                                            }
+                                            seat.read()
                                         }
-                                        seat.read()
                                     }
                                 };
 
@@ -1800,9 +1814,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         {
                                             continue;
                                         }
-                                        if !seat.confirm_compaction(active.id()) {
+                                        if !automatic_compaction
+                                            && !seat.confirm_compaction(active.id())
+                                        {
                                             continue;
                                         }
+                                        // One automatic attempt per source epoch; failure remains visible.
+                                        automatic_compaction_failed = automatic_compaction;
                                         seat.busy();
 
                                         let target_runtime = Arc::new(Mutex::new(None));
@@ -2087,6 +2105,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             .lock()
                                             .expect("interactive compaction runtime")
                                             .take();
+                                        checkpoint_pending = automatic_compaction;
+                                        automatic_compaction_failed = false;
                                         break 'epoch EpochTransition::Compact {
                                             target: target_owner,
                                             publication: receipt.publication,
@@ -2209,7 +2229,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                             } else {
                                 loop_
                             };
-                            let mut loop_ = loop_.with_interactive_control(&mut control);
+                            let mut loop_ = loop_
+                                .with_automatic_compaction()
+                                .with_interactive_control(&mut control);
                             let driven = match resumed_turn {
                                 Some(RuntimeResume::Model(turn)) => {
                                     let (termination, result) = turns
@@ -2232,6 +2254,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     Some((termination, result))
                                 }
                                 None => match asked {
+                                    Some(InteractiveTurnInput::Checkpoint) => Some(
+                                        turns
+                                            .drive_checkpoint(&mut loop_, &turn_cancel, diagnostics)
+                                            .await,
+                                    ),
                                     Some(InteractiveTurnInput::Prompt(asked)) => {
                                         let (termination, result) = turns
                                             .drive_with_images(

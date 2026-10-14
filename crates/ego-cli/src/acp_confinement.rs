@@ -98,8 +98,10 @@ impl CliSessionConfinementAdmission {
         let selected = self
             .controls
             .profile_selections(session, ego_core::run::RunSelections::empty())?;
-        offered(self.ceiling)
-            .map(|level| {
+        let ceiling = self.controls.confinement_ceiling(session)?;
+        let mut policies = Vec::new();
+        for level in offered(ceiling).filter(|level| level.within(self.ceiling)) {
+            let policy = (|| {
                 if selected.read_only_dir().is_none() {
                     return ego_tools::exec::admit_confinement(
                         level,
@@ -119,8 +121,17 @@ impl CliSessionConfinementAdmission {
                 args.ceiling_profile = selected.ceiling_profile().map(str::to_owned);
                 crate::run::read_directory::session_policy(root, &args)
                     .map_err(|error| read_directory_refusal(&error.to_string()))
-            })
-            .collect()
+            })()?;
+            if !policies
+                .iter()
+                .any(|existing: &ego_core::permit::RunConfinement| {
+                    existing.level() == policy.level()
+                })
+            {
+                policies.push(policy);
+            }
+        }
+        Ok(policies)
     }
 
     fn root_refusal(pinned: &RunRoot, requested: &RunRoot) -> ControlError {
@@ -318,7 +329,10 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
                         Ok(policies) => policies,
                         Err(error) => return Box::pin(async move { Err(error) }),
                     },
-                    self.ceiling,
+                    match self.controls.confinement_ceiling(session) {
+                        Ok(ceiling) => ceiling,
+                        Err(error) => return Box::pin(async move { Err(error) }),
+                    },
                     self.cancel.clone(),
                     Arc::clone(&self.reporter),
                     session,

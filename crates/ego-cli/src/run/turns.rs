@@ -219,6 +219,7 @@ pub(super) struct Turns<'a> {
 }
 
 enum TurnStart {
+    Checkpoint,
     Prompt {
         text: String,
         images: Vec<ImageRef>,
@@ -268,6 +269,16 @@ impl Turns<'_> {
             .await
     }
 
+    pub(super) async fn drive_checkpoint<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(loop_, TurnStart::Checkpoint, cancel, diagnostics)
+            .await
+    }
+
     pub(super) async fn drive_resumed<'session: 'turn, 'turn>(
         &self,
         loop_: &mut TurnLoop<'session, 'turn>,
@@ -311,6 +322,9 @@ impl Turns<'_> {
                 return (RunTermination::MaxTurns, self.answer(&loop_.state()));
             }
             let outcome = match next {
+                TurnStart::Checkpoint => {
+                    self.one_running(loop_.continue_checkpoint(), cancel).await
+                }
                 TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
                 TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
                 TurnStart::Answered { question, answer } => {

@@ -277,6 +277,16 @@ impl AcpSessionControls {
         Ok(selections)
     }
 
+    pub(crate) fn confinement_ceiling(
+        &self,
+        session: SessionId,
+    ) -> Result<Confinement, ControlError> {
+        let sessions = self.lock_sessions()?;
+        Ok(sessions
+            .get(&session)
+            .map_or(self.sandbox_ceiling, |seat| self.session_ceiling(seat)))
+    }
+
     fn session_ceiling(&self, seat: &SessionSeat) -> Confinement {
         seat.profile
             .as_ref()
