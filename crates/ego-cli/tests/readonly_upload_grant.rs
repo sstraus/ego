@@ -209,6 +209,54 @@ fn grant_cannot_widen_to_parent_or_symlink_escape() {
     assert!(refused.stderr.contains("canonical"), "{}", refused.stderr);
 }
 
+// Catches: measuring a clamped upload policy loses the process ceiling and refuses the prompt.
+#[test]
+fn upload_grant_with_narrower_host_sandbox_ceiling_reads_on_prompt() {
+    let places = Places::new();
+    let uploads = tempfile::tempdir().unwrap();
+    let uploads = uploads.path().canonicalize().unwrap();
+    let source = uploads.join("attachment.txt");
+    std::fs::write(&source, "CEILING-UPLOAD-CONTENT").unwrap();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        format!(
+            "model='ollama/qwen3'\nthinking='off'\nroots=[]\nsandbox='off'\n[profile.host]\nsandbox='workspace'\nroots=[{{path='{}',access='read'}}]\n",
+            uploads.display()
+        ),
+    )
+    .unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            call("read_upload", "read", json!({"path": source})),
+            Reply::Sse(text("Read.")),
+        ],
+        ..Plan::default()
+    });
+    let mut host = AcpHost::adopt(
+        places
+            .ego(&stub)
+            .subcommand("acp")
+            .args(["--sandbox", "off"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let opened = host.request(
+        "session/new",
+        json!({
+            "cwd": places.workspace_path(), "mcpServers": [], "additionalDirectories": [uploads],
+            "_meta": {"ego": {"ceilingProfile": "host"}},
+        }),
+    );
+    let session = opened["result"]["sessionId"].as_str().unwrap();
+    let response = host.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "Read upload"}]}),
+    );
+    assert!(response["result"].is_object(), "{response}");
+    host.finish();
+    assert!(stub.generations()[1].to_string().contains("CEILING-UPLOAD-CONTENT"));
+}
+
 // Catches: a launch grant bypasses system roots ceilings or writable overlap checks.
 #[test]
 fn grant_respects_ceilings_and_existing_write_authority() {
