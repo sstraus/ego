@@ -79,7 +79,7 @@ fn metadata_no_links(path: &Path) -> Result<fs::Metadata, String> {
         }
         #[cfg(target_os = "macos")]
         {
-            flags |= OFlag::O_EVTONLY;
+            flags |= OFlag::from_bits_retain(nix::libc::O_EVTONLY);
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
