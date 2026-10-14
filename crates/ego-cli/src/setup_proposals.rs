@@ -22,6 +22,7 @@ pub(crate) struct Preview {
     pub target: UserConfigTarget,
     pub layers: Vec<Sourced<ConfigLayer>>,
     pub identities: Vec<String>,
+    pub config_identity: String,
     pub environment: Vec<(String, Option<std::ffi::OsString>)>,
     pub stored_before: Vec<RootCfg>,
     pub stored_after: Vec<RootCfg>,
@@ -205,6 +206,7 @@ pub(crate) fn preview(
         target,
         layers: layers.to_vec(),
         identities,
+        config_identity: config_identity(home)?,
         environment: environment_identity(),
         stored_before: stored,
         stored_after: roots,
@@ -240,6 +242,11 @@ pub(crate) fn confirm_apply(
         return Ok("Setup declined/cancelled; no configuration writes.\n".into());
     }
     let check = || {
+        if config_identity(home).map_err(UserConfigError::new)? != preview.config_identity {
+            return Err(UserConfigError::new(
+                "setup configuration path changed; confirm a fresh preview",
+            ));
+        }
         let current =
             crate::config::base_layers_in(workspace.as_path(), Trust::Untrusted, Some(home))
                 .map_err(|error| UserConfigError::new(error.to_string()))?;
@@ -314,6 +321,17 @@ fn environment_identity() -> Vec<(String, Option<std::ffi::OsString>)> {
     .into_iter()
     .map(|name| (name.to_owned(), std::env::var_os(name)))
     .collect()
+}
+
+fn config_identity(home: &Path) -> Result<String, String> {
+    let path = home.join("config.toml");
+    let canonical_home = std::fs::canonicalize(home).map_err(|error| error.to_string())?;
+    let target = if path.exists() {
+        path_identity(&path)?
+    } else {
+        "absent".into()
+    };
+    Ok(format!("{}:{target}", canonical_home.display()))
 }
 
 #[cfg(test)]
