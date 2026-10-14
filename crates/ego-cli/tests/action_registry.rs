@@ -24,8 +24,8 @@ const NAMES: [&str; 29] = [
     "statusline",
     "export",
     "config",
-    "doctor",
     "setup",
+    "doctor",
     "quit",
     "refresh",
     "new",
@@ -51,7 +51,7 @@ fn final_surface_has_exact_names_in_contract_order_and_stable_ids() {
     assert_eq!(registry.id("config"), Some(ActionId::Config));
     assert_eq!(registry.id("hooks"), Some(ActionId::Hooks));
     assert_eq!(registry.id("version"), Some(ActionId::Version));
-    assert_eq!(registry.len(), 28);
+    assert_eq!(registry.len(), NAMES.len());
 }
 
 #[test]

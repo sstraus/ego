@@ -91,3 +91,124 @@ fn setup_alias_to_missing_credential_is_refused_before_target_metadata() {
     assert_eq!(error, "credential diagnostic access is forbidden");
     assert!(!secret.exists());
 }
+
+// Catches: instruction references become shell code or an unbounded cycle.
+#[test]
+fn setup_inventory_follows_literal_reference_graph_with_cycle_bound() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("AGENTS.md"),
+        "@child.md\n```sh\n@ignored.md\n```\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("child.md"), "@AGENTS.md\n").unwrap();
+    let inventory = ego_tools::setup::inventory(root.path());
+    assert!(inventory.iter().any(
+        |probe| matches!(probe, Probe::Instructions { path, .. } if path.ends_with("child.md"))
+    ));
+    assert!(!inventory.iter().any(
+        |probe| matches!(probe, Probe::Instructions { path, .. } if path.ends_with("ignored.md"))
+    ));
+    assert!(inventory.len() <= 64);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+}
+
+// Catches: linked-worktree common-dir metadata is lost or queried via git execution.
+#[test]
+fn setup_inventory_observes_real_linked_git_layout_without_changing_it() {
+    let root = tempfile::tempdir().unwrap();
+    let main = root.path().join("main");
+    let linked = root.path().join("linked");
+    let init = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&main)
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&main)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&linked)
+        .output()
+        .unwrap();
+    // An unborn repository needs an initial fixture commit, not a fabricated selector.
+    if !add.status.success() {
+        let commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "fixture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["worktree", "add", "--quiet", "--detach"])
+            .arg(&linked)
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "{}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+    }
+    let before = std::fs::read(linked.join(".git")).unwrap();
+    let inventory = ego_tools::setup::inventory(&linked);
+    assert!(
+        inventory
+            .iter()
+            .any(|probe| matches!(probe, Probe::Read { path, .. } if path.ends_with("commondir")))
+    );
+    assert!(
+        inventory.iter().any(
+            |probe| matches!(probe, Probe::Metadata { path, .. } if path.ends_with("objects"))
+        )
+    );
+    assert_eq!(std::fs::read(linked.join(".git")).unwrap(), before);
+}
+
+// Catches: tool presence or write policy is mislabeled as a successful execution/effect.
+#[test]
+fn setup_tool_presence_and_write_intent_never_claim_effect_success() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("target");
+    std::fs::write(&file, "unchanged").unwrap();
+    let reader = NativeProbeReader::capture();
+    let policy = PolicyEngine::new(CanonPath::new(root.path()), Mode::Yolo, Ruleset::default());
+    let scope = DiagnosticScope::new(Vec::new());
+    let report = Controller::new(&reader, &policy, &scope)
+        .inspect(&[
+            Probe::Write {
+                path: file.clone(),
+                reason: "expected output".into(),
+            },
+            Probe::Tool {
+                name: "git".into(),
+                reason: "expected tool".into(),
+            },
+        ])
+        .unwrap();
+    assert!(matches!(report[0].status, ego_core::setup::Status::Unknown));
+    assert!(matches!(report[1].status, ego_core::setup::Status::Unknown));
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "unchanged");
+}

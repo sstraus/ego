@@ -1435,13 +1435,21 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             profile: None,
                                             directory: Some(root.clone()),
                                         };
-                                        match crate::setup::observed_host(
-                                            root.clone(),
-                                            &setup_args,
+                                        let confirm = |question: String| {
                                             status
                                                 .as_ref()
                                                 .filter(|status| status.human)
-                                                .map(|status| status.seat.as_ref()),
+                                                .is_some_and(|status| {
+                                                    matches!(
+                                                        status.seat.confirm_setup(question),
+                                                        repl::Confirmation::Confirmed
+                                                    )
+                                                })
+                                        };
+                                        match crate::setup::observed_host(
+                                            root.clone(),
+                                            &setup_args,
+                                            Some(&confirm),
                                         )
                                         .await
                                         {

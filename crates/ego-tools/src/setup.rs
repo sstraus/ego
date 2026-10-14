@@ -26,11 +26,13 @@ fn identity(metadata: &fs::Metadata) -> String {
     {
         use std::os::unix::fs::MetadataExt;
         format!(
-            "{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}",
             metadata.dev(),
             metadata.ino(),
             metadata.len(),
-            metadata.mtime()
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime_nsec()
         )
     }
     #[cfg(not(unix))]
@@ -179,4 +181,140 @@ impl ProbeReader for NativeProbeReader {
         }
         Err("requested tool is missing from bounded operator PATH inventory".into())
     }
+}
+
+/// Expand selected instruction/Git selectors through bounded native reads only.
+/// The caller still classifies every result under the target policy.
+pub fn inventory(workspace: &Path) -> Vec<ego_core::setup::Probe> {
+    inventory_admitted(workspace, &|path| path.as_path().starts_with(workspace))
+}
+
+pub fn inventory_admitted(
+    workspace: &Path,
+    content_admitted: &dyn Fn(&CanonPath) -> bool,
+) -> Vec<ego_core::setup::Probe> {
+    use ego_core::setup::Probe;
+    let reader = NativeProbeReader::capture();
+    let mut probes = Vec::new();
+    let mut queue = std::collections::VecDeque::from([
+        (workspace.join("AGENTS.md"), 0usize),
+        (workspace.join("CLAUDE.md"), 0),
+    ]);
+    let mut visited = std::collections::HashSet::new();
+    while let Some((path, depth)) = queue.pop_front() {
+        if probes.len() >= 32 {
+            break;
+        }
+        probes.push(Probe::Instructions {
+            path: path.clone(),
+            reason: format!("instruction reference depth {depth}"),
+        });
+        let Ok(metadata) = reader.metadata(&path) else {
+            continue;
+        };
+        if depth >= 8
+            || !content_admitted(&metadata.canonical)
+            || !metadata.regular
+            || !metadata.canonical.as_path().starts_with(workspace)
+            || !visited.insert(metadata.canonical.clone())
+        {
+            continue;
+        }
+        let Ok(content) = reader.read(&metadata.canonical, 64 * 1024) else {
+            continue;
+        };
+        if content.truncated {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&content.bytes) else {
+            continue;
+        };
+        for reference in ego_core::config::instruction_references(text)
+            .into_iter()
+            .take(16)
+        {
+            if reference.is_empty() {
+                continue;
+            }
+            let requested = PathBuf::from(&reference);
+            let target = if requested.is_absolute() {
+                requested
+            } else {
+                path.parent().unwrap_or(workspace).join(requested)
+            };
+            queue.push_back((target, depth + 1));
+        }
+    }
+    let marker = workspace.join(".git");
+    probes.push(Probe::Metadata {
+        path: marker.clone(),
+        reason: "Git workspace selector".into(),
+    });
+    if let Ok(observation) = reader.metadata(&marker) {
+        let git = if observation.regular && content_admitted(&observation.canonical) {
+            reader
+                .read(&observation.canonical, 4096)
+                .ok()
+                .filter(|read| !read.truncated)
+                .and_then(|read| String::from_utf8(read.bytes).ok())
+                .and_then(|text| {
+                    text.trim()
+                        .strip_prefix("gitdir: ")
+                        .map(|path| workspace.join(path))
+                })
+        } else if !observation.regular {
+            Some(marker)
+        } else {
+            None
+        };
+        if let Some(git) = git {
+            probes.push(Probe::Metadata {
+                path: git.clone(),
+                reason: "Git operational metadata".into(),
+            });
+            let common_marker = git.join("commondir");
+            probes.push(Probe::Read {
+                path: common_marker.clone(),
+                reason: "linked Git common-dir selector".into(),
+            });
+            let common = reader
+                .metadata(&common_marker)
+                .ok()
+                .filter(|metadata| content_admitted(&metadata.canonical))
+                .and_then(|metadata| reader.read(&metadata.canonical, 4096).ok())
+                .filter(|read| !read.truncated)
+                .and_then(|read| String::from_utf8(read.bytes).ok())
+                .map(|text| git.join(text.trim()))
+                .unwrap_or_else(|| git.clone());
+            for name in ["objects", "refs", "HEAD", "config", "hooks"] {
+                probes.push(Probe::Metadata {
+                    path: common.join(name),
+                    reason: "Git common metadata/control (not executed)".into(),
+                });
+            }
+        }
+    }
+    for name in ["git", "cargo", "rustc", "node", "pnpm", "xcodebuild"] {
+        probes.push(Probe::Tool {
+            name: name.into(),
+            reason: "operator PATH inventory; health/exec not proven".into(),
+        });
+    }
+    for key in [
+        "DEVELOPER_DIR",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "TMPDIR",
+        "PNPM_HOME",
+        "npm_config_cache",
+    ] {
+        if let Some(path) = std::env::var_os(key) {
+            probes.push(Probe::Metadata {
+                path: PathBuf::from(path),
+                reason: format!("operator environment {key}; presence only"),
+            });
+        }
+    }
+    probes.truncate(64);
+    probes
 }

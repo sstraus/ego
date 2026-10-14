@@ -19,7 +19,7 @@ mod workspace_trust;
 
 pub use discovery::{
     CwdOutsideRoot, Found, INSTRUCTIONS_FILE, Instruction, InstructionIo, InstructionSet, Limits,
-    Refusal, Selection, Skipped, SystemPrompt, load, plan, system_prompt,
+    Refusal, Selection, Skipped, SystemPrompt, instruction_references, load, plan, system_prompt,
 };
 pub use error::ConfigError;
 pub use layer::{

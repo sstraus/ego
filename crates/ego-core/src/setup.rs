@@ -13,6 +13,7 @@ use crate::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall, R
 pub enum Probe {
     Read { path: PathBuf, reason: String },
     Metadata { path: PathBuf, reason: String },
+    Write { path: PathBuf, reason: String },
     Tool { name: String, reason: String },
     Git { path: PathBuf, reason: String },
     Instructions { path: PathBuf, reason: String },
@@ -106,7 +107,9 @@ impl<'a> Controller<'a> {
             Probe::Read { path, reason }
             | Probe::Git { path, reason }
             | Probe::Instructions { path, reason } => (path.clone(), reason, true),
-            Probe::Metadata { path, reason } => (path.clone(), reason, false),
+            Probe::Metadata { path, reason } | Probe::Write { path, reason } => {
+                (path.clone(), reason, false)
+            }
             Probe::Tool { name, reason } => (PathBuf::from(name), reason, false),
         };
         let mut finding = Finding {
@@ -145,11 +148,31 @@ impl<'a> Controller<'a> {
             finding.evidence = "credential diagnostic access is forbidden".into();
             return finding;
         }
-        let read = PreparedCall::new(
-            "read",
+        if matches!(probe, Probe::Tool { .. }) {
+            finding.status = Status::Unknown;
+            finding.evidence = format!(
+                "PATH tool present; identity {}; executable reach and complete action are not proven; no execution",
+                observation.identity
+            );
+            return finding;
+        }
+        let intended = if matches!(probe, Probe::Write { .. }) {
+            Op::Write {
+                path: observation.canonical.clone(),
+                change: crate::permit::Change::Whole(Vec::new()),
+            }
+        } else {
             Op::Read {
                 path: observation.canonical.clone(),
+            }
+        };
+        let read = PreparedCall::new(
+            if matches!(probe, Probe::Write { .. }) {
+                "write"
+            } else {
+                "read"
             },
+            intended,
         );
         let (status, policy_reason) = match self.policy.classify(read) {
             Classification::Settled(Ok(_)) => (Status::Ok, "target read is admitted"),
@@ -162,6 +185,16 @@ impl<'a> Controller<'a> {
             }
         };
         finding.status = status;
+        if matches!(probe, Probe::Write { .. }) {
+            finding.evidence = format!(
+                "policy-only write classification; identity {}; no write performed; native floor/backend result not proven",
+                observation.identity
+            );
+            if matches!(finding.status, Status::Ok) {
+                finding.status = Status::Unknown;
+            }
+            return finding;
+        }
         finding.evidence = format!("{policy_reason}; identity {}", observation.identity);
         if !content {
             return finding;
@@ -204,7 +237,7 @@ mod tests {
     #[test]
     fn unsupported_setup_probe_cannot_enter_controller() {
         for value in [
-            r#"{"kind":"write","path":"x","reason":"task"}"#,
+            r#"{"kind":"execute","path":"x","reason":"task"}"#,
             r#"{"kind":"read","path":"x","reason":"task","apply":true}"#,
         ] {
             assert!(serde_json::from_str::<super::Probe>(value).is_err());
