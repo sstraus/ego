@@ -20,6 +20,9 @@ pub(crate) struct Preview {
     pub items: Vec<usize>,
     pub paths: Vec<std::path::PathBuf>,
     pub target: UserConfigTarget,
+    pub layers: Vec<Sourced<ConfigLayer>>,
+    pub identities: Vec<String>,
+    pub environment: Vec<(String, Option<std::ffi::OsString>)>,
     pub stored_before: Vec<RootCfg>,
     pub stored_after: Vec<RootCfg>,
 }
@@ -191,11 +194,18 @@ pub(crate) fn preview(
     {
         return Err("combined setup proposal is ineffective".into());
     }
+    let identities = paths
+        .iter()
+        .map(|path| path_identity(path))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(Preview {
         batch,
         items,
         paths,
         target,
+        layers: layers.to_vec(),
+        identities,
+        environment: environment_identity(),
         stored_before: stored,
         stored_after: roots,
     }))
@@ -360,4 +370,112 @@ mod tests {
         let after = resolve_candidate(&layers, result.batch.candidate(), &workspace).unwrap();
         assert_eq!(after.permissions, effective.permissions);
     }
+}
+
+fn path_identity(path: &Path) -> Result<String, String> {
+    use ego_core::setup::ProbeReader;
+    let observation = ego_tools::setup::NativeProbeReader::capture().metadata(path)?;
+    Ok(format!(
+        "{}:{}",
+        observation.canonical, observation.identity
+    ))
+}
+
+/// Only the private host dispatch can ask the seat; the batch is consumed once.
+pub(crate) fn confirm_apply(
+    preview: Preview,
+    workspace: &CanonPath,
+    home: &Path,
+    seat: &crate::repl::Seat,
+) -> Result<String, crate::cli::UsageError> {
+    use ego_core::config::UserConfigError;
+    use sha2::{Digest, Sha256};
+    let setup_id = ego_core::event::id::ItemId::new();
+    let base = format!("{:x}", Sha256::digest(preview.batch.before().as_bytes()));
+    let candidate = format!("{:x}", Sha256::digest(preview.batch.candidate().as_bytes()));
+    let question = format!(
+        "Setup {setup_id}: items {:?}, target {:?}\nRead-directory exposure includes siblings/descendants. Stored roots {:?} -> {:?}\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
+        preview.items, preview.target, preview.stored_before, preview.stored_after, preview.paths
+    );
+    if !matches!(
+        seat.confirm_setup(question),
+        crate::repl::Confirmation::Confirmed
+    ) {
+        return Ok("Setup declined/cancelled; no configuration writes.\n".into());
+    }
+    let check = || {
+        let current =
+            crate::config::base_layers_in(workspace.as_path(), Trust::Untrusted, Some(home))
+                .map_err(|error| UserConfigError::new(error.to_string()))?;
+        let selected = std::env::var("EGO_PROFILE").ok();
+        let selection = selected.as_deref().map(|name| (name, Source::Env));
+        let current_policy = resolve_selected(&current, Trust::Untrusted, selection)
+            .map_err(|error| UserConfigError::new(error.to_string()))?;
+        let preview_policy = resolve_selected(&preview.layers, Trust::Untrusted, selection)
+            .map_err(|error| UserConfigError::new(error.to_string()))?;
+        if current_policy != preview_policy || environment_identity() != preview.environment {
+            return Err(UserConfigError::new(
+                "setup policy changed; confirm a fresh preview",
+            ));
+        }
+        for (path, identity) in preview.paths.iter().zip(&preview.identities) {
+            if path_identity(path).map_err(UserConfigError::new)? != *identity {
+                return Err(UserConfigError::new(
+                    "setup path changed; confirm a fresh preview",
+                ));
+            }
+        }
+        Ok(())
+    };
+    let store =
+        OsUserConfigStore::new(Arc::new(OsIo) as Arc<dyn StoreIo>, home.join("config.toml"));
+    let paths = preview.paths.clone();
+    let result = store
+        .publish_batch_checked(preview.batch, &check)
+        .map_err(|error| crate::cli::UsageError(error.to_string()))?;
+    let layers = crate::config::base_layers_in(workspace.as_path(), Trust::Untrusted, Some(home))?;
+    let env_profile = std::env::var("EGO_PROFILE").ok();
+    let mut effective = resolve_selected(
+        &layers,
+        Trust::Untrusted,
+        env_profile.as_deref().map(|name| (name, Source::Env)),
+    )
+    .map_err(|error| crate::cli::UsageError(error.to_string()))?;
+    if let Some(home) = std::env::var_os("HOME") {
+        crate::run::profile_roots::defaults(&mut effective, Path::new(&home));
+    }
+    let mut report = format!(
+        "Setup publication: {:?}; resume before using changed authority.\n",
+        result.publication
+    );
+    for path in paths {
+        let status = if path_identity(&path).is_err() {
+            "unknown"
+        } else if read_admitted(&effective, workspace, &CanonPath::new(&path)) {
+            "fixed (policy-only)"
+        } else {
+            "still blocked"
+        };
+        report.push_str(&format!(
+            "Re-probe {}: {status}; existing run authority unchanged.\n",
+            ego_core::permit::terminal_safe(&path.display().to_string())
+        ));
+    }
+    Ok(report)
+}
+
+fn environment_identity() -> Vec<(String, Option<std::ffi::OsString>)> {
+    [
+        "HOME",
+        "EGO_HOME",
+        "EGO_PROFILE",
+        "PATH",
+        "TMPDIR",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "DEVELOPER_DIR",
+    ]
+    .into_iter()
+    .map(|name| (name.to_owned(), std::env::var_os(name)))
+    .collect()
 }

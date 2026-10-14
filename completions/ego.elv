@@ -31,6 +31,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand models 'List the shared model catalogue.'
             cand hooks 'Inspect the admitted system and user hook catalogue.'
             cand doctor 'Report a read-only redacted health snapshot of this installation.'
+            cand setup 'Inspect expected work without running effects.'
             cand acp 'Serve the Agent Client Protocol on stdio or an endpoint.'
             cand a2a 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
             cand auth 'Manage subscription credentials.'
@@ -245,6 +246,12 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;doctor'= {
             cand --json 'Emit the exact versioned health snapshot'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;setup'= {
+            cand --profile 'profile'
+            cand --directory 'directory'
             cand -h 'Print help'
             cand --help 'Print help'
         }

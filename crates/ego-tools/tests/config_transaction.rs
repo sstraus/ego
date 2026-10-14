@@ -335,3 +335,29 @@ fn setup_batch_durability_uncertainty_retains_exact_new_authority() {
     ));
     assert_eq!(std::fs::read_to_string(path).unwrap(), candidate);
 }
+
+// Catches: setup publication ignores a changed policy/path identity after confirmation.
+#[test]
+fn setup_batch_identity_recheck_refuses_publication_and_runs_under_lock() {
+    use ego_core::config::{UserConfigError, UserConfigTarget};
+    use ego_core::permit::RootAccess;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    std::fs::write(&path, "# authority\n").unwrap();
+    let store = OsUserConfigStore::new(Arc::new(OsIo), &path);
+    let preview = store
+        .prepare_batch(vec![UserConfigMutation::Root {
+            target: UserConfigTarget::Base,
+            path: root.path().join("read"),
+            access: Some(RootAccess::Read),
+        }])
+        .unwrap();
+    let checked = std::cell::Cell::new(false);
+    let result = store.publish_batch_checked(preview, &|| {
+        checked.set(true);
+        Err(UserConfigError::new("fixture path changed"))
+    });
+    assert!(checked.get());
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# authority\n");
+}

@@ -1435,8 +1435,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             profile: None,
                                             directory: Some(root.clone()),
                                         };
-                                        match crate::setup::observed(root.clone(), &setup_args)
-                                            .await
+                                        match crate::setup::observed_host(
+                                            root.clone(),
+                                            &setup_args,
+                                            status
+                                                .as_ref()
+                                                .filter(|status| status.human)
+                                                .map(|status| status.seat.as_ref()),
+                                        )
+                                        .await
                                         {
                                             Ok(report) => diagnostics.note(&report),
                                             Err(error) => diagnostics.note(&error.to_string()),

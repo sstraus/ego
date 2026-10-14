@@ -276,6 +276,15 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(setup)
+_arguments "${_arguments_options[@]}" : \
+'--profile=[]:PROFILE:_default' \
+'--directory=[]:DIRECTORY:_files' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::prompt:_default' \
+&& ret=0
+;;
 (acp)
 _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
@@ -639,6 +648,7 @@ _ego_commands() {
 'models:List the shared model catalogue.' \
 'hooks:Inspect the admitted system and user hook catalogue.' \
 'doctor:Report a read-only redacted health snapshot of this installation.' \
+'setup:Inspect expected work without running effects.' \
 'acp:Serve the Agent Client Protocol on stdio or an endpoint.' \
 'a2a:Serve the Agent2Agent protocol on a local or loopback endpoint.' \
 'auth:Manage subscription credentials.' \
@@ -896,6 +906,11 @@ _ego__subcmd__rules__subcmd__revoke_commands() {
 _ego__subcmd__run_commands() {
     local commands; commands=()
     _describe -t commands 'ego run commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__setup_commands] )) ||
+_ego__subcmd__setup_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego setup commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__usage_commands] )) ||
 _ego__subcmd__usage_commands() {

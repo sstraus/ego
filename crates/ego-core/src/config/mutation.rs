@@ -476,6 +476,17 @@ pub trait UserConfigStore: Send + Sync {
         ))
     }
 
+    /// Setup host rechecks policy/path identities while the publication lock is held.
+    fn publish_batch_checked(
+        &self,
+        _batch: Box<dyn UserConfigBatch>,
+        _check: &dyn Fn() -> Result<(), UserConfigError>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        Err(UserConfigError::new(
+            "checked setup publication is unavailable",
+        ))
+    }
+
     /// Copy the exact current user document into a private sibling candidate.
     fn prepare_edit(&self) -> Result<Box<dyn UserConfigEditHandle>, UserConfigError> {
         Err(UserConfigError::new(

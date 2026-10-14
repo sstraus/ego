@@ -239,6 +239,14 @@ where
         &self,
         batch: Box<dyn UserConfigBatch>,
     ) -> Result<UserConfigEditResult, UserConfigError> {
+        self.publish_batch_checked(batch, &|| Ok(()))
+    }
+
+    fn publish_batch_checked(
+        &self,
+        batch: Box<dyn UserConfigBatch>,
+        check: &dyn Fn() -> Result<(), UserConfigError>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
         let batch = batch
             .into_any()
             .downcast::<OsUserConfigBatch>()
@@ -260,6 +268,7 @@ where
                 "setup candidate changed after confirmation",
             ));
         }
+        check()?;
         let publication = if candidate.as_bytes() == current {
             UserConfigPublication::NotPublished
         } else {

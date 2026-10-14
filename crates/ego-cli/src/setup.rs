@@ -15,6 +15,14 @@ use crate::output::Stdout;
 
 /// Both host entry points render this same transient inventory.
 pub async fn observed(workspace: PathBuf, args: &SetupArgs) -> Result<String, UsageError> {
+    observed_host(workspace, args, None).await
+}
+
+pub(crate) async fn observed_host(
+    workspace: PathBuf,
+    args: &SetupArgs,
+    seat: Option<&crate::repl::Seat>,
+) -> Result<String, UsageError> {
     let workspace = OsFs
         .canonicalize(&workspace)
         .map_err(|error| UsageError(format!("setup workspace unavailable: {error}")))?;
@@ -69,6 +77,11 @@ pub async fn observed(workspace: PathBuf, args: &SetupArgs) -> Result<String, Us
         ) {
             Ok(Some(preview)) => {
                 rendered.push_str(&format!("Proposed read roots for items {:?}; target {:?}; exposure includes directory siblings and descendants.\nPaths: {:?}\nStored before:\n{}\nStored candidate:\n{}\nEffective result: selected reads admitted; no permission/mode/sandbox/network change.\n", preview.items, preview.target, preview.paths, format!("roots = {:?}; document {} bytes", preview.stored_before, preview.batch.before().len()), format!("roots = {:?}; document {} bytes", preview.stored_after, preview.batch.candidate().len())));
+                if let Some(seat) = seat {
+                    rendered.push_str(&crate::setup_proposals::confirm_apply(
+                        preview, &workspace, home, seat,
+                    )?);
+                }
             }
             Ok(None) => rendered.push_str("No proven effective narrow mutation.\n"),
             Err(_) => rendered

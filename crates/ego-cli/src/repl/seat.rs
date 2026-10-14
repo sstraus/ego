@@ -793,6 +793,10 @@ enum Control {
         source: SessionId,
         reply: Sender<bool>,
     },
+    ConfirmSetup {
+        text: String,
+        reply: Sender<Confirmation>,
+    },
     ConfirmRemember {
         reply: Sender<Confirmation>,
     },
@@ -1469,6 +1473,16 @@ impl Seat {
     pub fn question(&self, id: ItemId, request: QuestionRequest) -> QuestionOutcome {
         futures::executor::block_on(self.elicit(id, request))
             .unwrap_or(QuestionOutcome::Unavailable)
+    }
+
+    pub(crate) fn confirm_setup(&self, text: String) -> Confirmation {
+        if !self.terminal {
+            return Confirmation::Declined;
+        }
+        self.request(
+            |reply| Control::ConfirmSetup { text, reply },
+            Confirmation::Declined,
+        )
     }
 
     pub(crate) fn confirm_remember(&self) -> Confirmation {
