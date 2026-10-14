@@ -198,7 +198,7 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
 /// quoted-string subset, escape its two structural characters, and reject
 /// control bytes instead of guessing at escape spellings. Escaping `"` keeps
 /// a closing parenthesis in the string, where it has no syntactic meaning.
-fn path_literal(path: &Path) -> Result<String, ProfileError> {
+pub(super) fn path_literal(path: &Path) -> Result<String, ProfileError> {
     if !path.is_absolute() {
         return Err(ProfileError::RelativePath(path_label(path)));
     }

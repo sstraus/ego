@@ -300,3 +300,21 @@ replay.
 Sources: [model identity](../../crates/ego-core/src/turn/identity.rs),
 [system-context assembly](../../crates/ego-core/src/turn/mod.rs), and
 [generator-boundary coverage](../../crates/ego-core/tests/tool_catalogue.rs).
+
+### User configuration write floor
+
+Sandboxed child processes cannot write the operator user-configuration directory
+(`EGO_HOME`, or `HOME/.ego` when unset). Explicit writable roots and runtime grants
+do not lift this floor. The canonical `config.toml` target is protected too
+when the file is a symlink outside that directory. Reads retain their existing reach. Sandbox `off` has no
+such native confinement. Sandboxed admission refuses a config file with multiple
+hardlinks; replace it with a copy or symlink so its authority has one captured
+file identity.
+
+On macOS, Seatbelt denies writes under the captured directory and prevents
+unlinking its ancestor boundaries. Linux Landlock grants cannot subtract a
+protected descendant from a writable root. Ego therefore refuses Workspace
+admission if the workspace, scratch directory, or writable root overlaps the
+user-configuration directory. The error names both paths; select a separate
+workspace rather than widening authority. Operator config commands run outside
+the model's process sandbox and retain their existing atomic transaction.

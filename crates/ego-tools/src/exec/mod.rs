@@ -20,6 +20,7 @@ mod residual;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 mod secret_child;
+mod user_config;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -755,6 +756,15 @@ fn policy_digest_with_runtime_roots(
     // profile/default roots are materialized; those inactive fields must not
     // invalidate its observation or a durable unconfined run selection.
     if policy.level() != ego_core::permit::Confinement::Off {
+        let protected = user_config::capture()?;
+        update_digest_field(
+            &mut hash,
+            b"user_config.count",
+            &(protected.len() as u64).to_be_bytes(),
+        )?;
+        for path in protected {
+            update_path_field(&mut hash, b"user_config.path", path.as_os_str())?;
+        }
         if let Some(adaptive) = policy.adaptive_perimeter() {
             update_path_field(
                 &mut hash,

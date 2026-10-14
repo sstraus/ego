@@ -136,7 +136,7 @@ fn error(message: impl Into<String>) -> ProcessError {
 }
 
 /// Resolve absent paths through the nearest existing ancestor without creating it.
-fn resolve(path: &Path) -> Result<PathBuf, ProcessError> {
+pub(super) fn resolve(path: &Path) -> Result<PathBuf, ProcessError> {
     if !path.is_absolute()
         || path
             .components()
@@ -146,6 +146,12 @@ fn resolve(path: &Path) -> Result<PathBuf, ProcessError> {
             "adaptive roots must be absolute and contain no parent traversal",
         ));
     }
+    resolve_filesystem(path)
+}
+
+/// Preserve filesystem traversal semantics, including parent components through
+/// symlinks. Reconstruct only ordinary missing names; never erase `..` lexically.
+pub(super) fn resolve_filesystem(path: &Path) -> Result<PathBuf, ProcessError> {
     let mut existing = path;
     let mut suffix = Vec::new();
     loop {

@@ -25,6 +25,10 @@ impl BwrapBackend {
         scratch: &CanonPath,
         runtime_roots: &[CanonPath],
     ) -> Result<Self, ProcessError> {
+        if policy.level() != Confinement::Off {
+            super::user_config::capture()?;
+        }
+        super::user_config::reject_overlap(policy, scratch.as_path())?;
         // Use the installed system utility, never a model-controlled PATH lookup.
         let executable = fs::canonicalize("/usr/bin/bwrap")
             .map_err(|error| ProcessError::Backend(format!("bwrap unavailable: {error}")))?;
@@ -37,7 +41,10 @@ impl BwrapBackend {
         }
         let image = fs::read(&executable)
             .map_err(|error| ProcessError::Backend(format!("cannot identify bwrap: {error}")))?;
-        let revision = format!("bwrap-namespaces-v1:{:x}", Sha256::digest(image));
+        let revision = format!(
+            "bwrap-namespaces-v2-user-config-floor:{:x}",
+            Sha256::digest(image)
+        );
         let mut arguments: Vec<OsString> = [
             "--die-with-parent",
             "--unshare-user",

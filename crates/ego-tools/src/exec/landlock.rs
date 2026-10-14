@@ -45,7 +45,7 @@ const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--noc
 
 const HELPER_FAILURE: u8 = 125;
 const MAX_RUNTIME_ROOTS: usize = 128;
-const BACKEND_REVISION: &str = "landlock-safe-reexec-v2-read-noexec-abi9";
+const BACKEND_REVISION: &str = "landlock-safe-reexec-v3-user-config-floor";
 
 /// One immutable Linux confinement mechanism prepared for an effective run.
 /// Its capability value is only an upper bound; common production probes must
@@ -77,6 +77,8 @@ impl LandlockBackend {
             }
         };
         validate_private_directory(private_scratch.as_path())?;
+        super::user_config::capture()?;
+        super::user_config::reject_overlap(policy, private_scratch.as_path())?;
         let runtime_roots = derived_runtime_roots
             .iter()
             .map(CanonPath::as_path)
@@ -624,6 +626,79 @@ mod tests {
     use ego_core::permit::ExecCaps;
 
     use super::{LandlockBackend, Level, dispatch_helper};
+
+    // Catches: a writable workspace containing EGO_HOME admits a config-changing child.
+    #[test]
+    fn linux_user_config_overlap_refuses_admission() {
+        use ego_core::permit::{CanonPath, Confinement, RunConfinement};
+        let name = "exec::landlock::tests::linux_user_config_overlap_refuses_admission";
+        if std::env::var_os("EGO_CONFIG_FLOOR_CHILD").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("EGO_CONFIG_FLOOR_CHILD", "1")
+                .env("EGO_HOME", root.path().join("ego"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+        let config_dir = PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+        std::fs::create_dir(&config_dir).unwrap();
+        let config = config_dir.join("config.toml");
+        std::fs::write(&config, "mode = 'default'\n").unwrap();
+        let workspace = std::fs::canonicalize(config_dir.parent().unwrap()).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy =
+            RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+        let result = LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]);
+        let Err(error) = result else {
+            panic!("user-config overlap admitted")
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("user config") && message.contains(workspace.to_str().unwrap()),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(&config).unwrap(), b"mode = 'default'\n");
+        use ego_core::permit::{ProfileRoot, RootAccess};
+        let outside = tempfile::tempdir().unwrap();
+        let outside = std::fs::canonicalize(outside.path()).unwrap();
+        let policy = RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&outside))
+            .unwrap()
+            .with_roots(vec![ProfileRoot::new(
+                CanonPath::new(&config_dir),
+                RootAccess::ReadWrite,
+            )]);
+        let error = match LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("explicit user-config write root admitted"),
+        };
+        assert!(error.to_string().contains(config_dir.to_str().unwrap()));
+        // A file alias can place the selected authority inside another workspace.
+        std::fs::remove_file(&config).unwrap();
+        let alias_target = outside.join("policy.toml");
+        std::fs::write(&alias_target, "mode = 'default'\n").unwrap();
+        std::os::unix::fs::symlink(&alias_target, &config).unwrap();
+        let alias_policy =
+            RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&outside)).unwrap();
+        let error =
+            match LandlockBackend::prepare(&alias_policy, &CanonPath::new(scratch.path()), &[]) {
+                Err(error) => error,
+                Ok(_) => panic!("config-file alias workspace admitted"),
+            };
+        assert!(error.to_string().contains(alias_target.to_str().unwrap()));
+        assert_eq!(std::fs::read(&config).unwrap(), b"mode = 'default'\n");
+        // An absent config directory remains protected through its existing ancestor.
+        std::fs::remove_file(&config).unwrap();
+        std::fs::remove_dir(&config_dir).unwrap();
+        assert!(LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]).is_err());
+        let policy =
+            RunConfinement::new(Confinement::Ro, false, CanonPath::new(&workspace)).unwrap();
+        assert!(LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]).is_ok());
+    }
 
     /// The prefix the backend emits is the envelope the dispatcher accepts, and
     /// every guard word is load-bearing: drop one and a libtest host either
