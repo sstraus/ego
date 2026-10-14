@@ -580,6 +580,9 @@ impl RunRevision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSelections {
+    /// One launch-owned canonical read directory, retained across durable runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    read_only_dir: Option<PathBuf>,
     model: Option<ModelRef>,
     thinking: Option<crate::generator::types::ThinkingLevel>,
     mode: Option<Mode>,
@@ -647,6 +650,7 @@ impl RunSelections {
         profile: Option<String>,
     ) -> Self {
         Self {
+            read_only_dir: None,
             model,
             thinking,
             mode,
@@ -686,6 +690,7 @@ impl RunSelections {
 
     pub const fn empty() -> Self {
         Self {
+            read_only_dir: None,
             model: None,
             thinking: None,
             mode: None,
@@ -738,6 +743,17 @@ impl RunSelections {
 
     pub fn budget(&self) -> Option<&Budget> {
         self.budget.as_ref()
+    }
+
+    /// Pin a read directory already admitted at the launch boundary.
+    pub fn with_read_only_dir(mut self, path: PathBuf) -> Self {
+        self.read_only_dir = Some(path);
+        self
+    }
+
+    /// The launch-owned read directory, if supplied.
+    pub fn read_only_dir(&self) -> Option<&Path> {
+        self.read_only_dir.as_deref()
     }
 
     pub fn profile(&self) -> Option<&str> {

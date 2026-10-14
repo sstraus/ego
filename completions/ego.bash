@@ -199,7 +199,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__acp)
-            opts="-C -h --session-dir --sandbox --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --listen --allow-public-bind --max-connections --connection-lifetime --max-ingress-bytes --help"
+            opts="-C -h --session-dir --sandbox --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --listen --allow-public-bind --max-connections --connection-lifetime --max-ingress-bytes --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -214,6 +214,10 @@ _ego() {
                     return 0
                     ;;
                 --sandbox)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --read-only-dir)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -455,7 +459,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__continue)
-            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
+            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -494,6 +498,10 @@ _ego() {
                     return 0
                     ;;
                 --thinking)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --read-only-dir)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -913,7 +921,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__resume)
-            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
+            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -952,6 +960,10 @@ _ego() {
                     return 0
                     ;;
                 --thinking)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --read-only-dir)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1261,7 +1273,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__run)
-            opts="-f -m -C -c -q -h --file --var --attach --model --offline --sandbox --thinking --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
+            opts="-f -m -C -c -q -h --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1296,6 +1308,10 @@ _ego() {
                     return 0
                     ;;
                 --thinking)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --read-only-dir)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

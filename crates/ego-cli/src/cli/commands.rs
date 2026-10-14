@@ -271,6 +271,10 @@ pub(super) struct AcpCommand {
 /// `ego acp` from growing a `--tools` that means something else.
 #[derive(Debug, ClapArgs)]
 pub(super) struct Shape {
+    /// Grant reads of one existing canonical absolute upload directory.
+    #[arg(long, value_name = "DIR")]
+    pub(super) read_only_dir: Option<PathBuf>,
+
     /// Replace the system prompt. `@file` reads it from a file.
     #[arg(long)]
     pub(super) system: Option<String>,

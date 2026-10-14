@@ -569,6 +569,35 @@ pub type SessionConfinementFuture =
 /// backend and commits evidence. Observation lookup reads the immutable
 /// snapshot installed before this session's options were published.
 pub trait SessionConfinementAdmission: Send + Sync {
+    /// Validate launch read authority before lifecycle or process effects.
+    fn admit_read_directory(
+        &self,
+        _root: &RunRoot,
+        directories: &[std::path::PathBuf],
+    ) -> Result<Option<std::path::PathBuf>, ControlError> {
+        if directories.is_empty() {
+            Ok(None)
+        } else {
+            Err(ControlError::Refused {
+                control: "additionalDirectories",
+                why: "read-only launch directories are not supported".into(),
+            })
+        }
+    }
+
+    /// Pin validated read authority to one session before its first effect.
+    fn configure_read_directory(
+        &self,
+        _session: SessionId,
+        _root: &RunRoot,
+        _directory: &std::path::Path,
+    ) -> Result<(), ControlError> {
+        Err(ControlError::Refused {
+            control: "additionalDirectories",
+            why: "read-only launch directories are not supported".into(),
+        })
+    }
+
     /// Resolve optional host profiles before the session starts any effects.
     fn configure_profiles(
         &self,
@@ -2058,6 +2087,20 @@ fn config_options(
     }
 }
 
+fn admit_read_directory(
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
+    root: &RunRoot,
+    directories: &[std::path::PathBuf],
+) -> Result<Option<std::path::PathBuf>, Error> {
+    match admission {
+        Some(admission) => admission
+            .admit_read_directory(root, directories)
+            .map_err(|error| control_error(&error)),
+        None if directories.is_empty() => Ok(None),
+        None => Err(Error::invalid_params().data("read-only launch directories are not supported")),
+    }
+}
+
 /// Establish the session's measured offer before any option can expose it.
 async fn initialize_confinement(
     admission: Option<&Arc<dyn SessionConfinementAdmission>>,
@@ -2148,6 +2191,11 @@ where
     if selected.profile().is_some() || selected.ceiling_profile().is_some() {
         admission
             .configure_profiles(target, root, selected.profile(), selected.ceiling_profile())
+            .map_err(|error| control_error(&error))?;
+    }
+    if let Some(directory) = selected.read_only_dir() {
+        admission
+            .configure_read_directory(target, root, directory)
             .map_err(|error| control_error(&error))?;
     }
     Ok(())
@@ -3040,7 +3088,7 @@ where
                     let trust = trust.clone();
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
-                    if !request.additional_directories.is_empty() {
+                    if !request.additional_directories.is_empty() && confinement.is_none() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
                         ));
@@ -3052,6 +3100,10 @@ where
                                 Error::invalid_params().data(error.to_string()),
                             );
                         }
+                    };
+                    let read_only_dir = match admit_read_directory(confinement.as_ref(), &root, &request.additional_directories) {
+                        Ok(directory) => directory,
+                        Err(error) => return responder.respond_with_error(error),
                     };
                     if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
                         return responder.respond_with_error(refused_params(error));
@@ -3079,7 +3131,7 @@ where
                     }
                     let mut creation_profiles = profiles.clone().unwrap_or_default();
                     creation_profiles.prompt_options = prompt_options;
-                    let profile_meta = match profiles {
+                    let mut profile_meta = match profiles {
                         Some(SessionProfiles { profile, ceiling_profile, .. }) => match confinement.as_ref() {
                             Some(admission) => match admission.configure_profiles(session, &root, profile.as_deref(), ceiling_profile.as_deref()) {
                                 Ok(meta) => Some(serde_json::Map::from_iter([("ego".to_owned(), meta)])),
@@ -3089,6 +3141,17 @@ where
                         },
                         None => None,
                     };
+                    if let Some(directory) = &read_only_dir
+                        && let Some(admission) = &confinement
+                        && let Err(error) = admission.configure_read_directory(session, &root, directory)
+                    {
+                        return responder.respond_with_error(control_error(&error));
+                    }
+                    if let Some(directory) = &read_only_dir {
+                        let meta = profile_meta.get_or_insert_with(serde_json::Map::new);
+                        let ego = meta.entry("ego".to_owned()).or_insert_with(|| serde_json::json!({}));
+                        ego["readOnlyDirectory"] = serde_json::json!(directory);
+                    }
                     // Hidden before it exists so no list or load can see it
                     // between creation and admission.
                     let hidden = unadmitted.hold(session);
@@ -3303,7 +3366,7 @@ where
                 let prompt_handler = Arc::clone(&prompt_handler);
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
-                    if !request.additional_directories.is_empty() {
+                    if !request.additional_directories.is_empty() && confinement.is_none() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
                         ));
@@ -3327,6 +3390,10 @@ where
                         Ok(root) => root,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
+                    let read_only_dir = match admit_read_directory(confinement.as_ref(), &root, &request.additional_directories) {
+                        Ok(directory) => directory,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
                     let attachment = match lifecycle.load(id, root.as_path()).await {
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
@@ -3338,6 +3405,13 @@ where
                     if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
                         return responder.respond_with_error(error);
                     }
+                    if let Some(directory) = &read_only_dir
+                        && let Some(admission) = &confinement
+                        && let Err(error) = admission.configure_read_directory(id, &root, directory)
+                    {
+                        return responder.respond_with_error(control_error(&error));
+                    }
+
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -3460,7 +3534,7 @@ where
                 let prompt_handler = Arc::clone(&prompt_handler);
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
-                    if !request.additional_directories.is_empty() {
+                    if !request.additional_directories.is_empty() && confinement.is_none() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
                         ));
@@ -3484,6 +3558,10 @@ where
                         Ok(root) => root,
                         Err(error) => return responder.respond_with_error(refused_params(error)),
                     };
+                    let read_only_dir = match admit_read_directory(confinement.as_ref(), &root, &request.additional_directories) {
+                        Ok(directory) => directory,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
                     let attachment = match lifecycle.resume(id, root.as_path()).await {
                         Ok(attachment) => attachment,
                         Err(error) => return responder.respond_with_error(lifecycle_error(&error)),
@@ -3491,6 +3569,13 @@ where
                     if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), id, id, &root).await {
                         return responder.respond_with_error(error);
                     }
+                    if let Some(directory) = &read_only_dir
+                        && let Some(admission) = &confinement
+                        && let Err(error) = admission.configure_read_directory(id, &root, directory)
+                    {
+                        return responder.respond_with_error(control_error(&error));
+                    }
+
                     if let Err(error) =
                         initialize_confinement(confinement.as_ref(), id, &root).await
                     {
@@ -3601,7 +3686,7 @@ where
                 let prompt_handler = Arc::clone(&prompt_handler);
                     let dispatcher = cx.clone();
                     dispatcher.spawn(async move {
-                    if !request.additional_directories.is_empty() {
+                    if !request.additional_directories.is_empty() && confinement.is_none() {
                         return responder.respond_with_error(Error::invalid_params().data(
                             "this agent does not support additionalDirectories",
                         ));
@@ -3623,6 +3708,10 @@ where
                     if let Err(error) = lifecycle.resume(source, root.as_path()).await {
                         return responder.respond_with_error(lifecycle_error(&error));
                     }
+                    let read_only_dir = match admit_read_directory(confinement.as_ref(), &root, &request.additional_directories) {
+                        Ok(directory) => directory,
+                        Err(error) => return responder.respond_with_error(error),
+                    };
                     if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
                         return responder.respond_with_error(refused_params(error));
                     }
@@ -3658,6 +3747,13 @@ where
                     // takes it back rather than leaving an unexplained fork.
                     if let Err(error) = restore_session_profiles(controller.as_ref(), lifecycle.as_ref(), confinement.as_ref(), source, child, &root).await {
                         let error = hidden.discard(Some(lifecycle.as_ref()), error).await;
+                        return responder.respond_with_error(error);
+                    }
+                    if let Some(directory) = &read_only_dir
+                        && let Some(admission) = &confinement
+                        && let Err(error) = admission.configure_read_directory(child, &root, directory)
+                    {
+                        let error = hidden.discard(Some(lifecycle.as_ref()), control_error(&error)).await;
                         return responder.respond_with_error(error);
                     }
                     let admitted = match initialize_confinement(confinement.as_ref(), child, &root).await {
