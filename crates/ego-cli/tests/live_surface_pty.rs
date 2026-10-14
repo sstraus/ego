@@ -8776,9 +8776,13 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
         thread::sleep(Duration::from_millis(10));
     }
     let wake_start = output.len();
-    input.write_all(b"REGRESSION-MARKER\r").unwrap();
+    input.write_all(b"REGRESSION-MARKER").unwrap();
     input.flush().unwrap();
+    // Observe the buffer before Enter: closed busy admission clears it when
+    // handing the submitted line back to the driver for the successor.
     until_normalized(&reader, &mut output, wake_start, "REGRESSION-MARKER");
+    input.write_all(b"\r").unwrap();
+    input.flush().unwrap();
     drain_until_quiet(&reader, &mut output);
     gate.release();
     until_normalized(&reader, &mut output, wake_start, "compacted session");
