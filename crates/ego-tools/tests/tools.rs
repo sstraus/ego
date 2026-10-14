@@ -654,6 +654,57 @@ mod registration {
 mod read {
     use super::*;
 
+    // Catches: a large file is returned whole instead of a bounded page.
+    #[test]
+    fn large_read_is_bounded_and_names_the_continuation_offset() {
+        let ws = populated();
+        fs::write(ws.root.join("large.txt"), "line\n".repeat(5362)).unwrap();
+        let page = ws.call("read", json!({"path": "large.txt"})).unwrap();
+        assert_eq!(page.matches("line\n").count(), 2000);
+        assert!(page.contains("offset=10000"), "{page}");
+    }
+
+    // Catches: continuation restarts at byte zero, skipping or repeating a page.
+    #[test]
+    fn read_continuation_starts_at_exact_byte_offset_and_eof_is_empty() {
+        let ws = populated();
+        fs::write(
+            ws.root.join("pages.txt"),
+            format!("{}tail", "line\n".repeat(2000)),
+        )
+        .unwrap();
+        assert_eq!(
+            ws.call("read", json!({"path":"pages.txt", "offset":10000}))
+                .unwrap(),
+            "tail"
+        );
+        assert_eq!(
+            ws.call("read", json!({"path":"pages.txt", "offset":10004}))
+                .unwrap(),
+            ""
+        );
+    }
+
+    // Catches: a single giant line bypasses the cap or splits a UTF-8 character.
+    #[test]
+    fn read_byte_cap_preserves_utf8_and_continuation() {
+        let ws = populated();
+        fs::write(
+            ws.root.join("unicode.txt"),
+            format!("{}éend", "a".repeat(32767)),
+        )
+        .unwrap();
+        let page = ws.call("read", json!({"path":"unicode.txt"})).unwrap();
+        assert!(page.starts_with(&"a".repeat(32767)));
+        assert!(page.contains("offset=32767"));
+        assert!(!page.contains('\u{fffd}'));
+        assert_eq!(
+            ws.call("read", json!({"path":"unicode.txt", "offset":32767}))
+                .unwrap(),
+            "éend"
+        );
+    }
+
     #[test]
     fn read_returns_the_file_through_the_guarded_seam() {
         let ws = populated();
