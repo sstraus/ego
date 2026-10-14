@@ -29,9 +29,10 @@ pub use layer::{
     PermCfg, ProfileLayer, StatusSegmentName, StatuslineLayer, UiLayer, is_forbidden_auth_header,
 };
 pub use mutation::{
-    ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigEditHandle,
-    UserConfigEditResult, UserConfigError, UserConfigMutation, UserConfigMutationFacts,
-    UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
+    ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigBatch,
+    UserConfigEditHandle, UserConfigEditResult, UserConfigError, UserConfigMutation,
+    UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
+    UserConfigStore,
 };
 pub use provenance::SettingProvenance;
 pub use resolve::{

@@ -62,8 +62,39 @@ impl Resolver for SystemResolver {
     }
 }
 
+/// In-memory, HTTP-only authority for explicitly selected setup inference.
+/// Construction neither measures a process backend nor opens an evidence store.
+/// This exposes no process, filesystem, MCP, or session-storage handle.
+pub struct InferenceHttpPorts {
+    transport: Arc<OneShotHttpTransport>,
+}
+
+impl InferenceHttpPorts {
+    pub fn new(confinement: RunConfinement, cancel: CancelToken, timeout: HttpCallTimeout) -> Self {
+        Self {
+            transport: Arc::new(OneShotHttpTransport::new(
+                Arc::new(SystemResolver::new()),
+                cancel,
+                timeout,
+                None,
+                confinement,
+            )),
+        }
+    }
+
+    pub fn resolver_handle(&self) -> Arc<dyn Resolver> {
+        self.transport.clone()
+    }
+    pub fn one_hop_handle(&self) -> Arc<dyn OneHop> {
+        self.transport.clone()
+    }
+    pub fn begin_call(&self) -> Instant {
+        self.transport.begin_call()
+    }
+}
+
 /// One run's HTTP effect boundary. Construction is restricted to
-/// [`crate::exec::RunEffectPorts`].
+/// [`crate::exec::RunEffectPorts`] or [`InferenceHttpPorts`].
 pub(crate) struct OneShotHttpTransport {
     resolver: Arc<dyn Resolver>,
     cancel: CancelToken,
