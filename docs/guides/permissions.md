@@ -88,7 +88,7 @@ persist a global allow or raise system ceilings.
 
 Credential-like reads have built-in default denies, including `.env*`, `.ssh/**`,
 `.aws/**`, `.netrc`, and keychain patterns. Only an effective explicit user allow
-can lift the default for its matching read. Project or flag allows do not. This
+can lift the default for its matching read under `ro` or `workspace`. Project or flag allows do not. Under `off` and `adaptive`, built-in read, list, and search tools retain an immutable credential-path floor. This
 is a read policy, not a subprocess secret filter or an assertion that all allowed
 search output is redacted. Exec arguments are data, not file accesses: a command
 may print or edit test text that names a credential path. The native sandbox
@@ -109,6 +109,13 @@ and immutable system denies continue to win.
 | `workspace` | Workspace writes with the admitted extra-root policy |
 | `adaptive` | Broad reads and executable reach with hard credential exclusions; workspace, configured and captured toolchain writes |
 | `off` | No filesystem confinement guarantee; classifiers/permission checks still apply |
+
+Built-in read, list, and search tools follow the admitted sandbox read reach.
+Under `off` and `adaptive`, they can access non-credential paths outside the
+workspace without an extra root. Each permit still covers only the named file
+or traversal subtree; writes do not gain this reach. Adaptive also retains its
+captured credential exclusions. Under `ro` and `workspace`, these tools retain
+the workspace and admitted extra-root boundary.
 
 Under strict levels, absent an explicit roots declaration, an existing `~/Gits` is added as a read-write
 extra root. Adaptive omits that implicit root. Use `ego config set 'roots=[]'` to clear configured roots; local/flag

@@ -289,6 +289,7 @@ fn prepare_resume_phase<'store>(
             human,
         )
         .with_profile_roots(profile_roots)
+        .with_read_perimeter(&settings.confinement)
         .with_coordinator_profile(settings.effective.active_profile.as_ref()),
     );
     let invocation = RunInvocationId::new();

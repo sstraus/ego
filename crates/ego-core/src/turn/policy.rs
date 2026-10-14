@@ -42,6 +42,7 @@ impl From<GenerationPolicyDigest> for String {
 pub struct GenerationPolicySnapshot {
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
+    read_perimeter: crate::permit::ReadPerimeter,
     mode: Mode,
     coordinator: bool,
     ruleset: Ruleset,
@@ -80,6 +81,7 @@ impl GenerationPolicySnapshot {
             self.mode,
             self.coordinator,
             self.ruleset.clone(),
+            self.read_perimeter.clone(),
         )?
         .digest())
     }
@@ -109,6 +111,7 @@ impl GenerationPolicySnapshot {
             version,
             workspace,
             roots,
+            read_perimeter,
             mode,
             coordinator,
             allow,
@@ -123,7 +126,8 @@ impl GenerationPolicySnapshot {
             allow: decode_rules(allow)?,
             deny: decode_rules(deny)?,
         };
-        let snapshot = Self::from_semantics(workspace, roots, mode, coordinator, ruleset)?;
+        let snapshot =
+            Self::from_semantics(workspace, roots, mode, coordinator, ruleset, read_perimeter)?;
         if snapshot.canonical.expose_secret_bytes() != encoded {
             return Err(GenerationPolicyCaptureError::NonCanonicalSnapshot);
         }
@@ -136,8 +140,16 @@ impl GenerationPolicySnapshot {
         mode: Mode,
         coordinator: bool,
         ruleset: Ruleset,
+        read_perimeter: crate::permit::ReadPerimeter,
     ) -> Result<Self, GenerationPolicyCaptureError> {
-        let wire = PolicyWire::from_semantics(&workspace, &roots, mode, coordinator, &ruleset);
+        let wire = PolicyWire::from_semantics(
+            &workspace,
+            &roots,
+            mode,
+            coordinator,
+            &ruleset,
+            &read_perimeter,
+        );
         let canonical =
             serde_json::to_vec(&wire).map_err(|_| GenerationPolicyCaptureError::EncodingFailed)?;
         if canonical.len() > MAX_GENERATION_POLICY_SNAPSHOT_BYTES {
@@ -147,6 +159,7 @@ impl GenerationPolicySnapshot {
         Ok(Self {
             workspace,
             roots,
+            read_perimeter,
             mode,
             coordinator,
             ruleset,
@@ -194,7 +207,12 @@ impl GenerationPolicyCapture {
     ) -> Result<Self, GenerationPolicyCaptureError> {
         Self::restore(
             Arc::new(GenerationPolicySnapshot::from_semantics(
-                workspace, roots, mode, false, ruleset,
+                workspace,
+                roots,
+                mode,
+                false,
+                ruleset,
+                crate::permit::ReadPerimeter::default(),
             )?),
             human,
         )
@@ -210,7 +228,12 @@ impl GenerationPolicyCapture {
     ) -> Result<Self, GenerationPolicyCaptureError> {
         Self::restore(
             Arc::new(GenerationPolicySnapshot::from_semantics(
-                workspace, roots, mode, true, ruleset,
+                workspace,
+                roots,
+                mode,
+                true,
+                ruleset,
+                crate::permit::ReadPerimeter::default(),
             )?),
             human,
         )
@@ -234,12 +257,29 @@ impl GenerationPolicyCapture {
             ),
         }
         .with_profile_roots(snapshot.roots.clone())
+        .with_read_perimeter(snapshot.read_perimeter.clone())
         .with_coordinator_profile(snapshot.coordinator);
         Ok(Self {
             policy: Arc::new(policy),
             snapshot,
             human,
         })
+    }
+
+    /// Pin the admitted sandbox read authority in both engine and snapshot.
+    pub fn with_read_perimeter(
+        self,
+        read_perimeter: crate::permit::ReadPerimeter,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            self.snapshot.roots.clone(),
+            self.snapshot.mode,
+            self.snapshot.coordinator,
+            self.snapshot.ruleset.clone(),
+            read_perimeter,
+        )?;
+        Self::restore(Arc::new(snapshot), self.human)
     }
 
     /// Pin the session's public MCP output directory with read-only authority.
@@ -261,6 +301,7 @@ impl GenerationPolicyCapture {
             self.snapshot.mode,
             self.snapshot.coordinator,
             self.snapshot.ruleset.clone(),
+            self.snapshot.read_perimeter.clone(),
         )?;
         Self::restore(Arc::new(snapshot), self.human)
     }
@@ -435,6 +476,11 @@ struct PolicyWire {
     /// Absent when empty, so a policy without profile roots keeps its digest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     roots: Vec<ProfileRoot>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::permit::ReadPerimeter::is_default"
+    )]
+    read_perimeter: crate::permit::ReadPerimeter,
     mode: Mode,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     coordinator: bool,
@@ -449,11 +495,13 @@ impl PolicyWire {
         mode: Mode,
         coordinator: bool,
         ruleset: &Ruleset,
+        read_perimeter: &crate::permit::ReadPerimeter,
     ) -> Self {
         Self {
             version: WIRE_VERSION,
             workspace: workspace.clone(),
             roots: roots.to_vec(),
+            read_perimeter: read_perimeter.clone(),
             mode,
             coordinator,
             allow: encode_rules(&ruleset.allow),

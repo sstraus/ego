@@ -185,6 +185,7 @@ pub(crate) struct CliGenerationPolicySource {
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
     coordinator: bool,
+    read_perimeter: ego_core::permit::ReadPerimeter,
     human: Option<Arc<dyn HumanApprover>>,
 }
 
@@ -199,6 +200,7 @@ impl CliGenerationPolicySource {
             workspace,
             roots: Vec::new(),
             coordinator: false,
+            read_perimeter: ego_core::permit::ReadPerimeter::default(),
             human,
         }
     }
@@ -206,6 +208,14 @@ impl CliGenerationPolicySource {
     /// The same source, reaching the profile's admitted roots too.
     pub(crate) fn with_profile_roots(mut self, roots: Vec<ProfileRoot>) -> Self {
         self.roots = roots;
+        self
+    }
+
+    pub(crate) fn with_read_perimeter(
+        mut self,
+        confinement: &ego_core::permit::RunConfinement,
+    ) -> Self {
+        self.read_perimeter = ego_core::permit::ReadPerimeter::from_confinement(confinement);
         self
     }
 
@@ -229,6 +239,7 @@ impl CliGenerationPolicySource {
                 None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
             }
             .with_profile_roots(self.roots.clone())
+            .with_read_perimeter(self.read_perimeter.clone())
             .with_coordinator_profile(self.coordinator),
         )
     }
@@ -259,6 +270,7 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             snapshot.ruleset,
             self.human.clone(),
         )
+        .and_then(|capture| capture.with_read_perimeter(self.read_perimeter.clone()))
         .map_err(|error| error.to_string())
     }
 
