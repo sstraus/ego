@@ -8,6 +8,7 @@ fn run(backend: &SeatbeltBackend, program: &str, args: &[&std::ffi::OsStr]) -> O
         .args(prefix.args_before_target)
         .arg(program)
         .args(args)
+        .current_dir(&backend.base.workspace)
         .output()
         .unwrap()
 }
@@ -173,5 +174,112 @@ fn adaptive_policy_tampering_cannot_unconfine_later_spawns() {
             );
             assert!(!forbidden.exists());
         }
+    }
+}
+
+// Catches: an explicit writable root reopens the operator user configuration.
+#[test]
+fn user_config_write_root_cannot_rewrite_permissions() {
+    let name = "exec::seatbelt::tests::user_config_write_root_cannot_rewrite_permissions";
+    if std::env::var_os("EGO_CONFIG_FLOOR_CHILD").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("EGO_CONFIG_FLOOR_CHILD", "1")
+            .env("EGO_HOME", root.path().join("ego"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let root = tempfile::tempdir().unwrap();
+    let workspace = fs::canonicalize(root.path()).unwrap();
+    let scratch = workspace.join("scratch");
+    let config_dir = PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let config_dir = fs::canonicalize(config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    fs::write(&config, "mode = 'default'\n").unwrap();
+    for level in [
+        Confinement::Workspace,
+        Confinement::Ro,
+        Confinement::Adaptive,
+    ] {
+        let policy = RunConfinement::new(level, false, CanonPath::new(&workspace))
+            .unwrap()
+            .with_roots(vec![ProfileRoot::new(
+                CanonPath::new(&config_dir),
+                RootAccess::ReadWrite,
+            )])
+            .with_adaptive_perimeter(AdaptivePerimeter {
+                home: CanonPath::new(&workspace),
+                writable: vec![CanonPath::new(&workspace)],
+                credentials: vec![],
+                controls: vec![],
+            });
+        let backend = SeatbeltBackend::prepare(
+            &policy,
+            &CanonPath::new(&scratch),
+            &derived_runtime_roots().unwrap(),
+        )
+        .unwrap();
+        for attack in [
+            "printf changed > \"$1\"",
+            "rm -f \"$1\"; printf changed > \"$1\"",
+            "mv \"$2\" \"$2.old\"",
+        ] {
+            let result = run(
+                &backend,
+                "/bin/sh",
+                &[
+                    "-c".as_ref(),
+                    attack.as_ref(),
+                    "write".as_ref(),
+                    config.as_os_str(),
+                    config_dir.as_os_str(),
+                ],
+            );
+            assert!(
+                !result.status.success(),
+                "sandbox allowed config change: {result:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("permitted")
+                    || String::from_utf8_lossy(&result.stderr).contains("denied"),
+                "{result:?}"
+            );
+            assert_eq!(fs::read(&config).unwrap(), b"mode = 'default'\n");
+        }
+        assert_eq!(
+            run(&backend, "/bin/cat", &[config.as_os_str()]).stdout,
+            b"mode = 'default'\n"
+        );
+        let sibling = workspace.join("ordinary");
+        let write = run(&backend, "/usr/bin/touch", &[sibling.as_os_str()]);
+        assert_eq!(
+            write.status.success(),
+            level != Confinement::Ro,
+            "{write:?}"
+        );
+        if sibling.exists() {
+            fs::remove_file(sibling).unwrap();
+        }
+        let widened = backend
+            .widened(
+                &[ego_core::permit::SandboxGrant {
+                    path: CanonPath::new(&config_dir),
+                    access: SandboxAccess::Write,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert!(
+            !run(&widened, "/usr/bin/touch", &[config.as_os_str()])
+                .status
+                .success()
+        );
     }
 }

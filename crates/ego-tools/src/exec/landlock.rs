@@ -625,6 +625,44 @@ mod tests {
 
     use super::{LandlockBackend, Level, dispatch_helper};
 
+    // Catches: a writable workspace containing EGO_HOME admits a config-changing child.
+    #[test]
+    fn linux_user_config_overlap_refuses_admission() {
+        use ego_core::permit::{CanonPath, Confinement, RunConfinement};
+        let name = "exec::landlock::tests::linux_user_config_overlap_refuses_admission";
+        if std::env::var_os("EGO_CONFIG_FLOOR_CHILD").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("EGO_CONFIG_FLOOR_CHILD", "1")
+                .env("EGO_HOME", root.path().join("ego"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+        let config_dir = PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+        std::fs::create_dir(&config_dir).unwrap();
+        let config = config_dir.join("config.toml");
+        std::fs::write(&config, "mode = 'default'\n").unwrap();
+        let workspace = std::fs::canonicalize(config_dir.parent().unwrap()).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy =
+            RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+        let result = LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]);
+        let Err(error) = result else {
+            panic!("user-config overlap admitted")
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("user config") && message.contains(workspace.to_str().unwrap()),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(config).unwrap(), b"mode = 'default'\n");
+    }
+
     /// The prefix the backend emits is the envelope the dispatcher accepts, and
     /// every guard word is load-bearing: drop one and a libtest host either
     /// skips the helper test or swallows the protocol as test-name filters.
