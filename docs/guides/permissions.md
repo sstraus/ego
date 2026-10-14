@@ -307,7 +307,9 @@ Sandboxed child processes cannot write the operator user-configuration directory
 (`EGO_HOME`, or `HOME/.ego` when unset). Explicit writable roots and runtime grants
 do not lift this floor. The canonical `config.toml` target is protected too
 when the file is a symlink outside that directory. Reads retain their existing reach. Sandbox `off` has no
-such native confinement.
+such native confinement. Sandboxed admission refuses a config file with multiple
+hardlinks; replace it with a copy or symlink so its authority has one captured
+file identity.
 
 On macOS, Seatbelt denies writes under the captured directory and prevents
 unlinking its ancestor boundaries. Linux Landlock grants cannot subtract a

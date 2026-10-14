@@ -25,6 +25,9 @@ impl BwrapBackend {
         scratch: &CanonPath,
         runtime_roots: &[CanonPath],
     ) -> Result<Self, ProcessError> {
+        if policy.level() != Confinement::Off {
+            super::user_config::capture()?;
+        }
         super::user_config::reject_overlap(policy, scratch.as_path())?;
         // Use the installed system utility, never a model-controlled PATH lookup.
         let executable = fs::canonicalize("/usr/bin/bwrap")

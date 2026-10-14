@@ -18,6 +18,25 @@ pub(super) fn capture() -> Result<Vec<PathBuf>, ProcessError> {
         .map_err(|error| ProcessError::Backend(format!("cannot resolve user config: {error}")))?;
     let canonical = super::adaptive::resolve(&selected)?;
     let config_target = super::adaptive::resolve(&selected.join("config.toml"))?;
+    #[cfg(unix)]
+    match std::fs::metadata(&config_target) {
+        Ok(metadata) => {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() > 1 {
+                return Err(ProcessError::Backend(format!(
+                    "user config {} has multiple hardlinks; replace the hardlink with a copy or symlink before sandbox admission",
+                    config_target.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ProcessError::Backend(format!(
+                "cannot inspect user config {}: {error}",
+                config_target.display()
+            )));
+        }
+    }
     let mut paths = vec![selected, canonical, config_target];
     paths.sort();
     paths.dedup();
@@ -54,4 +73,31 @@ pub(super) fn reject_overlap(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    // Catches: another writable hardlink name bypasses the captured path floor.
+    #[test]
+    fn user_config_hardlink_refuses_admission() {
+        let name = "exec::user_config::tests::user_config_hardlink_refuses_admission";
+        if std::env::var_os("EGO_HARDLINK_CASE").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("EGO_HARDLINK_CASE", "1")
+                .env("EGO_HOME", root.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+        let directory = std::path::PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+        let config = directory.join("config.toml");
+        std::fs::write(&config, "mode = 'default'\n").unwrap();
+        std::fs::hard_link(&config, directory.join("alias")).unwrap();
+        let error = super::capture().expect_err("multiply-linked config admitted");
+        assert!(error.to_string().contains("hardlink"), "{error}");
+        assert_eq!(std::fs::read(config).unwrap(), b"mode = 'default'\n");
+    }
 }

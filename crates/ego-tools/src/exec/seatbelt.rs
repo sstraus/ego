@@ -79,7 +79,11 @@ impl SeatbeltBackend {
             );
         }
         let base = ProfileBase {
-            user_config: super::user_config::capture()?,
+            user_config: if policy.level() == Confinement::Off {
+                Vec::new()
+            } else {
+                super::user_config::capture()?
+            },
             adaptive,
             level: policy.level(),
             offline: policy.offline(),

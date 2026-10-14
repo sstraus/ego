@@ -77,6 +77,7 @@ impl LandlockBackend {
             }
         };
         validate_private_directory(private_scratch.as_path())?;
+        super::user_config::capture()?;
         super::user_config::reject_overlap(policy, private_scratch.as_path())?;
         let runtime_roots = derived_runtime_roots
             .iter()
