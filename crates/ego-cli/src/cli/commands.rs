@@ -317,7 +317,7 @@ pub(super) struct Shape {
 /// `ARCHITECTURE.md`
 #[derive(Debug, ClapArgs)]
 pub(super) struct Ceiling {
-    /// The weakest confinement a session may select: ro|workspace|adaptive|off.
+    /// The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included.
     #[arg(long)]
     pub(super) sandbox: Option<Confinement>,
 }
@@ -669,7 +669,7 @@ pub(super) struct Flags {
     #[arg(long)]
     pub(super) offline: bool,
 
-    /// Filesystem confinement: ro|workspace|adaptive|off.
+    /// Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included.
     #[arg(long)]
     pub(super) sandbox: Option<Confinement>,
 

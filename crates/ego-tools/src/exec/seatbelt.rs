@@ -23,7 +23,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v3-adaptive";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v4-strict-credentials";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.

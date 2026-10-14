@@ -90,7 +90,12 @@ Credential-like reads have built-in default denies, including `.env*`, `.ssh/**`
 `.aws/**`, `.netrc`, and keychain patterns. Only an effective explicit user allow
 can lift the default for its matching read. Project or flag allows do not. This
 is a read policy, not a subprocess secret filter or an assertion that all allowed
-search output is redacted.
+search output is redacted. Exec arguments are data, not file accesses: a command
+may print or edit test text that names a credential path. The native sandbox
+checks files when the child opens them, including paths built inside a script.
+With `--sandbox off`, exec has no credential protection: off = no confinement,
+credentials included. Permission checks on the command still apply, but read
+tool rules do not constrain files opened by an unconfined child.
 
 Default allows do not authorize control paths such as instruction/config/skill
 material. Those require their dedicated authority. Explicit file-layer denies
@@ -109,6 +114,15 @@ Under strict levels, absent an explicit roots declaration, an existing `~/Gits` 
 extra root. Adaptive omits that implicit root. Use `ego config set 'roots=[]'` to clear configured roots; local/flag
 root declarations have stricter read-only constraints and cannot replace this
 user declaration. The effective perimeter reports the resulting source.
+
+For `ro` and `workspace`, outside files remain closed unless the native backend
+admits their root. On macOS, credential-shaped files outside the workspace and
+admitted extra roots also have a deny-read floor, even beneath runtime roots.
+Linux's Landlock and namespace backends enforce admitted-root access; they do
+not add a credential-pattern exclusion within runtime roots. An admitted data
+root can contain credential-shaped files: native exec reach is separate from
+the read tool's default-deny rules. Adaptive keeps its captured credential
+exclusions, including their protection against symlink aliases.
 
 Adaptive is the fresh-config default on macOS, independently of permission mode
 `auto`. Other platforms keep the `workspace` default until they support adaptive

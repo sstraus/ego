@@ -4058,6 +4058,120 @@ fn configured_exec_environment_reaches_real_builtin_children() {
     }
 }
 
+// Catches: credential-shaped argv data is mistaken for a file access before spawning.
+#[cfg(unix)]
+#[test]
+fn credential_path_arguments_are_data_until_the_child_opens_them() {
+    let root = cwd();
+    for level in [
+        Confinement::Off,
+        Confinement::Ro,
+        Confinement::Workspace,
+        Confinement::Adaptive,
+    ] {
+        if level == Confinement::Adaptive && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let confinement = ego_tools::exec::admit_confinement(level, false, root.clone()).unwrap();
+        let run = open_policy(confinement, 1024 * 1024, 1024).unwrap();
+        let policy = ego_core::permit::PolicyEngine::new(
+            root.clone(),
+            Mode::Yolo,
+            Ruleset::from_layer(
+                PermCfg {
+                    allow: vec![exact_executable_rule("/usr/bin/printf")],
+                    deny: vec![],
+                    judge: None,
+                },
+                Source::User,
+            )
+            .with_credential_defaults(),
+        );
+        let fs = OsFs;
+        let registry = builtins();
+        let tools = TurnTools::new(
+            &registry,
+            ToolEffectPorts::new(
+                &fs,
+                run.ports.process(),
+                &run.evidence,
+                run.ports.resolver_handle(),
+                run.ports.one_hop_handle(),
+                run.ports.duplex_handle(),
+            ),
+            root.clone(),
+        );
+        for argument in [
+            "fixtures/.ssh/synthetic".to_owned(),
+            root.as_path()
+                .join("fixtures/.aws/credentials")
+                .display()
+                .to_string(),
+            "fixtures/.env.synthetic".to_owned(),
+        ] {
+            let params = serde_json::json!({
+                "argv": ["/usr/bin/printf", "%s", argument],
+                "timeout_ms": 10000
+            });
+            let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+            let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+                panic!("printing fixture path data must be authorized");
+            };
+            let output = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+            assert!(format!("{output:?}").contains(&argument), "{output:?}");
+        }
+    }
+}
+
+// Catches: sandbox off is documented as unconfined but exec still blocks credential reads.
+#[cfg(unix)]
+#[test]
+fn sandbox_off_can_open_a_synthetic_credential_file() {
+    let tree = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(tree.path().canonicalize().unwrap());
+    let credential = root.as_path().join(".ssh/synthetic");
+    std::fs::create_dir(credential.parent().unwrap()).unwrap();
+    std::fs::write(&credential, "synthetic-off-contract").unwrap();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule("/bin/cat")],
+                deny: vec![],
+                judge: None,
+            },
+            Source::User,
+        )
+        .with_credential_defaults(),
+    );
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let params = serde_json::json!({"argv": ["/bin/cat", credential], "timeout_ms": 10000});
+    let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("explicit unconfined fixture read must be authorized");
+    };
+    let output = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+    assert!(
+        format!("{output:?}").contains("synthetic-off-contract"),
+        "{output:?}"
+    );
+}
+
 // Catches: roots reach permission policy but are ignored by the real exec sandbox,
 // or a single-file read root grants its sibling or write access.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -4075,6 +4189,11 @@ fn perimeter_roots_reach_real_children_without_widening_single_file_access() {
     }
     let file = allowlist.join("allowed.md");
     let sibling = allowlist.join("private.md");
+    let credential = home.join(".ssh/synthetic");
+    std::fs::create_dir_all(credential.parent().unwrap()).unwrap();
+    std::fs::write(&credential, "synthetic secret").unwrap();
+    let credential_alias = workspace.join("credential-alias");
+    std::os::unix::fs::symlink(&credential, &credential_alias).unwrap();
     std::fs::write(&file, "allowed").unwrap();
     std::fs::write(&sibling, "private").unwrap();
     let alias = home.join("instructions-link");
@@ -4108,6 +4227,25 @@ fn perimeter_roots_reach_real_children_without_widening_single_file_access() {
         let policy = run_confinement(level, false, cwd.clone()).with_roots(roots.clone());
         let run = open_policy(policy, 1024 * 1024, 1024).expect("real perimeter backend");
         execute(&run, read(&file)).expect("single file read allowed");
+        for protected in [&credential, &credential_alias] {
+            // Catches: outside credential reads or aliases bypass admitted-root confinement.
+            assert!(execute(&run, read(protected)).is_err(), "{protected:?}");
+            let internal_read = SpawnSpec::new(
+                vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!("exec /bin/cat '{}'", protected.display()).into(),
+                ],
+                Some(cwd.clone()),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .unwrap();
+            assert!(
+                execute(&run, internal_read).is_err(),
+                "script opened {protected:?}"
+            );
+        }
         assert!(
             execute(&run, read(&sibling)).is_err(),
             "single file must not expose sibling"
