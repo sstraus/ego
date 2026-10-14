@@ -88,6 +88,8 @@ ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               unless the operator asks for it
 ego orchestrator brief [--root PATH]  read-only TUIC children and unread results
 ego doctor [--json]           read-only redacted health snapshot
+ego setup [PROMPT] [--profile NAME] [--directory PATH]
+                             transient read-only setup inventory
 ```
 
 Notes:

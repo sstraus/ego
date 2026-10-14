@@ -7,7 +7,7 @@ use ego_cli::repl::actions::{
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
-const NAMES: [&str; 28] = [
+const NAMES: [&str; 29] = [
     "help",
     "model",
     "thinking",
@@ -25,6 +25,7 @@ const NAMES: [&str; 28] = [
     "export",
     "config",
     "doctor",
+    "setup",
     "quit",
     "refresh",
     "new",

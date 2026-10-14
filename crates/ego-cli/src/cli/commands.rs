@@ -821,3 +821,17 @@ impl clap::ValueEnum for RootAccessValue {
         Some(clap::builder::PossibleValue::new(self.0.as_str()))
     }
 }
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego setup",
+    about = "Inspect expected work without running effects.",
+    disable_help_subcommand = true
+)]
+pub(super) struct SetupCommand {
+    pub(super) prompt: Option<String>,
+    #[arg(long)]
+    pub(super) profile: Option<String>,
+    #[arg(long)]
+    pub(super) directory: Option<PathBuf>,
+}

@@ -117,6 +117,7 @@ enum SurfaceActionEffect {
     Skills,
     Hooks,
     Doctor,
+    Setup,
     Config,
     Quit,
     Version,
@@ -157,6 +158,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Expand => SurfaceActionEffect::Expand,
             ActionId::Skills => SurfaceActionEffect::Skills,
             ActionId::Hooks => SurfaceActionEffect::Hooks,
+            ActionId::Setup => SurfaceActionEffect::Setup,
             ActionId::Doctor => SurfaceActionEffect::Doctor,
             ActionId::Config => SurfaceActionEffect::Config,
             ActionId::Quit => SurfaceActionEffect::Quit,
@@ -1072,6 +1074,7 @@ impl Seat {
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
                     Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
+                    Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
@@ -1215,6 +1218,7 @@ impl Seat {
             ActionId::Hooks,
             ActionId::Config,
             ActionId::Doctor,
+            ActionId::Setup,
             ActionId::Quit,
             ActionId::Version,
         ] {

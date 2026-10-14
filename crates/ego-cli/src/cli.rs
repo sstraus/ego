@@ -57,6 +57,8 @@ pub enum Invocation {
     Hooks(HooksArgs),
     /// `ego doctor [--json]` — the read-only redacted health snapshot.
     Doctor(DoctorArgs),
+    /// Transient read-only setup diagnostics, outside the ordinary run pipeline.
+    Setup(SetupArgs),
     /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
     Run(Box<Args>),
     /// `ego resume [ID] [PROMPT]` — the same run against a session that
@@ -175,6 +177,7 @@ pub const BUILT: &[&str] = &[
     "models",
     "hooks",
     "doctor",
+    "setup",
     "acp",
     "a2a",
     "auth",
@@ -257,6 +260,7 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("models", ModelsCommand::command()))
         .subcommand(named("hooks", HooksCommand::command()))
         .subcommand(named("doctor", DoctorCommand::command()))
+        .subcommand(named("setup", SetupCommand::command()))
         .subcommand(named("acp", AcpCommand::command()))
         .subcommand(named("a2a", A2aCommand::command()))
         .subcommand(named("auth", AuthCommand::command()))
@@ -535,6 +539,13 @@ pub struct HooksArgs {
 ///
 /// One field, because doctor takes no subject: it reports on this
 /// installation, and there is only one of those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupArgs {
+    pub prompt: Option<String>,
+    pub profile: Option<String>,
+    pub directory: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorArgs {
     pub json: bool,
@@ -1142,6 +1153,7 @@ fn overview(program: &str) -> String {
             "hooks" => "Inspect the admitted hook catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
             "a2a" => "Serve Agent2Agent discovery information",
+            "setup" => "Inspect expected work without running effects",
             "doctor" => "Print a read-only redacted health snapshot",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "orchestrator" => "Inspect native orchestration without model generation",
@@ -1455,6 +1467,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Command(parsed) => match parsed.action {
                 HooksSubcommand::Ls { json } => Ok(Invocation::Hooks(HooksArgs { json })),
             },
+        },
+        Some("setup") => match clap_or_answer::<SetupCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Setup(SetupArgs {
+                prompt: parsed.prompt,
+                profile: parsed.profile,
+                directory: parsed.directory,
+            })),
         },
         Some("doctor") => match clap_or_answer::<DoctorCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
