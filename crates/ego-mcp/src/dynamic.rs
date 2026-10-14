@@ -256,6 +256,15 @@ struct CollapsedSchemaDefinition {
     name: String,
     description: String,
     input_schema: Value,
+    // Metadata does not participate in the generator descriptor or admission policy.
+    #[serde(default, rename = "title")]
+    _title: serde::de::IgnoredAny,
+    #[serde(default, rename = "outputSchema")]
+    _output_schema: serde::de::IgnoredAny,
+    #[serde(default, rename = "annotations")]
+    _annotations: serde::de::IgnoredAny,
+    #[serde(default, rename = "_meta")]
+    _meta: serde::de::IgnoredAny,
 }
 
 impl CollapsedSchemaDefinition {
