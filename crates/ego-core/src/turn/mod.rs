@@ -1604,6 +1604,21 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         target_system: Option<SystemPrompt>,
         target_tools: Vec<ToolDescriptor>,
     ) -> Result<PreparedCompaction, CompactionError> {
+        // Compaction cannot accept input after its history snapshot: that work
+        // would remain in the source when the checkpoint target is published.
+        // Drain the intents already ordered before closure and include them in
+        // the checkpoint. Later input stays terminal-owned for the successor.
+        self.close_and_drain_controls(turn).await?;
+        let delivered = self.deliver_pending(turn)?;
+        self.control = None;
+        if let Some(cause) = self.cancel.cause() {
+            return Err(CompactionError::Cancelled(cause));
+        }
+        let source_seq = if delivered {
+            self.state().last_seq
+        } else {
+            source_seq
+        };
         let title = self.state().title.clone();
         let goal = self.state().goal.clone();
         let (history, repairs) =
