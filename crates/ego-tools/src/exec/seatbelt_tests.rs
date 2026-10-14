@@ -337,3 +337,68 @@ fn user_config_symlink_target_cannot_rewrite_permissions() {
         b"mode = 'default'\n"
     );
 }
+
+// Catches: a valid EGO_HOME containing parent traversal prevents ordinary sandboxed work.
+#[test]
+fn user_config_parent_component_does_not_refuse_sandboxed_work() {
+    let name = "exec::seatbelt::tests::user_config_parent_component_does_not_refuse_sandboxed_work";
+    if std::env::var_os("EGO_PARENT_CONFIG_CHILD").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("child")).unwrap();
+        fs::create_dir(root.path().join("ego")).unwrap();
+        fs::write(root.path().join("ego/config.toml"), "mode = 'default'\n").unwrap();
+        fs::create_dir_all(root.path().join("target/nested")).unwrap();
+        fs::create_dir(root.path().join("target/ego")).unwrap();
+        fs::write(
+            root.path().join("target/ego/config.toml"),
+            "mode = 'default'\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(root.path().join("target/nested"), root.path().join("link"))
+            .unwrap();
+        for selected in ["child/../ego", "link/../ego", "child/../absent"] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("EGO_PARENT_CONFIG_CHILD", "1")
+                .env("EGO_HOME", root.path().join(selected))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{selected}: {output:?}");
+        }
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let workspace = fs::canonicalize(root.path()).unwrap();
+    let scratch = workspace.join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    let backend = SeatbeltBackend::prepare(
+        &policy,
+        &CanonPath::new(&scratch),
+        &derived_runtime_roots().unwrap(),
+    )
+    .expect("valid parent-component EGO_HOME refused sandbox admission");
+    let sibling = workspace.join("ordinary");
+    let write = run(&backend, "/usr/bin/touch", &[sibling.as_os_str()]);
+    assert!(write.status.success(), "{write:?}");
+    assert!(sibling.exists());
+    let config = PathBuf::from(std::env::var_os("EGO_HOME").unwrap()).join("config.toml");
+    let write = run(
+        &backend,
+        "/bin/sh",
+        &[
+            "-c".as_ref(),
+            "printf changed > \"$1\"".as_ref(),
+            "write".as_ref(),
+            config.as_os_str(),
+        ],
+    );
+    assert!(!write.status.success(), "config write allowed: {write:?}");
+    if config.exists() {
+        assert_eq!(fs::read(config).unwrap(), b"mode = 'default'\n");
+    } else {
+        assert!(!config.parent().unwrap().exists());
+    }
+}

@@ -16,8 +16,8 @@ pub(super) fn capture() -> Result<Vec<PathBuf>, ProcessError> {
         })?;
     let selected = std::path::absolute(selected)
         .map_err(|error| ProcessError::Backend(format!("cannot resolve user config: {error}")))?;
-    let canonical = super::adaptive::resolve(&selected)?;
-    let config_target = super::adaptive::resolve(&selected.join("config.toml"))?;
+    let canonical = super::adaptive::resolve_filesystem(&selected)?;
+    let config_target = super::adaptive::resolve_filesystem(&selected.join("config.toml"))?;
     #[cfg(unix)]
     match std::fs::metadata(&config_target) {
         Ok(metadata) => {
@@ -75,7 +75,7 @@ pub(super) fn reject_overlap(
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     // Catches: another writable hardlink name bypasses the captured path floor.
     #[test]
@@ -96,7 +96,33 @@ mod tests {
         let config = directory.join("config.toml");
         std::fs::write(&config, "mode = 'default'\n").unwrap();
         std::fs::hard_link(&config, directory.join("alias")).unwrap();
-        let error = super::capture().expect_err("multiply-linked config admitted");
+        use ego_core::permit::{CanonPath, Confinement, RunConfinement};
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap()),
+        )
+        .unwrap();
+        #[cfg(target_os = "macos")]
+        let result = super::super::seatbelt::SeatbeltBackend::prepare(
+            &policy,
+            &CanonPath::new(scratch.path()),
+            &super::super::seatbelt::derived_runtime_roots().unwrap(),
+        );
+        #[cfg(target_os = "linux")]
+        let result = super::super::landlock::LandlockBackend::prepare(
+            &policy,
+            &CanonPath::new(scratch.path()),
+            &[],
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("multiply-linked config admitted"),
+        };
         assert!(error.to_string().contains("hardlink"), "{error}");
         assert_eq!(std::fs::read(config).unwrap(), b"mode = 'default'\n");
     }

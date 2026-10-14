@@ -673,9 +673,9 @@ fn question_prompt(request: &QuestionRequest) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     if options.is_empty() {
-        format!("{} ", request.prompt)
+        format!("{}\n> ", request.prompt)
     } else {
-        format!("{} [{}] ", request.prompt, options)
+        format!("{} [{}]\n> ", request.prompt, options)
     }
 }
 
@@ -1519,6 +1519,81 @@ impl Prompt for Question {
 
     fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
         Cow::Owned(format!("(search: {}) ", search.term))
+    }
+}
+
+#[cfg(test)]
+mod ask_user_render_tests {
+    use super::*;
+
+    #[test]
+    fn ask_user_answer_does_not_share_the_last_question_row() {
+        let long_question = format!(
+            "Provide Verification connection: {}Do not send passwords or tokens.",
+            "Describe the verification connection and its public configuration. ".repeat(4)
+        );
+        let cases = [
+            QuestionRequest::new("Which connection?", QuestionMode::FreeText, vec![], true),
+            QuestionRequest::new(long_question, QuestionMode::FreeText, vec![], true),
+            QuestionRequest::new(
+                "Provide connection details.\nDo not send passwords or tokens.",
+                QuestionMode::FreeText,
+                vec![],
+                true,
+            ),
+            QuestionRequest::new(
+                "Which connection?",
+                QuestionMode::Single,
+                vec![QuestionOption::new("public", "Public connection")],
+                false,
+            ),
+            QuestionRequest::new(
+                "Provide connection JSON.",
+                QuestionMode::Form {
+                    schema: serde_json::json!({"type": "object"}),
+                },
+                vec![],
+                false,
+            ),
+        ];
+        for request in cases {
+            let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+            let prompt = Question::new(question_prompt(&request), status);
+            let rendered = format!(
+                "{}{}typed-answer",
+                prompt.render_prompt_left(),
+                prompt.render_prompt_indicator(PromptEditMode::Emacs),
+            );
+            let mut terminal = vt100::Parser::new(24, 120, 0);
+            terminal.process(rendered.replace('\n', "\r\n").as_bytes());
+            let rows = terminal.screen().rows(0, 120).collect::<Vec<_>>();
+            let answer_row = rows
+                .iter()
+                .position(|row| row.contains("typed-answer"))
+                .expect("the typed answer is visible");
+            assert_eq!(
+                rows[answer_row], "> typed-answer",
+                "answer must occupy its own marked row: {rendered:?}"
+            );
+            let mut question_screen = vt100::Parser::new(24, 120, 0);
+            let question = if request.options.is_empty() {
+                request.prompt.clone()
+            } else {
+                format!("{} [1. Public connection]", request.prompt)
+            };
+            question_screen.process(question.replace('\n', "\r\n").as_bytes());
+            let last_question_row = question_screen.screen().cursor_position().0 as usize;
+            assert_eq!(answer_row, last_question_row + 1);
+            assert_eq!(
+                &rows[..answer_row],
+                &question_screen
+                    .screen()
+                    .rows(0, 120)
+                    .take(answer_row)
+                    .collect::<Vec<_>>(),
+                "the complete question and options must remain above the answer"
+            );
+        }
     }
 }
 
