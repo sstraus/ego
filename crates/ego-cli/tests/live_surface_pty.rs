@@ -8683,3 +8683,49 @@ fn human_input_real_turn_does_not_render_duration_unavailable() {
     let shown = after_turn.join("\n");
     assert!(!shown.contains("duration unavailable"), "{shown}");
 }
+
+// Catches: a managed terminal idles at context pressure until /compact is typed.
+#[test]
+fn context_pressure_compacts_and_continues_without_operator_input() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("PRESSURE", 244796, 4)),
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(text("RECOVERED")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# context recovery fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "RECOVERED");
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 3);
+    let resumed = requests[2].to_string();
+    assert!(resumed.contains("Continue the task."), "{resumed}");
+    assert!(
+        !resumed.contains("PRESSURE"),
+        "old conversation leaked: {resumed}"
+    );
+}

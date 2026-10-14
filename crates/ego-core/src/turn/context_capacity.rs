@@ -10,3 +10,11 @@ pub(super) fn exhausted(context: ContextWindow, window: Option<u64>) -> Option<S
         )
     })
 }
+
+/// A measured threshold, not an estimate of the unsent request's size.
+pub fn compaction_due(context: ContextWindow) -> bool {
+    match (context.used_tokens, context.window) {
+        (Some(used), Some(window)) if window > 0 => u128::from(used) * 10 >= u128::from(window) * 9,
+        _ => false,
+    }
+}

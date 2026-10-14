@@ -84,3 +84,79 @@ fn unknown_and_below_window_context_can_generate() {
         assert_eq!(requests, 1);
     }
 }
+
+// Catches: an opted-in tool turn sends another request after measured pressure.
+#[test]
+fn automatic_context_pressure_yields_before_next_tool_generation() {
+    let trace = GenerationTrace::default();
+    let source = Arc::new(ScriptedGenerationSource::new([
+        Ok(profile_with_settings(
+            "openai/windowed",
+            vec![
+                AiEvent::Usage(tokens(244_796, 0, 0, 4)),
+                AiEvent::ToolCall {
+                    call_id: "pressure-read".into(),
+                    name: "read".into(),
+                    args: r#"{"path":"/ws/notes.md"}"#.into(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            &trace,
+            Some(1024),
+            Some(272_000),
+            ThinkingLevel::Off,
+            false,
+        )),
+        Ok(profile_with_settings(
+            "openai/windowed",
+            vec![AiEvent::Stop(StopReason::Stop)],
+            &trace,
+            Some(1024),
+            Some(272_000),
+            ThinkingLevel::Off,
+            false,
+        )),
+    ]));
+    let fx = Fixture::new(vec![]);
+    let (exit, _, state) = run_scripted_mode(
+        &fx,
+        SessionState::default(),
+        "continue",
+        source,
+        TurnConfig {
+            cache: CacheRetention::Short,
+            system: None,
+            identity: None,
+            token_ceiling: None,
+            retry: 0,
+            fallbacks: vec![],
+        },
+        true,
+    );
+    assert_eq!(exit, ExitReason::ContextOverflow);
+    assert_eq!(trace.requests.lock().unwrap().len(), 1);
+    assert_eq!(state.context.used_tokens, Some(244_800));
+    assert!(state.live_attempts.is_empty());
+}
+
+// Catches: rounding, overflow, or unknown occupancy inventing a pressure trigger.
+#[test]
+fn compaction_pressure_uses_only_measured_ninety_percent_boundary() {
+    for (used, window, expected) in [
+        (None, Some(272_000), false),
+        (Some(244_799), Some(272_000), false),
+        (Some(244_800), Some(272_000), true),
+        (Some(272_000), Some(272_000), true),
+        (Some(u64::MAX), Some(u64::MAX), true),
+        (Some(1), Some(0), false),
+    ] {
+        assert_eq!(
+            ego_core::turn::compaction_due(ContextWindow {
+                used_tokens: used,
+                window,
+                provenance: None,
+            }),
+            expected
+        );
+    }
+}

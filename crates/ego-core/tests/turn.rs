@@ -6904,6 +6904,17 @@ mod turn {
             source: Arc<ScriptedGenerationSource>,
             config: TurnConfig,
         ) -> (ExitReason, bool, SessionState) {
+            run_scripted_mode(fx, state, prompt, source, config, false)
+        }
+
+        fn run_scripted_mode(
+            fx: &Fixture,
+            state: SessionState,
+            prompt: &str,
+            source: Arc<ScriptedGenerationSource>,
+            config: TurnConfig,
+            automatic: bool,
+        ) -> (ExitReason, bool, SessionState) {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
@@ -6930,6 +6941,9 @@ mod turn {
                 },
                 tools,
             );
+            if automatic {
+                turn = turn.with_automatic_compaction();
+            }
             let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
             (
                 outcome.exit_reason,
