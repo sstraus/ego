@@ -448,27 +448,6 @@ mod credential_keys {
             .unwrap();
         assert!(found.starts_with("no line under"), "{found}");
     }
-
-    // Catches: exec bypasses key-only reads via a re-allowed path or its symlink.
-    #[test]
-    fn exec_refuses_declared_credential_paths_including_symlinks_and_background() {
-        let ws = workspace();
-        let file = ws.file(".env", "TOKEN=secret\n");
-        std::os::unix::fs::symlink(&file, ws.root.join("alias")).unwrap();
-        for path in [".env", "alias"] {
-            for background in [false, true] {
-                let error = ws
-                    .call(
-                        "exec",
-                        json!({"argv": ["cat", path], "background": background}),
-                    )
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains("protected credential"), "{error}");
-                assert!(error.contains("read"), "{error}");
-            }
-        }
-    }
 }
 
 mod registration {

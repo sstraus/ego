@@ -49,7 +49,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -s f -l file -d 'Read the i
 complete -c ego -n "__fish_ego_using_subcommand run" -l var -d 'Supply one declared agent-file template variable' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
-complete -c ego -n "__fish_ego_using_subcommand run" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
@@ -92,7 +92,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -s f -l file -d 'Read th
 complete -c ego -n "__fish_ego_using_subcommand resume" -l var -d 'Supply one declared agent-file template variable' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
-complete -c ego -n "__fish_ego_using_subcommand resume" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
@@ -135,7 +135,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -s f -l file -d 'Read 
 complete -c ego -n "__fish_ego_using_subcommand continue" -l var -d 'Supply one declared agent-file template variable' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
-complete -c ego -n "__fish_ego_using_subcommand continue" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
@@ -220,7 +220,7 @@ complete -c ego -n "__fish_ego_using_subcommand doctor" -l json -d 'Emit the exa
 complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -s C -d 'Run as if started in DIR' -r -F
-complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|adaptive|off' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
@@ -239,7 +239,7 @@ complete -c ego -n "__fish_ego_using_subcommand acp" -l allow-public-bind -d 'Se
 complete -c ego -n "__fish_ego_using_subcommand acp" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand a2a" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand a2a" -s C -d 'Run as if started in DIR' -r -F
-complete -c ego -n "__fish_ego_using_subcommand a2a" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|adaptive|off' -r
+complete -c ego -n "__fish_ego_using_subcommand a2a" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand a2a" -l listen -d 'Where to serve: a socket path, or an address such as `127.0.0.1:8080`' -r
 complete -c ego -n "__fish_ego_using_subcommand a2a" -l allow-public-bind -d 'Serve on an address reachable from outside this machine'
 complete -c ego -n "__fish_ego_using_subcommand a2a" -s h -l help -d 'Print help (see more with \'--help\')'

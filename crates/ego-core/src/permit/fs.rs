@@ -490,9 +490,6 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         input: &'b [u8],
         scope: EffectScope,
     ) -> BoxFuture<'b, Result<ToolResult, ProcessError>> {
-        if let Err(error) = self.refuse_credential_exec(spec) {
-            return Box::pin(future::ready(Err(error)));
-        }
         if let Err(denied) = self.permit.allows_spawn(spec) {
             return Box::pin(future::ready(Err(ProcessError::Invariant(
                 denied.to_string(),
@@ -694,31 +691,6 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         }
     }
 
-    fn refuse_credential_exec(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
-        let Some(cwd) = spec.cwd() else {
-            return Ok(());
-        };
-        for arg in spec.argv() {
-            let named = Path::new(arg);
-            let joined = if named.is_absolute() {
-                named.to_path_buf()
-            } else {
-                cwd.as_path().join(named)
-            };
-            let canonical = self.fs.canonicalize(&joined).ok();
-            if crate::config::Ruleset::is_credential_path(&CanonPath::new(&joined))
-                || canonical
-                    .as_ref()
-                    .is_some_and(crate::config::Ruleset::is_credential_path)
-            {
-                return Err(ProcessError::Invariant(
-                    "exec cannot access a protected credential file; use read or grep to inspect key names".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     /// Check every entry a traversal yielded, and fail the whole operation if
     /// any of them left the authorised subtree.
     ///
@@ -877,9 +849,6 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
     }
 
     fn exec<'a>(&'a self, spec: &'a SpawnSpec) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
-        if let Err(error) = self.refuse_credential_exec(spec) {
-            return Box::pin(future::ready(Err(error)));
-        }
         if let Err(denied) = self.permit.allows_spawn(spec) {
             return Box::pin(future::ready(Err(ProcessError::Invariant(
                 denied.to_string(),
@@ -893,9 +862,6 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
         id: DetachedExecId,
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<(), ProcessError>> {
-        if let Err(error) = self.refuse_credential_exec(spec) {
-            return Box::pin(future::ready(Err(error)));
-        }
         if let Err(denied) = self.permit.allows_spawn(spec) {
             return Box::pin(future::ready(Err(ProcessError::Invariant(
                 denied.to_string(),
