@@ -40,6 +40,41 @@ use null::NullBackend;
 
 pub use crate::store::SessionEvidenceStore;
 pub use adaptive::admit_confinement;
+
+/// Conservative setup write preview. This never constructs or launches a backend.
+/// Directory reach that overlaps operator configuration is not proposed, even on
+/// subtractive backends; Linux cannot subtract it at all.
+pub fn setup_write_root_safe(
+    directory: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<bool, ProcessError> {
+    let protected = user_config::capture()?;
+    if protected
+        .iter()
+        .any(|path| path.starts_with(directory) || directory.starts_with(path))
+    {
+        return Ok(false);
+    }
+    if ["/System", "/Library", "/usr", "/bin", "/sbin", "/etc"]
+        .iter()
+        .any(|path| directory.starts_with(path))
+    {
+        return Ok(false);
+    }
+    // Setup cannot turn a control-file need into persistent directory authority.
+    for component in target.components() {
+        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            ".git" | ".codex" | ".claude" | "agents.md" | "claude.md"
+        ) {
+            return Ok(false);
+        }
+    }
+    Ok(!ego_core::config::Ruleset::is_credential_path(
+        &CanonPath::new(target),
+    ))
+}
 pub use editor_process::{EditorProcessError, run_editor_process};
 pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]

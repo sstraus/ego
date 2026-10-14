@@ -1,4 +1,4 @@
-//! Deterministic read-root proposals, resolved through the real configuration layers.
+//! Deterministic read/write-root proposals, resolved through the real configuration layers.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub(crate) struct Preview {
     pub batch: Box<dyn UserConfigBatch>,
     pub items: Vec<usize>,
     pub paths: Vec<std::path::PathBuf>,
+    pub writes: Vec<bool>,
     pub target: UserConfigTarget,
     pub layers: Vec<Sourced<ConfigLayer>>,
     pub identities: Vec<String>,
@@ -39,7 +40,23 @@ fn root_changes(target: &UserConfigTarget, roots: &[RootCfg]) -> Vec<UserConfigM
         .collect()
 }
 
+#[cfg(test)]
 fn read_admitted(effective: &Effective, workspace: &CanonPath, path: &CanonPath) -> bool {
+    operation_admitted(effective, workspace, path, false)
+}
+
+fn operation_admitted(
+    effective: &Effective,
+    workspace: &CanonPath,
+    path: &CanonPath,
+    write: bool,
+) -> bool {
+    if write && effective.sandbox != Some(ego_core::permit::Confinement::Workspace) {
+        return false;
+    }
+    if write && ego_core::config::Ruleset::is_credential_path(path) {
+        return false;
+    }
     let Ok(roots) = crate::run::profile_roots::admit(effective, workspace) else {
         return false;
     };
@@ -49,7 +66,15 @@ fn read_admitted(effective: &Effective, workspace: &CanonPath, path: &CanonPath)
         effective.permissions.clone(),
     )
     .with_profile_roots(roots);
-    match policy.classify(PreparedCall::new("read", Op::Read { path: path.clone() })) {
+    let op = if write {
+        Op::Write {
+            path: path.clone(),
+            change: ego_core::permit::Change::Whole(Vec::new()),
+        }
+    } else {
+        Op::Read { path: path.clone() }
+    };
+    match policy.classify(PreparedCall::new(if write { "write" } else { "read" }, op)) {
         Classification::Settled(Ok(_)) => true,
         Classification::Ask(pending) => matches!(
             futures::executor::block_on(policy.settle(pending)),
@@ -82,7 +107,7 @@ fn resolve_candidate(
 }
 
 /// No model-selected TOML, rule wildcard, mode, sandbox, trust or network change.
-/// This initial mapper proposes only read reach. Other consumer gaps remain explicit.
+/// Workspace writes are policy-only; other backend/consumer gaps remain explicit.
 pub(crate) fn preview(
     layers: &[Sourced<ConfigLayer>],
     effective: &Effective,
@@ -122,13 +147,19 @@ pub(crate) fn preview(
     }
     let mut items = Vec::new();
     let mut paths = Vec::new();
+    let mut writes = Vec::new();
     for finding in findings {
         if !matches!(finding.status, Status::Blocked) {
             continue;
         }
         if !matches!(
             probes.get(finding.id),
-            Some(Probe::Read { .. } | Probe::Instructions { .. } | Probe::Git { .. })
+            Some(
+                Probe::Read { .. }
+                    | Probe::Instructions { .. }
+                    | Probe::Git { .. }
+                    | Probe::Write { .. }
+            )
         ) {
             continue;
         }
@@ -145,12 +176,30 @@ pub(crate) fn preview(
         {
             continue;
         }
+        let write = matches!(probes.get(finding.id), Some(Probe::Write { .. }));
+        if write
+            && (effective.sandbox != Some(ego_core::permit::Confinement::Workspace)
+                || !ego_tools::exec::setup_write_root_safe(directory, path).unwrap_or(false))
+        {
+            continue;
+        }
         let root = RootCfg {
             path: directory.to_path_buf(),
-            access: RootAccess::Read,
+            access: if write {
+                RootAccess::ReadWrite
+            } else {
+                RootAccess::Read
+            },
         };
         let mut proposed = roots.clone();
-        if !proposed.contains(&root) {
+        if let Some(existing) = proposed
+            .iter_mut()
+            .find(|existing| existing.path == root.path)
+        {
+            if write {
+                existing.access = RootAccess::ReadWrite;
+            }
+        } else {
             proposed.push(root);
         }
         let batch = store
@@ -168,19 +217,21 @@ pub(crate) fn preview(
         {
             continue;
         }
-        if !effective
-            .roots
-            .iter()
-            .all(|root| after.roots.contains(root))
-        {
+        if !effective.roots.iter().all(|root| {
+            after.roots.iter().any(|new| {
+                new.path == root.path
+                    && (new.access == root.access || new.access == RootAccess::ReadWrite)
+            })
+        }) {
             continue;
         }
-        if !read_admitted(&after, workspace, &CanonPath::new(path)) {
+        if !operation_admitted(&after, workspace, &CanonPath::new(path), write) {
             continue;
         }
         roots = proposed;
         items.push(finding.id);
         paths.push(finding.requested.clone());
+        writes.push(write);
     }
     if items.is_empty() {
         return Ok(None);
@@ -191,7 +242,8 @@ pub(crate) fn preview(
     let after = resolve_candidate(layers, batch.candidate(), workspace)?;
     if paths
         .iter()
-        .any(|path| !read_admitted(&after, workspace, &CanonPath::new(path)))
+        .zip(&writes)
+        .any(|(path, write)| !operation_admitted(&after, workspace, &CanonPath::new(path), *write))
     {
         return Err("combined setup proposal is ineffective".into());
     }
@@ -203,6 +255,7 @@ pub(crate) fn preview(
         batch,
         items,
         paths,
+        writes,
         target,
         layers: layers.to_vec(),
         identities,
@@ -235,7 +288,7 @@ pub(crate) fn confirm_apply(
     let base = format!("{:x}", Sha256::digest(preview.batch.before().as_bytes()));
     let candidate = format!("{:x}", Sha256::digest(preview.batch.candidate().as_bytes()));
     let question = format!(
-        "Setup {setup_id}: items {:?}, target {:?}\nRead-directory exposure includes siblings/descendants. Stored roots {:?} -> {:?}\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
+        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
         preview.items, preview.target, preview.stored_before, preview.stored_after, preview.paths
     );
     if !confirm(question) {
@@ -273,6 +326,7 @@ pub(crate) fn confirm_apply(
     let store =
         OsUserConfigStore::new(Arc::new(OsIo) as Arc<dyn StoreIo>, home.join("config.toml"));
     let paths = preview.paths.clone();
+    let writes = preview.writes.clone();
     let result = store
         .publish_batch_checked(preview.batch, &check)
         .map_err(|error| crate::cli::UsageError(error.to_string()))?;
@@ -291,10 +345,10 @@ pub(crate) fn confirm_apply(
         "Setup publication: {:?}; resume before using changed authority.\n",
         result.publication
     );
-    for path in paths {
+    for (path, write) in paths.into_iter().zip(writes) {
         let status = if path_identity(&path).is_err() {
             "unknown"
-        } else if read_admitted(&effective, workspace, &CanonPath::new(&path)) {
+        } else if operation_admitted(&effective, workspace, &CanonPath::new(&path), write) {
             "fixed (policy-only)"
         } else {
             "still blocked"
@@ -493,6 +547,94 @@ mod tests {
         let after = resolve_candidate(&layers, result.batch.candidate(), &workspace).unwrap();
         assert_eq!(after.permissions, effective.permissions);
     }
+    // Catches: the mapper omits effective Workspace writes or offers them under Ro.
+    #[test]
+    fn setup_write_preview_requires_workspace_and_preserves_unrelated_policy() {
+        let (_temp, workspace, home, layers, effective, mut probes, findings) = fixture(
+            "sandbox='workspace'\nmode='edits'\n[permissions]\ndeny=['write(/unrelated/**)']\n",
+        );
+        probes[0] = Probe::Write {
+            path: findings[0].requested.clone(),
+            reason: "expected output".into(),
+        };
+        let proposed = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &findings,
+        )
+        .unwrap()
+        .expect("effective Workspace write proposal is missing");
+        assert_eq!(proposed.stored_after[0].access, RootAccess::ReadWrite);
+        let after = resolve_candidate(&layers, proposed.batch.candidate(), &workspace).unwrap();
+        assert_eq!(after.permissions, effective.permissions);
+        assert_eq!(after.sandbox, effective.sandbox);
+        assert_eq!(
+            std::fs::read_to_string(&findings[0].requested).unwrap(),
+            "task evidence"
+        );
+        let default = ConfigLayer::parse(Source::User, "roots=[]\nsandbox='workspace'").unwrap();
+        let default_effective =
+            resolve_selected(std::slice::from_ref(&default), Trust::Untrusted, None).unwrap();
+        assert!(
+            preview(
+                &[default],
+                &default_effective,
+                &workspace,
+                &home,
+                None,
+                &probes,
+                &findings
+            )
+            .unwrap()
+            .is_none(),
+            "reach alone cannot resolve a write approval"
+        );
+        let ro = ConfigLayer::parse(Source::User, "roots=[]\nsandbox='ro'").unwrap();
+        let ro_effective =
+            resolve_selected(std::slice::from_ref(&ro), Trust::Untrusted, None).unwrap();
+        assert!(
+            preview(
+                &[ro],
+                &ro_effective,
+                &workspace,
+                &home,
+                None,
+                &probes,
+                &findings
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    // Catches: a write root bypasses explicit denies or exposes instruction controls.
+    #[test]
+    fn setup_write_preview_refuses_denies_and_control_targets() {
+        for extra in [
+            "sandbox='workspace'\n[permissions]\ndeny=['write(/**)']",
+            "sandbox='workspace'",
+        ] {
+            let (_temp, workspace, home, layers, effective, mut probes, mut findings) =
+                fixture(extra);
+            if !extra.contains("deny") {
+                let path = findings[0].requested.parent().unwrap().join("AGENTS.md");
+                std::fs::write(&path, "control").unwrap();
+                findings[0].requested = path.clone();
+                findings[0].canonical = Some(path);
+            }
+            probes[0] = Probe::Write {
+                path: findings[0].requested.clone(),
+                reason: "expected output".into(),
+            };
+            assert!(
+                preview(
+                    &layers, &effective, &workspace, &home, None, &probes, &findings
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+        }
+    }
+
     // Catches: declined or replayed confirmation writes transaction artifacts.
     #[test]
     fn setup_decline_drops_candidate_without_config_or_lock_writes() {

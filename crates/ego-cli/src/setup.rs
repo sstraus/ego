@@ -97,7 +97,7 @@ pub(crate) async fn observed_host(
             &findings,
         ) {
             Ok(Some(preview)) => {
-                rendered.push_str(&format!("Proposed read roots for items {:?}; target {:?}; exposure includes directory siblings and descendants.\nPaths: {:?}\nStored before:\n{}\nStored candidate:\n{}\nEffective result: selected reads admitted; no permission/mode/sandbox/network change.\n", preview.items, preview.target, preview.paths, format_args!("roots = {:?}; document {} bytes", preview.stored_before, preview.batch.before().len()), format_args!("roots = {:?}; document {} bytes", preview.stored_after, preview.batch.candidate().len())));
+                rendered.push_str(&format!("Proposed roots for items {:?}; target {:?}; exposure includes directory siblings and descendants.\nPaths: {:?}\nStored before:\n{}\nStored candidate:\n{}\nEffective result: selected operations admitted (writes policy-only); no permission/mode/sandbox/network change.\n", preview.items, preview.target, preview.paths, format_args!("roots = {:?}; document {} bytes", preview.stored_before, preview.batch.before().len()), format_args!("roots = {:?}; document {} bytes", preview.stored_after, preview.batch.candidate().len())));
                 if let Some(confirm) = confirmation {
                     rendered.push_str(&crate::setup_proposals::confirm_apply(
                         preview, &workspace, home, confirm,
