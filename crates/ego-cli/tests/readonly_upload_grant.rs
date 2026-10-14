@@ -74,8 +74,13 @@ fn grant_is_read_only() {
         .last()
         .unwrap()
         .to_string();
+    let refusal = if cfg!(target_os = "macos") {
+        "sandbox denied exec"
+    } else {
+        "error"
+    };
     assert!(
-        exec_result.contains("error"),
+        exec_result.contains(refusal),
         "exec must return a refusal: {exec_result}"
     );
 }
