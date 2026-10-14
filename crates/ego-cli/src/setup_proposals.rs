@@ -496,4 +496,57 @@ mod tests {
         );
         assert_eq!(std::fs::read_dir(home).unwrap().count(), 1);
     }
+    // Catches: a confirmed diff survives replacement of the bound filesystem item.
+    #[test]
+    fn setup_confirmed_path_change_invalidates_publication() {
+        let (_temp, workspace, home, layers, effective, probes, findings) = fixture("");
+        let preview = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &findings,
+        )
+        .unwrap()
+        .unwrap();
+        let path = findings[0].requested.clone();
+        let result = confirm_apply(preview, &workspace, &home, &|_| {
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(&path, "changed identity and bytes").unwrap();
+            true
+        });
+        assert!(result.unwrap_err().to_string().contains("path changed"));
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "roots=[]\n"
+        );
+    }
+
+    // Catches: an accepted batch mutates captured run policy rather than fresh admission only.
+    #[test]
+    fn setup_confirmed_publication_reprobes_without_widening_captured_policy() {
+        let (_temp, workspace, home, layers, effective, probes, findings) = fixture("");
+        let policy = PolicyEngine::new(
+            workspace.clone(),
+            ego_core::config::Mode::Default,
+            effective.permissions.clone(),
+        );
+        let preview = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &findings,
+        )
+        .unwrap()
+        .unwrap();
+        let report = confirm_apply(preview, &workspace, &home, &|_| true).unwrap();
+        assert!(report.contains("fixed (policy-only)"), "{report}");
+        assert!(matches!(
+            policy.classify(PreparedCall::new(
+                "read",
+                Op::Read {
+                    path: CanonPath::new(&findings[0].requested)
+                }
+            )),
+            Classification::Settled(Err(_))
+        ));
+        assert!(
+            std::fs::read_to_string(home.join("config.toml"))
+                .unwrap()
+                .contains("read")
+        );
+    }
 }
