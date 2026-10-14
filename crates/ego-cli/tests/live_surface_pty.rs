@@ -8729,3 +8729,166 @@ fn context_pressure_compacts_and_continues_without_operator_input() {
         "old conversation leaked: {resumed}"
     );
 }
+
+// Catches: a wake accepted during checkpoint generation leaves source work
+// pending forever instead of being delivered after automatic compaction.
+#[test]
+fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("REGRESSION-MARKER", 244796, 4)),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: text(checkpoint),
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# queued compaction fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 2 {
+        assert!(Instant::now() < deadline, "checkpoint did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let wake_start = output.len();
+    input.write_all(b"REGRESSION-MARKER").unwrap();
+    input.flush().unwrap();
+    // Observe the buffer before Enter: closed busy admission clears it when
+    // handing the submitted line back to the driver for the successor.
+    until_normalized(&reader, &mut output, wake_start, "REGRESSION-MARKER");
+    input.write_all(b"\r").unwrap();
+    input.flush().unwrap();
+    drain_until_quiet(&reader, &mut output);
+    gate.release();
+    until_normalized(&reader, &mut output, wake_start, "compacted session");
+    until_normalized(&reader, &mut output, wake_start, "REGRESSION-MARKER");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !stub
+        .generations()
+        .iter()
+        .skip(2)
+        .any(|request| request.to_string().contains("REGRESSION-MARKER"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "wake was not delivered to successor"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let requests = stub.generations();
+    let delivered: Vec<_> = requests
+        .iter()
+        .skip(2)
+        .filter(|request| request.to_string().contains("REGRESSION-MARKER"))
+        .collect();
+    assert_eq!(delivered.len(), 1, "wake must be delivered exactly once");
+    assert!(!delivered[0].to_string().contains("REGRESSION-MARKER"));
+    assert!(!normalized(&output).contains("new source work became pending"));
+}
+
+// Catches: closing prompt admission also rejects Ctrl-C for an active checkpoint.
+#[test]
+fn context_pressure_compaction_still_accepts_operator_cancellation() {
+    context_pressure_compaction_cancellation(b"\x03");
+}
+
+// Catches: the checkpoint prompt barrier rejects Esc instead of cancelling.
+#[test]
+fn context_pressure_compaction_still_accepts_escape_cancellation() {
+    context_pressure_compaction_cancellation(b"\x1b");
+}
+
+fn context_pressure_compaction_cancellation(interrupt: &[u8]) {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("REGRESSION-MARKER", 244796, 4)),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: text(checkpoint),
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# compaction cancellation fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 2 {
+        assert!(Instant::now() < deadline, "checkpoint did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drain_until_quiet(&reader, &mut output);
+    let cancel_start = output.len();
+    input.write_all(interrupt).unwrap();
+    input.flush().unwrap();
+    // Wait for settlement, not a quiet repaint interval: Esc has no notice
+    // and the checkpoint task can settle after the terminal becomes quiet.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !normalized(&output[cancel_start..]).contains("compaction was cancelled by User") {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match reader.recv_timeout(remaining) {
+            Ok(bytes) => output.extend(bytes),
+            Err(_) => break,
+        }
+    }
+    let cancellation_output = normalized(&output[cancel_start..]);
+    // Release the HTTP fixture even on a regression so teardown cannot hang.
+    gate.release();
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert!(
+        cancellation_output.contains("compaction was cancelled by User"),
+        "operator interrupt must cancel checkpoint preparation, not reject it: {cancellation_output}"
+    );
+}

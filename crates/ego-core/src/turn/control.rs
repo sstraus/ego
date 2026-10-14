@@ -131,9 +131,8 @@ impl InteractiveIngress {
     pub async fn interrupt(&self) -> Result<QueueStatus, ControlError> {
         let (reply, answer) = oneshot::channel();
         let mut sender = self.sender.lock().await;
-        if !self.admission.open.load(Ordering::Acquire) {
-            return Err(ControlError::Closed);
-        }
+        // Prompt admission can close while checkpoint generation is active.
+        // Cancellation remains owned by the receiver until it is dropped.
         sender
             .send(ControlIntent::Interrupt { reply })
             .await
