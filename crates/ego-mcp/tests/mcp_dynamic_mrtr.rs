@@ -84,6 +84,44 @@ fn collapsed_bootstrap_withholds_dispatch_until_exact_schema_lookup() {
     assert!(successor.tool_names().any(|name| name == "weather"));
 }
 
+// Catches: optional MCP Tool metadata rejects an otherwise callable collapsed tool.
+#[test]
+fn collapsed_schema_with_annotations_and_optional_tool_fields_is_admitted() {
+    let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
+    for metadata in [
+        json!({"annotations":{"readOnlyHint":true}}),
+        json!({"title":"Weather"}),
+        json!({"outputSchema":{"type":"object"}}),
+        json!({"_meta":{"example.com/source":"weather"}}),
+        json!({
+            "annotations":{"readOnlyHint":true,"destructiveHint":false},
+            "title":"Weather",
+            "outputSchema":{"type":"object"},
+            "_meta":{"example.com/source":"weather"}
+        }),
+    ] {
+        let mut definition = json!({
+            "name":"weather",
+            "description":"Current weather",
+            "inputSchema":{"type":"object"}
+        });
+        definition
+            .as_object_mut()
+            .expect("definition")
+            .extend(metadata.as_object().expect("metadata").clone());
+        let catalogue = McpCollapsedCatalogue::from_schema_response(
+            bootstrap,
+            "weather",
+            json!({"structuredContent":definition}),
+        )
+        .expect("optional MCP Tool fields do not prevent admission");
+        assert_eq!(
+            catalogue.tool_names().collect::<Vec<_>>(),
+            ["call_tool", "weather"]
+        );
+    }
+}
+
 #[test]
 fn collapsed_bootstrap_rejects_retired_alias_families_and_invalid_schema_results() {
     for names in [
@@ -105,6 +143,62 @@ fn collapsed_bootstrap_rejects_retired_alias_families_and_invalid_schema_results
         json!({"structuredContent":{"name":"weather","description":"duplicate","inputSchema":{"type":7}}}),
     ] {
         assert!(McpCollapsedCatalogue::from_schema_response(bootstrap, "weather", result).is_err());
+    }
+}
+
+// Catches: accepting metadata accidentally bypasses required fields or schema validation.
+#[test]
+fn collapsed_schema_with_metadata_still_rejects_malformed_required_fields() {
+    let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
+    let valid = json!({
+        "name":"weather",
+        "description":"Current weather",
+        "inputSchema":{"type":"object"},
+        "annotations":{"readOnlyHint":true}
+    });
+    for field in ["name", "description", "inputSchema"] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().expect("definition").remove(field);
+        assert!(
+            McpCollapsedCatalogue::from_schema_response(
+                bootstrap,
+                "weather",
+                json!({"structuredContent":missing}),
+            )
+            .is_err(),
+            "missing {field}"
+        );
+        for malformed in [json!(null), json!(7), json!([])] {
+            let mut definition = valid.clone();
+            definition[field] = malformed;
+            assert!(
+                McpCollapsedCatalogue::from_schema_response(
+                    bootstrap,
+                    "weather",
+                    json!({"structuredContent":definition}),
+                )
+                .is_err(),
+                "malformed {field}"
+            );
+        }
+    }
+    for (field, value) in [
+        ("name", json!("other")),
+        ("name", json!("")),
+        ("inputSchema", json!({"type":7})),
+        ("extra", json!(true)),
+    ] {
+        let mut definition = valid.clone();
+        definition[field] = value;
+        assert!(
+            McpCollapsedCatalogue::from_schema_response(
+                bootstrap,
+                "weather",
+                json!({"structuredContent":definition}),
+            )
+            .is_err(),
+            "invalid {field}"
+        );
     }
 }
 
