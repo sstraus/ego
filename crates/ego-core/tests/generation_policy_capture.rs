@@ -853,3 +853,49 @@ fn analysis_identity_ignores_only_the_session_read_pin_and_keeps_live_boundaries
         );
     }
 }
+
+// Catches: restored generations lose sandbox read reach or captured credential exclusions.
+#[test]
+fn restored_read_perimeter_keeps_broad_reads_and_credential_exclusions() {
+    use ego_core::permit::{AdaptivePerimeter, Confinement, ReadPerimeter, RunConfinement};
+    for level in [Confinement::Off, Confinement::Adaptive] {
+        let confinement = RunConfinement::new(level, false, CanonPath::new(WORKSPACE))
+            .unwrap()
+            .with_adaptive_perimeter(AdaptivePerimeter {
+                home: CanonPath::new("/home/operator"),
+                writable: vec![],
+                credentials: vec![CanonPath::new("/captured/private")],
+                controls: vec![],
+            });
+        let base = capture(Mode::Yolo, Ruleset::default());
+        let broad = capture(Mode::Yolo, Ruleset::default())
+            .with_read_perimeter(ReadPerimeter::from_confinement(&confinement))
+            .unwrap();
+        assert_ne!(base.snapshot().digest(), broad.snapshot().digest());
+        let encoded = broad.snapshot().encode_confidential();
+        let decoded = GenerationPolicySnapshot::decode_confidential(&encoded).unwrap();
+        let restored = GenerationPolicyCapture::restore(Arc::new(decoded), None).unwrap();
+        for path in [
+            "/sibling/public.txt",
+            "/sibling/.env.synthetic",
+            "/captured/private/data",
+        ] {
+            let result = restored.policy().classify(PreparedCall::new(
+                "read",
+                Op::Read {
+                    path: CanonPath::new(path),
+                },
+            ));
+            let allowed = path == "/sibling/public.txt"
+                || (level == Confinement::Off && path == "/captured/private/data");
+            let admitted = match result {
+                Classification::Ask(pending) => matches!(
+                    futures::executor::block_on(restored.policy().settle(pending)),
+                    ego_core::permit::Resolution::Settled(Ok(_))
+                ),
+                Classification::Settled(result) => result.is_ok(),
+            };
+            assert_eq!(admitted, allowed, "{level:?}: {path}");
+        }
+    }
+}

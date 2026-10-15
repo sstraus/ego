@@ -289,6 +289,9 @@ impl Walk<'_> {
         }
         names.sort();
 
+        // Visit files before entering sibling directories: a large early
+        // subtree must not spend the scan or search budget before root files.
+        let mut directories = Vec::new();
         for name in names {
             if self.entries.len() >= self.req.limits.max_entries {
                 self.truncated = true;
@@ -311,7 +314,7 @@ impl Walk<'_> {
             if meta.is_symlink() {
                 self.link(child, &at);
             } else if meta.is_dir() {
-                self.directory(child, &at, &name, depth);
+                directories.push((child, at, name));
             } else if meta.is_file() {
                 self.entries.push(Entry {
                     relative: child,
@@ -322,6 +325,13 @@ impl Walk<'_> {
             // A socket, fifo or device is neither a file to read nor a
             // directory to walk, and reporting one as either would be a lie
             // about what the next operation can do with it.
+        }
+        for (child, at, name) in directories {
+            if self.entries.len() >= self.req.limits.max_entries {
+                self.truncated = true;
+                return Ok(());
+            }
+            self.directory(child, &at, &name, depth);
         }
         Ok(())
     }

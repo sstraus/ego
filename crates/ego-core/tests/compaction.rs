@@ -900,6 +900,74 @@ fn prepared_baseline(prepared: &PreparedCompaction) -> &GenRequest {
     prepared.baseline()
 }
 
+// Catches: a submission racing automatic compaction is accepted after the
+// checkpoint snapshot, leaving source work that prevents target publication.
+#[test]
+fn compaction_drains_raced_prompt_before_capturing_source_history() {
+    let (compact_profile, generator) = compaction_profile(
+        "compaction-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (main_profile, _) = compaction_profile(
+        "main-model",
+        ThinkingLevel::Low,
+        8_192,
+        512,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact_profile)),
+        (GenerationRole::Main, Ok(main_profile)),
+    ]);
+    let (turn, store, _) = compaction_turn(source);
+    let (ingress, mut control) = ego_core::turn::interactive_control();
+    let mut turn = turn.with_interactive_control(&mut control);
+    let (accepted, prepared) = futures::executor::block_on(async {
+        futures::join!(
+            ingress.submit("REGRESSION-MARKER".to_owned()),
+            turn.prepare_compaction(None, Vec::new()),
+        )
+    });
+    accepted.expect("pre-barrier submission remains durable");
+    let prepared = prepared.expect("raced input must not block compaction");
+    let state = SessionState::replay(store.events());
+    assert!(
+        state.unacknowledged_prompts().is_empty(),
+        "accepted input must be included before publication"
+    );
+    let request = serde_json::to_string(&generator.calls()[0]).unwrap();
+    assert!(
+        request.contains("REGRESSION-MARKER"),
+        "checkpoint omitted raced work: {request}"
+    );
+    let acknowledged = store
+        .events()
+        .into_iter()
+        .find(|event| {
+            matches!(
+                &event.kind, EventKind::UserPrompt { text, queued_prompt: Some(_), .. }
+                if text == "REGRESSION-MARKER"
+            )
+        })
+        .expect("source acknowledgement");
+    assert!(acknowledged.env.seq <= prepared.source_seq());
+    assert!(
+        matches!(
+            futures::executor::block_on(ingress.submit("LATE-WORK".into())),
+            Err(ego_core::turn::ControlError::Closed)
+        ),
+        "later input must stay owned by the terminal for the successor"
+    );
+}
+
 #[test]
 fn prepare_compaction_captures_prefix_and_keeps_compaction_text_private() {
     let (compact_profile, compaction_generator) = compaction_profile(

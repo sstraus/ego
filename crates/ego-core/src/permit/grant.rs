@@ -66,6 +66,7 @@ struct Sealed(());
 #[derive(Debug)]
 pub struct Permit {
     scope: Scope,
+    read_perimeter: super::ReadPerimeter,
     call_fingerprint: Option<[u8; 32]>,
     _sealed: Sealed,
 }
@@ -187,6 +188,9 @@ impl Permit {
 
     /// Checks a read against [`Scope::read_paths`].
     pub fn allows_read(&self, path: &CanonPath) -> Result<(), PermitDenied> {
+        if self.read_perimeter.refuses(path) {
+            return Err(PermitDenied::Read { path: path.clone() });
+        }
         Self::allows(&self.scope.read_paths, path, |path| PermitDenied::Read {
             path,
         })
@@ -199,6 +203,9 @@ impl Permit {
     /// be enumerated, and inferring one from the other is how least privilege
     /// quietly stops being enforced.
     pub fn allows_list(&self, path: &CanonPath) -> Result<(), PermitDenied> {
+        if self.read_perimeter.refuses(path) {
+            return Err(PermitDenied::List { path: path.clone() });
+        }
         Self::allows(&self.scope.list_paths, path, |path| PermitDenied::List {
             path,
         })
@@ -206,6 +213,9 @@ impl Permit {
 
     /// Checks a search against [`Scope::search_paths`].
     pub fn allows_search(&self, path: &CanonPath) -> Result<(), PermitDenied> {
+        if self.read_perimeter.refuses(path) {
+            return Err(PermitDenied::Search { path: path.clone() });
+        }
         Self::allows(&self.scope.search_paths, path, |path| {
             PermitDenied::Search { path }
         })
@@ -384,6 +394,7 @@ impl Authorized {
     pub(crate) fn from_verified_resume(call: PreparedCall, by: Authority) -> Self {
         let permit = Permit {
             scope: scope_of(&call),
+            read_perimeter: super::ReadPerimeter::default(),
             call_fingerprint: None,
             _sealed: Sealed(()),
         };
@@ -446,6 +457,11 @@ pub enum PolicyDenied {
     /// operation it was: "you may not read /etc/passwd" and "you may not list
     /// /etc" are different refusals, and a prompt that flattens them into
     /// "denied" teaches a model nothing.
+    ProtectedRead {
+        tool: String,
+        op: OpName,
+        path: CanonPath,
+    },
     OutsideWorkspace {
         tool: String,
         op: OpName,
@@ -537,9 +553,9 @@ impl PolicyDenied {
             },
             PolicyDenied::ModeForbids { mode, .. }
             | PolicyDenied::ModeForbidsSubject { mode, .. } => Authority::Mode { mode: *mode },
-            PolicyDenied::OutsideWorkspace { .. } | PolicyDenied::ReadOnlyRoot { .. } => {
-                Authority::Boundary
-            }
+            PolicyDenied::OutsideWorkspace { .. }
+            | PolicyDenied::ProtectedRead { .. }
+            | PolicyDenied::ReadOnlyRoot { .. } => Authority::Boundary,
             PolicyDenied::Refused { by, .. } | PolicyDenied::RefusedSubject { by, .. } => {
                 by.clone()
             }
@@ -613,6 +629,9 @@ impl fmt::Display for PolicyDenied {
                 "{tool} may not {op} {path}: {mode} mode forbids every \
                  operation that changes anything"
             ),
+            PolicyDenied::ProtectedRead { tool, op, path } => {
+                write!(f, "{tool} may not {op} {path}: protected credential path")
+            }
             PolicyDenied::OutsideWorkspace { tool, op, path } => {
                 write!(f, "{tool} may not {op} {path}: it is outside the workspace")?;
                 // A read the shell could still do under Adaptive: name the
@@ -1129,6 +1148,7 @@ pub struct PolicyEngine {
     /// Extra roots a profile opened, beyond the workspace. Empty for a run
     /// with no profile roots, which keeps the single-boundary behaviour.
     roots: Vec<ProfileRoot>,
+    read_perimeter: super::ReadPerimeter,
     coordinator: bool,
     mode: Mode,
     /// Both lists intact, matched per call. `resolve` no longer subtracts one
@@ -1166,6 +1186,7 @@ impl PolicyEngine {
             approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
             roots: Vec::new(),
+            read_perimeter: super::ReadPerimeter::default(),
             coordinator: false,
             mode,
             allow: permissions.allow,
@@ -1182,6 +1203,14 @@ impl PolicyEngine {
     /// read-write.
     pub fn with_profile_roots(self, roots: Vec<ProfileRoot>) -> Self {
         Self { roots, ..self }
+    }
+
+    /// Pin the read authority derived from the admitted run confinement.
+    pub fn with_read_perimeter(self, read_perimeter: super::ReadPerimeter) -> Self {
+        Self {
+            read_perimeter,
+            ..self
+        }
     }
 
     /// Apply the operator-selected coordinator profile's deterministic risk policy.
@@ -1674,7 +1703,18 @@ impl PolicyEngine {
         if let Some(path) = path
             && !matches!(op, Op::Spawn { .. })
         {
-            match self.reach(path) {
+            let is_read = matches!(op, Op::Read { .. } | Op::List { .. } | Op::Search { .. });
+            if is_read && self.read_perimeter.refuses(path) {
+                return Err(Box::new(PolicyDenied::ProtectedRead {
+                    tool: call.tool().to_owned(),
+                    op: op.name(),
+                    path: path.clone(),
+                }));
+            }
+            match self
+                .reach(path)
+                .or_else(|| (is_read && self.read_perimeter.broad()).then_some(RootAccess::Read))
+            {
                 None => {
                     return Err(Box::new(PolicyDenied::OutsideWorkspace {
                         tool: call.tool().to_owned(),
@@ -1774,6 +1814,7 @@ impl PolicyEngine {
     fn mint(&self, scope: Scope) -> Permit {
         Permit {
             scope,
+            read_perimeter: self.read_perimeter.clone(),
             call_fingerprint: None,
             _sealed: Sealed(()),
         }

@@ -1,17 +1,13 @@
-error[E0451]: fields `scope`, `call_fingerprint` and `_sealed` of struct `ego_core::permit::Permit` are private
-  --> tests/ui/permit_construction_is_private.rs:11:9
+error: cannot construct `ego_core::permit::Permit` with struct literal syntax due to private fields
+  --> tests/ui/permit_construction_is_private.rs:10:13
    |
 10 |     let _ = Permit {
-   |             ------ in this type
+   |             ^^^^^^
 11 |         scope: Scope::default(),
-   |         ^^^^^ private field
+   |         ----------------------- private field
 12 |         call_fingerprint: None,
-   |         ^^^^^^^^^^^^^^^^ private field
+   |         ---------------------- private field
 13 |         _sealed: impossible(),
-   |         ^^^^^^^ private field
-
-error: type `permit::grant::Sealed` is private
-  --> tests/ui/permit_construction_is_private.rs:13:18
+   |         --------------------- private field
    |
-13 |         _sealed: impossible(),
-   |                  ^^^^^^^^^^^^ private type
+   = note: ...and other private field `read_perimeter` that was not provided

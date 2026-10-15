@@ -2852,16 +2852,14 @@ mod collapsed_mcp_red {
         );
     }
 
+    // Catches: Tool annotations prevent a real registry schema lookup from publishing.
     #[tokio::test(flavor = "current_thread")]
-    async fn exact_schema_lookup_publishes_n_plus_one_and_preserves_old_capture() {
+    async fn exact_schema_lookup_with_annotations_publishes_n_plus_one_and_preserves_old_capture() {
         let (controller, _admission, first) = bootstrap().await;
         let old_capture = first.capture().clone();
-        let command = command(
-            first.capture(),
-            "generation-1",
-            "weather",
-            schema_definition("weather", weather_schema()),
-        );
+        let mut definition = schema_definition("weather", weather_schema());
+        definition["annotations"] = json!({"readOnlyHint":true});
+        let command = command(first.capture(), "generation-1", "weather", definition);
         let second = controller
             .reconcile_tool_schema(command)
             .await
