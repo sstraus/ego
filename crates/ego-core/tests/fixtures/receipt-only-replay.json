@@ -1,0 +1,257 @@
+[
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 1,
+      "run_id": {
+        "session_id": "00000000-0000-4000-8000-0000000100a1",
+        "nonce": "00000000-0000-4000-8000-0000000100a9"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "0000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_admitted",
+        "request_id": "00000000-0000-4000-8000-00000001009e",
+        "digest": "0000000000000000000000000000000000000000000000000000000000000001",
+        "expected_revision": null,
+        "lease": "00000000-0000-4000-8000-0000000100ab",
+        "executor_id": "00000000-0000-4000-8000-0000000100a9",
+        "prompt": "ciao",
+        "model": "openai-codex/gpt-6-sol",
+        "start": true
+      },
+      "status": "running",
+      "observed_at": 948252736569
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 2,
+      "run_id": {
+        "session_id": "00000000-0000-4000-8000-0000000100a1",
+        "nonce": "00000000-0000-4000-8000-0000000100a9"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "0000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_settled",
+        "lease": "00000000-0000-4000-8000-0000000100ab",
+        "settlement": {
+          "outcome": "interrupted",
+          "diagnostic": "confinement changed before execution: admitted backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 0000000000000000000000000000000000000000000000000000000000000003; observed backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 0000000000000000000000000000000000000000000000000000000000000004; the session must be reinitialized"
+        }
+      },
+      "status": "interrupted",
+      "observed_at": 948252736655
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 3,
+      "run_id": {
+        "session_id": "00000000-0000-4000-8000-0000000100a1",
+        "nonce": "00000000-0000-4000-8000-0000000100a9"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "0000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_admitted",
+        "request_id": "00000000-0000-4000-8000-0000000100a7",
+        "digest": "0000000000000000000000000000000000000000000000000000000000000001",
+        "expected_revision": 2,
+        "lease": "00000000-0000-4000-8000-00000001009f",
+        "executor_id": "00000000-0000-4000-8000-0000000100a9",
+        "prompt": "ciao",
+        "model": "openai-codex/gpt-6-sol",
+        "start": false
+      },
+      "status": "running",
+      "observed_at": 948253968480
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 4,
+      "run_id": {
+        "session_id": "00000000-0000-4000-8000-0000000100a1",
+        "nonce": "00000000-0000-4000-8000-0000000100a9"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "0000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_settled",
+        "lease": "00000000-0000-4000-8000-00000001009f",
+        "settlement": {
+          "outcome": "interrupted",
+          "diagnostic": "confinement changed before execution: admitted backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 0000000000000000000000000000000000000000000000000000000000000003; observed backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 0000000000000000000000000000000000000000000000000000000000000004; the session must be reinitialized"
+        }
+      },
+      "status": "interrupted",
+      "observed_at": 948253968556
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 5,
+      "run_id": {
+        "session_id": "00000000-0000-4000-8000-0000000100a1",
+        "nonce": "00000000-0000-4000-8000-0000000100a9"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "0000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_admitted",
+        "request_id": "00000000-0000-4000-8000-000000010095",
+        "digest": "0000000000000000000000000000000000000000000000000000000000000001",
+        "expected_revision": 4,
+        "lease": "00000000-0000-4000-8000-000000010099",
+        "executor_id": "00000000-0000-4000-8000-0000000100a9",
+        "prompt": "ciao",
+        "model": "openai-codex/gpt-6-sol",
+        "start": false
+      },
+      "status": "running",
+      "observed_at": 948254014949
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 6,
+      "run_id": {
+        "session_id": "00000000-0000-4000-8000-0000000100a1",
+        "nonce": "00000000-0000-4000-8000-0000000100a9"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "0000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_settled",
+        "lease": "00000000-0000-4000-8000-000000010099",
+        "settlement": {
+          "outcome": "interrupted",
+          "diagnostic": "confinement changed before execution: admitted backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 0000000000000000000000000000000000000000000000000000000000000003; observed backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 0000000000000000000000000000000000000000000000000000000000000004; the session must be reinitialized"
+        }
+      },
+      "status": "interrupted",
+      "observed_at": 948254015025
+    }
+  }
+]

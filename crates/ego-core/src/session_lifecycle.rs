@@ -16,7 +16,7 @@ use crate::event::time::{Clock, Timestamp};
 use crate::evidence::{EvidenceLogSource, ManifestEvidence, ManifestEvidenceError};
 use crate::goal::{GoalOwner, GoalRecord, GoalRefusal, GoalState, GoalTransition};
 use crate::public::{PublicEvent, project_public};
-use crate::run::RequestId;
+use crate::run::{RequestId, RunCommand, RunSettlement};
 use crate::session::{
     ForkError, LineageEdges, PreparedFork, ReplayContext, ReplayError, ReplaySource,
     ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication, TargetSeed,
@@ -782,7 +782,95 @@ where
         let mut state = SessionState::default();
         let mut frames = Vec::new();
         let mut semantic = Seq::ZERO;
+        // Receipt facts are display-only: never apply them to semantic state.
+        // A fork stops at its exact semantic boundary, including receipt facts
+        // before that event but not later admissions or settlements.
+        let end = cutoff.map_or(entries.len(), |cutoff| {
+            entries
+                .iter()
+                .position(
+                    |entry| matches!(entry, SessionEntry::Event(event) if event.env.seq >= cutoff),
+                )
+                .map_or(entries.len(), |index| index + 1)
+        });
+        let entries = &entries[..end];
+        let mut semantic_prompts = std::collections::HashSet::new();
+        let mut current = None;
         for entry in entries {
+            match entry {
+                SessionEntry::RunTransaction(transaction) => {
+                    if let RunCommand::CommandAdmitted { request_id, .. } = transaction.command() {
+                        current = Some(*request_id);
+                    }
+                }
+                SessionEntry::Event(event)
+                    if matches!(event.kind, EventKind::UserPrompt { .. }) =>
+                {
+                    if let Some(request) = current {
+                        semantic_prompts.insert(request);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut admissions = std::collections::HashMap::new();
+        let mut errors = std::collections::HashSet::new();
+        for entry in entries {
+            if let SessionEntry::RunTransaction(transaction) = entry {
+                match transaction.command() {
+                    RunCommand::CommandAdmitted {
+                        request_id,
+                        prompt,
+                        lease,
+                        ..
+                    } => {
+                        admissions.insert(*lease, *request_id);
+                        errors.clear();
+                        if !semantic_prompts.contains(request_id) {
+                            frames.push(ReplayFrame {
+                                event: PublicEvent::ItemCompleted {
+                                    turn: TurnId::from_uuid(request_id.uuid()),
+                                    item: ItemId::from_uuid(request_id.uuid()),
+                                    kind: crate::public::ItemKind::UserMessage,
+                                    ok: true,
+                                    text: Some(prompt.clone()),
+                                },
+                                state: state.clone(),
+                                inherited: false,
+                            });
+                        }
+                    }
+                    RunCommand::CommandSettled { lease, settlement } => {
+                        let message = match settlement {
+                            RunSettlement::Interrupted { diagnostic } => {
+                                Some(diagnostic.as_deref().unwrap_or("the turn failed"))
+                            }
+                            RunSettlement::Uncertain { diagnostic } => Some(
+                                diagnostic
+                                    .as_deref()
+                                    .unwrap_or("the turn's execution is uncertain"),
+                            ),
+                            _ => None,
+                        };
+                        if let Some(message) = message
+                            && !errors.contains(message)
+                            && let Some(request_id) = admissions.get(lease)
+                        {
+                            frames.push(ReplayFrame {
+                                event: PublicEvent::Error {
+                                    turn: TurnId::from_uuid(request_id.uuid()),
+                                    item: None,
+                                    message: message.to_owned(),
+                                    kind: crate::generator::types::ErrorKind::Unclassified,
+                                },
+                                state: state.clone(),
+                                inherited: false,
+                            });
+                        }
+                    }
+                    RunCommand::CancelRequested { .. } => {}
+                }
+            }
             if let SessionEntry::Event(event) = entry {
                 if cutoff.is_some_and(|cutoff| event.env.seq > cutoff) {
                     break;
@@ -795,8 +883,11 @@ where
                     }));
                 }
                 semantic = event.env.seq;
-                state.apply(&event);
-                if let Some(public) = project_public(&event) {
+                state.apply(event);
+                if let EventKind::Error { message, .. } = &event.kind {
+                    errors.insert(message.clone());
+                }
+                if let Some(public) = project_public(event) {
                     frames.push(ReplayFrame {
                         event: public,
                         state: state.clone(),
