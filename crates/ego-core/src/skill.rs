@@ -376,15 +376,14 @@ impl SkillSpec {
 
 // Interpret only source tokens: inserted argument bytes are never scanned again.
 fn render_once(body: &str, arguments: &str, names: &[String]) -> Result<String, SkillError> {
-    let values = shell_words::split(arguments)
-        .map_err(|error| SkillError::new(format!("invalid skill argument quoting: {error}")))?;
+    let mut values: Option<Vec<String>> = None;
     let mut rendered = String::with_capacity(body.len().saturating_add(arguments.len()));
     let mut remaining = body;
     let mut received = false;
     while let Some(offset) = remaining.find('$') {
         let prefix = &remaining[..offset];
         let tail = &remaining[offset + 1..];
-        let (length, value) = argument_token(tail, arguments, &values, names);
+        let (length, token) = argument_token(tail, names);
         // Exactly one immediately preceding backslash escapes a known token.
         let escaped = prefix.ends_with('\\') && !prefix.ends_with("\\\\");
         if length > 0 && escaped {
@@ -393,6 +392,21 @@ fn render_once(body: &str, arguments: &str, names: &[String]) -> Result<String, 
             rendered.push_str(&tail[..length]);
         } else {
             rendered.push_str(prefix);
+            let value = match token {
+                Some(ArgumentToken::Raw) => Some(arguments),
+                Some(ArgumentToken::Position(index, named)) => {
+                    if values.is_none() {
+                        values = Some(shell_words::split(arguments).map_err(|error| {
+                            SkillError::new(format!("invalid skill argument quoting: {error}"))
+                        })?);
+                    }
+                    let value = index
+                        .and_then(|i| values.as_ref()?.get(i))
+                        .map(String::as_str);
+                    value.or(if named { Some("") } else { None })
+                }
+                None => None,
+            };
             if let Some(value) = value {
                 rendered.push_str(value);
                 received = true;
@@ -411,31 +425,32 @@ fn render_once(body: &str, arguments: &str, names: &[String]) -> Result<String, 
     Ok(rendered)
 }
 
-fn argument_token<'a>(
-    tail: &str,
-    raw: &'a str,
-    values: &'a [String],
-    names: &[String],
-) -> (usize, Option<&'a str>) {
+enum ArgumentToken {
+    Raw,
+    Position(Option<usize>, bool),
+}
+
+fn argument_token(tail: &str, names: &[String]) -> (usize, Option<ArgumentToken>) {
     if let Some(indexed) = tail.strip_prefix("ARGUMENTS[") {
         let digits = indexed.bytes().take_while(u8::is_ascii_digit).count();
         if digits > 0 && indexed[digits..].starts_with(']') {
-            let value = indexed[..digits]
-                .parse::<usize>()
-                .ok()
-                .and_then(|i| values.get(i));
-            return (11 + digits, value.map(String::as_str));
+            return (
+                11 + digits,
+                Some(ArgumentToken::Position(
+                    indexed[..digits].parse().ok(),
+                    false,
+                )),
+            );
         }
         // A malformed indexed token must not be consumed as the raw prefix.
         return (0, None);
     }
     let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
     if digits > 0 {
-        let value = tail[..digits]
-            .parse::<usize>()
-            .ok()
-            .and_then(|i| values.get(i));
-        return (digits, value.map(String::as_str));
+        return (
+            digits,
+            Some(ArgumentToken::Position(tail[..digits].parse().ok(), false)),
+        );
     }
     let length = tail
         .bytes()
@@ -443,10 +458,10 @@ fn argument_token<'a>(
         .count();
     let name = &tail[..length];
     if name == "ARGUMENTS" {
-        return (length, Some(raw));
+        return (length, Some(ArgumentToken::Raw));
     }
     if let Some(index) = names.iter().position(|candidate| candidate == name) {
-        return (length, Some(values.get(index).map_or("", String::as_str)));
+        return (length, Some(ArgumentToken::Position(Some(index), true)));
     }
     (0, None)
 }
