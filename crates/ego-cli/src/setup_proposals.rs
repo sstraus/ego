@@ -800,7 +800,25 @@ fn environment_identity() -> Vec<(String, Option<std::ffi::OsString>)> {
 
 fn config_identity(home: &Path) -> Result<String, String> {
     let path = home.join("config.toml");
-    let canonical_home = std::fs::canonicalize(home).map_err(|error| error.to_string())?;
+    let mut ancestor = home;
+    let canonical_home = loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let canonical =
+                    std::fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+                let suffix = home.strip_prefix(ancestor).map_err(|e| e.to_string())?;
+                break if suffix.as_os_str().is_empty() {
+                    canonical
+                } else {
+                    canonical.join(suffix)
+                };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().ok_or_else(|| error.to_string())?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     let target = if path.exists() {
         path_identity(&path)?
     } else {
@@ -888,6 +906,61 @@ mod tests {
             proposal.err().unwrap_or_else(|| "no proposal".into())
         );
         assert!(!home.exists(), "preview must not create EGO_HOME");
+    }
+
+    // Catches: first-run confirmation rejects its own transaction-created home or writes on decline.
+    #[test]
+    fn setup_first_run_confirmation_creates_only_after_yes() {
+        for accept in [false, true] {
+            let (_temp, workspace, home, _, _, probes, findings) = fixture("");
+            std::fs::remove_file(home.join("config.toml")).unwrap();
+            std::fs::remove_dir(&home).unwrap();
+            let home = home.join("nested");
+            let layers =
+                crate::config::base_layers_in(workspace.as_path(), Trust::Untrusted, Some(&home))
+                    .unwrap();
+            let effective = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
+            let proposal = preview(
+                &layers, &effective, &workspace, &home, None, &probes, &findings,
+            )
+            .unwrap()
+            .unwrap();
+            let report = confirm_apply(proposal, &workspace, &home, &|_| {
+                assert!(!home.parent().unwrap().exists());
+                accept
+            })
+            .unwrap();
+            if accept {
+                assert!(home.join("config.toml").is_file());
+                assert!(report.contains("fixed (policy-only)"), "{report}");
+            } else {
+                assert!(!home.parent().unwrap().exists());
+                assert!(report.contains("declined/cancelled"));
+            }
+        }
+    }
+
+    // Catches: an absent config home is redirected after preview but still published.
+    #[cfg(unix)]
+    #[test]
+    fn setup_first_run_confirmation_refuses_redirected_home() {
+        let (temp, workspace, home, layers, effective, probes, findings) = fixture("");
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        std::fs::remove_dir(&home).unwrap();
+        let proposal = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &findings,
+        )
+        .unwrap()
+        .unwrap();
+        let redirected = temp.path().join("redirected");
+        std::fs::create_dir(&redirected).unwrap();
+        let error = confirm_apply(proposal, &workspace, &home, &|_| {
+            std::os::unix::fs::symlink(&redirected, &home).unwrap();
+            true
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("configuration path changed"));
+        assert!(!redirected.join("config.toml").exists());
     }
 
     // Catches: a concrete unresolved action cannot receive a narrow permission proposal.

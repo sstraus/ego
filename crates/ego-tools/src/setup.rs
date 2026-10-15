@@ -530,7 +530,6 @@ pub fn inventory_report(
         }
         if !content_admitted(&metadata.canonical)
             || !metadata.regular
-            || !metadata.canonical.as_path().starts_with(workspace)
             || !visited.insert(metadata.canonical.clone())
         {
             continue;
