@@ -18,6 +18,10 @@ pub(super) struct HeadlessGeneration<'a> {
     pub(super) invocation: RunInvocationId,
     pub(super) config: TurnConfig,
     pub(super) provider_recovery: bool,
+    pub(super) goal: Option<String>,
+    pub(super) goal_turns: u32,
+    pub(super) goal_check_command: Option<Vec<String>>,
+    pub(super) goal_ceilings: ego_core::ceiling::Ceilings,
     pub(super) gate: SharedBudgetGate,
     pub(super) hook_layers: Option<&'a [Sourced<ConfigLayer>]>,
     pub(super) hook_trust: Trust,
@@ -75,6 +79,10 @@ pub(super) async fn drive_headless_turn(
         invocation,
         config,
         provider_recovery,
+        goal,
+        goal_turns,
+        goal_check_command,
+        goal_ceilings,
         gate,
         hook_layers,
         hook_trust,
@@ -240,6 +248,8 @@ pub(super) async fn drive_headless_turn(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?
+    .with_goal(goal, goal_turns)
+    .with_goal_policy(goal_ceilings, goal_check_command)
     .with_provider_recovery(provider_recovery.then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON))
     .with_skill_invocation_port(skill_owner.clone())
     .with_pause_token(pause.clone());

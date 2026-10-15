@@ -742,6 +742,55 @@ mod acp_golden {
         state
     }
 
+    #[test]
+    fn managed_goal_stop_is_distinct_from_completed_work_in_plan_metadata() {
+        // Catches: TUIC ACP parent sees ordinary completion but loses a stopped goal's durable state.
+        use ego_core::goal::GoalOwner;
+        let turn = TurnId::new();
+        let id = ego_core::event::id::GoalId::new();
+        let mut seq = Seq::ZERO;
+        let state = state_after(&[
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::GoalSet {
+                    id,
+                    objective: "verify artifact".into(),
+                    owner: GoalOwner::Operator,
+                    ceilings: Default::default(),
+                    derived_from: None,
+                },
+            ),
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::GoalCheckStopped {
+                    id,
+                    reason: "goal continuation budget exhausted (20)".into(),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ego_core::event::domain::ExitReason::Completed,
+                },
+            ),
+        ]);
+        let plan = ego_acp::project::project_goal_plan_v1(state.goal.as_ref()).unwrap();
+        let wire = serde_json::to_value(plan).unwrap();
+        assert!(
+            wire.to_string()
+                .contains("goal continuation budget exhausted (20)")
+        );
+        assert!(wire.to_string().contains("stopped"));
+        assert!(!wire.to_string().contains("completed"));
+    }
+
     // Catches: live turns omitting the goal plan, or showing blocked/achieved
     // goals as active work. The state is reduced from real goal journal events.
     #[test]
@@ -793,7 +842,7 @@ mod acp_golden {
                     },
                 ));
             } else if state_name == "blocked" {
-                for _ in 0..3 {
+                for _ in 0..5 {
                     events.push(ev(
                         seq.next(),
                         TurnId::new(),

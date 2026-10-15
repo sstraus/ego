@@ -23,6 +23,7 @@ State is a **reduction over an append-only event log** (pi's reducer,
 ```
 SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested | SessionPaused |
 SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
+GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
 AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState |
 ToolCallStarted | ToolCallDelta | ToolCallCompleted | ToolCallMeasured |
@@ -38,9 +39,9 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-53 variants in the current schema, and this list is exhaustive by contract.
+57 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-53, including the session-metadata, pause and goal, question, detached-exec,
+57, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, skill, and clean-session compaction lifecycles.
 `ExecutionObserved` records an admitted execution authority.
 `ExecutionMeasured` records a capability measurement as evidence only (§3.4).

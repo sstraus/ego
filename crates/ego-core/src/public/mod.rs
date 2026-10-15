@@ -491,6 +491,9 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::SessionPaused { .. }
         | EventKind::SessionPauseObserved { .. }
         | EventKind::SessionResumed { .. }
+        | EventKind::GoalCheckConfigured { .. }
+        | EventKind::GoalContinuation { .. }
+        | EventKind::GoalUpdated { .. }
         | EventKind::GoalSet { .. }
         | EventKind::GoalTransitioned { .. } => None,
         EventKind::DetachedExecStarted { .. }
@@ -720,6 +723,12 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // it; this projection has the message and nothing else, and a
         // projection that sniffed the message for "rate limit" would be
         // inventing a classification the wire never made.
+        EventKind::GoalCheckStopped { reason, .. } => Some(PublicEvent::Error {
+            turn,
+            item,
+            message: reason.clone(),
+            kind: crate::generator::types::ErrorKind::Unclassified,
+        }),
         EventKind::Error { message, kind } => Some(PublicEvent::Error {
             turn,
             item,

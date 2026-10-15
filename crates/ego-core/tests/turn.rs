@@ -1722,13 +1722,44 @@ mod turn {
         }
     }
 
+    struct GoalEvidenceWriter(Box<dyn ego_core::store::blob::BlobWriter>);
+    impl EvidenceWriter for GoalEvidenceWriter {
+        fn append(&mut self, chunk: &[u8]) -> Result<(), EvidenceError> {
+            self.0.append(chunk).map_err(|error| EvidenceError::Io {
+                message: error.to_string(),
+            })
+        }
+        fn commit(
+            self: Box<Self>,
+        ) -> Result<ego_core::store::evidence::EvidenceRef, EvidenceError> {
+            let reference = self.0.commit().map_err(|error| EvidenceError::Io {
+                message: error.to_string(),
+            })?;
+            Ok(ego_core::store::evidence::EvidenceRef {
+                id: ego_core::store::evidence::EvidenceId::parse(reference.id.to_string())?,
+                bytes: reference.bytes,
+            })
+        }
+        fn abort(self: Box<Self>) -> Result<(), EvidenceError> {
+            self.0.abort().map_err(|error| EvidenceError::Io {
+                message: error.to_string(),
+            })
+        }
+    }
+
     impl EvidenceStore for SkillEvidence {
         fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
             &self.blobs
         }
 
         fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
-            Err(EvidenceError::Limit { limit: 0 })
+            use ego_core::store::blob::BlobStore;
+            self.blobs
+                .begin()
+                .map(|writer| Box::new(GoalEvidenceWriter(writer)) as Box<dyn EvidenceWriter>)
+                .map_err(|error| EvidenceError::Io {
+                    message: error.to_string(),
+                })
         }
 
         fn read_page<'a>(
@@ -1738,6 +1769,118 @@ mod turn {
             Box::pin(futures::future::ready(Err(EvidenceError::NotFound {
                 reference: request.reference.id.clone(),
             })))
+        }
+    }
+
+    #[test]
+    fn goal_command_accepts_real_process_stdout_instead_of_model_projection() {
+        // A real executor returns separate provenance-tagged stdout and stderr,
+        // not the builtin string used by a model-facing tool result.
+        struct Evaluator {
+            bytes: Vec<u8>,
+            limit: usize,
+        }
+        impl ProcessExecutor for Evaluator {
+            fn execute<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                panic!("the evaluator uses handler stdin")
+            }
+            fn execute_handler<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+                _input: &'a [u8],
+                _scope: ego_core::hook::EffectScope,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                use ego_core::permit::{StreamProvenance, ToolContentBlock};
+                use ego_core::store::evidence::{EvidenceId, EvidenceRef};
+                let stdout = self.bytes.clone();
+                let limit = self.limit;
+                let reference = EvidenceRef::new(
+                    EvidenceId::parse(
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .unwrap(),
+                    stdout.len() as u64,
+                );
+                Box::pin(async move {
+                    Ok(ToolResult::new(vec![
+                        ToolContentBlock::process(
+                            StreamProvenance::Stdout,
+                            &stdout,
+                            limit,
+                            reference.clone(),
+                        ),
+                        ToolContentBlock::process(
+                            StreamProvenance::Stderr,
+                            b"diagnostic, not JSON",
+                            1024,
+                            reference,
+                        ),
+                    ]))
+                })
+            }
+        }
+        for (bytes, limit, achieved, diagnostic) in [
+            (
+                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                1024,
+                true,
+                "",
+            ),
+            (
+                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                4,
+                false,
+                "truncated",
+            ),
+            (vec![255, 254], 1024, false, "not UTF-8"),
+        ] {
+            let mut fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]])
+                .with_rules(&["exec(/ws/check)"], &[]);
+            fx.with_process(Arc::new(Evaluator { bytes, limit }));
+            let evidence = SkillEvidence::new();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model_for(&fx, &fx.generator, &mut fx.gate.borrow_mut()),
+                tools,
+            )
+            .with_goal(Some("verification passes".into()), 1)
+            .with_goal_policy(Default::default(), Some(vec!["/ws/check".into()]));
+            block_on(turn.run("verify")).unwrap();
+            let goal = turn.state().goal.unwrap();
+            assert_eq!(
+                goal.state,
+                if achieved {
+                    ego_core::goal::GoalState::Achieved
+                } else {
+                    ego_core::goal::GoalState::Active
+                },
+                "{:?}",
+                goal.check_stop
+            );
+            if !achieved {
+                assert!(goal.check_stop.unwrap().contains(diagnostic));
+            }
         }
     }
 
@@ -2146,6 +2289,531 @@ mod turn {
             outcome.ok,
             turn.into_state().expect("unique turn journal state"),
         )
+    }
+
+    fn run_checked_goal(
+        scripts: Vec<Vec<AiEvent>>,
+        allowance: u32,
+    ) -> (SessionState, Vec<DomainEvent>, Vec<GenRequest>) {
+        let fx = Fixture::new(scripts);
+        let evidence = SkillEvidence::new();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let runtime = model(&fx.generator, &mut gate);
+        let mut loop_ = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        )
+        .with_goal(Some("produce a verified artifact".into()), allowance);
+        block_on(loop_.run("work")).unwrap();
+        (
+            loop_.into_state().unwrap(),
+            fx.store.events(),
+            fx.generator.calls(),
+        )
+    }
+
+    fn goal_reply(achieved: bool, reason: &str) -> Vec<AiEvent> {
+        vec![
+            AiEvent::TextDelta {
+                text: json!({"achieved": achieved, "reason": reason}).to_string(),
+            },
+            AiEvent::Usage(Usage {
+                uncached_input_tokens: 2,
+                output_tokens: 1,
+                ..Usage::IDENTITY
+            }),
+            AiEvent::Stop(StopReason::Stop),
+        ]
+    }
+
+    #[test]
+    fn goal_check_continues_as_system_input_then_achieves_operator_goal_with_evidence() {
+        // Catches: a completed work turn returns before the goal is met or fabricates an operator prompt.
+        let (state, events, calls) = run_checked_goal(
+            vec![
+                vec![
+                    AiEvent::TextDelta {
+                        text: "artifact drafted".into(),
+                    },
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+                goal_reply(false, "artifact is not verified"),
+                vec![
+                    AiEvent::TextDelta {
+                        text: "artifact verified".into(),
+                    },
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+                goal_reply(true, "session records verification"),
+            ],
+            20,
+        );
+        let goal = state.goal.unwrap();
+        assert_eq!(goal.state, ego_core::goal::GoalState::Achieved);
+        assert_eq!(goal.achieved_by, Some(ego_core::goal::GoalOwner::Check));
+        assert!(goal.achievement_evidence.is_some());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::UserPrompt { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::GoalContinuation { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e.kind,
+                    EventKind::GenerationStarted {
+                        role: GenerationRole::GoalCheck,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(state.usage.uncached_input_tokens, 4);
+        let continuation = serde_json::to_value(&calls[2].messages).unwrap();
+        assert!(
+            continuation.as_array().unwrap().iter().any(
+                |m| m["role"] == "system" && m.to_string().contains("artifact is not verified")
+            )
+        );
+        assert_eq!(SessionState::replay(events).goal, Some(goal));
+    }
+
+    #[test]
+    fn goal_check_stops_on_five_repeated_observations_without_unbounded_work() {
+        // Catches: completed work resets the automatic blocker audit before the fifth check.
+        let scripts = (0..5)
+            .flat_map(|_| {
+                [
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    goal_reply(false, "artifact unavailable"),
+                ]
+            })
+            .collect();
+        let (state, events, calls) = run_checked_goal(scripts, 20);
+        assert_eq!(
+            state.goal.unwrap().state,
+            ego_core::goal::GoalState::Blocked
+        );
+        assert_eq!(calls.len(), 10);
+        assert!(events.iter().any(|e| matches!(&e.kind, EventKind::GoalCheckStopped { reason, .. } if reason.contains("five observations"))));
+    }
+
+    #[test]
+    fn goal_check_budget_and_invalid_verdict_stop_without_attesting_success() {
+        // Catches: exhausted continuations or malformed evaluator output is treated as goal achievement.
+        for (scripts, allowance, diagnostic) in [
+            (
+                vec![
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    goal_reply(false, "missing"),
+                ],
+                0,
+                "budget exhausted",
+            ),
+            (
+                vec![
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    vec![
+                        AiEvent::TextDelta { text: "yes".into() },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                ],
+                20,
+                "invalid verdict",
+            ),
+        ] {
+            let (state, events, calls) = run_checked_goal(scripts, allowance);
+            assert_eq!(state.goal.unwrap().state, ego_core::goal::GoalState::Active);
+            assert_eq!(calls.len(), 2);
+            assert!(events.iter().any(|e| matches!(&e.kind, EventKind::GoalCheckStopped { reason, .. } if reason.contains(diagnostic))));
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e.kind, EventKind::GoalContinuation { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn goal_check_does_not_run_after_provider_failure() {
+        // Catches: goal continuation retries work after the ordinary provider owner stopped it.
+        let (state, events, calls) = run_checked_goal(
+            vec![vec![
+                AiEvent::Error {
+                    message: "provider unavailable".into(),
+                    kind: ErrorKind::Unclassified,
+                },
+                AiEvent::Stop(StopReason::Error),
+            ]],
+            20,
+        );
+        assert_eq!(state.goal.unwrap().state, ego_core::goal::GoalState::Active);
+        assert_eq!(calls.len(), 1);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.kind, EventKind::GoalContinuation { .. }))
+        );
+    }
+
+    #[test]
+    fn goal_check_cancellation_settles_attempt_without_achievement_or_continuation() {
+        // Catches: tool-less evaluator ignores cancellation and attests success after the operator stopped it.
+        struct CancelCheck {
+            fake: Arc<FakeGenerator>,
+            cancel: CancelToken,
+        }
+        impl Generator for CancelCheck {
+            fn ensure_expressible(
+                &self,
+                request: &GenRequest,
+            ) -> Result<(), RequestExpressibilityError> {
+                self.fake.ensure_expressible(request)
+            }
+            fn generate(&self, request: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+                if serde_json::to_string(&request.messages)
+                    .unwrap()
+                    .contains("Independently check")
+                {
+                    self.cancel.cancel(CancelCause::User);
+                }
+                self.fake.generate(request, attempt)
+            }
+        }
+        let fx = Fixture::new(vec![
+            vec![AiEvent::Stop(StopReason::Stop)],
+            goal_reply(true, "artifact verified"),
+        ]);
+        let evidence = SkillEvidence::new();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let cancel = CancelToken::new();
+        let generator = Arc::new(CancelCheck {
+            fake: fx.generator.clone(),
+            cancel: cancel.clone(),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let runtime = model(&generator, &mut gate);
+        let mut loop_ = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                cancel,
+            ),
+            runtime,
+            tools,
+        )
+        .with_goal(Some("produce a verified artifact".into()), 20);
+        block_on(loop_.run("work")).unwrap();
+        let state = loop_.state();
+        assert_eq!(state.goal.unwrap().state, ego_core::goal::GoalState::Active);
+        assert!(state.live_attempts.is_empty());
+        assert_eq!(
+            fx.store
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::AttemptSettled { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn goal_check_allowance_survives_new_loop_and_captures_resolved_ceilings() {
+        // Catches: resume resets continuation usage/budget and bypasses the admitted goal limit.
+        let fx = Fixture::new(vec![
+            vec![AiEvent::Stop(StopReason::Stop)],
+            goal_reply(false, "unverified"),
+            vec![AiEvent::Stop(StopReason::Stop)],
+            goal_reply(false, "unverified"),
+            vec![AiEvent::Stop(StopReason::Stop)],
+            goal_reply(false, "unverified"),
+        ]);
+        let evidence = SkillEvidence::new();
+        let ceilings = ego_core::ceiling::Ceilings {
+            money: None,
+            tokens: Some(1000),
+        };
+        let mut state = SessionState::default();
+        for allowance in [1, 20] {
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut gate = fx.gate.borrow_mut();
+            let runtime = model(&fx.generator, &mut gate);
+            let mut loop_ = TurnLoop::open(
+                session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+                runtime,
+                tools,
+            )
+            .with_goal(Some("verify artifact".into()), allowance)
+            .with_goal_policy(ceilings.clone(), None);
+            block_on(loop_.run("work")).unwrap();
+            state = SessionState::replay(fx.store.events());
+        }
+        let goal = state.goal.unwrap();
+        assert_eq!(goal.continuation_turns, 1);
+        assert_eq!(goal.continuation_budget, Some(1));
+        assert_eq!(goal.ceilings, ceilings);
+        assert_eq!(fx.generator.calls().len(), 6);
+    }
+
+    #[test]
+    fn goal_check_run_turn_cap_counts_internal_continuations() {
+        // Catches: --max-turns bounds only operator prompts while automatic goal work exceeds the cap.
+        let fx = Fixture::new(
+            (0..2)
+                .flat_map(|_| {
+                    [
+                        vec![AiEvent::Stop(StopReason::Stop)],
+                        goal_reply(false, "unverified"),
+                    ]
+                })
+                .collect(),
+        );
+        let evidence = SkillEvidence::new();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let runtime = model(&fx.generator, &mut gate);
+        let mut loop_ = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        )
+        .with_goal(Some("verify artifact".into()), 20);
+        loop_.set_turn_allowance(Some(2));
+        block_on(loop_.run("work")).unwrap();
+        let state = loop_.state();
+        assert_eq!(state.turns.len(), 2);
+        assert_eq!(
+            state.goal.unwrap().check_stop.as_deref(),
+            Some("run max-turns reached")
+        );
+    }
+
+    #[test]
+    fn goal_check_configured_command_receives_evidence_without_model_evaluation() {
+        // Catches: configured command is ignored, or its verdict is not tied to real session evidence.
+        struct CommandCheck {
+            input: Mutex<Vec<u8>>,
+        }
+        impl ProcessExecutor for CommandCheck {
+            fn execute<'a>(
+                &'a self,
+                _: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                panic!("command evaluator must use the stdin handler boundary")
+            }
+            fn execute_handler<'a>(
+                &'a self,
+                _: &'a SpawnSpec,
+                input: &'a [u8],
+                _: ego_core::hook::EffectScope,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                *self.input.lock().unwrap() = input.to_vec();
+                Box::pin(async {
+                    let bytes = br#"{"achieved":true,"reason":"artifact verified"}"#;
+                    Ok(ToolResult::new(vec![
+                        ego_core::permit::ToolContentBlock::process(
+                            ego_core::permit::StreamProvenance::Stdout,
+                            bytes,
+                            1024,
+                            ego_core::store::evidence::EvidenceRef::new(
+                                ego_core::store::evidence::EvidenceId::parse("a".repeat(64))
+                                    .unwrap(),
+                                bytes.len() as u64,
+                            ),
+                        ),
+                    ]))
+                })
+            }
+        }
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]])
+            .with_rules(&["exec(/bin/echo)"], &[]);
+        let process = CommandCheck {
+            input: Mutex::new(Vec::new()),
+        };
+        let evidence = SkillEvidence::new();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                &process,
+                &evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let mut runtime = model(&fx.generator, &mut gate);
+        runtime.policy_source = fx.policy_source.clone();
+        let mut loop_ = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        )
+        .with_goal(Some("verify artifact".into()), 20)
+        .with_goal_policy(Default::default(), Some(vec!["/bin/echo".into()]));
+        block_on(loop_.run("work")).unwrap();
+        assert_eq!(
+            loop_.state().goal.as_ref().unwrap().state,
+            ego_core::goal::GoalState::Achieved,
+            "{:?}",
+            loop_.state().goal
+        );
+        let input: serde_json::Value =
+            serde_json::from_slice(&process.input.lock().unwrap()).unwrap();
+        assert_eq!(input["objective"], "verify artifact");
+        assert!(input["session"].is_array());
+        assert_eq!(fx.generator.calls().len(), 1);
+    }
+
+    #[test]
+    fn goal_tool_records_model_authorship_and_refuses_operator_goal_replacement() {
+        // Catches: model goal updates overwrite operator authority or lose authorship.
+        for operator in [false, true] {
+            let fx = Fixture::new(vec![
+                vec![
+                    AiEvent::ToolCall {
+                        call_id: "goal-1".into(),
+                        name: "goal".into(),
+                        args: r#"{"objective":"model objective"}"#.into(),
+                    },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+                goal_reply(true, "the artifact is verified"),
+            ]);
+            let evidence = SkillEvidence::new();
+            let registry = vec![RegisteredTool::Goal];
+            let tools = Tools::from_registry(
+                &registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut gate = fx.gate.borrow_mut();
+            let runtime = model(&fx.generator, &mut gate);
+            let mut loop_ = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                runtime,
+                tools,
+            )
+            .with_goal(operator.then(|| "operator objective".into()), 20);
+            block_on(loop_.run("work")).unwrap();
+            let state = loop_.state();
+            let goal = state.goal.unwrap();
+            assert_eq!(
+                goal.owner,
+                if operator {
+                    ego_core::goal::GoalOwner::Operator
+                } else {
+                    ego_core::goal::GoalOwner::Automated
+                }
+            );
+            assert_eq!(
+                goal.objective,
+                if operator {
+                    "operator objective"
+                } else {
+                    "model objective"
+                }
+            );
+            assert!(
+                state
+                    .items
+                    .values()
+                    .any(|item| item.kind == ItemKind::ToolCall && item.tool_result.is_some())
+            );
+        }
     }
 
     #[test]

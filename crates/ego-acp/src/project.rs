@@ -838,6 +838,8 @@ pub fn project_goal_plan_v1(
                 "ego".to_owned(),
                 serde_json::json!({
                     "goalId": goal.id, "goalState": goal.state,
+                    "goalStop": goal.check_stop, "goalContinuationTurns": goal.continuation_turns,
+                    "goalStatus": if goal.check_stop.is_some() { "stopped" } else { "running" },
                 }),
             )]),
         ),

@@ -379,6 +379,7 @@ pub struct TurnState {
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     ContextCheckpoint,
+    GoalContinuation,
     UserPrompt,
     Assistant,
     Reasoning,
@@ -1830,12 +1831,53 @@ impl SessionState {
                         derived_from: *derived_from,
                         created_seq: ev.env.seq,
                         state: GoalState::Active,
+                        continuation_turns: 0,
+                        continuation_budget: None,
+                        check_stop: None,
                         blocker_reason: None,
                         blocker_observations: 0,
                         achieved_by: None,
                         achievement_evidence: None,
                         blocker_turns: Vec::new(),
                     });
+                }
+            }
+            EventKind::GoalCheckConfigured {
+                id,
+                continuation_budget,
+            } => {
+                if let Some(goal) = self
+                    .goal
+                    .as_mut()
+                    .filter(|goal| goal.id == *id && goal.continuation_budget.is_none())
+                {
+                    goal.continuation_budget = Some(*continuation_budget);
+                }
+            }
+            EventKind::GoalContinuation { id, text } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.continuation_turns = goal.continuation_turns.saturating_add(1);
+                    goal.check_stop = None;
+                }
+                if let Some(item) = self.item_mut(ev, ItemKind::GoalContinuation) {
+                    item.text = text.clone();
+                }
+            }
+            EventKind::GoalCheckStopped { id, reason } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.check_stop = Some(reason.clone());
+                }
+            }
+            EventKind::GoalUpdated { id, objective } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| {
+                    goal.id == *id
+                        && goal.state == GoalState::Active
+                        && goal.owner == crate::goal::GoalOwner::Automated
+                }) {
+                    goal.objective = objective.clone();
+                    goal.blocker_reason = None;
+                    goal.blocker_observations = 0;
+                    goal.blocker_turns.clear();
                 }
             }
             EventKind::GoalTransitioned { id, transition } => {

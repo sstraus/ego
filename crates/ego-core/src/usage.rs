@@ -15,7 +15,8 @@ use crate::session::SessionLineage;
 use crate::state::{Charge, ChargeAttribution, SessionState, Usage};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
-/// The externally serialized usage-report contract.
+/// The current closed v2 contract requires every role, including goal_check.
+/// Old report snapshots are not accepted through compatibility defaults.
 pub const USAGE_REPORT_VERSION: u32 = 2;
 
 /// A deterministic workspace or active-session usage report.
@@ -60,6 +61,7 @@ pub struct ContextUsage {
 pub struct UsageLines {
     pub main: UsageLine,
     pub judge: UsageLine,
+    pub goal_check: UsageLine,
     pub compaction: UsageLine,
     pub subagent: UsageLine,
     pub hook: UsageLine,
@@ -251,6 +253,7 @@ impl UsagePeriod {
 struct LinesAccumulator {
     main: LineAccumulator,
     judge: LineAccumulator,
+    goal_check: LineAccumulator,
     compaction: LineAccumulator,
     subagent: LineAccumulator,
     hook: LineAccumulator,
@@ -262,6 +265,7 @@ impl LinesAccumulator {
         Self {
             main: LineAccumulator::new(),
             judge: LineAccumulator::new(),
+            goal_check: LineAccumulator::new(),
             compaction: LineAccumulator::new(),
             subagent: LineAccumulator::new(),
             hook: LineAccumulator::new(),
@@ -273,6 +277,7 @@ impl LinesAccumulator {
         match role {
             GenerationRole::Main => self.main.add(charge),
             GenerationRole::Judge => self.judge.add(charge),
+            GenerationRole::GoalCheck => self.goal_check.add(charge),
             GenerationRole::Compaction => self.compaction.add(charge),
             GenerationRole::Subagent => self.subagent.add(charge),
             GenerationRole::Hook => self.hook.add(charge),
@@ -284,6 +289,7 @@ impl LinesAccumulator {
         UsageLines {
             main: self.main.finish(),
             judge: self.judge.finish(),
+            goal_check: self.goal_check.finish(),
             compaction: self.compaction.finish(),
             subagent: self.subagent.finish(),
             hook: self.hook.finish(),

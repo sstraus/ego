@@ -39,7 +39,7 @@ fn json_report(finished: &support::Finished) -> Value {
 }
 
 #[test]
-fn usage_json_is_a_versioned_report_with_all_six_role_lines_and_total() {
+fn usage_json_is_a_versioned_report_with_all_seven_role_lines_and_total() {
     let report = json_report(&seeded_usage(["--json"]));
 
     assert_eq!(report["v"], USAGE_REPORT_VERSION);
@@ -48,8 +48,16 @@ fn usage_json_is_a_versioned_report_with_all_six_role_lines_and_total() {
     let sessions = report["sessions"].as_array().expect("report sessions");
     assert_eq!(sessions.len(), 1);
     let lines = sessions[0]["lines"].as_object().expect("report lines");
-    assert_eq!(lines.len(), 6);
-    for role in ["main", "judge", "compaction", "subagent", "hook", "total"] {
+    assert_eq!(lines.len(), 7);
+    for role in [
+        "main",
+        "judge",
+        "goal_check",
+        "compaction",
+        "subagent",
+        "hook",
+        "total",
+    ] {
         assert!(lines.contains_key(role), "missing {role} line: {lines:?}");
     }
     assert!(report["totals"].is_object(), "workspace totals are present");
@@ -85,12 +93,20 @@ fn usage_text_and_json_are_deterministic_projections_of_the_same_report() {
     assert_eq!(text.code, Some(0), "stderr: {}", text.stderr);
     let report = json_report(&json);
     // The table is the report read out loud, not a second report: every role
-    // JSON carries is reachable in text, and JSON keeps all six either way.
+    // JSON carries is reachable in text, and JSON keeps all seven either way.
     // regression case hid the silent ones behind `--all-roles`, because a fixture
     // that only ever ran a main turn should not print five empty rows.
     let all_roles = seeded_usage(["--all-roles"]);
     assert_eq!(all_roles.code, Some(0), "stderr: {}", all_roles.stderr);
-    for role in ["main", "judge", "compaction", "subagent", "hook", "total"] {
+    for role in [
+        "main",
+        "judge",
+        "goal_check",
+        "compaction",
+        "subagent",
+        "hook",
+        "total",
+    ] {
         assert!(all_roles.stdout.contains(role), "{}", all_roles.stdout);
     }
     for role in ["main", "total"] {

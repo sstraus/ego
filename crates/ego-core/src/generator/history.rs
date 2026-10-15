@@ -120,6 +120,9 @@ fn conversation_from_inner(
     while let Some(item) = items.get(next).copied() {
         next += 1;
         match item.kind {
+            ItemKind::GoalContinuation => {
+                push(&mut messages, Role::System, text_block(&item.text));
+            }
             ItemKind::ContextCheckpoint => {
                 push(
                     &mut messages,
