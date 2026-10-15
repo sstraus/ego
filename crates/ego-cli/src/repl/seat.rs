@@ -793,6 +793,10 @@ enum Control {
         source: SessionId,
         reply: Sender<bool>,
     },
+    SelectSetup {
+        request: QuestionRequest,
+        reply: Sender<QuestionOutcome>,
+    },
     ConfirmSetup {
         text: String,
         reply: Sender<Confirmation>,
@@ -1473,6 +1477,17 @@ impl Seat {
     pub fn question(&self, id: ItemId, request: QuestionRequest) -> QuestionOutcome {
         futures::executor::block_on(self.elicit(id, request))
             .unwrap_or(QuestionOutcome::Unavailable)
+    }
+
+    /// Transient host selection: no model tool question or durable event.
+    pub(crate) fn select_setup(&self, request: QuestionRequest) -> QuestionOutcome {
+        if !self.terminal {
+            return QuestionOutcome::Unavailable;
+        }
+        self.request(
+            |reply| Control::SelectSetup { request, reply },
+            QuestionOutcome::Unavailable,
+        )
     }
 
     pub(crate) fn confirm_setup(&self, text: String) -> Confirmation {

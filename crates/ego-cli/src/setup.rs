@@ -13,6 +13,8 @@ use crate::cli::{SetupArgs, UsageError};
 use crate::config;
 use crate::output::Stdout;
 
+type ItemSelection<'a> = dyn Fn(&[ego_core::setup::Finding]) -> Option<Vec<usize>> + 'a;
+
 /// Both host entry points render this same transient inventory.
 pub async fn observed(workspace: PathBuf, args: &SetupArgs) -> Result<String, UsageError> {
     observed_host(workspace, args, None).await
@@ -22,6 +24,15 @@ pub(crate) async fn observed_host(
     workspace: PathBuf,
     args: &SetupArgs,
     confirmation: Option<&dyn Fn(String) -> bool>,
+) -> Result<String, UsageError> {
+    observed_selection_host(workspace, args, confirmation, None).await
+}
+
+pub(crate) async fn observed_selection_host(
+    workspace: PathBuf,
+    args: &SetupArgs,
+    confirmation: Option<&dyn Fn(String) -> bool>,
+    selection: Option<&ItemSelection<'_>>,
 ) -> Result<String, UsageError> {
     let workspace = OsFs
         .canonicalize(&workspace)
@@ -102,7 +113,20 @@ pub(crate) async fn observed_host(
         None
     };
     rendered.push_str("Read-rule mapper: admitted built-in reads need no extra allow in current modes; denies/floors are never lifted.\n");
-    let selected_findings = if let Some(ids) = &args.items {
+    let picked = if let Some(select) = selection {
+        match select(&findings) {
+            Some(ids) => Some(ids),
+            None => {
+                rendered.push_str(
+                    "Setup declined/cancelled during item selection; no configuration writes.\n",
+                );
+                return Ok(rendered);
+            }
+        }
+    } else {
+        args.items.clone()
+    };
+    let selected_findings = if let Some(ids) = &picked {
         if ids
             .iter()
             .any(|id| !findings.iter().any(|finding| finding.id == *id))
@@ -119,7 +143,7 @@ pub(crate) async fn observed_host(
     } else {
         findings.clone()
     };
-    rendered.push_str(&format!("Accepted proposal item selection: {:?}; rerun --items ID,ID to narrow. Final confirmation still required.\n", args.items));
+    rendered.push_str(&format!("Accepted proposal item selection: {:?}; rerun --items ID,ID to narrow. Final confirmation still required.\n", picked));
     if let Some(home) = &home {
         let proposal = crate::setup_proposals::preview(
             &layers,

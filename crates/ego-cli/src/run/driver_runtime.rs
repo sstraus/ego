@@ -1448,10 +1448,51 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                     )
                                                 })
                                         };
-                                        match crate::setup::observed_host(
+                                        let select = |findings: &[ego_core::setup::Finding]| {
+                                            use ego_core::question::{
+                                                QuestionAnswer, QuestionMode, QuestionOption,
+                                                QuestionOutcome, QuestionRequest,
+                                            };
+                                            let status =
+                                                status.as_ref().filter(|status| status.human)?;
+                                            let options = findings
+                                                .iter()
+                                                .map(|finding| {
+                                                    QuestionOption::new(
+                                                        finding.id.to_string(),
+                                                        ego_core::permit::terminal_safe(&format!(
+                                                            "{}: {} — {}",
+                                                            finding.id,
+                                                            finding.requested.display(),
+                                                            finding.evidence
+                                                        )),
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>();
+                                            if options.is_empty() {
+                                                return Some(Vec::new());
+                                            }
+                                            let request = QuestionRequest::new(
+                                                "Select setup proposal items; only selected items enter the preview. Final confirmation still required.",
+                                                QuestionMode::Multiple,
+                                                options,
+                                                false,
+                                            );
+                                            match status.seat.select_setup(request) {
+                                                QuestionOutcome::Answered(
+                                                    QuestionAnswer::Multiple(ids),
+                                                ) => ids
+                                                    .into_iter()
+                                                    .map(|id| id.parse::<usize>().ok())
+                                                    .collect(),
+                                                _ => None,
+                                            }
+                                        };
+                                        match crate::setup::observed_selection_host(
                                             root.clone(),
                                             &setup_args,
                                             Some(&confirm),
+                                            Some(&select),
                                         )
                                         .await
                                         {
