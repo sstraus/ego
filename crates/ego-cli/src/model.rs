@@ -888,7 +888,7 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             // Synthetic subscription state; never inspect the developer's credentials.
             std::fs::write(home.path().join("auth.json"), serde_json::json!({
-                "openai-codex": {"type":"oauth", "access":
+                "openai-codex": {"type":"o_auth", "access":
                     "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig"}
             }).to_string()).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
