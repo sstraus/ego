@@ -58,7 +58,7 @@ use ego_core::turn::{CancelToken, Journal, RegisteredTool, SharedJournal};
 
 const DIGEST_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const DIGEST_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-const BODY: &[u8] = b"Explain $ARGUMENTS and keep $1 inert.";
+const BODY: &[u8] = br"Explain $ARGUMENTS and keep \$1 inert.";
 
 type BlobRecord = (BlobRef, Vec<u8>);
 type CommittedBlobs = Arc<Mutex<BTreeMap<String, BlobRecord>>>;
@@ -471,6 +471,106 @@ fn renderer_is_one_inert_pass_and_preserves_the_exact_raw_argument_tail() {
     assert_eq!(skill.render(&operation).unwrap(), rendered);
 }
 
+// Catches: raw-prefix replacement corrupts indexed tokens and skips named values.
+#[test]
+fn renderer_preserves_index_boundaries_named_values_and_literal_insertions() {
+    let skill = spec_with_body("args", DIGEST_A, true, true,
+        b"raw=[$ARGUMENTS]; zero=[$0]; one=[$ARGUMENTS[1]]; first=[$first]; missing=[$2]; absent=[$third]")
+        .with_arguments(["first", "second", "third"]);
+    let operation = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "alpha beta".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&operation).unwrap(),
+        "raw=[alpha beta]; zero=[alpha]; one=[beta]; first=[alpha]; missing=[$2]; absent=[]"
+    );
+    let operation = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "\"$ARGUMENTS hello\" 'second value'".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&operation).unwrap(),
+        "raw=[\"$ARGUMENTS hello\" 'second value']; zero=[$ARGUMENTS hello]; one=[second value]; first=[$ARGUMENTS hello]; missing=[$2]; absent=[]"
+    );
+}
+
+// Catches: unused arguments disappear when no placeholder receives a value.
+#[test]
+fn renderer_appends_unused_arguments_but_not_after_missing_named_values() {
+    for (body, expected) in [
+        ("body", "body\n\nARGUMENTS: alpha"),
+        ("$2", "$2\n\nARGUMENTS: alpha"),
+        ("$missing", ""),
+    ] {
+        let skill = spec_with_body("args", DIGEST_A, true, true, body.as_bytes())
+            .with_arguments(["first", "missing"]);
+        let op = SkillOperation::Invoke {
+            name: "args".into(),
+            arguments: "alpha".into(),
+            bare: false,
+        };
+        assert_eq!(skill.render(&op).unwrap(), expected);
+    }
+}
+
+// Catches: empty quoted positions collapse or invalid quoting silently changes values.
+#[test]
+fn renderer_keeps_empty_positions_and_rejects_unterminated_quotes() {
+    let skill = spec_with_body(
+        "args",
+        DIGEST_A,
+        true,
+        true,
+        b"$0|$1|$2|$ARGUMENTS[99]|$ARGUMENTS[bad]",
+    );
+    let op = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "'' café tail".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&op).unwrap(),
+        "|café|tail|$ARGUMENTS[99]|$ARGUMENTS[bad]"
+    );
+    let op = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "'unclosed".into(),
+        bare: false,
+    };
+    assert!(
+        skill
+            .render(&op)
+            .unwrap_err()
+            .to_string()
+            .contains("quoting")
+    );
+}
+
+// Catches: escaped placeholders expand or prefixes consume unknown names.
+#[test]
+fn renderer_respects_escapes_token_boundaries_and_multi_digit_positions() {
+    let skill = spec_with_body(
+        "args",
+        DIGEST_A,
+        true,
+        true,
+        br"\$0 \\$1 $10 $firstly $ARGUMENTS_SUFFIX $first",
+    )
+    .with_arguments(["first"]);
+    let op = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "a b c d e f g h i j k".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&op).unwrap(),
+        r"$0 \\b k $firstly $ARGUMENTS_SUFFIX a"
+    );
+}
+
 #[test]
 fn active_scope_pins_model_and_narrows_effect_tools_monotonically() {
     let mut scope = ActiveSkillScope::new(["read", "grep", "write"]);
@@ -519,6 +619,47 @@ fn four_real_visibility_configs_announce_and_authorize_only_their_admitted_audie
     assert!(model.authorize_user("model").is_err());
     assert!(model.authorize_model("model").is_ok());
     assert!(SkillCatalogue::new(vec![spec("disabled", DIGEST_A, false, false)]).is_err());
+}
+
+#[test]
+fn skill_descriptor_exposes_model_choices_without_leaking_bodies_or_user_only_skills() {
+    let catalogue = Arc::new(
+        SkillCatalogue::new(vec![
+            spec("zeta", DIGEST_A, false, true),
+            spec("private", DIGEST_A, true, false),
+            spec("alpha", DIGEST_A, true, true),
+        ])
+        .unwrap(),
+    );
+    let tool = RegisteredTool::skill(catalogue);
+    let descriptor = tool.descriptor();
+    assert!(descriptor.description.contains("Description for alpha"));
+    assert!(descriptor.description.contains("Description for zeta"));
+    assert!(descriptor.description.contains("\"user_invocable\":false"));
+    assert!(!descriptor.description.contains("private"));
+    assert!(!descriptor.description.contains("Explain $ARGUMENTS"));
+    assert!(!descriptor.description.contains("SKILL.md"));
+    assert!(
+        descriptor.description.find("alpha").unwrap()
+            < descriptor.description.find("zeta").unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(tool.descriptor()).unwrap(),
+        serde_json::to_value(descriptor).unwrap()
+    );
+    let changed_body = RegisteredTool::skill(Arc::new(
+        SkillCatalogue::new(vec![
+            spec_with_body("alpha", DIGEST_B, true, true, b"secret replacement"),
+            spec_with_body("zeta", DIGEST_B, false, true, b"other replacement"),
+        ])
+        .unwrap(),
+    ));
+    assert_eq!(
+        tool.descriptor().description,
+        changed_body.descriptor().description
+    );
+    let empty = RegisteredTool::skill(Arc::new(SkillCatalogue::new(vec![]).unwrap()));
+    assert!(!empty.descriptor().description.contains("Description for"));
 }
 
 #[test]
@@ -1390,5 +1531,42 @@ fn real_child_service() -> RealChildFixture {
         child_events,
         child_waits,
         origins,
+    }
+}
+
+#[test]
+fn raw_skill_arguments_do_not_reject_natural_language_apostrophes() {
+    for (body, expected) in [
+        ("Explain $ARGUMENTS", "Explain don't change the API"),
+        (
+            r"Explain \$0",
+            "Explain $0\n\nARGUMENTS: don't change the API",
+        ),
+        (
+            r"Explain \$first",
+            "Explain $first\n\nARGUMENTS: don't change the API",
+        ),
+        (
+            "Explain $unknown",
+            "Explain $unknown\n\nARGUMENTS: don't change the API",
+        ),
+        (
+            "Explain the task",
+            "Explain the task\n\nARGUMENTS: don't change the API",
+        ),
+    ] {
+        let skill = spec_with_body("explain", DIGEST_A, true, true, body.as_bytes())
+            .with_arguments(["first"]);
+        let operation = SkillOperation::Invoke {
+            name: "explain".to_owned(),
+            arguments: "don't change the API".to_owned(),
+            bare: false,
+        };
+        assert_eq!(
+            skill
+                .render(&operation)
+                .expect("raw prose is not shell syntax"),
+            expected,
+        );
     }
 }

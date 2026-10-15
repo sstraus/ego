@@ -370,21 +370,100 @@ impl SkillSpec {
         }
         let body = std::str::from_utf8(&self.body)
             .map_err(|_| SkillError::new("admitted skill body is not UTF-8"))?;
-        Ok(render_once(body, arguments))
+        render_once(body, arguments, &self.arguments)
     }
 }
 
-fn render_once(body: &str, arguments: &str) -> String {
-    const TOKEN: &str = "$ARGUMENTS";
+// Interpret only source tokens: inserted argument bytes are never scanned again.
+fn render_once(body: &str, arguments: &str, names: &[String]) -> Result<String, SkillError> {
+    let mut values: Option<Vec<String>> = None;
     let mut rendered = String::with_capacity(body.len().saturating_add(arguments.len()));
     let mut remaining = body;
-    while let Some(offset) = remaining.find(TOKEN) {
-        rendered.push_str(&remaining[..offset]);
-        rendered.push_str(arguments);
-        remaining = &remaining[offset + TOKEN.len()..];
+    let mut received = false;
+    while let Some(offset) = remaining.find('$') {
+        let prefix = &remaining[..offset];
+        let tail = &remaining[offset + 1..];
+        let (length, token) = argument_token(tail, names);
+        // Exactly one immediately preceding backslash escapes a known token.
+        let escaped = prefix.ends_with('\\') && !prefix.ends_with("\\\\");
+        if length > 0 && escaped {
+            rendered.push_str(&prefix[..prefix.len() - 1]);
+            rendered.push('$');
+            rendered.push_str(&tail[..length]);
+        } else {
+            rendered.push_str(prefix);
+            let value = match token {
+                Some(ArgumentToken::Raw) => Some(arguments),
+                Some(ArgumentToken::Position(index, named)) => {
+                    if values.is_none() {
+                        values = Some(shell_words::split(arguments).map_err(|error| {
+                            SkillError::new(format!("invalid skill argument quoting: {error}"))
+                        })?);
+                    }
+                    let value = index
+                        .and_then(|i| values.as_ref()?.get(i))
+                        .map(String::as_str);
+                    value.or(if named { Some("") } else { None })
+                }
+                None => None,
+            };
+            if let Some(value) = value {
+                rendered.push_str(value);
+                received = true;
+            } else {
+                rendered.push('$');
+                rendered.push_str(&tail[..length]);
+            }
+        }
+        remaining = &tail[length..];
     }
     rendered.push_str(remaining);
-    rendered
+    if !received && !arguments.is_empty() {
+        rendered.push_str("\n\nARGUMENTS: ");
+        rendered.push_str(arguments);
+    }
+    Ok(rendered)
+}
+
+enum ArgumentToken {
+    Raw,
+    Position(Option<usize>, bool),
+}
+
+fn argument_token(tail: &str, names: &[String]) -> (usize, Option<ArgumentToken>) {
+    if let Some(indexed) = tail.strip_prefix("ARGUMENTS[") {
+        let digits = indexed.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && indexed[digits..].starts_with(']') {
+            return (
+                11 + digits,
+                Some(ArgumentToken::Position(
+                    indexed[..digits].parse().ok(),
+                    false,
+                )),
+            );
+        }
+        // A malformed indexed token must not be consumed as the raw prefix.
+        return (0, None);
+    }
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        return (
+            digits,
+            Some(ArgumentToken::Position(tail[..digits].parse().ok(), false)),
+        );
+    }
+    let length = tail
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        .count();
+    let name = &tail[..length];
+    if name == "ARGUMENTS" {
+        return (length, Some(ArgumentToken::Raw));
+    }
+    if let Some(index) = names.iter().position(|candidate| candidate == name) {
+        return (length, Some(ArgumentToken::Position(Some(index), true)));
+    }
+    (0, None)
 }
 
 /// One canonical immutable catalogue used by user and model admission.

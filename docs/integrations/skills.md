@@ -47,8 +47,9 @@ permission; disallowed tools subtract. `shell`, bang-command blocks, and
 
 Arguments substitute once: `$ARGUMENTS` is the raw tail, `$ARGUMENTS[N]`/`$N` an
 indexed value, and `$name` a declared position. Missing indexed values remain
-literal; missing named values become empty. With no placeholder, an `Arguments:`
-block is appended. Rendered text is not rescanned as shell code.
+literal; missing named values become empty. If no placeholder receives a value, `ARGUMENTS: <raw tail>`
+is appended. Indexed values use shell-style quoting. A single backslash escapes
+an argument placeholder; inserted values are never expanded again. Rendered text is not rescanned as shell code.
 
 ## Durability and authority
 

@@ -142,11 +142,29 @@ impl RegisteredTool {
             }
             Self::HumanInput(tool) => tool.descriptor(),
             Self::History { tool, .. } => tool.descriptor(),
-            Self::Skill(_) => crate::generator::types::ToolDescriptor {
+            Self::Skill(catalogue) => crate::generator::types::ToolDescriptor {
                 name: "skill".to_owned(),
-                description:
-                    "Invoke one admitted skill or read one resource from a live invocation"
-                        .to_owned(),
+                // Only immutable catalogue metadata belongs in this cached tool prefix.
+                description: format!(
+                    "Invoke one admitted skill or read one resource from a live invocation. Choose a skill when its description matches the task. Available skills: {}",
+                    serde_json::Value::Array(
+                        catalogue
+                            .announce_for_model()
+                            .into_iter()
+                            .map(|skill| {
+                                serde_json::json!({
+                                    "name": skill.name,
+                                    "description": skill.description,
+                                    "trigger": skill.trigger,
+                                    "argument_hint": skill.argument_hint,
+                                    "source": skill.source,
+                                    "user_invocable": skill.user_invocable,
+                                    "model_invocable": skill.model_invocable,
+                                })
+                            })
+                            .collect()
+                    )
+                ),
                 parameters: serde_json::json!({
                     "oneOf": [
                         {
