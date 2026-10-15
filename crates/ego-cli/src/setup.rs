@@ -49,8 +49,18 @@ pub(crate) async fn observed_selection_host(
     let roots = crate::run::profile_roots::admit(&effective, &workspace).map_err(UsageError)?;
     let (selected_probes, interpretation) = if let Some(prompt) = &args.prompt {
         match interpret(prompt, &effective, &workspace).await {
-            Ok(probes) => (Some(probes), "Configured provider inference selected closed probes; network/spend exception.\n".to_owned()),
-            Err(_) => (None, "Prompt interpretation is unknown: no usable provider or valid closed response; using deterministic inventory.\n".to_owned()),
+            Ok(probes) => (
+                Some(probes),
+                "Configured provider inference selected closed probes; network/spend exception.\n"
+                    .to_owned(),
+            ),
+            Err(error) => (
+                None,
+                format!(
+                    "Prompt interpretation is unknown: {}; using deterministic inventory.\n",
+                    ego_core::permit::terminal_safe(&error)
+                ),
+            ),
         }
     } else {
         (None, String::new())
@@ -399,7 +409,7 @@ async fn interpret(
         ego_ai::generator::WireGenerator::new(resolved.row, resolved.wire, http, credential);
     let mut stream = generator.generate(request, attempt);
     let mut text = String::new();
-    let mut invalid = false;
+    let mut invalid = None;
     while let Some(event) = stream.next().await {
         match event {
             AiEvent::TextDelta { text: delta }
@@ -407,8 +417,14 @@ async fn interpret(
             {
                 text.push_str(&delta)
             }
-            AiEvent::TextDelta { .. } | AiEvent::ToolCall { .. } | AiEvent::Error { .. } => {
-                invalid = true
+            AiEvent::Error { message, .. } => {
+                invalid.get_or_insert_with(|| format!("setup provider error: {message}"));
+            }
+            AiEvent::TextDelta { .. } => {
+                invalid.get_or_insert_with(|| "setup provider response exceeds 65536 bytes".into());
+            }
+            AiEvent::ToolCall { .. } => {
+                invalid.get_or_insert_with(|| "setup provider returned a tool call".into());
             }
             _ => {}
         }
@@ -423,8 +439,8 @@ async fn interpret(
             _ => return Err("setup token ceiling reached or usage unknown".into()),
         }
     }
-    if invalid {
-        return Err("invalid setup provider output".into());
+    if let Some(error) = invalid {
+        return Err(error);
     }
     let probes: Vec<Probe> =
         serde_json::from_str(&text).map_err(|_| "invalid closed probe selection")?;
