@@ -370,11 +370,31 @@ set edit:completion:arg-completer[ego] = {|@words|
         &'ego;config'= {
             cand -h 'Print help'
             cand --help 'Print help'
+            cand capabilities 'Inspect managed owner transaction capabilities as JSON'
+            cand snapshot 'Read stored values and their opaque owner revision as JSON'
+            cand batch 'Atomically publish a bounded set of typed managed edits'
             cand get 'Read one exact stored value'
             cand set 'Store one strictly typed TOML value'
             cand unset 'Remove one exact stored value'
             cand ls 'List the exact stored managed projection'
             cand edit 'Edit the complete user document in the selected external editor'
+        }
+        &'ego;config;capabilities'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;config;snapshot'= {
+            cand --profile 'profile'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;config;batch'= {
+            cand --profile 'profile'
+            cand --set 'set'
+            cand --if-revision 'if-revision'
+            cand --unset 'unset'
+            cand -h 'Print help'
+            cand --help 'Print help'
         }
         &'ego;config;get'= {
             cand --profile 'profile'

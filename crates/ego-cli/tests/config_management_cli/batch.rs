@@ -5,6 +5,20 @@ use super::*;
 fn managed_batch_invalid_last_operation_writes_nothing() {
     let fixture = Fixture::new();
     fixture.write_config("# unchanged\nmodel='ollama/original'\n");
+    let accepted = fixture.run(&[
+        "config",
+        "batch",
+        "--set",
+        "model='ollama/accepted'",
+        "--set",
+        "mode='plan'",
+    ]);
+    assert!(accepted.status.success(), "{}", error(&accepted));
+    for (key, expected) in [("model", "\"ollama/accepted\"\n"), ("mode", "\"plan\"\n")] {
+        let readback = fixture.run(&["config", "get", key]);
+        assert!(readback.status.success(), "{}", error(&readback));
+        assert_eq!(text(&readback), expected);
+    }
     let before = std::fs::read(fixture.config_path()).unwrap();
     for tail in [
         "bare='not a boolean'",

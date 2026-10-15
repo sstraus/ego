@@ -399,11 +399,34 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;config' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('capabilities', 'capabilities', [CompletionResultType]::ParameterValue, 'Inspect managed owner transaction capabilities as JSON')
+            [CompletionResult]::new('snapshot', 'snapshot', [CompletionResultType]::ParameterValue, 'Read stored values and their opaque owner revision as JSON')
+            [CompletionResult]::new('batch', 'batch', [CompletionResultType]::ParameterValue, 'Atomically publish a bounded set of typed managed edits')
             [CompletionResult]::new('get', 'get', [CompletionResultType]::ParameterValue, 'Read one exact stored value')
             [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Store one strictly typed TOML value')
             [CompletionResult]::new('unset', 'unset', [CompletionResultType]::ParameterValue, 'Remove one exact stored value')
             [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List the exact stored managed projection')
             [CompletionResult]::new('edit', 'edit', [CompletionResultType]::ParameterValue, 'Edit the complete user document in the selected external editor')
+            break
+        }
+        'ego;config;capabilities' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;config;snapshot' {
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;config;batch' {
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'set')
+            [CompletionResult]::new('--if-revision', '--if-revision', [CompletionResultType]::ParameterName, 'if-revision')
+            [CompletionResult]::new('--unset', '--unset', [CompletionResultType]::ParameterName, 'unset')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;config;get' {

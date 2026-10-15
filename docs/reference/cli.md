@@ -393,6 +393,9 @@ Manage configured MCP servers.
 
 Manage stored user configuration.
 
+- `config capabilities` — Inspect managed owner transaction capabilities as JSON
+- `config snapshot` — Read stored values and their opaque owner revision as JSON
+- `config batch` — Atomically publish a bounded set of typed managed edits
 - `config get` — Read one exact stored value
 - `config set` — Store one strictly typed TOML value
 - `config unset` — Remove one exact stored value
