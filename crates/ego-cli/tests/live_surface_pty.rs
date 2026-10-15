@@ -8700,6 +8700,55 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
 "#;
 
+// Catches: the MCP test accepts a real busy-composer repaint as turn completion.
+#[test]
+fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
+    // Captured in high-parallelism run 6 of regression-load.log on rb.
+    let busy = b"\x1b[4;1H\x1b[JWorking 0s \xc2\xb7 Esc to interrupt\r\n> \x1b[?25h";
+    assert!(
+        !mcp_composer_is_idle(busy),
+        "busy composer was accepted as idle"
+    );
+    let mut idle = busy.to_vec();
+    idle.extend_from_slice(b"\x1b[4;1H\x1b[J> \x1b[?25h");
+    assert!(mcp_composer_is_idle(&idle), "idle repaint was not accepted");
+    assert!(!mcp_composer_is_idle(b""), "empty output was accepted");
+    assert!(
+        !mcp_composer_is_idle(b"\x1b[4;1H\x1b[J> second with mcp on"),
+        "submitted draft was accepted before the idle repaint"
+    );
+}
+
+fn mcp_composer_is_idle(output: &[u8]) -> bool {
+    let mut terminal = vt100::Parser::new(24, 120, 0);
+    terminal.process(output);
+    let screen = terminal.screen();
+    let (row, _) = screen.cursor_position();
+    let rows: Vec<_> = screen.rows(0, 120).collect();
+    let composer = &rows[usize::from(row)];
+    composer.trim_end().ends_with('>')
+        && (row == 0 || !rows[usize::from(row - 1)].contains("Esc to interrupt"))
+}
+
+fn until_mcp_composer_is_idle(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !mcp_composer_is_idle(output) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "idle MCP composer timed out: {:?}",
+            normalized(output)
+        );
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "idle MCP composer wait failed: {error}; output: {:?}",
+                normalized(output)
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
 // Catches: toggling persisting configuration or leaving the provider tool catalogue unchanged.
 #[test]
 fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
@@ -8742,8 +8791,7 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
     input.write_all(b"first with mcp off\r").expect("prompt");
     input.flush().expect("flush");
     until(&reader, &mut output, b"MCP-OFF-REQUEST");
-    let off_done = output.len();
-    until_prompt_from(&reader, &mut output, off_done);
+    until_mcp_composer_is_idle(&reader, &mut output);
     let on_start = output.len();
     input.write_all(b"/mcp toggle auto\r").expect("toggle on");
     input.flush().expect("flush");
@@ -8755,8 +8803,7 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
     input.write_all(b"second with mcp on\r").expect("prompt");
     input.flush().expect("flush");
     until(&reader, &mut output, b"MCP-ON-REQUEST");
-    let on_done = output.len();
-    until_prompt_from(&reader, &mut output, on_done);
+    until_mcp_composer_is_idle(&reader, &mut output);
     let add_start = output.len();
     let added_server = ego.file(
         "added-server.py",
