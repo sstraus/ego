@@ -1616,6 +1616,8 @@ pub enum RecoveryEvidence {
     Running(RunHandle),
     Terminal,
     CancelledBeforeStart,
+    /// The process-local generation ended; no unresolved tool effect remains.
+    Interrupted,
     Ambiguous,
     NotRecoverable,
 }
@@ -2580,6 +2582,11 @@ where
             RecoveryEvidence::CancelledBeforeStart => {
                 self.settle_and_observe(run_id, lease, RunSettlement::CancelledBeforeStart)
                     .await
+            }
+            RecoveryEvidence::Interrupted => {
+                self.settle_and_observe(run_id, lease, RunSettlement::Interrupted {
+                    diagnostic: Some("the previous process ended during generation; the request will not be replayed automatically".to_owned()),
+                }).await
             }
             // Both settle uncertain, and they are not the same thing: one
             // executor could not tell us, the other told us it cannot. Split

@@ -123,7 +123,7 @@ mod turn {
             .expect("crashed attempt is durably interrupted");
         assert_eq!(outcome.stop(), StopReason::Aborted);
         assert!(!outcome.retry_is_safe());
-        assert_eq!(fx.sink.events().iter().filter(|event| matches!(event, PublicEvent::Error { message, .. } if message.contains("interrupted") && message.contains(&format!("{:?}", old.attempt())))).count(), 1);
+        assert_eq!(fx.sink.events().iter().filter(|event| matches!(event, PublicEvent::Error { message, .. } if message.contains("interrupted") && message.contains(&old.attempt().uuid().to_string()))).count(), 1);
     }
 
     // Catches: recovery replaces usage already observed before the crash with zero.

@@ -473,7 +473,7 @@ impl<'a> Journal<'a> {
                 }
             }
             self.append(turn, None, Some(parent), EventKind::Error {
-                message: format!("Attempt {:?} was interrupted by the previous process ending. Its request may have reached the provider; it will not be replayed automatically. Only your next explicit request will run.", attempt.attempt()),
+                message: format!("Attempt {} was interrupted by the previous process ending. Its request may have reached the provider; it will not be replayed automatically. Only your next explicit request will run.", attempt.attempt().uuid()),
                 kind: ErrorKind::Unclassified,
             })?;
             if usage.is_none() {

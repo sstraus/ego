@@ -989,9 +989,25 @@ impl RunExecutor for CliRunExecutor {
 
     fn recover<'a>(
         &'a self,
-        _run: &'a ego_core::run::RunId,
+        run: &'a ego_core::run::RunId,
     ) -> futures::future::BoxFuture<'a, Result<RecoveryEvidence, RunExecutorError>> {
-        Box::pin(async { Ok(RecoveryEvidence::NotRecoverable) })
+        Box::pin(async move {
+            let clock = SystemClock;
+            let opened = session::open(self.store.as_ref(), &run.session_id(), &clock)
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+            let state = &opened.state;
+            // Generation streams belong to the dead process. Unlike an admitted
+            // tool effect, they cannot continue locally and must never be replayed.
+            let unresolved_effect = state
+                .items
+                .values()
+                .any(|item| item.tool_call_started.is_some() && !item.completed);
+            Ok(if !state.live_attempts.is_empty() && !unresolved_effect {
+                RecoveryEvidence::Interrupted
+            } else {
+                RecoveryEvidence::NotRecoverable
+            })
+        })
     }
 
     fn observe<'a>(

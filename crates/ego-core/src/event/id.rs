@@ -302,6 +302,11 @@ impl AttemptId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
+
+    /// The human-readable wire identity, without the debug type wrapper.
+    pub const fn uuid(self) -> Uuid {
+        self.0
+    }
 }
 
 impl Default for AttemptId {
