@@ -866,10 +866,12 @@ mod tests {
     // Catches: first-run setup cannot preview until the user creates EGO_HOME by hand.
     #[test]
     fn setup_first_run_previews_without_creating_missing_config_directory() {
-        let (_temp, workspace, home, _layers, _effective, probes, findings) = fixture("");
+        let (_temp, workspace, home, _layers, _effective, probes, mut findings) = fixture("");
+        let workspace = CanonPath::new(std::fs::canonicalize(workspace.as_path()).unwrap());
+        findings[0].canonical = Some(std::fs::canonicalize(&findings[0].requested).unwrap());
         std::fs::remove_file(home.join("config.toml")).unwrap();
         std::fs::remove_dir(&home).unwrap();
-        let layers = vec![ConfigLayer::parse(Source::Default, "roots=[]").unwrap()];
+        let layers = vec![ConfigLayer::parse(Source::Flags, "sandbox='workspace'").unwrap()];
         let effective = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
         let proposal = preview(
             &layers, &effective, &workspace, &home, None, &probes, &findings,
