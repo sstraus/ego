@@ -116,7 +116,7 @@ use executor::{
 };
 pub use executor::{CliCompactionCommand, CliRunExecutor};
 pub(crate) use executor::{protocol_args, protocol_effective};
-pub use session_commands::{compact, export, fork, ls};
+pub use session_commands::{compact, export, fork, ls, rm};
 use session_commands::{exported, finalize_ci_bundle, finalize_ci_error};
 use turns::{
     Driver, InteractiveStatus, RunHost, SeatApprover, Turns, last_assistant_message, run_trust,

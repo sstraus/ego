@@ -2089,3 +2089,16 @@ disables model requests, not automatic pressure recovery. Clear is disabled
 unless the operator passes `--context-clear`, and requires an active goal.
 Headless and ACP hosts do not advertise the tool until they can own automatic
 successor activation; their explicit compaction commands remain unchanged.
+
+### Delete a stored session
+
+`ego rm ID [--yes] [--force] [--session-dir PATH] [-C DIR]` deletes the named
+session from the catalogue. Without `--yes`, the CLI asks for terminal
+confirmation; non-interactive use must pass `--yes`. `--force` acknowledges
+an uncertain prior run and does not replace confirmation. Running, leased,
+or held sessions are refused even with force. Release a hold first.
+
+Deletion uses the same durable tombstone as ACP `session/delete`. It hides
+only the target from `ego ls` and ACP session lists. It retains history for
+fork descendants and does not remove shared storage or resolve uncertain
+external effects. Repeated deletion succeeds.

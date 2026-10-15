@@ -1335,3 +1335,51 @@ fn fork_at_rejects_reasoning_and_compaction_checkpoint_ids_instead_of_accepting_
         ))
     ));
 }
+
+// Catches: deleting a held session silently discards a resumable conversation.
+#[test]
+fn delete_refuses_a_durably_held_session() {
+    let (service, _store, _runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    futures::executor::block_on(
+        service.pause(id, RequestId::from_uuid(uuid::Uuid::from_u128(0x439))),
+    )
+    .unwrap();
+    assert!(futures::executor::block_on(service.delete(id)).is_err());
+    assert_eq!(service.list(None, 10, None).unwrap().items.len(), 1);
+}
+
+// Catches: force either cannot acknowledge uncertainty, or bypasses live/held safety.
+#[test]
+fn delete_force_only_overrides_uncertainty_not_active_leased_or_held_sessions() {
+    let (service, store, runs) = service();
+    let root = PathBuf::from("/workspace");
+    let uncertain = service.create(root.clone()).unwrap().id;
+    let kept = service.create(root.clone()).unwrap().id;
+    let kept_count = store.event_count(kept);
+    runs.mark_uncertain(uncertain);
+    assert!(matches!(
+        futures::executor::block_on(service.delete(uncertain)),
+        Err(LifecycleError::EffectUncertain)
+    ));
+    futures::executor::block_on(service.delete_with_force(uncertain, true)).unwrap();
+    assert_eq!(store.event_count(kept), kept_count);
+    assert_eq!(service.list(None, 10, None).unwrap().items[0].id, kept);
+    for activity in [SessionActivity::Active, SessionActivity::LeaseHeld] {
+        let id = service.create(root.clone()).unwrap().id;
+        match activity {
+            SessionActivity::Active => runs.mark_active(id),
+            _ => runs.hold_lease(id),
+        }
+        assert!(futures::executor::block_on(service.delete_with_force(id, true)).is_err());
+    }
+    let held = service.create(root).unwrap().id;
+    futures::executor::block_on(
+        service.pause(held, RequestId::from_uuid(uuid::Uuid::from_u128(0x440))),
+    )
+    .unwrap();
+    assert!(matches!(
+        futures::executor::block_on(service.delete_with_force(held, true)),
+        Err(LifecycleError::Held)
+    ));
+}
