@@ -252,6 +252,7 @@ pub(super) fn tools_with_mode(
     );
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     all.push(RegisteredTool::Task);
+    all.push(RegisteredTool::Goal);
     if let Some(source) = history {
         for tool in [
             ego_core::history::HistoryTool::Search,

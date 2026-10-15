@@ -1131,7 +1131,7 @@ TEXT`, `/goal achieve`, and `/goal block REASON`, with bare `/goal` equal to
 spellings. A name never changes session identity. One goal may be active;
 `achieved` and `blocked` are terminal and a later objective starts a new goal.
 `achieve` is the operator's explicit completion attestation. `block REASON`
-records one blocker observation; only the third consecutive observation of the
+records one blocker observation; only the fifth consecutive observation of the
 same condition makes the goal terminal, and progress or a changed condition
 resets that audit.
 
@@ -2017,3 +2017,21 @@ has no provider-independent maximum for those inputs. Input uses the dearest
 reachable rate, including cache creation; output uses the request cap. Actual
 provider usage settles the reservation after the response. Missing table
 prices fail closed and name the provider, model and required `chat` mode row.
+
+### Checked session goals (2026-10-15)
+
+An active goal drives work after each successfully completed turn. An independent,
+tool-less small-model generation checks the objective against session evidence.
+This generation uses the normal session budget gate, usage accounting and response
+evidence store. A passing check records `check` attribution and evidence, including
+for operator-owned goals. `/goal achieve` remains an operator attestation.
+
+An unmet condition admits a durable `goal_continuation` system message, never an
+operator prompt. Five consecutive observations of the same normalized condition
+block the goal. A changed condition resets that count. The default allowance is
+20 automatic work turns per run; `--goal-turns N` changes it. `ego run --goal TEXT`
+sets an operator-owned objective. The `goal` tool sets or updates a model-authored
+objective, but cannot replace an operator-owned active goal. Provider, permission,
+pause, cancellation and budget stops do not admit automatic work. Invalid checks
+and exhausted allowances emit a visible diagnostic and retain the active goal;
+they never claim achievement.

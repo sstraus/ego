@@ -335,6 +335,8 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         fallbacks: Vec::new(),
         budget: None,
         max_output_tokens: None,
+        goal: None,
+        goal_turns: 20,
         max_turns: None,
         timeout: None,
         tools: shape.tools,

@@ -159,10 +159,11 @@ pub(crate) fn context_line(context: ContextWindow) -> String {
 }
 
 /// Every accounting line of one set, in the fixed report order.
-fn role_lines(lines: &ego_core::usage::UsageLines) -> [(&'static str, &UsageLine); 6] {
+fn role_lines(lines: &ego_core::usage::UsageLines) -> [(&'static str, &UsageLine); 7] {
     [
         ("main", &lines.main),
         ("judge", &lines.judge),
+        ("goal_check", &lines.goal_check),
         ("compaction", &lines.compaction),
         ("subagent", &lines.subagent),
         ("hook", &lines.hook),
@@ -306,6 +307,7 @@ mod text_red {
             totals: UsageLines {
                 main: empty(),
                 judge: empty(),
+                goal_check: empty(),
                 compaction: empty(),
                 subagent: empty(),
                 hook: empty(),
@@ -399,7 +401,7 @@ mod text_red {
             serde_json::to_string(&report(1_790_662_411_741, usd(156_247, 8))).expect("serialise");
         assert_eq!(
             json,
-            r#"{"v":2,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[]}}}}"#
+            r#"{"v":2,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[]}}}}"#
         );
     }
 }

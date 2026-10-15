@@ -229,6 +229,9 @@ pub enum ExportEvent {
     },
     GoalSet,
     GoalTransitioned,
+    GoalContinuation,
+    GoalUpdated,
+    GoalCheckStopped,
     PromptQueued {
         id: QueuedPromptId,
         images: Vec<ImageRef>,
@@ -811,6 +814,18 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalSet
+        }
+        EventKind::GoalContinuation { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::GoalContinuation
+        }
+        EventKind::GoalUpdated { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::GoalUpdated
+        }
+        EventKind::GoalCheckStopped { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::GoalCheckStopped
         }
         EventKind::GoalTransitioned {
             id: _,

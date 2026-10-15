@@ -319,6 +319,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?
+            .with_goal(args.goal.clone(), args.goal_turns)
             .with_hook_binding(
                 ($hooks).state.clone(),
                 Arc::clone(&($hooks).binding),
@@ -461,6 +462,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                     invocation,
                     config: config.clone(),
                     provider_recovery: args.provider_recovery,
+                    goal: args.goal.clone(),
+                    goal_turns: args.goal_turns,
                     gate: gate.clone(),
                     hook_layers: skill_profile_layers.as_deref(),
                     hook_trust: skill_trust,

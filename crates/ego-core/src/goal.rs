@@ -12,6 +12,8 @@ use crate::store::evidence::EvidenceRef;
 pub enum GoalOwner {
     Operator,
     Automated,
+    /// Independent session goal evaluator.
+    Check,
 }
 
 /// Current state of a persistent goal.
@@ -89,11 +91,12 @@ impl GoalRecord {
             return Err(GoalRefusal::AlreadyTerminal(self.state));
         }
         if let GoalTransition::Achieved {
-            attested_by: GoalOwner::Automated,
+            attested_by,
             evidence,
         } = transition
+            && *attested_by != GoalOwner::Operator
         {
-            if self.owner != GoalOwner::Automated {
+            if *attested_by == GoalOwner::Automated && self.owner != GoalOwner::Automated {
                 return Err(GoalRefusal::AttestationWouldWiden);
             }
             if evidence.is_none() {
@@ -123,7 +126,7 @@ impl GoalRecord {
 
         self.blocker_turns.push(turn);
         self.blocker_observations = self.blocker_turns.len() as u64;
-        if self.blocker_observations >= 3 {
+        if self.blocker_observations >= 5 {
             self.state = GoalState::Blocked;
         }
     }

@@ -505,8 +505,12 @@ impl CliGenerationModelSource {
                 };
                 (identity, explicit, concrete)
             }
-            GenerationRole::Judge => {
-                let identity = match self.judge.as_ref() {
+            GenerationRole::GoalCheck | GenerationRole::Judge => {
+                let identity = match self
+                    .judge
+                    .as_ref()
+                    .filter(|_| role == GenerationRole::Judge)
+                {
                     Some(model) if model.0 == "none" => {
                         return Err(GenerationModelError::new(
                             GenerationModelErrorClass::Usage,
@@ -530,7 +534,9 @@ impl CliGenerationModelSource {
         let hosted = facts::supplied(&self.ceilings).map_err(|error| {
             GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
         })?;
-        if role == GenerationRole::Judge && self.judge.is_none() {
+        if role == GenerationRole::GoalCheck
+            || (role == GenerationRole::Judge && self.judge.is_none())
+        {
             let preferred = match provider_id {
                 "openai-codex" => Some("openai-codex/codex-auto-review"),
                 "openai" => Some("openai/gpt-6-luna"),
@@ -541,6 +547,30 @@ impl CliGenerationModelSource {
                 preferred.filter(|preferred| hosted.iter().any(|(slug, _)| slug == preferred))
             {
                 identity = ModelRef(preferred.to_owned());
+            }
+        }
+        // Prefer the cheapest fully quoted model on the current provider.
+        // Without operator pricing, the provider's small-model default above
+        // is the only supported cost signal; never invent prices.
+        if role == GenerationRole::GoalCheck {
+            let provider = identity
+                .0
+                .split_once('/')
+                .map(|(provider, _)| provider)
+                .unwrap_or(&identity.0);
+            if let Some((slug, _)) = hosted
+                .iter()
+                .filter(|(slug, _)| {
+                    slug.split_once('/')
+                        .is_some_and(|(candidate, _)| candidate == provider)
+                })
+                .filter_map(|(slug, model)| {
+                    let quote = &model.rates.as_ref()?.quote;
+                    Some((slug, (quote.output?, quote.uncached_input?)))
+                })
+                .min_by_key(|(_, prices)| *prices)
+            {
+                identity = ModelRef(slug.clone());
             }
         }
         let provider_id = identity
@@ -593,7 +623,7 @@ impl CliGenerationModelSource {
                 GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
             })?;
         }
-        let thinking = if role == GenerationRole::Judge {
+        let thinking = if matches!(role, GenerationRole::Judge | GenerationRole::GoalCheck) {
             judge_thinking(&resolved.capabilities)
         } else {
             resolved

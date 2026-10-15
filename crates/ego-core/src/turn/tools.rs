@@ -89,6 +89,9 @@ impl GenerationToolCatalogue {
 /// A model call after the mixed registry has selected its typed boundary.
 /// Human input never acquires an effect tool or enters permission policy.
 pub(crate) enum PreparedToolCall {
+    Goal {
+        objective: String,
+    },
     Task(super::task::TaskRequest),
     Effect {
         tool: std::sync::Arc<dyn Tool>,
@@ -387,7 +390,8 @@ impl<'a> Tools<'a> {
             .iter()
             .find_map(|registered| match registered {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
-                RegisteredTool::Effect(_)
+                RegisteredTool::Goal
+                | RegisteredTool::Effect(_)
                 | RegisteredTool::HumanInput(_)
                 | RegisteredTool::Task
                 | RegisteredTool::History { .. } => None,
@@ -576,6 +580,21 @@ impl<'a> Tools<'a> {
                 call: self.prepare_params(tool.as_ref(), params.clone())?,
                 presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
+            RegisteredTool::Goal => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct GoalArgs {
+                    objective: String,
+                }
+                let args: GoalArgs =
+                    serde_json::from_value(params).map_err(|error| error.to_string())?;
+                if args.objective.trim().is_empty() {
+                    return Err("goal objective must not be empty".into());
+                }
+                Ok(PreparedToolCall::Goal {
+                    objective: args.objective,
+                })
+            }
             RegisteredTool::Task => super::task::parse(params).map(PreparedToolCall::Task),
             RegisteredTool::History { source, tool } => Ok(PreparedToolCall::History {
                 source: std::sync::Arc::clone(source),

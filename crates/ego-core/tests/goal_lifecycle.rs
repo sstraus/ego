@@ -42,12 +42,18 @@ fn started(turn: TurnId, seq: u64, owner: GoalOwner) -> (DomainEvent, GoalId) {
 }
 
 #[test]
-fn blocker_audit_counts_distinct_goal_turns_and_blocks_on_third_observation() {
-    let turns = [TurnId::new(), TurnId::new(), TurnId::new()];
+fn blocker_audit_counts_distinct_goal_turns_and_blocks_on_fifth_observation() {
+    let turns = [
+        TurnId::new(),
+        TurnId::new(),
+        TurnId::new(),
+        TurnId::new(),
+        TurnId::new(),
+    ];
     let mut state = SessionState::default();
     let (creation, id) = started(turns[0], 1, GoalOwner::Operator);
     state.apply(&creation);
-    for (turn, seq) in [(turns[0], 2), (turns[1], 3)] {
+    for (turn, seq) in [(turns[0], 2), (turns[1], 3), (turns[2], 4), (turns[3], 5)] {
         state.apply(&event(
             turn,
             seq,
@@ -64,8 +70,8 @@ fn blocker_audit_counts_distinct_goal_turns_and_blocks_on_third_observation() {
         ));
     }
     state.apply(&event(
-        turns[2],
-        4,
+        turns[4],
+        6,
         EventKind::GoalTransitioned {
             id,
             transition: GoalTransition::BlockerObserved {
@@ -205,4 +211,44 @@ fn achievement_matrix_enforces_attester_and_evidence_and_is_terminal() {
     assert!(matches!(state.goal.unwrap().state, GoalState::Active));
     let (state, _, _) = achieve(GoalOwner::Operator, GoalOwner::Automated, Some(evidence()));
     assert!(matches!(state.goal.unwrap().state, GoalState::Active));
+}
+
+#[test]
+fn independent_check_can_achieve_operator_goal_but_requires_evidence() {
+    // Catches: operator ownership silently rejects independent goal checks.
+    let turn = TurnId::new();
+    let (creation, id) = started(turn, 1, GoalOwner::Operator);
+    let mut state = SessionState::default();
+    state.apply(&creation);
+    for (seq, evidence) in [
+        (2, None),
+        (
+            3,
+            Some(EvidenceRef {
+                id: EvidenceId::parse("b".repeat(64)).unwrap(),
+                bytes: 9,
+            }),
+        ),
+    ] {
+        state.apply(&event(
+            turn,
+            seq,
+            EventKind::GoalTransitioned {
+                id,
+                transition: GoalTransition::Achieved {
+                    attested_by: GoalOwner::Check,
+                    evidence,
+                },
+            },
+        ));
+        assert_eq!(
+            state.goal.as_ref().unwrap().state,
+            if seq == 2 {
+                GoalState::Active
+            } else {
+                GoalState::Achieved
+            }
+        );
+    }
+    assert_eq!(state.goal.unwrap().achieved_by, Some(GoalOwner::Check));
 }

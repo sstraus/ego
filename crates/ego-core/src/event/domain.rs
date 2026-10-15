@@ -62,6 +62,7 @@ pub enum GenerationRole {
     #[default]
     Main,
     Judge,
+    GoalCheck,
     Compaction,
     Subagent,
     Hook,
@@ -319,6 +320,12 @@ pub enum EventKind {
         ceilings: crate::ceiling::Ceilings,
         derived_from: Option<GoalId>,
     },
+    /// System-owned work admitted after an independent goal check.
+    GoalContinuation { id: GoalId, text: String },
+    /// A check could not continue safely or exhausted its allowance.
+    GoalCheckStopped { id: GoalId, reason: String },
+    /// The model updated its own objective.
+    GoalUpdated { id: GoalId, objective: String },
     /// One observation was made against the current goal.
     GoalTransitioned {
         id: GoalId,
@@ -774,6 +781,9 @@ impl EventKind {
             EventKind::SessionPauseObserved { .. } => "session_pause_observed",
             EventKind::SessionResumed { .. } => "session_resumed",
             EventKind::GoalSet { .. } => "goal_set",
+            EventKind::GoalContinuation { .. } => "goal_continuation",
+            EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
+            EventKind::GoalUpdated { .. } => "goal_updated",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",

@@ -379,6 +379,7 @@ pub struct TurnState {
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     ContextCheckpoint,
+    GoalContinuation,
     UserPrompt,
     Assistant,
     Reasoning,
@@ -1836,6 +1837,24 @@ impl SessionState {
                         achievement_evidence: None,
                         blocker_turns: Vec::new(),
                     });
+                }
+            }
+            EventKind::GoalContinuation { text, .. } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::GoalContinuation) {
+                    item.text = text.clone();
+                }
+            }
+            EventKind::GoalCheckStopped { .. } => {}
+            EventKind::GoalUpdated { id, objective } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| {
+                    goal.id == *id
+                        && goal.state == GoalState::Active
+                        && goal.owner == crate::goal::GoalOwner::Automated
+                }) {
+                    goal.objective = objective.clone();
+                    goal.blocker_reason = None;
+                    goal.blocker_observations = 0;
+                    goal.blocker_turns.clear();
                 }
             }
             EventKind::GoalTransitioned { id, transition } => {

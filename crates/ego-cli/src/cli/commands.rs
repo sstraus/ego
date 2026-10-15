@@ -741,6 +741,13 @@ pub(super) struct Flags {
     /// Maximum generated tokens per request.
     #[arg(long)]
     pub(super) max_output_tokens: Option<std::num::NonZeroU64>,
+    /// Set a checked session objective.
+    #[arg(long)]
+    pub(super) goal: Option<String>,
+
+    /// Maximum automatic goal continuation turns.
+    #[arg(long, default_value_t = 20)]
+    pub(super) goal_turns: u32,
 
     /// Cap the turns this run may take.
     #[arg(long)]
