@@ -1335,3 +1335,121 @@ fn fork_at_rejects_reasoning_and_compaction_checkpoint_ids_instead_of_accepting_
         ))
     ));
 }
+
+fn receipt_only_fixture() -> Vec<SessionEntry> {
+    serde_json::from_str(include_str!("fixtures/receipt-only-replay.json")).unwrap()
+}
+
+fn load_receipt_entries(
+    entries: Vec<SessionEntry>,
+) -> Vec<ego_core::session_lifecycle::ReplayFrame> {
+    let (service, store, _runs) = service();
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    store
+        .0
+        .0
+        .lock()
+        .unwrap()
+        .entries
+        .extend(entries.into_iter().map(|entry| (id, entry)));
+    futures::executor::block_on(service.load(id, Path::new("/workspace")))
+        .unwrap()
+        .replay
+}
+
+#[test]
+fn receipt_only_prompts_and_interruptions_are_not_dropped_from_replay() {
+    use ego_core::public::{ItemKind, PublicEvent};
+    let frames = load_receipt_entries(receipt_only_fixture());
+    assert_eq!(
+        frames.len(),
+        6,
+        "three real prompts and three recorded failures, no assistant reply"
+    );
+    for pair in frames.chunks_exact(2) {
+        assert!(
+            matches!(&pair[0].event, PublicEvent::ItemCompleted { kind: ItemKind::UserMessage, text: Some(text), .. } if text == "ciao")
+        );
+        assert!(
+            matches!(&pair[1].event, PublicEvent::Error { message, .. } if message.starts_with("confinement changed before execution:") && message.ends_with("the session must be reinitialized"))
+        );
+    }
+    let ids = frames
+        .iter()
+        .step_by(2)
+        .map(|frame| match frame.event {
+            PublicEvent::ItemCompleted { item, .. } => item,
+            _ => unreachable!(),
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        ids.len(),
+        3,
+        "identical text represents three distinct admissions"
+    );
+    assert_eq!(
+        frames,
+        load_receipt_entries(receipt_only_fixture()),
+        "replay identities are stable"
+    );
+}
+
+#[test]
+fn receipt_replay_does_not_duplicate_semantic_prompt() {
+    let mut entries = receipt_only_fixture();
+    entries.truncate(2);
+    let mut settled = serde_json::to_value(&entries[1]).unwrap();
+    settled["run_transaction"]["command"]["settlement"] =
+        serde_json::json!({"outcome": "completed"});
+    settled["run_transaction"]["status"] = serde_json::json!("settled");
+    entries[1] = serde_json::from_value(settled).unwrap();
+    entries.insert(1, SessionEntry::Event(event("ciao", 1)));
+    let frames = load_receipt_entries(entries);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                frame.event,
+                ego_core::public::PublicEvent::ItemCompleted {
+                    kind: ego_core::public::ItemKind::UserMessage,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn receipt_replay_keeps_unprompted_session_empty() {
+    assert!(load_receipt_entries(Vec::new()).is_empty());
+}
+
+#[test]
+fn receipt_replay_does_not_duplicate_recorded_error() {
+    let mut entries = receipt_only_fixture();
+    entries.truncate(2);
+    let diagnostic = match &entries[1] {
+        SessionEntry::RunTransaction(transaction) => match transaction.command() {
+            ego_core::run::RunCommand::CommandSettled { settlement, .. } => {
+                settlement.diagnostic().unwrap().to_owned()
+            }
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let mut error = event("unused", 1);
+    error.kind = EventKind::Error {
+        message: diagnostic,
+        kind: ego_core::generator::types::ErrorKind::Unclassified,
+    };
+    entries.insert(1, SessionEntry::Event(error));
+    let frames = load_receipt_entries(entries);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(frame.event, ego_core::public::PublicEvent::Error { .. }))
+            .count(),
+        1
+    );
+}

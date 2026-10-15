@@ -169,6 +169,11 @@ impl std::fmt::Display for SessionId {
 pub struct TurnId(Uuid);
 
 impl TurnId {
+    /// Preserve the identity of a durable receipt in a display-only projection.
+    pub(crate) const fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
     /// Generate a new identity from the current time.
     pub fn new() -> Self {
         Self(Uuid::now_v7())
@@ -203,6 +208,11 @@ impl Default for GoalId {
 pub struct ItemId(Uuid);
 
 impl ItemId {
+    /// Preserve the identity of a durable receipt in a display-only projection.
+    pub(crate) const fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
     /// Generate a new identity from the current time.
     pub fn new() -> Self {
         Self(Uuid::now_v7())

@@ -1479,6 +1479,12 @@ result, and `status` projects the durable `context_overflow` settlement. The
 source session owns every compaction generation's usage and cost,
 and the target receives no copied ledger or run state.
 
+ACP `session/load` also displays accepted prompts that survive only in durable
+run receipts. A semantic user prompt takes precedence, so load does not display
+it twice. Recorded interrupted or uncertain outcomes appear as historical error
+cards. This display projection does not add semantic events, assistant replies,
+or provider context. A session with no accepted prompt still has no transcript.
+
 ### 6.7 Conversation forks
 
 `ego fork ID --at ITEM_ID` and `/fork [message-id]` branch after the successful
