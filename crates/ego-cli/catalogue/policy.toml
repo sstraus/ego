@@ -206,7 +206,12 @@ transport = "sse"
 [stated."openai/chat-latest"]
 source = "https://developers.openai.com/api/docs/models/chat-latest"
 read = "2026-10-15"
-reasoning_efforts = "unknown"
+# Responses probe 2026-10-15: POST https://api.openai.com/v1/responses with
+# model=chat-latest, reasoning.effort=medium returned HTTP 200, status=completed,
+# reasoning.effort=medium and output_text=ok (16 total tokens). Only Medium is
+# measured; do not infer Off, Low or High. See ADR 2026-10-11, regression case.
+reasoning = true
+reasoning_options = [{ type = "effort", values = ["medium"] }]
 limit = { context = 400000, output = 128000 }
 modalities = { input = ["text", "image"], output = ["text"] }
 

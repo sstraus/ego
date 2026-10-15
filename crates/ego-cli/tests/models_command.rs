@@ -1000,7 +1000,10 @@ fn chat_latest_lists_vendor_limits_without_invented_controls_or_subscription() {
     let caps = &model["capabilities"];
     assert_eq!(caps["max_context_tokens"], 400_000);
     assert_eq!(caps["max_output_tokens"], 128_000);
-    assert_eq!(caps["reasoning_efforts"], "unknown");
+    assert_eq!(
+        caps["reasoning_efforts"],
+        serde_json::json!({"only": ["medium"]})
+    );
     assert_eq!(caps["supports_parallel_tool_calls"], false);
     assert_eq!(caps["image_input"]["kind"], "supported");
     assert_eq!(model["provenance"]["authority"], "builtin");
