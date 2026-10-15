@@ -597,6 +597,8 @@ pub struct Report {
     pub result: serde_json::Value,
     pub ok: bool,
     pub exit_reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalReport>,
     /// Stable sanitized MCP startup diagnostics, absent when every selected
     /// server was admitted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -631,6 +633,48 @@ pub struct Report {
     pub cost: CumulativeCost,
 }
 
+/// Goal outcome is separate from whether the invocation completed successfully.
+#[derive(Debug, Serialize)]
+pub struct GoalReport {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl GoalReport {
+    fn of(goal: &ego_core::goal::GoalRecord) -> Self {
+        use ego_core::goal::GoalState;
+        let reason = goal
+            .check_stop
+            .clone()
+            .or_else(|| goal.blocker_reason.clone());
+        // The durable stop event carries a reason, not a typed stop category.
+        let exhausted = goal.check_stop.as_deref().is_some_and(|reason| {
+            reason == "goal check token budget reached"
+                || reason
+                    == format!(
+                        "goal continuation budget exhausted ({})",
+                        goal.continuation_turns
+                    )
+        });
+        let status = match goal.state {
+            GoalState::Achieved => "achieved",
+            _ if exhausted => "exhausted",
+            GoalState::Blocked => "stopped",
+            GoalState::Active if goal.check_stop.is_some() => "stopped",
+            GoalState::Active => "active",
+        };
+        Self {
+            status,
+            reason: if goal.state == GoalState::Achieved {
+                None
+            } else {
+                reason
+            },
+        }
+    }
+}
+
 impl Report {
     pub fn of(
         session: SessionId,
@@ -657,6 +701,7 @@ impl Report {
             result,
             ok: matches!(termination, RunTermination::Done),
             exit_reason: termination.exit_reason(),
+            goal: state.goal.as_ref().map(GoalReport::of),
             mcp_errors: Vec::new(),
             denied,
             denied_by,
@@ -720,6 +765,10 @@ mod tests {
         });
         let object = object.as_object().expect("§4.1 publishes an object");
 
+        assert!(
+            !object.contains_key("goal"),
+            "no goal must not acquire an outcome"
+        );
         assert_eq!(object["exit_reason"], "permission");
         assert_eq!(object["denied"], "edit may not write /ws/x");
         // Absent, not null. §4.2 ratifies presence as this format's detection

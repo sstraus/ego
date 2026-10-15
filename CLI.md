@@ -604,7 +604,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 12,
+  "v": 13,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -623,6 +623,18 @@ a number of its own. This object is a projection of the same public model —
 changes both surfaces at once, and a second number would let one of the two
 move without the other. §4.6's catalogue is versioned separately for the
 opposite reason: it publishes no part of the event model.
+
+When the session has a goal, the summary also contains `goal`:
+`{"status":"achieved|stopped|exhausted|active","reason":"…"}`.
+The field is absent for sessions without a goal. `achieved` means the durable
+goal was achieved; it has no `reason`. `stopped` carries the goal-check stop
+reason (including bounded evaluator failure diagnostics), or the blocker reason.
+`exhausted` carries the goal continuation or goal-check token budget reason.
+`active` means the goal remains open without a goal-check stop, for example
+when the invocation needs human input. Its last blocker reason is included if
+present. `ok` and `exit_reason` still describe the invocation, not goal success:
+a completed invocation can have `ok:true`, `exit_reason:"done"`, and a stopped
+or exhausted goal. Consumers that require goal success must inspect `goal.status`.
 
 `usage` is the sum of the per-generation deltas, split by the categories that
 are *priced differently*; it is a flow and only grows. `context` is the
