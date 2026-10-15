@@ -264,15 +264,14 @@ async fn validate_setup_judge(
         )),
     ));
     let hosted = crate::facts::supplied(&effective.ceilings).map_err(|error| error.to_string())?;
-    let (resolved, credential) = crate::model::resolve(
-        model,
-        hosted,
-        &http,
-        &ego_ai::provider::EnvCredentials,
-        &effective.auth,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let credentials: Box<dyn ego_ai::provider::Credentials> = match config::ego_home() {
+        Some(home) => Box::new(crate::auth::ObservedCredentials::new(home)),
+        None => Box::new(ego_ai::provider::EnvCredentials),
+    };
+    let (resolved, credential) =
+        crate::model::resolve(model, hosted, &http, credentials.as_ref(), &effective.auth)
+            .await
+            .map_err(|error| error.to_string())?;
     let identity = ego_core::config::ModelRef(model.to_owned());
     let mut request = crate::run::composition::fixed_judge_request(
         &identity,
@@ -331,12 +330,16 @@ async fn interpret(
     ));
     let http: Arc<dyn Http> = Arc::new(crate::provider_http::ProviderHttpAdapter::inference(ports));
     let hosted = crate::facts::supplied(&effective.ceilings).map_err(|error| error.to_string())?;
-    // Environment-only credentials avoid store refresh, lock and bootstrap effects.
+    // Observed subscription credentials never refresh, create locks or bootstrap.
+    let credentials: Box<dyn ego_ai::provider::Credentials> = match config::ego_home() {
+        Some(home) => Box::new(crate::auth::ObservedCredentials::new(home)),
+        None => Box::new(ego_ai::provider::EnvCredentials),
+    };
     let (resolved, credential) = crate::model::resolve(
         &model.0,
         hosted,
         &http,
-        &ego_ai::provider::EnvCredentials,
+        credentials.as_ref(),
         &effective.auth,
     )
     .await
