@@ -322,3 +322,81 @@ fn setup_tool_presence_and_write_intent_never_claim_effect_success() {
     assert!(matches!(report[1].status, ego_core::setup::Status::Unknown));
     assert_eq!(std::fs::read_to_string(file).unwrap(), "unchanged");
 }
+
+// Catches: the bounded instruction catalogue silently drops queued references.
+#[test]
+fn setup_inventory_reports_omitted_instruction_references() {
+    let root = tempfile::tempdir().unwrap();
+    let names = (0..16)
+        .map(|id| format!("@branch-{id}.md\n"))
+        .collect::<String>();
+    std::fs::write(root.path().join("AGENTS.md"), names).unwrap();
+    for id in 0..16 {
+        std::fs::write(
+            root.path().join(format!("branch-{id}.md")),
+            format!("@leaf-{id}.md\n"),
+        )
+        .unwrap();
+    }
+    let inventory = ego_tools::setup::inventory_report(root.path(), &|_| true);
+    assert!(
+        inventory
+            .omissions
+            .iter()
+            .any(|reason| reason.contains("instruction") && reason.contains("limit")),
+        "bounded catalogue silently omitted queued references"
+    );
+    assert!(inventory.probes.len() <= 64);
+}
+
+// Catches: per-file reference and byte bounds disappear from catalogue evidence.
+#[test]
+fn setup_inventory_reports_reference_and_byte_limits() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("AGENTS.md"),
+        (0..17)
+            .map(|id| format!("@leaf-{id}.md\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let report = ego_tools::setup::inventory_report(root.path(), &|_| true);
+    assert!(
+        report
+            .omissions
+            .iter()
+            .any(|reason| reason.contains("reference limit 16")
+                && reason.contains("1 references omitted"))
+    );
+    std::fs::write(root.path().join("AGENTS.md"), vec![b'x'; 65537]).unwrap();
+    let report = ego_tools::setup::inventory_report(root.path(), &|_| true);
+    assert!(
+        report
+            .omissions
+            .iter()
+            .any(|reason| reason.contains("byte limit 65536"))
+    );
+}
+
+// Catches: duplicate references consume bounded slots and lose their source chain.
+#[test]
+fn setup_inventory_deduplicates_same_kind_path_preserving_source_depths() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("AGENTS.md"), "@shared.md\n@branch.md\n").unwrap();
+    std::fs::write(root.path().join("branch.md"), "@shared.md\n").unwrap();
+    std::fs::write(root.path().join("shared.md"), "plain").unwrap();
+    let report = ego_tools::setup::inventory_report(root.path(), &|_| true);
+    let shared = report
+        .probes
+        .iter()
+        .filter_map(|probe| match probe {
+            Probe::Instructions { path, reason } if path == &root.path().join("shared.md") => {
+                Some(reason)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(shared.len(), 1);
+    assert!(shared[0].contains("depth 1") && shared[0].contains("depth 2"));
+    assert!(report.omissions.is_empty());
+}

@@ -63,7 +63,7 @@ pub(crate) async fn observed_selection_host(
     .with_profile_roots(roots);
     let reader = NativeProbeReader::capture();
     let scope = DiagnosticScope::new(Vec::new());
-    let probes = ego_tools::setup::inventory_admitted(workspace.as_path(), &|path| {
+    let inventory = ego_tools::setup::inventory_report(workspace.as_path(), &|path| {
         use ego_core::permit::{Classification, Op, PreparedCall, Resolution};
         match policy.classify(PreparedCall::new("read", Op::Read { path: path.clone() })) {
             Classification::Settled(Ok(_)) => true,
@@ -74,7 +74,7 @@ pub(crate) async fn observed_selection_host(
             _ => false,
         }
     });
-    let active_probes = selected_probes.as_deref().unwrap_or(&probes);
+    let active_probes = selected_probes.as_deref().unwrap_or(&inventory.probes);
     let findings = Controller::new(&reader, &policy, &scope)
         .inspect(active_probes)
         .map_err(UsageError)?;
@@ -97,6 +97,11 @@ pub(crate) async fn observed_selection_host(
         rendered.push_str("Report only; no human apply authority.\n");
     }
     rendered.push_str(&interpretation);
+    if selected_probes.is_none() {
+        for omission in &inventory.omissions {
+            rendered.push_str(&format!("Catalogue incomplete: {omission}\n"));
+        }
+    }
     let _judge = if let Some(selected) = &args.judge {
         match validate_setup_judge(selected, &effective, &workspace).await {
             Ok(()) => {

@@ -434,31 +434,60 @@ pub fn inventory(workspace: &Path) -> Vec<ego_core::setup::Probe> {
     inventory_admitted(workspace, &|path| path.as_path().starts_with(workspace))
 }
 
+#[derive(Debug)]
+pub struct Inventory {
+    pub probes: Vec<ego_core::setup::Probe>,
+    pub omissions: Vec<String>,
+}
+
 pub fn inventory_admitted(
     workspace: &Path,
     content_admitted: &dyn Fn(&CanonPath) -> bool,
 ) -> Vec<ego_core::setup::Probe> {
+    inventory_report(workspace, content_admitted).probes
+}
+
+/// Bounded catalogue plus explicit limits; an incomplete graph is never silent.
+pub fn inventory_report(
+    workspace: &Path,
+    content_admitted: &dyn Fn(&CanonPath) -> bool,
+) -> Inventory {
     use ego_core::setup::Probe;
+    let mut omissions = Vec::new();
     let reader = NativeProbeReader::capture();
     let mut probes = Vec::new();
     let mut queue = std::collections::VecDeque::from([
-        (workspace.join("AGENTS.md"), 0usize),
-        (workspace.join("CLAUDE.md"), 0),
+        (
+            workspace.join("AGENTS.md"),
+            0usize,
+            "workspace entry".to_owned(),
+        ),
+        (workspace.join("CLAUDE.md"), 0, "workspace entry".to_owned()),
     ]);
     let mut visited = std::collections::HashSet::new();
-    while let Some((path, depth)) = queue.pop_front() {
+    while let Some((path, depth, source)) = queue.pop_front() {
         if probes.len() >= 32 {
+            omissions.push(format!(
+                "instruction item limit 32: at least {} queued references omitted",
+                queue.len() + 1
+            ));
             break;
         }
         probes.push(Probe::Instructions {
             path: path.clone(),
-            reason: format!("instruction reference depth {depth}"),
+            reason: format!("instruction reference depth {depth}; source {source}"),
         });
         let Ok(metadata) = reader.metadata(&path) else {
             continue;
         };
-        if depth >= 8
-            || !content_admitted(&metadata.canonical)
+        if depth >= 8 {
+            omissions.push(format!(
+                "instruction depth limit 8 at {}; descendants not inspected",
+                ego_core::permit::terminal_safe(&path.display().to_string())
+            ));
+            continue;
+        }
+        if !content_admitted(&metadata.canonical)
             || !metadata.regular
             || !metadata.canonical.as_path().starts_with(workspace)
             || !visited.insert(metadata.canonical.clone())
@@ -469,15 +498,24 @@ pub fn inventory_admitted(
             continue;
         };
         if content.truncated {
+            omissions.push(format!(
+                "instruction byte limit 65536 at {}; references not expanded",
+                ego_core::permit::terminal_safe(&path.display().to_string())
+            ));
             continue;
         }
         let Ok(text) = std::str::from_utf8(&content.bytes) else {
             continue;
         };
-        for reference in ego_core::config::instruction_references(text)
-            .into_iter()
-            .take(16)
-        {
+        let references = ego_core::config::instruction_references(text);
+        if references.len() > 16 {
+            omissions.push(format!(
+                "instruction reference limit 16 at {}: {} references omitted",
+                ego_core::permit::terminal_safe(&path.display().to_string()),
+                references.len() - 16
+            ));
+        }
+        for reference in references.into_iter().take(16) {
             if reference.is_empty() {
                 continue;
             }
@@ -487,7 +525,11 @@ pub fn inventory_admitted(
             } else {
                 path.parent().unwrap_or(workspace).join(requested)
             };
-            queue.push_back((target, depth + 1));
+            queue.push_back((
+                target,
+                depth + 1,
+                ego_core::permit::terminal_safe(&path.display().to_string()),
+            ));
         }
     }
     let marker = workspace.join(".git");
@@ -663,6 +705,52 @@ pub fn inventory_admitted(
     }
     #[cfg(target_os = "macos")]
     probes.push(Probe::Metadata { path: std::env::var_os("DEVELOPER_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/db/xcode_select_link")), reason: "operator/platform developer selection; inspect selector only, never xcode-select execution".into() });
-    probes.truncate(64);
-    probes
+    // Collapse exact kind/path duplicates only; retain every source reason.
+    // Aliases remain distinct requested paths for confirmation identity binding.
+    let mut unique: Vec<Probe> = Vec::new();
+    for probe in probes {
+        let (kind, path, reason) = probe_parts(&probe);
+        if let Some(existing) = unique.iter_mut().find(|existing| {
+            let (other_kind, other_path, _) = probe_parts(existing);
+            kind == other_kind && path == other_path
+        }) {
+            let previous = match existing {
+                Probe::Read { reason, .. }
+                | Probe::Metadata { reason, .. }
+                | Probe::Write { reason, .. }
+                | Probe::Tool { reason, .. }
+                | Probe::Git { reason, .. }
+                | Probe::Instructions { reason, .. } => reason,
+            };
+            if !previous.contains(reason) {
+                previous.push_str("; ");
+                previous.push_str(reason);
+            }
+        } else {
+            unique.push(probe);
+        }
+    }
+    if unique.len() > 64 {
+        omissions.push(format!(
+            "catalogue item limit 64: {} entries omitted",
+            unique.len() - 64
+        ));
+        unique.truncate(64);
+    }
+    Inventory {
+        probes: unique,
+        omissions,
+    }
+}
+
+fn probe_parts(probe: &ego_core::setup::Probe) -> (u8, &std::ffi::OsStr, &str) {
+    use ego_core::setup::Probe;
+    match probe {
+        Probe::Read { path, reason } => (0, path.as_os_str(), reason),
+        Probe::Metadata { path, reason } => (1, path.as_os_str(), reason),
+        Probe::Write { path, reason } => (2, path.as_os_str(), reason),
+        Probe::Tool { name, reason } => (3, std::ffi::OsStr::new(name), reason),
+        Probe::Git { path, reason } => (4, path.as_os_str(), reason),
+        Probe::Instructions { path, reason } => (5, path.as_os_str(), reason),
+    }
 }
