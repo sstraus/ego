@@ -3881,6 +3881,9 @@ where
                         Some(serde_json::Value::Bool(force)) => *force,
                         Some(_) => return responder.respond_with_error(Error::invalid_params().data("_meta.ego.force must be a boolean")),
                     };
+                    if sessions.is_busy(&request.session_id) {
+                        return responder.respond_with_error(Error::new(SESSION_BUSY, "session has active work"));
+                    }
                     match lifecycle.delete_with_force(id, force).await {
                         Ok(()) => {
                             if let Some(mcp) = sessions.close(&request.session_id) {

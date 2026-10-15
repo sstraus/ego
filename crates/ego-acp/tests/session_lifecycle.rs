@@ -2082,7 +2082,11 @@ async fn delete_refuses_a_prompt_preparing_its_first_run_even_with_force() {
             serde_json::json!({"sessionId":session, "prompt":[{"type":"text","text":"start"}]}),
         )
         .await;
-    regression_case_phase("first prompt preparation", fixture.executor.preparation_started()).await;
+    regression_case_phase(
+        "first prompt preparation",
+        fixture.executor.preparation_started(),
+    )
+    .await;
     let (deleted, _) = connection
         .request(
             "session/delete",
@@ -2096,6 +2100,12 @@ async fn delete_refuses_a_prompt_preparing_its_first_run_even_with_force() {
     let (listed, _) = connection
         .request("session/list", serde_json::json!({"cwd":ROOT}))
         .await;
-    assert!(listed["result"]["sessions"].as_array().unwrap().iter().any(|row| row["sessionId"] == session));
+    assert!(
+        listed["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["sessionId"] == session)
+    );
     connection.finish().await;
 }
