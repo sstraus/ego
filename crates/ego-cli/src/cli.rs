@@ -696,6 +696,14 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigAction {
+    Capabilities,
+    Snapshot {
+        target: UserConfigTarget,
+    },
+    Batch {
+        changes: Vec<ego_core::config::UserConfigMutation>,
+        expected: Option<String>,
+    },
     RootsList {
         target: UserConfigTarget,
         json: bool,
@@ -1561,6 +1569,54 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
 
 fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
     let action = match command.action {
+        ConfigSubcommand::Capabilities => ConfigAction::Capabilities,
+        ConfigSubcommand::Snapshot { profile } => ConfigAction::Snapshot {
+            target: config_target(profile)?,
+        },
+        ConfigSubcommand::Batch {
+            profile,
+            sets,
+            unsets,
+            if_revision,
+        } => {
+            let target = config_target(profile)?;
+            if sets.len() + unsets.len() == 0 || sets.len() + unsets.len() > 64 {
+                return Err(UsageError("managed batch requires 1..64 operations".into()));
+            }
+            let mut changes = Vec::new();
+            let mut keys = std::collections::HashSet::new();
+            for assignment in sets {
+                let (key, raw) = assignment
+                    .split_once('=')
+                    .ok_or_else(|| UsageError("batch set requires KEY=TOML_VALUE".into()))?;
+                let key = managed_config_key(&target, key)?;
+                if !keys.insert(key.to_string()) {
+                    return Err(UsageError("duplicate batch key".into()));
+                }
+                let value = ManagedConfigValue::parse(key.clone(), raw).map_err(|_| {
+                    UsageError(format!("invalid TOML value or type for config key `{key}`"))
+                })?;
+                changes.push(ego_core::config::UserConfigMutation::ManagedSet {
+                    target: target.clone(),
+                    key,
+                    value,
+                });
+            }
+            for key in unsets {
+                let key = managed_config_key(&target, &key)?;
+                if !keys.insert(key.to_string()) {
+                    return Err(UsageError("duplicate batch key".into()));
+                }
+                changes.push(ego_core::config::UserConfigMutation::ManagedUnset {
+                    target: target.clone(),
+                    key,
+                });
+            }
+            ConfigAction::Batch {
+                changes,
+                expected: if_revision,
+            }
+        }
         ConfigSubcommand::Get { profile, json, key } => {
             let target = config_target(profile)?;
             let key = managed_config_key(&target, &key)?;

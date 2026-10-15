@@ -458,7 +458,30 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:ego-config-command-$line[1]:"
         case $line[1] in
-            (get)
+            (capabilities)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+'--profile=[]:NAME:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(batch)
+_arguments "${_arguments_options[@]}" : \
+'--profile=[]:NAME:_default' \
+'*--set=[]:KEY=TOML_VALUE:_default' \
+'--if-revision=[]:REVISION:_default' \
+'*--unset=[]:KEY:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get)
 _arguments "${_arguments_options[@]}" : \
 '--profile=[]:NAME:_default' \
 '--json[]' \
@@ -728,6 +751,9 @@ _ego__subcmd__compact_commands() {
 (( $+functions[_ego__subcmd__config_commands] )) ||
 _ego__subcmd__config_commands() {
     local commands; commands=(
+'capabilities:Inspect managed owner transaction capabilities as JSON' \
+'snapshot:Read stored values and their opaque owner revision as JSON' \
+'batch:Atomically publish a bounded set of typed managed edits' \
 'get:Read one exact stored value' \
 'set:Store one strictly typed TOML value' \
 'unset:Remove one exact stored value' \
@@ -735,6 +761,16 @@ _ego__subcmd__config_commands() {
 'edit:Edit the complete user document in the selected external editor' \
     )
     _describe -t commands 'ego config commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__config__subcmd__batch_commands] )) ||
+_ego__subcmd__config__subcmd__batch_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego config batch commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__config__subcmd__capabilities_commands] )) ||
+_ego__subcmd__config__subcmd__capabilities_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego config capabilities commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__config__subcmd__edit_commands] )) ||
 _ego__subcmd__config__subcmd__edit_commands() {
@@ -755,6 +791,11 @@ _ego__subcmd__config__subcmd__ls_commands() {
 _ego__subcmd__config__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'ego config set commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__config__subcmd__snapshot_commands] )) ||
+_ego__subcmd__config__subcmd__snapshot_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego config snapshot commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__config__subcmd__unset_commands] )) ||
 _ego__subcmd__config__subcmd__unset_commands() {

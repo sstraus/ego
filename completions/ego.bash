@@ -88,6 +88,12 @@ _ego() {
             ego__subcmd__auth,status)
                 cmd="ego__subcmd__auth__subcmd__status"
                 ;;
+            ego__subcmd__config,batch)
+                cmd="ego__subcmd__config__subcmd__batch"
+                ;;
+            ego__subcmd__config,capabilities)
+                cmd="ego__subcmd__config__subcmd__capabilities"
+                ;;
             ego__subcmd__config,edit)
                 cmd="ego__subcmd__config__subcmd__edit"
                 ;;
@@ -99,6 +105,9 @@ _ego() {
                 ;;
             ego__subcmd__config,set)
                 cmd="ego__subcmd__config__subcmd__set"
+                ;;
+            ego__subcmd__config,snapshot)
+                cmd="ego__subcmd__config__subcmd__snapshot"
                 ;;
             ego__subcmd__config,unset)
                 cmd="ego__subcmd__config__subcmd__unset"
@@ -370,8 +379,52 @@ _ego() {
             return 0
             ;;
         ego__subcmd__config)
-            opts="-h --help get set unset ls edit"
+            opts="-h --help capabilities snapshot batch get set unset ls edit"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__config__subcmd__batch)
+            opts="-h --profile --set --if-revision --unset --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --set)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --if-revision)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --unset)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__config__subcmd__capabilities)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -434,6 +487,24 @@ _ego() {
             return 0
             ;;
         ego__subcmd__config__subcmd__set)
+            opts="-h --profile --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__config__subcmd__snapshot)
             opts="-h --profile --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

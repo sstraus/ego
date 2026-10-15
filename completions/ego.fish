@@ -299,12 +299,23 @@ complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from reload" -s h -l help -d 'Print help'
-complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from get set unset ls edit" -s h -l help -d 'Print help'
-complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from get set unset ls edit" -f -a "get" -d 'Read one exact stored value'
-complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from get set unset ls edit" -f -a "set" -d 'Store one strictly typed TOML value'
-complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from get set unset ls edit" -f -a "unset" -d 'Remove one exact stored value'
-complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from get set unset ls edit" -f -a "ls" -d 'List the exact stored managed projection'
-complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from get set unset ls edit" -f -a "edit" -d 'Edit the complete user document in the selected external editor'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "capabilities" -d 'Inspect managed owner transaction capabilities as JSON'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "snapshot" -d 'Read stored values and their opaque owner revision as JSON'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "batch" -d 'Atomically publish a bounded set of typed managed edits'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "get" -d 'Read one exact stored value'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "set" -d 'Store one strictly typed TOML value'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "unset" -d 'Remove one exact stored value'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "ls" -d 'List the exact stored managed projection'
+complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -f -a "edit" -d 'Edit the complete user document in the selected external editor'
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from capabilities" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from snapshot" -l profile -r
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from snapshot" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from batch" -l profile -r
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from batch" -l set -r
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from batch" -l if-revision -r
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from batch" -l unset -r
+complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from batch" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from get" -l profile -r
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from get" -l json
 complete -c ego -n "__fish_ego_using_subcommand config; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help'

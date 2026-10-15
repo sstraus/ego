@@ -337,14 +337,27 @@ pub struct RuleMutation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserConfigError {
     message: String,
+    conflict: bool,
 }
 
 impl UserConfigError {
+    pub fn conflict() -> Self {
+        Self {
+            message: "config revision conflict; read a fresh snapshot".into(),
+            conflict: true,
+        }
+    }
+
+    pub fn is_conflict(&self) -> bool {
+        self.conflict
+    }
+
     /// Preserve the boundary's actionable cause without exposing an outer
     /// filesystem error type through the core-owned port.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            conflict: false,
         }
     }
 }
@@ -455,6 +468,33 @@ pub trait UserConfigStore: Send + Sync {
         &self,
         mutation: UserConfigMutation,
     ) -> Result<UserConfigMutationResult, UserConfigError>;
+
+    /// Validate and publish 1..64 managed operations to one exact target.
+    fn managed_batch(
+        &self,
+        _changes: Vec<UserConfigMutation>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        Err(UserConfigError::new("managed batches are unavailable"))
+    }
+
+    /// Capture an opaque target-bound revision with its stored projection.
+    fn revision_snapshot(
+        &self,
+        _target: UserConfigTarget,
+    ) -> Result<(UserConfigSnapshot, String), UserConfigError> {
+        Err(UserConfigError::new("config revisions are unavailable"))
+    }
+
+    /// Compare and publish under the same cross-process lock as every writer.
+    fn managed_batch_conditional(
+        &self,
+        _changes: Vec<UserConfigMutation>,
+        _expected: &str,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        Err(UserConfigError::new(
+            "conditional config writes are unavailable",
+        ))
+    }
 
     /// Preview without creating lock, directory, temporary file, or candidate.
     fn prepare_batch(

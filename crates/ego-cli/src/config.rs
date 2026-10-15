@@ -127,6 +127,52 @@ async fn execute_inner(
         .transpose()?;
     let store = user_store()?;
     match &args.action {
+        ConfigAction::Capabilities => {
+            out.line(r#"{"v":1,"atomic_batch":true,"max_operations":64,"compare_and_swap":true}"#)
+        }
+        ConfigAction::Snapshot { target } => {
+            let (snapshot, revision) = store
+                .revision_snapshot(target.clone())
+                .map_err(store_failure)?;
+            render_json_revision(
+                target,
+                snapshot
+                    .values
+                    .into_iter()
+                    .filter(|(_, value)| value.is_some()),
+                Some(&revision),
+                out,
+            )?;
+        }
+        ConfigAction::Batch { changes, expected } => {
+            let result = match expected {
+                Some(expected) => store.managed_batch_conditional(changes.clone(), expected),
+                None => store.managed_batch(changes.clone()),
+            };
+            let result = result.map_err(|error| {
+                if error.is_conflict() {
+                    out.line(
+                        r#"{"v":1,"code":"conflict","persisted":false,"next_action":"snapshot"}"#,
+                    );
+                    RunTermination::Failed {
+                        message: "config revision conflict; read a fresh snapshot".into(),
+                    }
+                } else {
+                    store_failure(error)
+                }
+            })?;
+            let publication = match result.publication {
+                UserConfigPublication::NotPublished => "not_published",
+                UserConfigPublication::PublishedDurably => "durable",
+                UserConfigPublication::PublishedDurabilityUncertain { .. } => {
+                    "durability_uncertain"
+                }
+            };
+            out.line(
+                &serde_json::json!({"v":1,"changed":result.changed,"publication":publication})
+                    .to_string(),
+            );
+        }
         ConfigAction::Effective { .. } => {
             unreachable!("effective listing returns before stored-value management")
         }
@@ -463,6 +509,20 @@ fn render_json(
     >,
     out: &Stdout,
 ) -> Result<(), RunTermination> {
+    render_json_revision(target, values, None, out)
+}
+
+fn render_json_revision(
+    target: &UserConfigTarget,
+    values: impl IntoIterator<
+        Item = (
+            ego_core::config::ManagedConfigKey,
+            Option<ManagedConfigValue>,
+        ),
+    >,
+    revision: Option<&str>,
+    out: &Stdout,
+) -> Result<(), RunTermination> {
     let mut rendered = Vec::new();
     for (key, value) in values {
         let json =
@@ -491,8 +551,11 @@ fn render_json(
             .expect("a validated profile string is always valid JSON"),
         None => "null".to_owned(),
     };
+    let revision = revision
+        .map(|revision| format!(",\"revision\":\"{revision}\""))
+        .unwrap_or_default();
     let line = format!(
-        "{{\"v\":1,\"scope\":\"user\",\"profile\":{profile},\"values\":{{{}}}}}",
+        "{{\"v\":1,\"scope\":\"user\",\"profile\":{profile},\"values\":{{{}}}{revision}}}",
         rendered.join(",")
     );
     out.line(&line);
