@@ -522,6 +522,47 @@ fn four_real_visibility_configs_announce_and_authorize_only_their_admitted_audie
 }
 
 #[test]
+fn skill_descriptor_exposes_model_choices_without_leaking_bodies_or_user_only_skills() {
+    let catalogue = Arc::new(
+        SkillCatalogue::new(vec![
+            spec("zeta", DIGEST_A, false, true),
+            spec("private", DIGEST_A, true, false),
+            spec("alpha", DIGEST_A, true, true),
+        ])
+        .unwrap(),
+    );
+    let tool = RegisteredTool::skill(catalogue);
+    let descriptor = tool.descriptor();
+    assert!(descriptor.description.contains("Description for alpha"));
+    assert!(descriptor.description.contains("Description for zeta"));
+    assert!(descriptor.description.contains("\"user_invocable\":false"));
+    assert!(!descriptor.description.contains("private"));
+    assert!(!descriptor.description.contains("Explain $ARGUMENTS"));
+    assert!(!descriptor.description.contains("SKILL.md"));
+    assert!(
+        descriptor.description.find("alpha").unwrap()
+            < descriptor.description.find("zeta").unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(tool.descriptor()).unwrap(),
+        serde_json::to_value(descriptor).unwrap()
+    );
+    let changed_body = RegisteredTool::skill(Arc::new(
+        SkillCatalogue::new(vec![
+            spec_with_body("alpha", DIGEST_B, true, true, b"secret replacement"),
+            spec_with_body("zeta", DIGEST_B, false, true, b"other replacement"),
+        ])
+        .unwrap(),
+    ));
+    assert_eq!(
+        tool.descriptor().description,
+        changed_body.descriptor().description
+    );
+    let empty = RegisteredTool::skill(Arc::new(SkillCatalogue::new(vec![]).unwrap()));
+    assert!(!empty.descriptor().description.contains("Description for"));
+}
+
+#[test]
 fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_captured_authority() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let blobs = RecordingBlobStore::with_order(Arc::clone(&order));
