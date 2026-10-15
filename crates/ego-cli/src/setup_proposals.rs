@@ -869,7 +869,7 @@ mod tests {
         let (_temp, workspace, home, _layers, _effective, probes, findings) = fixture("");
         std::fs::remove_file(home.join("config.toml")).unwrap();
         std::fs::remove_dir(&home).unwrap();
-        let layers = Vec::new();
+        let layers = vec![ConfigLayer::parse(Source::Default, "roots=[]").unwrap()];
         let effective = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
         let proposal = preview(
             &layers, &effective, &workspace, &home, None, &probes, &findings,
