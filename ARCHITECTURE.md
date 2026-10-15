@@ -40,7 +40,7 @@ Error
 
 53 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-52, including the session-metadata, pause and goal, question, detached-exec,
+53, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, skill, and clean-session compaction lifecycles.
 `ExecutionObserved` records an admitted execution authority.
 `ExecutionMeasured` records a capability measurement as evidence only (§3.4).
