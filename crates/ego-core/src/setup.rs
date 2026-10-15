@@ -11,12 +11,35 @@ use crate::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall, R
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Probe {
-    Read { path: PathBuf, reason: String },
-    Metadata { path: PathBuf, reason: String },
-    Write { path: PathBuf, reason: String },
-    Tool { name: String, reason: String },
-    Git { path: PathBuf, reason: String },
-    Instructions { path: PathBuf, reason: String },
+    Action {
+        argv: Vec<String>,
+        cwd: PathBuf,
+        reason: String,
+    },
+    Read {
+        path: PathBuf,
+        reason: String,
+    },
+    Metadata {
+        path: PathBuf,
+        reason: String,
+    },
+    Write {
+        path: PathBuf,
+        reason: String,
+    },
+    Tool {
+        name: String,
+        reason: String,
+    },
+    Git {
+        path: PathBuf,
+        reason: String,
+    },
+    Instructions {
+        path: PathBuf,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +63,10 @@ pub struct Observation {
 
 /// Read-only external effect seam. Implementations cannot be supplied by model text.
 pub trait ProbeReader {
+    /// Read-only action preparation; never launches a process or grants authority.
+    fn action(&self, _argv: &[String], _cwd: &std::path::Path) -> Result<PreparedCall, String> {
+        Err("concrete action observation unavailable".into())
+    }
     fn metadata(&self, path: &std::path::Path) -> Result<Observation, String>;
     fn write_metadata(&self, path: &std::path::Path) -> Result<Observation, String> {
         self.metadata(path)
@@ -106,6 +133,42 @@ impl<'a> Controller<'a> {
     }
 
     fn inspect_one(&self, id: usize, probe: &Probe) -> Finding {
+        if let Probe::Action { argv, cwd, reason } = probe {
+            let mut finding = Finding {
+                id,
+                reason: crate::permit::terminal_safe(reason),
+                requested: argv.first().map(PathBuf::from).unwrap_or_default(),
+                canonical: None,
+                status: Status::Unknown,
+                evidence: String::new(),
+                observed: false,
+                truncated: false,
+            };
+            match self.reader.action(argv, cwd) {
+                Ok(call) => {
+                    if let [Op::Spawn { spec }] = call.ops() {
+                        finding.canonical = self
+                            .reader
+                            .metadata(std::path::Path::new(&spec.argv()[0]))
+                            .ok()
+                            .map(|observed| observed.canonical.as_path().to_path_buf());
+                    }
+                    finding.status = match self.policy.classify(call) {
+                        Classification::Settled(Ok(_)) => Status::Ok,
+                        Classification::Settled(Err(_)) => Status::Blocked,
+                        Classification::Ask(pending) => {
+                            match futures::executor::block_on(self.policy.settle(pending)) {
+                                Resolution::Settled(Ok(_)) => Status::Ok,
+                                _ => Status::Blocked,
+                            }
+                        }
+                    };
+                    finding.evidence = "concrete argv policy-only; executable/cwd metadata observed; image identity, native effects and dependencies unproven; no execution".into();
+                }
+                Err(error) => finding.evidence = crate::permit::terminal_safe(&error),
+            }
+            return finding;
+        }
         let (path, reason, content) = match probe {
             Probe::Read { path, reason }
             | Probe::Git { path, reason }
@@ -114,6 +177,7 @@ impl<'a> Controller<'a> {
                 (path.clone(), reason, false)
             }
             Probe::Tool { name, reason } => (PathBuf::from(name), reason, false),
+            Probe::Action { .. } => unreachable!(),
         };
         let mut finding = Finding {
             id,

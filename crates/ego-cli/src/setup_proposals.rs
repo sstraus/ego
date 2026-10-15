@@ -24,6 +24,8 @@ pub(crate) struct Preview {
     pub exec_before: Vec<std::path::PathBuf>,
     pub exec_after: Vec<std::path::PathBuf>,
     pub judge: Option<String>,
+    actions: Vec<(Probe, String)>,
+    pub rules: Vec<String>,
     pub target: UserConfigTarget,
     pub layers: Vec<Sourced<ConfigLayer>>,
     pub identities: Vec<String>,
@@ -175,6 +177,44 @@ fn resolve_candidate(
     }
     crate::run::profile_roots::admit(&effective, workspace)?;
     Ok(effective)
+}
+
+fn action_call(probe: &Probe) -> Result<PreparedCall, String> {
+    use ego_core::setup::ProbeReader;
+    let Probe::Action { argv, cwd, .. } = probe else {
+        return Err("not an action".into());
+    };
+    ego_tools::setup::NativeProbeReader::capture().action(argv, cwd)
+}
+
+fn action_identity(probe: &Probe) -> Result<String, String> {
+    let Probe::Action { argv, cwd, .. } = probe else {
+        return Err("not an action".into());
+    };
+    action_call(probe)?;
+    Ok(format!(
+        "{}:{}:{}",
+        serde_json::to_string(probe).map_err(|e| e.to_string())?,
+        path_identity(Path::new(&argv[0]))?,
+        path_identity(cwd)?
+    ))
+}
+
+fn action_resolution(effective: &Effective, workspace: &CanonPath, call: PreparedCall) -> u8 {
+    let policy = PolicyEngine::new(
+        workspace.clone(),
+        effective.mode.unwrap_or(ego_core::config::Mode::Default),
+        effective.permissions.clone(),
+    );
+    match policy.classify(call) {
+        Classification::Settled(Ok(_)) => 1,
+        Classification::Settled(Err(_)) => 0,
+        Classification::Ask(pending) => match futures::executor::block_on(policy.settle(pending)) {
+            Resolution::Settled(Ok(_)) => 1,
+            Resolution::Ask(_) => 2,
+            _ => 0,
+        },
+    }
 }
 
 /// No model-selected TOML, rule wildcard, mode, sandbox, trust or network change.
@@ -392,13 +432,111 @@ pub(crate) fn preview(
         writes.push(write);
         executions.push(execution);
     }
+    // Rules are proposed only for genuinely unresolved concrete actions, never
+    // for Tool presence, deterministic denials or already settled operations.
+    let mut actions = Vec::new();
+    let mut rules = Vec::new();
+    let mut changes = if items.is_empty() {
+        Vec::new()
+    } else {
+        batch_changes(&target, &roots, &exec_after, change_exec)
+    };
+    for finding in findings {
+        let Some(probe @ Probe::Action { .. }) = probes.get(finding.id) else {
+            continue;
+        };
+        let Ok(call) = action_call(probe) else {
+            continue;
+        };
+        let Some(path) = finding.canonical.as_ref() else {
+            continue;
+        };
+        if action_resolution(effective, workspace, call.clone()) != 2
+            || !exec_admitted(effective, workspace, &CanonPath::new(path))
+        {
+            continue;
+        }
+        let plan = ego_core::config::rule_management::RuleManagement::remember(
+            &call,
+            ego_core::config::ManagedRuleEffect::Allow,
+            workspace.as_path(),
+        )
+        .map_err(|e| e.to_string())?;
+        let mut proposed = changes.clone();
+        // A permissions list replaces a layer: retain every effective predicate.
+        let mut additions = Vec::new();
+        for (effect, entries) in [
+            (
+                ego_core::config::ManagedRuleEffect::Allow,
+                &effective.permissions.allow,
+            ),
+            (
+                ego_core::config::ManagedRuleEffect::Deny,
+                &effective.permissions.deny,
+            ),
+        ] {
+            additions.extend(entries.iter().map(|entry| ego_core::config::RuleMutation {
+                effect,
+                rule: entry.rule().clone(),
+            }));
+        }
+        additions.extend(plan.candidates.iter().cloned().map(|rule| {
+            ego_core::config::RuleMutation {
+                effect: ego_core::config::ManagedRuleEffect::Allow,
+                rule,
+            }
+        }));
+        proposed.push(UserConfigMutation::Rules {
+            target: target.clone(),
+            changes: additions,
+        });
+        let batch = store
+            .prepare_batch(proposed.clone())
+            .map_err(|e| e.to_string())?;
+        let Ok(after) = resolve_candidate(layers, batch.candidate(), workspace) else {
+            continue;
+        };
+        if after.mode != effective.mode
+            || after.sandbox != effective.sandbox
+            || after.network != effective.network
+            || after.judge != effective.judge
+            || after.roots != effective.roots && items.is_empty()
+            || !effective.permissions.deny.iter().all(|entry| {
+                after
+                    .permissions
+                    .deny
+                    .iter()
+                    .any(|new| new.rule() == entry.rule())
+            })
+            || !effective.permissions.allow.iter().all(|entry| {
+                after
+                    .permissions
+                    .allow
+                    .iter()
+                    .any(|new| new.rule() == entry.rule())
+            })
+            || action_resolution(&after, workspace, call) != 1
+        {
+            continue;
+        }
+        let identity = action_identity(probe)?;
+        rules.extend(plan.candidates.iter().map(ToString::to_string));
+        actions.push((probe.clone(), identity));
+        items.push(finding.id);
+        changes = proposed;
+    }
     if items.is_empty() {
         return Ok(None);
     }
     let batch = store
-        .prepare_batch(batch_changes(&target, &roots, &exec_after, change_exec))
+        .prepare_batch(changes)
         .map_err(|error| error.to_string())?;
     let after = resolve_candidate(layers, batch.candidate(), workspace)?;
+    if actions.iter().any(|(probe, _)| {
+        action_call(probe).map_or(true, |call| action_resolution(&after, workspace, call) != 1)
+    }) {
+        return Err("combined setup action proposal is ineffective".into());
+    }
     if paths
         .iter()
         .zip(&writes)
@@ -426,6 +564,8 @@ pub(crate) fn preview(
         exec_before,
         exec_after,
         judge: None,
+        actions,
+        rules,
         target,
         layers: layers.to_vec(),
         identities,
@@ -458,15 +598,21 @@ pub(crate) fn confirm_apply(
     let base = format!("{:x}", Sha256::digest(preview.batch.before().as_bytes()));
     let candidate = format!("{:x}", Sha256::digest(preview.batch.candidate().as_bytes()));
     let question = format!(
-        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}; exec directories {:?} -> {:?} (directory reach, not single executable)\nJudge {:?}: future inference may spend money; this does not grant an action or lift network/floors\nPaths {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
+        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}; exec directories {:?} -> {:?} (directory reach, not single executable)\nExact permission rules {:?}; exec rules omit cwd, timeout and environment and match future calls with the same argv. Action assessment is policy-only; image identity/native success unproven.\nJudge {:?}: future inference may spend money; this does not grant an action or lift network/floors\nPaths {:?}; concrete actions {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
         preview.items,
         preview.target,
         preview.stored_before,
         preview.stored_after,
         preview.exec_before,
         preview.exec_after,
+        preview.rules,
         preview.judge,
-        preview.paths
+        preview.paths,
+        preview
+            .actions
+            .iter()
+            .map(|(probe, _)| probe)
+            .collect::<Vec<_>>()
     );
     if !confirm(question) {
         return Ok("Setup declined/cancelled; no configuration writes.\n".into());
@@ -491,6 +637,13 @@ pub(crate) fn confirm_apply(
                 "setup policy changed; confirm a fresh preview",
             ));
         }
+        for (probe, identity) in &preview.actions {
+            if action_identity(probe).map_err(UserConfigError::new)? != *identity {
+                return Err(UserConfigError::new(
+                    "setup action identity changed; confirm a fresh preview",
+                ));
+            }
+        }
         for (path, identity) in preview.paths.iter().zip(&preview.identities) {
             if path_identity(path).map_err(UserConfigError::new)? != *identity {
                 return Err(UserConfigError::new(
@@ -502,6 +655,7 @@ pub(crate) fn confirm_apply(
     };
     let store =
         OsUserConfigStore::new(Arc::new(OsIo) as Arc<dyn StoreIo>, home.join("config.toml"));
+    let actions = preview.actions.clone();
     let paths = preview.paths.clone();
     let writes = preview.writes.clone();
     let executions = preview.executions.clone();
@@ -539,6 +693,12 @@ pub(crate) fn confirm_apply(
             "Re-probe {}: {status}; existing run authority unchanged.\n",
             ego_core::permit::terminal_safe(&path.display().to_string())
         ));
+    }
+    for (probe, identity) in actions {
+        let fixed = action_identity(&probe).ok().as_ref() == Some(&identity)
+            && action_call(&probe)
+                .is_ok_and(|call| action_resolution(&effective, workspace, call) == 1);
+        report.push_str(&format!("Re-probe concrete action: {}; policy-only, no execution; existing run authority unchanged.\n", if fixed { "fixed approval" } else { "still blocked/unknown" }));
     }
     Ok(report)
 }
@@ -622,6 +782,218 @@ mod tests {
             probes,
             findings,
         )
+    }
+
+    // Catches: a concrete unresolved action cannot receive a narrow permission proposal.
+    #[test]
+    fn setup_action_preview_resolves_only_uncovered_exact_argv() {
+        let (_temp, workspace, home, layers, effective, _, _) = fixture("sandbox='workspace'\n");
+        let program = workspace.as_path().join("fixture-program");
+        std::fs::write(&program, "not executed").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let probe: Probe = serde_json::from_value(serde_json::json!({
+            "kind": "action", "argv": [program, "literal*", "two words"],
+            "cwd": workspace.as_path(), "reason": "expected concrete work"
+        }))
+        .expect("closed concrete action vocabulary missing");
+        let reader = ego_tools::setup::NativeProbeReader::capture();
+        let policy = PolicyEngine::new(
+            workspace.clone(),
+            ego_core::config::Mode::Default,
+            effective.permissions.clone(),
+        );
+        let scope = ego_core::setup::DiagnosticScope::new(Vec::new());
+        let findings = ego_core::setup::Controller::new(&reader, &policy, &scope)
+            .inspect(std::slice::from_ref(&probe))
+            .unwrap();
+        assert!(matches!(findings[0].status, Status::Blocked));
+        assert!(
+            exec_admitted(&effective, &workspace, &CanonPath::new(&program)),
+            "executable reach fixture"
+        );
+        let call = action_call(&probe).unwrap();
+        assert_eq!(
+            action_resolution(&effective, &workspace, call.clone()),
+            2,
+            "unresolved fixture"
+        );
+        let plan = ego_core::config::rule_management::RuleManagement::remember(
+            &call,
+            ego_core::config::ManagedRuleEffect::Allow,
+            workspace.as_path(),
+        )
+        .unwrap();
+        let store =
+            OsUserConfigStore::new(Arc::new(OsIo) as Arc<dyn StoreIo>, home.join("config.toml"));
+        let batch = store
+            .prepare_batch(vec![UserConfigMutation::Rules {
+                target: UserConfigTarget::Base,
+                changes: plan
+                    .candidates
+                    .into_iter()
+                    .map(|rule| ego_core::config::RuleMutation {
+                        effect: ego_core::config::ManagedRuleEffect::Allow,
+                        rule,
+                    })
+                    .collect(),
+            }])
+            .unwrap();
+        let candidate = resolve_candidate(&layers, batch.candidate(), &workspace).unwrap();
+        assert_eq!(
+            action_resolution(&candidate, &workspace, call),
+            1,
+            "candidate {}",
+            batch.candidate()
+        );
+        let proposal = preview(
+            &layers,
+            &effective,
+            &workspace,
+            &home,
+            None,
+            &[probe],
+            &findings,
+        )
+        .unwrap()
+        .expect("unresolved concrete action proposal missing");
+        assert!(proposal.batch.candidate().contains("allow"));
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "not executed");
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+        let after = resolve_candidate(&layers, proposal.batch.candidate(), &workspace).unwrap();
+        let owned_action = proposal.actions[0].0.clone();
+        let action = &owned_action;
+        assert_eq!(
+            action_resolution(&after, &workspace, action_call(action).unwrap()),
+            1
+        );
+        let Probe::Action { argv, cwd, reason } = action else {
+            unreachable!()
+        };
+        let mut different = argv.clone();
+        different[1] = "literal-other".into();
+        let changed = Probe::Action {
+            argv: different,
+            cwd: cwd.clone(),
+            reason: reason.clone(),
+        };
+        assert_eq!(
+            action_resolution(&after, &workspace, action_call(&changed).unwrap()),
+            2,
+            "literal star must not become a rule wildcard"
+        );
+        for config in [
+            "sandbox='workspace'\nmode='plan'",
+            "sandbox='workspace'\nmode='yolo'",
+            "sandbox='workspace'\n[permissions]\ndeny=['exec(*)']",
+        ] {
+            let denied_layers = vec![ConfigLayer::parse(Source::User, config).unwrap()];
+            let denied = resolve_selected(&denied_layers, Trust::Untrusted, None).unwrap();
+            assert!(
+                preview(
+                    &denied_layers,
+                    &denied,
+                    &workspace,
+                    &home,
+                    None,
+                    std::slice::from_ref(action),
+                    &findings
+                )
+                .unwrap()
+                .is_none(),
+                "{config}"
+            );
+        }
+        assert!(
+            preview(
+                &layers,
+                &after,
+                &workspace,
+                &home,
+                None,
+                std::slice::from_ref(action),
+                &findings
+            )
+            .unwrap()
+            .is_none(),
+            "settled actions need no rules"
+        );
+        let result = confirm_apply(proposal, &workspace, &home, &|question| {
+            assert!(question.contains("omit cwd"));
+            std::fs::write(&program, "replacement image").unwrap();
+            true
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("action identity changed")
+        );
+        let mut preserved_layers = layers.clone();
+        preserved_layers.push(
+            ConfigLayer::parse(
+                Source::System,
+                "[permissions]\ndeny=['read(/unrelated/**)']",
+            )
+            .unwrap(),
+        );
+        let preserved = resolve_selected(&preserved_layers, Trust::Untrusted, None).unwrap();
+        let proposal = preview(
+            &preserved_layers,
+            &preserved,
+            &workspace,
+            &home,
+            None,
+            std::slice::from_ref(action),
+            &findings,
+        )
+        .unwrap()
+        .unwrap();
+        let candidate =
+            resolve_candidate(&preserved_layers, proposal.batch.candidate(), &workspace).unwrap();
+        assert!(
+            candidate
+                .permissions
+                .deny
+                .iter()
+                .any(|entry| entry.rule().to_string() == "read(/unrelated/**)")
+        );
+        preserved_layers
+            .push(ConfigLayer::parse(Source::Flags, "[permissions]\nallow=[]").unwrap());
+        let masked = resolve_selected(&preserved_layers, Trust::Untrusted, None).unwrap();
+        assert!(
+            preview(
+                &preserved_layers,
+                &masked,
+                &workspace,
+                &home,
+                None,
+                std::slice::from_ref(action),
+                &findings
+            )
+            .unwrap()
+            .is_none()
+        );
+        let proposal = preview(
+            &layers,
+            &effective,
+            &workspace,
+            &home,
+            None,
+            std::slice::from_ref(action),
+            &findings,
+        )
+        .unwrap()
+        .unwrap();
+        let report = confirm_apply(proposal, &workspace, &home, &|_| true).unwrap();
+        assert!(report.contains("fixed approval"), "{report}");
+        assert_eq!(
+            std::fs::read_to_string(&program).unwrap(),
+            "replacement image"
+        );
     }
 
     // Catches: a dry-run persists config or replaces the original list without improving read admission.

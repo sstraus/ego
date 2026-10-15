@@ -279,6 +279,47 @@ fn open_regular_no_links(_path: &Path) -> Result<fs::File, String> {
 }
 
 impl ProbeReader for NativeProbeReader {
+    fn action(
+        &self,
+        argv: &[String],
+        cwd: &Path,
+    ) -> Result<ego_core::permit::PreparedCall, String> {
+        use ego_core::permit::{EnvPolicy, Op, PreparedCall, SpawnSpec};
+        if argv.is_empty()
+            || argv.len() > 64
+            || argv.iter().map(String::len).sum::<usize>() > 16 * 1024
+            || !Path::new(&argv[0]).is_absolute()
+            || !cwd.is_absolute()
+        {
+            return Err("action requires absolute executable/cwd and bounded argv".into());
+        }
+        let program = self.metadata(Path::new(&argv[0]))?;
+        let directory = self.metadata(cwd)?;
+        if !program.regular || !metadata_no_links(directory.canonical.as_path())?.is_dir() {
+            return Err("action executable/cwd metadata invalid".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata_no_links(program.canonical.as_path())?
+                .permissions()
+                .mode()
+                & 0o111
+                == 0
+            {
+                return Err("action executable is not executable".into());
+            }
+        }
+        let spec = SpawnSpec::new(
+            argv.iter().map(std::ffi::OsString::from).collect(),
+            Some(directory.canonical),
+            None,
+            EnvPolicy::exact(Vec::new()).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(PreparedCall::new("exec", Op::Spawn { spec }))
+    }
+
     fn metadata(&self, path: &Path) -> Result<Observation, String> {
         let canonical = diagnostic_path(path)?;
         let metadata = metadata_no_links(&canonical)?;
@@ -720,7 +761,8 @@ pub fn inventory_report(
                 | Probe::Write { reason, .. }
                 | Probe::Tool { reason, .. }
                 | Probe::Git { reason, .. }
-                | Probe::Instructions { reason, .. } => reason,
+                | Probe::Instructions { reason, .. }
+                | Probe::Action { reason, .. } => reason,
             };
             if !previous.contains(reason) {
                 previous.push_str("; ");
@@ -746,6 +788,7 @@ pub fn inventory_report(
 fn probe_parts(probe: &ego_core::setup::Probe) -> (u8, &std::ffi::OsStr, &str) {
     use ego_core::setup::Probe;
     match probe {
+        Probe::Action { cwd, reason, .. } => (6, cwd.as_os_str(), reason),
         Probe::Read { path, reason } => (0, path.as_os_str(), reason),
         Probe::Metadata { path, reason } => (1, path.as_os_str(), reason),
         Probe::Write { path, reason } => (2, path.as_os_str(), reason),

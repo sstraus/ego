@@ -440,3 +440,74 @@ fn setup_inventory_observes_recorded_operator_cache_source_without_creating_cach
     #[cfg(target_os = "macos")]
     assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("developer selection"))));
 }
+
+// Catches: action diagnostics launch commands or inspect credential aliases/unbounded argv.
+#[test]
+fn setup_action_is_metadata_only_and_rejects_invalid_targets() {
+    use ego_core::setup::ProbeReader;
+    let root = tempfile::tempdir().unwrap();
+    let program = root.path().join("program");
+    let marker = root.path().join("must-not-exist");
+    std::fs::write(&program, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let reader = NativeProbeReader::capture();
+    let argv = vec![program.to_string_lossy().into_owned(), "--expected".into()];
+    let call = reader.action(&argv, root.path()).unwrap();
+    assert!(
+        matches!(call.ops(), [ego_core::permit::Op::Spawn { spec }] if spec.identity().is_none())
+    );
+    assert!(!marker.exists());
+    assert!(reader.action(&[], root.path()).is_err());
+    assert!(reader.action(&["relative".into()], root.path()).is_err());
+    assert!(
+        reader
+            .action(&argv, std::path::Path::new("relative"))
+            .is_err()
+    );
+    assert!(
+        reader
+            .action(&vec![argv[0].clone(); 65], root.path())
+            .is_err()
+    );
+    assert!(
+        reader
+            .action(&[argv[0].clone(), "x".repeat(16 * 1024)], root.path())
+            .is_err()
+    );
+    assert!(
+        reader
+            .action(&[argv[0].clone(), "invalid\0argument".into()], root.path())
+            .is_err()
+    );
+    assert!(
+        reader
+            .action(&[root.path().display().to_string()], root.path())
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        let secret = root.path().join(".ssh");
+        std::fs::create_dir(&secret).unwrap();
+        let target = secret.join("id_rsa");
+        std::fs::write(&target, "not observed").unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(target, &alias).unwrap();
+        assert!(
+            reader
+                .action(&[alias.display().to_string()], root.path())
+                .is_err()
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name() == "must-not-exist")
+            .count(),
+        0
+    );
+}
