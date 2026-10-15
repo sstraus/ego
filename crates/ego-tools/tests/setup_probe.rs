@@ -400,3 +400,43 @@ fn setup_inventory_deduplicates_same_kind_path_preserving_source_depths() {
     assert!(shared[0].contains("depth 1") && shared[0].contains("depth 2"));
     assert!(report.omissions.is_empty());
 }
+
+// Catches: operator mbx configuration is ignored or its cache path is fabricated.
+#[test]
+fn setup_inventory_observes_recorded_operator_cache_source_without_creating_cache() {
+    if std::env::var_os("EGO_SETUP_CATALOGUE_FIXTURE").is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let config = home
+            .path()
+            .join("Library/Application Support/mbx/config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        // Recorded from the operator mbx config on 2026-10-15; only the cache_dir field is relevant.
+        std::fs::write(&config, r#"cache_dir = "/home/example/workspace""#).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "setup_inventory_observes_recorded_operator_cache_source_without_creating_cache",
+            ])
+            .env("EGO_SETUP_CATALOGUE_FIXTURE", "1")
+            .env("HOME", home.path())
+            .env("EGO_SETUP_CATALOGUE_WORKSPACE", workspace.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!home.path().join(".cargo").exists());
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+        return;
+    }
+    let workspace =
+        std::path::PathBuf::from(std::env::var_os("EGO_SETUP_CATALOGUE_WORKSPACE").unwrap());
+    let probes = ego_tools::setup::inventory(&workspace);
+    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { path, reason } if path == std::path::Path::new("/home/example/workspace") && reason.contains("bounded operator TOML"))));
+    #[cfg(target_os = "macos")]
+    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("developer selection"))));
+}
