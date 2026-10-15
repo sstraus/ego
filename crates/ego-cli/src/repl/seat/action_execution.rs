@@ -23,6 +23,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::Plan,
                 ActionId::Yolo,
                 ActionId::Permissions,
+                ActionId::Retry,
             ],
         ),
         (
@@ -625,6 +626,19 @@ fn execute_action(
     action: ActionId,
     busy: bool,
 ) -> (bool, bool) {
+    if action == ActionId::Retry {
+        let notice = if busy {
+            match futures::executor::block_on(ingress.retry_now()) {
+                Ok(()) => "retrying provider now".to_owned(),
+                Err(error) => error.to_string(),
+            }
+        } else {
+            "no provider retry wait is active".to_owned()
+        };
+        status.lock().expect("surface status lock").notice = Some(notice);
+        repaint_status(status);
+        return (true, true);
+    }
     let Some(actions) = status.lock().expect("surface status lock").actions.clone() else {
         return (false, false);
     };

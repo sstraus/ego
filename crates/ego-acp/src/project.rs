@@ -245,21 +245,34 @@ pub fn provider_retry_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
         delay_ms,
         kind,
         cause,
+        recovery_remaining_ms,
         ..
     } = event
     else {
         return None;
     };
     let seconds = delay_ms.div_ceil(1_000);
+    let counter = recovery_remaining_ms.map_or_else(
+        || format!("attempt {attempt}/{limit}"),
+        |remaining| {
+            format!(
+                "attempt {attempt}, recovery horizon {}s; retry now: _ego/retry",
+                remaining.div_ceil(1_000)
+            )
+        },
+    );
     Some(provider_retry_meta(serde_json::json!({
         "state": "waiting",
+        "phase": if recovery_remaining_ms.is_some() { "recovery" } else { "finite" },
+        "recoveryRemainingMs": recovery_remaining_ms,
+        "force": {"method": "_ego/retry", "version": 1},
         "attempt": attempt,
         "limit": limit,
         "delayMs": delay_ms,
         "kind": kind,
         "cause": cause,
         "text": format!(
-            "{cause} — connection problem, retrying in {seconds}s (attempt {attempt}/{limit})"
+            "{cause} — connection problem, retrying in {seconds}s ({counter})"
         ),
     })))
 }

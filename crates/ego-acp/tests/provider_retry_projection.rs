@@ -15,6 +15,7 @@ fn a_retry_is_a_session_info_patch_with_the_counter_the_wait_and_the_cause() {
         turn: TurnId::new(),
         attempt: 2,
         limit: 6,
+        recovery_remaining_ms: None,
         delay_ms: 1_500,
         kind: ErrorKind::Transient,
         cause: "Our servers are currently overloaded. Please try again later.".to_owned(),
@@ -57,5 +58,32 @@ fn a_retry_is_a_session_info_patch_with_the_counter_the_wait_and_the_cause() {
             turn: TurnId::new()
         })
         .is_none()
+    );
+}
+
+/// regression case — catches: recovery looks like a spent finite allowance
+/// and a host cannot discover the force action or horizon.
+#[test]
+fn regression_case_recovery_status_exposes_horizon_and_force_action() {
+    let event = PublicEvent::ProviderRetry {
+        turn: TurnId::new(),
+        attempt: 9,
+        limit: 6,
+        delay_ms: 120_000,
+        recovery_remaining_ms: Some(86_000_000),
+        kind: ErrorKind::Transient,
+        cause: "connection lost".into(),
+    };
+    let wire = serde_json::to_value(provider_retry_v1(&event).unwrap()).unwrap();
+    let status = &wire["_meta"]["ego"]["providerRetry"];
+    assert_eq!(status["phase"], "recovery");
+    assert_eq!(status["recoveryRemainingMs"], 86_000_000);
+    assert_eq!(
+        status["force"],
+        serde_json::json!({"method":"_ego/retry","version":1})
+    );
+    assert_eq!(
+        status["text"],
+        "connection lost — connection problem, retrying in 120s (attempt 9, recovery horizon 86000s; retry now: _ego/retry)"
     );
 }

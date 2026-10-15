@@ -328,7 +328,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                 message: error.to_string(),
             })?;
             let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
-            let loop_ = loop_.with_skill_invocation_port(skill_owner);
+            let loop_ = loop_
+                .with_provider_recovery(
+                    args.provider_recovery
+                        .then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
+                )
+                .with_skill_invocation_port(skill_owner);
             let loop_ = match $active.replayed() {
                 Some(replayed) => loop_.with_replayed_context(replayed),
                 None => loop_,
@@ -455,6 +460,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                     admission: Arc::clone(&evidence),
                     invocation,
                     config: config.clone(),
+                    provider_recovery: args.provider_recovery,
                     gate: gate.clone(),
                     hook_layers: skill_profile_layers.as_deref(),
                     hook_trust: skill_trust,

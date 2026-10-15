@@ -5656,7 +5656,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 29] = [
+    const COMMANDS: [&str; 30] = [
         "help",
         "model",
         "thinking",
@@ -5685,6 +5685,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "expand",
         "skills",
         "hooks",
+        "retry",
         "version",
     ];
     assert_eq!(ActionRegistry::final_surface().names(), COMMANDS);
@@ -5760,6 +5761,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("expand", Some("no tool call to expand yet")),
         ("skills", None),
         ("hooks", Some("no hooks are admitted")),
+        ("retry", Some("no provider retry wait is active")),
         ("version", Some("ego 0.1.0")),
     ] {
         if command == "compact" {

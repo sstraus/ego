@@ -329,17 +329,15 @@ fn cancelling_a_streaming_stdio_turn_leaves_the_session_able_to_run_the_next_pro
     host.finish();
 }
 
-/// regression case, end to end through the packaged binary — catches: a
-/// transient provider failure retried silently or not at all, a provider
-/// failure settling uncertain and refusing every later prompt with "already
-/// has an active turn", and the cause named twice in the error.
+/// regression case — catches: an ACP seat stops after six failed attempts,
+/// or its force action is unavailable while a prompt response is outstanding.
 #[test]
-fn an_overloaded_provider_is_retried_visibly_then_fails_known_and_the_next_prompt_runs() {
+fn regression_case_acp_recovers_without_a_new_prompt_and_force_retry_is_routable() {
     let places = Places::new();
     let mut completions = vec![
         Reply::StatusRetryAfter {
             status: 503,
-            seconds: 1,
+            seconds: 1
         };
         8
     ];
@@ -352,96 +350,42 @@ fn an_overloaded_provider_is_retried_visibly_then_fails_known_and_the_next_promp
     host.initialize();
     let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
     let prompt_id = host.send_request("session/prompt", prompt(&session));
-    let mut statuses = Vec::new();
+    let mut attempts = Vec::new();
+    let mut forced = Vec::new();
+    let mut accepted = 0;
+    let mut cleared = false;
     let answer = loop {
         let frame = host.read_frame();
         if frame["id"] == prompt_id {
             break frame;
         }
-        let update = &frame["params"]["update"];
-        if frame["method"] == "session/update"
-            && update["sessionUpdate"] == "session_info_update"
-            && let Some(status) = update["_meta"]["ego"].get("providerRetry")
-        {
-            statuses.push(status.clone());
-        }
-    };
-
-    let cause = "the provider returned HTTP 503";
-    let waiting: Vec<_> = statuses.iter().filter(|status| !status.is_null()).collect();
-    assert_eq!(waiting.len(), 6, "six retries were announced: {statuses:?}");
-    for (index, status) in waiting.iter().enumerate() {
-        let attempt = index + 1;
-        assert_eq!(status["state"], "waiting", "{status}");
-        assert_eq!(status["attempt"], attempt, "{status}");
-        assert_eq!(status["limit"], 6, "{status}");
-        assert_eq!(
-            status["delayMs"], 1_000,
-            "Retry-After: 1 was honoured: {status}"
-        );
-        assert_eq!(status["cause"], cause, "{status}");
-        assert_eq!(
-            status["text"],
-            format!("{cause} — connection problem, retrying in 1s (attempt {attempt}/6)"),
-            "{status}"
-        );
-    }
-    assert!(
-        statuses.last().is_some_and(serde_json::Value::is_null),
-        "the status was cleared when the turn ended: {statuses:?}"
-    );
-
-    let message = answer["error"]["message"]
-        .as_str()
-        .expect("an error answer");
-    assert_eq!(message, format!("the turn failed: {cause}"), "{answer}");
-    let detail = answer["error"]["data"].as_str().unwrap_or("");
-    assert_eq!(
-        format!("{message} {detail}").matches(cause).count(),
-        1,
-        "the cause is named once: {answer}"
-    );
-    assert_eq!(
-        stub.generations().len(),
-        7,
-        "one attempt and six retries reached the provider"
-    );
-
-    // The next prompt is admitted; its first attempt is overloaded too, and
-    // the status clears before the recovered answer is shown.
-    let next_id = host.send_request("session/prompt", prompt(&session));
-    let mut order = Vec::new();
-    let next = loop {
-        let frame = host.read_frame();
-        if frame["id"] == next_id {
-            break frame;
+        if forced.iter().any(|id| frame["id"] == *id) {
+            assert_eq!(frame["result"]["state"], "accepted", "{frame}");
+            accepted += 1;
+            continue;
         }
         let update = &frame["params"]["update"];
         if let Some(status) = update["_meta"]["ego"].get("providerRetry") {
-            order.push(if status.is_null() {
-                "cleared".to_owned()
-            } else {
-                format!("retry {}/{}", status["attempt"], status["limit"])
-            });
-        } else if update["sessionUpdate"] == "agent_message_chunk" {
-            order.push("answer".to_owned());
+            if status.is_null() {
+                cleared = true;
+                continue;
+            }
+            assert_eq!(status["phase"], "recovery");
+            assert_eq!(status["delayMs"], 1000);
+            assert!(status["recoveryRemainingMs"].as_u64().unwrap() > 0);
+            assert_eq!(status["force"]["method"], "_ego/retry");
+            assert!(status["text"].as_str().unwrap().contains("retry now"));
+            attempts.push(status["attempt"].as_u64().unwrap());
+            forced.push(
+                host.send_request("_ego/retry", serde_json::json!({"v":1,"sessionId":session})),
+            );
         }
     };
-    assert_eq!(
-        next["result"]["stopReason"], "end_turn",
-        "the failed turn did not wedge the session: {next}"
-    );
-    assert_eq!(
-        order.first().map(String::as_str),
-        Some("retry 1/6"),
-        "{order:?}"
-    );
-    assert_eq!(
-        order.get(1).map(String::as_str),
-        Some("cleared"),
-        "the status clears when an attempt succeeds, before its output: {order:?}"
-    );
-    assert!(order[2..].iter().all(|step| step == "answer"), "{order:?}");
+    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+    assert_eq!(attempts, (1..=8).collect::<Vec<_>>());
+    assert_eq!(accepted, 8);
+    assert!(cleared, "retry status must clear before recovered output");
+    assert_eq!(stub.generations().len(), 9);
     host.finish();
 }
 

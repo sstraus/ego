@@ -229,3 +229,65 @@ async fn offline_rejects_non_loopback_logical_and_selected_targets() {
         one_hop_with_selected("localhost", IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))).await,
     );
 }
+
+/// regression case — catches: a silent response bypasses the logical call
+/// deadline. Both absent headers and a stalled SSE body must be bounded.
+#[tokio::test]
+async fn regression_case_silent_provider_is_bounded_by_the_logical_call_deadline() {
+    use futures::StreamExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    assert_eq!(
+        HttpCallTimeout::default().duration(),
+        Duration::from_secs(1800)
+    );
+    for send_headers in [false, true] {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release, hold) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            if send_headers {
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                stream.flush().await.unwrap();
+            }
+            let _ = hold.await;
+        });
+        let target = NetworkTarget::new("localhost", port).unwrap();
+        let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+        let request = HttpRequest::get("/").unwrap();
+        let connect = PreparedConnect::new(target, &request);
+        let transport = offline_transport(
+            Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+            CancelToken::new(),
+        );
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            match GuardedHttp::new(transport.clone(), transport)
+                .execute_admitted(route, connect, request, deadline)
+                .await
+            {
+                Err(error) => error,
+                Ok(response) => {
+                    let OneHopResponse::Response { mut body, .. } = response else {
+                        panic!("fixture must not redirect");
+                    };
+                    body.next()
+                        .await
+                        .expect("timeout body event")
+                        .expect_err("silent body must time out")
+                }
+            }
+        })
+        .await;
+        let _ = release.send(());
+        server.await.unwrap();
+        let error = observed.expect("silent provider must not wait forever");
+        assert_eq!(error.failure(), &TransportFailure::TimedOut);
+        assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    }
+}
