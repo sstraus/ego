@@ -894,6 +894,8 @@ pub struct GenRequest {
 /// Stable messages precede the volatile context/current user request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptCache {
+    /// Active session identity; unlike the cache root this changes on a fork.
+    pub session_id: crate::event::id::SessionId,
     pub lineage_root: crate::event::id::SessionId,
     pub retention: super::capabilities::CacheRetention,
     pub stable_messages: usize,

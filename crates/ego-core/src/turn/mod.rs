@@ -1912,6 +1912,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             let stable_messages = source_messages.messages().len().saturating_sub(1);
             GenRequest {
                 cache: Some(crate::generator::types::PromptCache {
+                    session_id: self.session_id,
                     lineage_root: self.lineage_root,
                     retention: self.config.cache,
                     stable_messages,
@@ -4245,6 +4246,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 )?;
                 let mut request = GenRequest {
                     cache: Some(crate::generator::types::PromptCache {
+                        session_id: self.session_id,
                         lineage_root: self.lineage_root,
                         retention: self.config.cache,
                         stable_messages,

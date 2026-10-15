@@ -66,6 +66,11 @@ pub(crate) fn request_has_images(req: &GenRequest) -> bool {
 /// `Debug` and a row worth logging must not lose which shape it speaks.
 /// `Send + Sync` because a row is shared across a generation's tasks.
 pub trait WireFormat: fmt::Debug + Send + Sync {
+    /// Only mappings with a proven bidirectional contract opt in.
+    fn websocket(&self) -> bool {
+        false
+    }
+
     /// The complete HTTP request for `req` against `target`.
     ///
     /// A [`RequestTarget`] and not a URL, and that is the whole enforcement

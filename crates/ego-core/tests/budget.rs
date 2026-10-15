@@ -271,6 +271,7 @@ mod budget {
         req.messages =
             Conversation::new(vec![Message::text(Role::User, "a ".repeat(190_000))]).unwrap();
         req.cache = Some(PromptCache {
+            session_id: SessionId::new(),
             lineage_root: SessionId::new(),
             retention: CacheRetention::Long,
             stable_messages: 1,

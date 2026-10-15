@@ -168,7 +168,19 @@ impl Resolver for OneShotHttpTransport {
     }
 }
 
+mod websocket;
+
 impl OneHop for OneShotHttpTransport {
+    fn open_websocket(
+        &self,
+        connect: ResolvedConnect,
+        request: HttpRequest,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<Box<dyn ego_core::permit::WebSocketSession>, TransportError>>
+    {
+        websocket::open(self, connect, request, deadline)
+    }
+
     fn admit_mcp(&self) -> Result<(), TransportError> {
         if self.confinement.admits_mcp_http() {
             return Ok(());

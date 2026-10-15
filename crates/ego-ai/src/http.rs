@@ -382,7 +382,7 @@ pub(crate) fn bearer_header(value: &[u8]) -> HttpHeader {
 }
 
 impl HttpRequest {
-    fn to_core(&self) -> Result<CoreHttpRequest, HttpProfileError> {
+    pub(crate) fn to_core(&self) -> Result<CoreHttpRequest, HttpProfileError> {
         let mut path = self.url.path().to_owned();
         if let Some(query) = self.url.query() {
             path.push('?');
@@ -462,7 +462,7 @@ impl HttpError {
         }
     }
 
-    fn transport(error: TransportError) -> Self {
+    pub(crate) fn transport(error: TransportError) -> Self {
         let failure = match error.failure() {
             TransportFailure::AuthoritySpent | TransportFailure::AuthorityMismatch => {
                 HttpFailure::Authority
@@ -553,6 +553,23 @@ pub trait HttpCall: Send {
 /// Consumer-owned HTTP port. Beginning once creates one logical call scope.
 pub trait Http: Send + Sync {
     fn begin_call(&self) -> Box<dyn HttpCall>;
+
+    fn open_websocket(
+        &self,
+        _call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<Box<dyn HttpWebSocket>, TransportError>> {
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::Connect(
+                "WebSocket is unavailable".into(),
+            )),
+        )))
+    }
+}
+
+/// Provider admission is checked for every message, not only at the handshake.
+pub trait HttpWebSocket: Send {
+    fn send(&mut self, call: PreparedHttpCall) -> BoxFuture<'_, Result<(), TransportError>>;
+    fn receive(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>>;
 }
 
 /// One buffered auxiliary exchange. Generation bodies remain streamed.

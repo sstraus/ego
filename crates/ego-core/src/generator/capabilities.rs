@@ -353,6 +353,7 @@ pub enum ReasoningEffortSupport {
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     Sse,
+    WebSocket,
 }
 
 /// A versioned snapshot of what a model can do in conversation, resolved per

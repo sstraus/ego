@@ -83,10 +83,11 @@ context_override = 272000
 
 [provider.openai-codex.wire]
 supports_parallel_tool_calls = false
-reasoning_carryover = "unsupported"
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "openai-codex-responses"
 cancel = "cooperative"
 cache = "none"
-transport = "sse"
+transport = "web_socket"
 
 # ---------------------------------------------------------------------------
 # anthropic. Current generation: the newest model of each tier, released from

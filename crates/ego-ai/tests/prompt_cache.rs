@@ -15,6 +15,7 @@ fn request(model: &str, root: SessionId, live: &str) -> GenRequest {
     GenRequest {
         model: model.to_owned(),
         cache: Some(PromptCache {
+            session_id: root,
             lineage_root: root,
             retention: CacheRetention::Short,
             stable_messages: 4,
