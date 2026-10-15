@@ -1429,6 +1429,15 @@ pub(super) async fn generation_preflight_inner(
         .resolve(GenerationModelRequest::new(GenerationRole::Main))
         .await
         .map_err(generation_refusal)?;
+    if let Some(notice) =
+        model::reasoning_default_notice(&main.identity, &main.capabilities, thinking)
+    {
+        if let Some(status) = status.as_ref() {
+            status.seat.set_notice(notice.to_owned());
+        } else {
+            crate::output::note(notice);
+        }
+    }
     if let Some((catalogue_snapshot, config_store)) = human_picker {
         let picker = Arc::new(Mutex::new(ModelPicker::for_selection(
             Arc::clone(&catalogue_snapshot),

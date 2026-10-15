@@ -1750,6 +1750,13 @@ rows for the providers whose resolver reads this file: `openai`, `openai-codex`,
 `anthropic`, `gemini`, `github-copilot`, `xai-oauth` and `minimax-oauth`. An older
 model a vendor still serves is stated in a stronger layer. `openrouter` is
 selectable but has no builtin rows: it proxies hundreds of third-party models.
+OpenRouter reads reasoning support from the public model inventory's
+`supported_parameters` and per-model `reasoning.supported_efforts` and
+`reasoning.default_effort`. It admits only published effort levels; a reasoning
+parameter without an effort list does not prove that any particular level works.
+Without that parameter, an unspecified effort defaults to off with a visible
+notice; an explicit non-off effort is refused. Off sends the unified `reasoning.enabled = false` switch, not an effort.
+Operator-supplied model facts still override discovery.
 Ollama and `kimi-coding` enumerate their own models; `nous` is operator-supplied.
 See `ARCHITECTURE.md`.
 
