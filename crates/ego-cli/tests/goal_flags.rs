@@ -135,3 +135,161 @@ fn goal_command_binary_invokes_evaluator_and_persists_achievement() {
     assert_eq!(metadata.report()["goal"]["state"], "achieved");
     assert_eq!(metadata.report()["goal"]["achieved_by"], "check");
 }
+
+/// Catches: confinement drops the evidence pipe, or stderr contaminates the verdict.
+#[cfg(unix)]
+#[test]
+fn goal_command_workspace_child_reads_evidence_and_ignores_stderr() {
+    use support::{Places, Plan, Reply, Stub, text};
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("verified artifact"))],
+        ..Plan::default()
+    });
+    let input = places.workspace_path().join("evidence.json");
+    let script = places.file("check.sh", "cat > \"$1\"\nprintf 'diagnostic noise\\n' >&2\nprintf '%s\\n' '{\"achieved\":true,\"reason\":\"verified\"}'\n");
+    let command = serde_json::json!(["/bin/sh", script, input]).to_string();
+    let finished = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "workspace",
+            "--model",
+            "ollama/qwen3",
+            "--output",
+            "jsonl",
+            "--goal",
+            "Checked objective",
+            "--goal-check-command",
+            &command,
+            "--allow",
+            "exec(/bin/sh *)",
+            "Finish the work",
+        ])
+        .run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap();
+    assert_eq!(evidence["objective"], "Checked objective");
+    assert!(
+        evidence["session"]
+            .to_string()
+            .contains("verified artifact")
+    );
+    assert!(
+        goal_events(&places)
+            .iter()
+            .any(|e| e["event"]["kind"]["transition"]["kind"] == "achieved"),
+        "{}",
+        finished.stdout
+    );
+    assert!(!finished.stdout.contains("diagnostic noise"));
+    assert_eq!(stub.generations().len(), 1);
+}
+
+/// Catches: the real child's failure streams are lost when ProcessError is rendered.
+#[cfg(unix)]
+#[test]
+fn goal_command_failed_child_reports_bounded_stderr_tail() {
+    use support::{Places, Plan, Reply, Stub, text};
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("finished"))],
+        ..Plan::default()
+    });
+    let script = places.file("fail.sh", "cat >/dev/null\nprintf 'discard-this-prefix\\n' >&2\ni=0; while [ \"$i\" -lt 5000 ]; do printf x >&2; i=$((i+1)); done\nprintf '\\nprecise failure tail\\n' >&2\nexit 7\n");
+    let command = serde_json::json!(["/bin/sh", script]).to_string();
+    let finished = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--output",
+            "jsonl",
+            "--goal",
+            "Checked objective",
+            "--goal-check-command",
+            &command,
+            "--allow",
+            "exec(/bin/sh *)",
+            "Finish the work",
+        ])
+        .run();
+    let payloads = goal_events(&places);
+    let stopped = payloads
+        .iter()
+        .map(|e| &e["event"]["kind"])
+        .find(|e| e["kind"] == "GoalCheckStopped")
+        .expect("goal check stopped");
+    let reason = stopped["reason"].as_str().unwrap();
+    assert!(reason.contains("precise failure tail"), "{reason}");
+    assert!(reason.contains("Some(7)"), "{reason}");
+    assert!(!reason.contains("discard-this-prefix"), "{reason}");
+    assert!(reason.len() < 4300, "{}", reason.len());
+    assert!(
+        finished.stdout.contains("precise failure tail"),
+        "{}",
+        finished.stdout
+    );
+}
+
+#[cfg(unix)]
+fn goal_events(places: &support::Places) -> Vec<serde_json::Value> {
+    std::fs::read_dir(places.home_path().join("sessions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|e| std::fs::read_to_string(e.path().join("events.jsonl")).ok())
+        .flat_map(|text| {
+            text.lines()
+                .map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).unwrap()["payload"].clone()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Catches: an invalid real-child verdict is accepted as achievement.
+#[cfg(unix)]
+#[test]
+fn goal_command_invalid_child_verdict_never_achieves() {
+    use support::{Places, Plan, Reply, Stub, text};
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("finished"))],
+        ..Plan::default()
+    });
+    let command =
+        serde_json::json!(["/bin/sh", "-c", "cat >/dev/null; printf 'not a verdict'"]).to_string();
+    let finished = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--output",
+            "jsonl",
+            "--goal",
+            "Checked objective",
+            "--goal-check-command",
+            &command,
+            "--allow",
+            "exec(/bin/sh *)",
+            "Finish the work",
+        ])
+        .run();
+    assert!(
+        finished.stdout.contains("invalid verdict"),
+        "{}",
+        finished.stdout
+    );
+    assert!(
+        !goal_events(&places)
+            .iter()
+            .any(|e| e["event"]["kind"]["transition"]["kind"] == "achieved")
+    );
+    assert_eq!(stub.generations().len(), 1);
+}
