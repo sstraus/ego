@@ -578,7 +578,8 @@ pub fn project_replay_v1(
 ) -> Vec<v1::SessionUpdate> {
     let mut updates = frames
         .iter()
-        .flat_map(|frame| {
+        .enumerate()
+        .flat_map(|(position, frame)| {
             // The original prompt RPC carried this failure live. On load
             // there is no historical RPC response, so retain it as a card,
             // not an invented assistant answer.
@@ -592,7 +593,7 @@ pub fn project_replay_v1(
                 vec![v1::SessionUpdate::AgentMessageChunk(
                     v1::ContentChunk::new(message.clone().into())
                         .message_id(Some(v1::MessageId::new(format!(
-                            "replay-error-{turn:?}-{item:?}"
+                            "replay-error-{turn:?}-{item:?}-{position}"
                         ))))
                         .meta(serde_json::Map::from_iter([(
                             "ego".to_owned(),

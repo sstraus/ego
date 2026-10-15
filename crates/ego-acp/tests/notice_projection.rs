@@ -61,6 +61,11 @@ fn replay_does_not_merge_distinct_failures_from_the_same_turn_into_one_card() {
         first["messageId"], second["messageId"],
         "distinct historical failures must not append into one ACP card"
     );
+    assert_eq!(
+        updates,
+        project_replay_v1(&frames, None, std::path::Path::new("/workspace")),
+        "reopening the same history must preserve each failure card's identity"
+    );
 }
 
 #[test]
