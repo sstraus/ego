@@ -129,6 +129,16 @@ pub fn windows_system_environment() -> Vec<(&'static str, OsString)> {
 
 #[cfg(not(windows))]
 pub fn ready_prompt_count(output: &[u8]) -> usize {
+    completed_prompt_count(output, false)
+}
+
+#[cfg(not(windows))]
+pub fn ready_prompt_count_with_status(output: &[u8]) -> usize {
+    completed_prompt_count(output, true)
+}
+
+#[cfg(not(windows))]
+fn completed_prompt_count(output: &[u8], allow_status: bool) -> usize {
     const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 
@@ -149,7 +159,9 @@ pub fn ready_prompt_count(output: &[u8]) -> usize {
             };
             let mut screen = vt100::Parser::new(24, 80, 0);
             screen.process(&frame[..end]);
-            screen.screen().contents().trim() == ">"
+            let contents = screen.screen().contents();
+            let contents = contents.trim();
+            contents == ">" || (allow_status && contents.lines().last() == Some(">"))
         })
         .count()
 }
