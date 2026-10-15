@@ -587,7 +587,7 @@ fn a_capability_the_daemon_does_not_state_is_not_inferred() {
     // `/api/tags` reports completion, tools and thinking, and says nothing
     // about parallel tool calls. `false` is the value that only forecloses a
     // fallback; `true` would break a request. And the daemon states no output
-    // ceiling at all, so that stays `None` and the request must cap itself.
+    // ceiling at all, so that stays `None` without an invented wire cap.
     let (http, _) = server([(200, TAGS), (200, PS_LOADED)]);
 
     let resolved =
@@ -599,12 +599,9 @@ fn a_capability_the_daemon_does_not_state_is_not_inferred() {
 }
 
 #[test]
-fn a_local_model_with_no_output_ceiling_is_refused_for_the_ceiling_and_not_the_price() {
-    // The reason `UnknownCost::UnstatedCeiling` had to exist. Ollama states
-    // no output ceiling, so this is the ordinary path: a request that caps
-    // nothing is unbounded. The quote is complete and honest, so telling the
-    // operator the *price* is unknown would send them hunting for a table
-    // that is already there and already correct.
+fn an_unmetered_local_model_needs_no_output_ceiling_to_bound_zero_spend() {
+    // Catches: applying a paid output-reservation requirement to a model
+    // whose policy guarantees zero monetary spend.
     let (http, _) = server([(200, TAGS), (200, PS_LOADED)]);
     let resolved =
         block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http)).expect("resolved");
@@ -619,16 +616,26 @@ fn a_local_model_with_no_output_ceiling_is_refused_for_the_ceiling_and_not_the_p
         resolved
             .metering
             .upper_bound(None, &uncapped, &resolved.capabilities, usd()),
+        Ok(Some(ego_core::cost::Money::zero(usd()))),
+        "an unmetered request reserves zero without inventing an output cap"
+    );
+    assert_eq!(uncapped.max_output_tokens, None);
+    assert_eq!(resolved.capabilities.max_output_tokens, None);
+
+    // The same missing output ceiling must still refuse currency metering:
+    // no finite paid output reservation can be proved without it.
+    assert_eq!(
+        tabulated().upper_bound(
+            Some(&hosted_quote()),
+            &uncapped,
+            &resolved.capabilities,
+            usd()
+        ),
         Err(UnknownCost::UnstatedCeiling {
             ceiling: ego_core::cost::Ceiling::Output
-        }),
-        "the missing fact is the ceiling, and the refusal has to say so"
+        })
     );
 
-    // And with a cap, the same model bounds cleanly — at zero, because it is
-    // genuinely unmetered. Note that `Unmetered` does *not* skip the ceiling
-    // check to get there: a row nobody charges for is still a row whose
-    // shape the binding has to state.
     let bound = resolved
         .metering
         .upper_bound(None, &request(), &resolved.capabilities, usd())
