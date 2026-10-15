@@ -2045,6 +2045,10 @@ and returns only `{ "achieved": true|false, "reason": "evidence or unmet conditi
 on stdout. Its exact exec authority must be granted by ordinary policy; it uses
 the same confinement and cancellation scope, with a 60-second timeout. Command
 checks do not incur model cost. Model checks remain accounted generations.
+Stderr is not part of the verdict. If the command exits unsuccessfully, the
+visible goal-check diagnostic includes at most 4096 UTF-8 bytes from the end of
+its bounded stderr preview. An exec allow rule does not grant filesystem access:
+the evaluator script and its inputs must be readable under the run confinement.
 
 
 Usage report v2 is the current closed contract: its role lines are `main`,

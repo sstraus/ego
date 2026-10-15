@@ -763,7 +763,7 @@ pub(super) struct Flags {
 
     /// Evaluator argv as a JSON string array; reads evidence JSON on stdin.
     #[arg(long, value_parser = parse_goal_check_command)]
-    pub(super) goal_check_command: Option<Vec<String>>,
+    pub(super) goal_check_command: Option<GoalCheckCommand>,
 
     /// Cap the turns this run may take.
     #[arg(long)]
@@ -875,10 +875,14 @@ pub(super) struct SetupCommand {
     pub(super) directory: Option<PathBuf>,
 }
 
-fn parse_goal_check_command(value: &str) -> Result<Vec<String>, String> {
+/// One clap value containing the evaluator's entire argv, not repeated values.
+#[derive(Debug, Clone)]
+pub(super) struct GoalCheckCommand(pub(super) Vec<String>);
+
+fn parse_goal_check_command(value: &str) -> Result<GoalCheckCommand, String> {
     let argv: Vec<String> = serde_json::from_str(value).map_err(|error| error.to_string())?;
     if argv.is_empty() || argv[0].trim().is_empty() {
         return Err("goal check command must name an executable".into());
     }
-    Ok(argv)
+    Ok(GoalCheckCommand(argv))
 }

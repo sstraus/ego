@@ -3309,7 +3309,32 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let result = effects
             .exec_handler(spec, input, scope)
             .await
-            .map_err(|error| failure(error.to_string()))?;
+            .map_err(|error| {
+                let mut diagnostic = error.to_string();
+                if let crate::permit::ProcessError::Exit { result, .. }
+                | crate::permit::ProcessError::Signal { result, .. } = &error
+                    && let Some(stderr) = result.content.iter().find(|block| {
+                        matches!(
+                            block.provenance,
+                            crate::permit::ToolOutputProvenance::Process {
+                                stream: crate::permit::StreamProvenance::Stderr,
+                                ..
+                            }
+                        )
+                    })
+                    && !stderr.text.trim().is_empty()
+                {
+                    // Keep the end of the bounded process preview, not the
+                    // verdict stream or an unbounded copy of child output.
+                    let mut start = stderr.text.len().saturating_sub(4096);
+                    while !stderr.text.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    diagnostic.push_str("; stderr tail: ");
+                    diagnostic.push_str(stderr.text[start..].trim());
+                }
+                failure(diagnostic)
+            })?;
         if self.cancel.is_cancelled() {
             return Err(failure("goal evaluator cancelled".into()));
         }

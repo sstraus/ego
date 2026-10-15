@@ -1901,7 +1901,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         no_context_tool: flags.no_context_tool,
         context_clear: flags.context_clear,
         context_interval: flags.context_interval,
-        goal_check_command: flags.goal_check_command,
+        goal_check_command: flags.goal_check_command.map(|command| command.0),
         max_turns: flags.max_turns,
         timeout: flags.timeout,
         tools: shape.tools,
