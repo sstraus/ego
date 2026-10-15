@@ -36,6 +36,29 @@ fn setup_diagnostic_read_observes_without_widening_target_policy() {
     );
 }
 
+// Catches: an admitted external instruction file hides its own required references.
+#[test]
+fn setup_inventory_expands_admitted_external_instruction_references() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let shared = root.path().join("shared");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "@../shared/AGENTS.md\n").unwrap();
+    std::fs::write(shared.join("AGENTS.md"), "@rules.md\n").unwrap();
+    std::fs::write(shared.join("rules.md"), "required shared rules\n").unwrap();
+    let report = ego_tools::setup::inventory_report(&workspace, &|_| true);
+    let reader = NativeProbeReader::capture();
+    let expected = std::fs::canonicalize(shared.join("rules.md")).unwrap();
+    assert!(
+        report.probes.iter().any(|probe| {
+            matches!(probe, Probe::Instructions { path, .. }
+            if reader.metadata(path).is_ok_and(|item| item.canonical.as_path() == expected))
+        }),
+        "admitted external instruction dependency was omitted from setup catalogue"
+    );
+}
+
 // Catches: a setup read waits on a FIFO or reads unbounded regular-file contents.
 #[test]
 fn setup_native_read_bounds_bytes_and_refuses_nonregular_files() {

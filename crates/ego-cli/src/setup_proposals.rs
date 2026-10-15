@@ -863,6 +863,25 @@ mod tests {
         )
     }
 
+    // Catches: first-run setup cannot preview until the user creates EGO_HOME by hand.
+    #[test]
+    fn setup_first_run_previews_without_creating_missing_config_directory() {
+        let (_temp, workspace, home, _layers, _effective, probes, findings) = fixture("");
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        std::fs::remove_dir(&home).unwrap();
+        let layers = Vec::new();
+        let effective = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
+        let proposal = preview(
+            &layers, &effective, &workspace, &home, None, &probes, &findings,
+        );
+        assert!(
+            matches!(proposal, Ok(Some(_))),
+            "first-run setup must offer a read-root preview with absent EGO_HOME: {}",
+            proposal.err().unwrap_or_else(|| "no proposal".into())
+        );
+        assert!(!home.exists(), "preview must not create EGO_HOME");
+    }
+
     // Catches: a concrete unresolved action cannot receive a narrow permission proposal.
     #[test]
     fn setup_action_preview_resolves_only_uncovered_exact_argv() {
