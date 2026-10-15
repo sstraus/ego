@@ -825,6 +825,29 @@ mod tests {
         );
     }
 
+    // Catches: a listed chat-latest alias refuses the measured Medium effort at admission.
+    #[test]
+    fn chat_latest_admission_accepts_measured_effort_without_guessing_other_levels() {
+        let profile = supplied_request_profile(&ModelRef("openai/chat-latest".into()))
+            .unwrap()
+            .expect("the listed alias has a request profile");
+        let capabilities = profile.capabilities();
+        assert_eq!(
+            capabilities.resolve_reasoning_effort(Some(ThinkingLevel::Medium)),
+            Ok(ThinkingLevel::Medium)
+        );
+        for effort in [ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High] {
+            assert!(capabilities.resolve_reasoning_effort(Some(effort)).is_err());
+        }
+        let mut unknown = capabilities.clone();
+        unknown.reasoning_efforts = ReasoningEffortSupport::Unknown;
+        assert!(
+            unknown
+                .resolve_reasoning_effort(Some(ThinkingLevel::Medium))
+                .is_err()
+        );
+    }
+
     fn selectable() -> Vec<String> {
         rows(&Default::default())
             .expect("the built-in bases parse")
