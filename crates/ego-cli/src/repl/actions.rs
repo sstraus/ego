@@ -39,6 +39,7 @@ pub enum ActionId {
     Expand,
     Skills,
     Hooks,
+    Retry,
     Version,
 }
 
@@ -533,6 +534,7 @@ impl ActionRegistry {
             enabled(Skills, "skills", "List or invoke admitted skills")
                 .unavailable("the skill catalogue"),
             enabled(Hooks, "hooks", "Inspect admitted hooks"),
+            enabled(Retry, "retry", "Retry a waiting provider now").shortcut('r'),
             enabled(Version, "version", "Show packaged version information"),
         ])
         .expect("the final action surface is statically unique")

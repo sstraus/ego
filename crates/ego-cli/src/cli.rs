@@ -814,6 +814,8 @@ pub struct Args {
     pub schema_retries: u32,
     /// Additional delivery-safe attempts allowed for each model candidate.
     pub retry: u32,
+    /// Interactive default recovery; an explicit --retry keeps finite ownership.
+    pub(crate) provider_recovery: bool,
     /// Ordered model candidates used after a safely-unsent failure or refusal.
     pub fallbacks: Vec<ModelRef>,
     pub budget: Option<String>,
@@ -1879,6 +1881,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         schema: flags.schema,
         schema_retries: flags.schema_retries,
         retry: flags.retry.unwrap_or(retry_default),
+        provider_recovery: retry_default != 0 && flags.retry.is_none(),
         fallbacks: flags.fallbacks,
         budget: flags.budget,
         max_turns: flags.max_turns,

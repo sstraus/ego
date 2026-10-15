@@ -505,13 +505,24 @@ a served session anything about its workspace.
 
 Final retry semantics are owned above provider mappings. `--retry N` permits
 at most N additional attempts on the same resolved model after a `Transient`
-failure that was `DefinitelyUnsent` or emitted no text, reasoning or tool
-call. Each retry uses exponential backoff of 1, 2, 4 … seconds (at most 60),
+failure that emitted no text, reasoning, reasoning state, or tool call.
+Each retry uses exponential backoff of 1, 2, 4 … seconds (at most 120),
 with up to 25% downward jitter, or the provider's `Retry-After` without jitter.
 `Retry-After` accepts delta seconds and HTTP-date; `retry-after-ms` takes precedence.
-A provider wait above 60 seconds stops the plan rather than retrying early. Each retry is announced to the host while it waits. `ego acp`
-sessions and interactive seats allow six retries; a headless run defaults to none.
-An explicit `--retry 0` disables interactive retries. Each repeatable `--fallback P/M` is an ordered
+A provider wait above 120 seconds stops a finite plan rather than retrying early.
+Without an explicit `--retry`, interactive and ACP seats use a 24-hour monotonic
+recovery horizon. It starts at the first eligible failure and does not reset
+when an operator forces a retry. Provider waits can use the remaining horizon.
+Headless runs default to no retries. Explicit `--retry N`, including zero,
+selects a finite allowance instead of interactive recovery.
+
+Recovery status shows attempt, next delay, remaining horizon, and a force hint.
+`/retry` or `Meta-r` ends only the current backoff; it does not cancel an active
+request or replay output. ACP/TUIC clients can use `_ego/retry` version 1 with
+`sessionId`. Cancellation and budget checks remain authoritative. Silent HTTP
+is bounded by the existing 1800-second absolute call deadline, not an idle
+timeout; a recovery attempt also ends at its recovery deadline.
+Each repeatable `--fallback P/M` is an ordered
 candidate that is re-resolved from current facts and attempted only after
 capability and request-expressibility checks preserve tools, images, schemas,
 limits, and reasoning state. A possibly-sent attempt that showed output stops

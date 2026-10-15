@@ -153,6 +153,7 @@ fn interactive_retry_notice_is_visible_without_becoming_answer_text() {
         turn: TurnId::new(),
         attempt: 1,
         limit: 6,
+        recovery_remaining_ms: None,
         delay_ms: 750,
         kind: ego_core::generator::types::ErrorKind::Transient,
         cause: "the network failed".to_owned(),

@@ -9039,11 +9039,33 @@ mod turn {
         struct RecordedPause {
             delays: Mutex<Vec<std::time::Duration>>,
             cancel_on_wait: Option<CancelToken>,
+            force_on_wait: Option<ego_core::turn::InteractiveIngress>,
+            virtual_now: Mutex<Option<std::time::Instant>>,
         }
 
         impl ego_core::turn::RetryPause for RecordedPause {
+            fn now(&self) -> std::time::Instant {
+                *self
+                    .virtual_now
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(std::time::Instant::now)
+            }
+
             fn pause(&self, delay: std::time::Duration) -> BoxFuture<'static, ()> {
+                let now = self.now();
+                *self.virtual_now.lock().unwrap() = Some(now + delay);
                 self.delays.lock().unwrap().push(delay);
+                if let Some(ingress) = &self.force_on_wait {
+                    let ingress = ingress.clone();
+                    return Box::pin(async move {
+                        ingress
+                            .retry_now()
+                            .await
+                            .expect("retry-now must release backoff, not cancel the turn");
+                        futures::future::pending().await
+                    });
+                }
                 match &self.cancel_on_wait {
                     Some(cancel) => {
                         cancel.cancel(ego_core::event::domain::CancelCause::Host);
@@ -9060,6 +9082,18 @@ mod turn {
             retry: u32,
             pause: Arc<RecordedPause>,
             cancel: CancelToken,
+        ) -> ego_core::turn::TurnOutcome {
+            run_retrying_controlled(fx, source, retry, pause, cancel, None, None)
+        }
+
+        fn run_retrying_controlled(
+            fx: &Fixture,
+            source: Arc<ScriptedGenerationSource>,
+            retry: u32,
+            pause: Arc<RecordedPause>,
+            cancel: CancelToken,
+            control: Option<&mut ego_core::turn::InteractiveControl>,
+            recovery: Option<std::time::Duration>,
         ) -> ego_core::turn::TurnOutcome {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
@@ -9100,6 +9134,10 @@ mod turn {
                 },
                 tools,
             );
+            turn = turn.with_provider_recovery(recovery);
+            if let Some(control) = control {
+                turn = turn.with_interactive_control(control);
+            }
             block_on(turn.run("are you there?")).expect("the store accepted every append")
         }
 
@@ -9311,12 +9349,180 @@ mod turn {
                 Arc::new(ScriptedGenerationSource::new(profiles).with_trace(trace.clone()));
             let fx = Fixture::new(vec![]);
             let pause = Arc::new(RecordedPause::default());
-            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+            let (_, mut control) = ego_core::turn::interactive_control();
+            let outcome = run_retrying_controlled(
+                &fx,
+                source,
+                6,
+                pause.clone(),
+                CancelToken::new(),
+                Some(&mut control),
+                Some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
+            );
             assert!(
                 outcome.ok,
                 "the pending turn must recover without another human prompt"
             );
             assert_eq!(trace.requests.lock().unwrap().len(), 8);
+            assert_eq!(
+                *pause.delays.lock().unwrap(),
+                [1, 2, 4, 8, 16, 32, 64].map(std::time::Duration::from_secs)
+            );
+            assert!(
+                fx.sink.events().iter().any(|event| matches!(
+                    event,
+                    PublicEvent::ProviderRetry {
+                        recovery_remaining_ms: Some(_),
+                        ..
+                    }
+                )),
+                "managed recovery must be visible as recovery, not ordinary busy work"
+            );
+        }
+
+        /// regression case — catches: a recovery wait starts an extra paid
+        /// request after the monotonic horizon has expired.
+        #[test]
+        fn regression_case_recovery_horizon_stops_without_another_attempt() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new((0..8).map(|_| {
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    ))
+                }))
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying_controlled(
+                &fx,
+                source,
+                0,
+                pause.clone(),
+                CancelToken::new(),
+                None,
+                Some(std::time::Duration::from_secs(5)),
+            );
+            assert_eq!(outcome.exit_reason, ExitReason::Provider);
+            assert_eq!(trace.requests.lock().unwrap().len(), 3);
+            assert_eq!(
+                *pause.delays.lock().unwrap(),
+                [1, 2, 2].map(std::time::Duration::from_secs)
+            );
+        }
+
+        /// regression case — catches: recovery bypasses cancellation or
+        /// replays already observed model output.
+        #[test]
+        fn regression_case_recovery_preserves_cancel_and_output_safety() {
+            for output in [false, true] {
+                let trace = GenerationTrace::default();
+                let mut events = overloaded(None);
+                if output {
+                    events.insert(
+                        0,
+                        AiEvent::TextDelta {
+                            text: "partial".into(),
+                        },
+                    );
+                }
+                let source = Arc::new(
+                    ScriptedGenerationSource::new([Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        events,
+                        &trace,
+                        Some(1_024),
+                    ))])
+                    .with_trace(trace.clone()),
+                );
+                let fx = Fixture::new(vec![]);
+                let cancel = CancelToken::new();
+                let pause = Arc::new(RecordedPause {
+                    cancel_on_wait: Some(cancel.clone()),
+                    ..Default::default()
+                });
+                let outcome = run_retrying_controlled(
+                    &fx,
+                    source,
+                    6,
+                    pause.clone(),
+                    cancel,
+                    None,
+                    Some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
+                );
+                assert!(!outcome.ok);
+                assert_eq!(trace.requests.lock().unwrap().len(), 1);
+                if output {
+                    assert!(
+                        pause.delays.lock().unwrap().is_empty(),
+                        "observed output suppresses recovery"
+                    );
+                } else {
+                    assert_eq!(
+                        outcome.exit_reason,
+                        ExitReason::Cancelled(ego_core::event::domain::CancelCause::Host)
+                    );
+                }
+            }
+        }
+
+        /// regression case — catches: force-retry cancels the turn or leaves
+        /// the provider waiting until its backoff timer expires.
+        #[test]
+        fn regression_case_force_retry_releases_backoff_without_cancelling() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    )),
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        vec![
+                            AiEvent::TextDelta {
+                                text: "back".into(),
+                            },
+                            AiEvent::Stop(StopReason::Stop),
+                        ],
+                        &trace,
+                        Some(1_024),
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let (ingress, mut control) = ego_core::turn::interactive_control();
+            let pause = Arc::new(RecordedPause {
+                force_on_wait: Some(ingress),
+                ..Default::default()
+            });
+            let cancel = CancelToken::new();
+            let outcome = run_retrying_controlled(
+                &fx,
+                source,
+                6,
+                pause,
+                cancel.clone(),
+                Some(&mut control),
+                None,
+            );
+            assert!(outcome.ok);
+            assert!(
+                !cancel.is_cancelled(),
+                "forcing a safe retry is not turn cancellation"
+            );
+            assert_eq!(trace.requests.lock().unwrap().len(), 2);
         }
 
         /// regression case — catches: a provider-stated `Retry-After` ignored
@@ -9363,7 +9569,7 @@ mod turn {
                 ScriptedGenerationSource::new([Ok(profile(
                     "ollama/primary-model",
                     false,
-                    overloaded(Some(std::time::Duration::from_secs(120))),
+                    overloaded(Some(std::time::Duration::from_secs(121))),
                     &trace,
                     Some(1_024),
                 ))])
@@ -9485,6 +9691,8 @@ mod turn {
             let pause = Arc::new(RecordedPause {
                 delays: Mutex::default(),
                 cancel_on_wait: Some(cancel.clone()),
+                force_on_wait: None,
+                virtual_now: Mutex::default(),
             });
             let outcome = run_retrying(&fx, source, 6, pause.clone(), cancel);
             assert_eq!(
@@ -11450,7 +11658,7 @@ fn retry_jitter_stays_bounded_and_never_shortens_provider_wait() {
         (1, 1_000, 750),
         (2, 2_000, 1_500),
         (6, 32_000, 24_000),
-        (30, 60_000, 45_000),
+        (30, 120_000, 90_000),
     ] {
         let upper = Duration::from_millis(upper_ms);
         let lower = Duration::from_millis(lower_ms);
@@ -11461,7 +11669,25 @@ fn retry_jitter_stays_bounded_and_never_shortens_provider_wait() {
     let stated = Duration::from_millis(1250);
     assert_eq!(retry_delay_with_jitter(1, Some(stated), 2500), Some(stated));
     assert_eq!(
-        retry_delay_with_jitter(1, Some(Duration::from_secs(61)), 0),
+        retry_delay_with_jitter(1, Some(Duration::from_secs(121)), 0),
         None
     );
+}
+
+/// regression case — catches: long outages keep retrying at the old 60s
+/// ceiling instead of progressing to a jittered two-minute backoff.
+#[test]
+fn regression_case_progressive_backoff_reaches_two_minutes() {
+    use ego_core::turn::retry_delay_with_jitter;
+    use std::time::Duration;
+    for (attempt, upper, lower) in [(7, 64, 48), (8, 120, 90), (1000, 120, 90)] {
+        assert_eq!(
+            retry_delay_with_jitter(attempt, None, 0),
+            Some(Duration::from_secs(upper))
+        );
+        assert_eq!(
+            retry_delay_with_jitter(attempt, None, 2500),
+            Some(Duration::from_secs(lower))
+        );
+    }
 }

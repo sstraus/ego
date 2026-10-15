@@ -36,6 +36,9 @@ impl fmt::Display for ControlError {
 impl std::error::Error for ControlError {}
 
 pub(crate) enum ControlIntent {
+    RetryNow {
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
     Recall {
         reply: oneshot::Sender<Result<Option<(String, QueueStatus)>, ControlError>>,
     },
@@ -84,6 +87,18 @@ impl Clone for InteractiveIngress {
 }
 
 impl InteractiveIngress {
+    /// Request an immediate attempt only while the coordinator is in retry backoff.
+    pub async fn retry_now(&self) -> Result<(), ControlError> {
+        let (reply, answer) = oneshot::channel();
+        let mut sender = self.sender.lock().await;
+        sender
+            .send(ControlIntent::RetryNow { reply })
+            .await
+            .map_err(|_| ControlError::Closed)?;
+        drop(sender);
+        answer.await.map_err(|_| ControlError::Closed)?
+    }
+
     /// Durably withdraw the latest input still owned by the queue.
     pub async fn recall(&self) -> Result<Option<(String, QueueStatus)>, ControlError> {
         let (reply, answer) = oneshot::channel();

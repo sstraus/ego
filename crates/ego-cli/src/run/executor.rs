@@ -331,6 +331,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         schema: None,
         schema_retries: 0,
         retry: 0,
+        provider_recovery: false,
         fallbacks: Vec::new(),
         budget: None,
         max_turns: None,
@@ -733,6 +734,7 @@ impl CliRunExecutor {
     ) -> Self {
         let mut args = protocol_args(session_dir, shape);
         args.retry = ACP_PROVIDER_RETRIES;
+        args.provider_recovery = true;
         Self {
             args,
             store,

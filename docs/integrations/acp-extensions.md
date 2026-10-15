@@ -376,6 +376,32 @@ Implementation: `crates/ego-acp/src/project.rs:242`, `:268`;
 Test: `crates/ego-acp/tests/provider_retry_projection.rs::a_retry_is_a_session_info_patch_with_the_counter_the_wait_and_the_cause`.
 This test covers projection and null clearing, not a live provider outage.
 
+### Recovery and `_ego/retry`
+
+Interactive and ACP defaults can recover for 24 hours after the first safe
+transient failure. `providerRetry` adds `phase` (`recovery` or `finite`),
+`recoveryRemainingMs` (null for finite plans), and
+`force: {"method":"_ego/retry","version":1}`. In recovery, `attempt` is an
+increasing counter, not a value bounded by the legacy finite `limit` field.
+Use `phase` and `recoveryRemainingMs` to render recovery rather than an
+exhausted finite allowance. `delayMs` is the next actual wait, including jitter.
+Local waits grow to 120 seconds; provider waits are not shortened.
+
+The initialize capability `_meta.ego.retry` advertises the version and method.
+A host, including TUIC, can send this request while `session/prompt` is pending:
+
+```json
+{"jsonrpc":"2.0","id":42,"method":"_ego/retry","params":{"v":1,"sessionId":"SESSION_UUID"}}
+```
+
+The result is `{"v":1,"state":"accepted"}` only when a live provider backoff
+is released. Idle sessions and active streams return `not-waiting`; a closed
+coordinator also returns `not-waiting`. Invalid versions or session IDs are
+invalid parameters. The request never cancels an active stream, resets the
+horizon, bypasses cancellation/budget checks, or replays an attempt after
+output. It is a control request, not a new prompt. Parent-state rendering in
+TUIC is outside this protocol implementation.
+
 ### `_meta.ego.salience` and `.action`
 
 E → C on standard updates. Tool creation/progress/completion and reasoning use

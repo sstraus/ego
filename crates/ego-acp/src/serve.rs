@@ -885,6 +885,10 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
         "steer".to_owned(),
         serde_json::json!({"version": 1, "method": "_ego/steer", "contentTypes": ["text"]}),
     );
+    ego.insert(
+        "retry".to_owned(),
+        serde_json::json!({"version": 1, "method": "_ego/retry"}),
+    );
     if compaction {
         ego.insert(
             "compact".to_owned(),
@@ -995,6 +999,35 @@ impl JsonRpcMessage for AcpSteerRequest {
 }
 
 impl JsonRpcRequest for AcpSteerRequest {
+    type Response = serde_json::Value;
+}
+
+/// Force the current provider backoff to finish, without replaying output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcpRetryRequest {
+    v: u32,
+    session_id: String,
+}
+
+impl JsonRpcMessage for AcpRetryRequest {
+    fn matches_method(method: &str) -> bool {
+        method == "_ego/retry"
+    }
+    fn method(&self) -> &str {
+        "_ego/retry"
+    }
+    fn to_untyped_message(&self) -> Result<UntypedMessage, Error> {
+        UntypedMessage::new(self.method(), self)
+    }
+    fn parse_message(method: &str, params: &impl Serialize) -> Result<Self, Error> {
+        if !Self::matches_method(method) {
+            return Err(Error::method_not_found());
+        }
+        agent_client_protocol::util::json_cast_params(params)
+    }
+}
+impl JsonRpcRequest for AcpRetryRequest {
     type Response = serde_json::Value;
 }
 
@@ -3973,6 +4006,34 @@ where
                             let response = match ingress.submit(text).await {
                                 Ok(_) => serde_json::json!({"v":1,"state":"accepted"}),
                                 Err(ego_core::turn::ControlError::Closed) => serde_json::json!({"v":1,"state":"not-busy"}),
+                                Err(error) => serde_json::json!({"v":1,"state":"rejected","reason":error.to_string()}),
+                            };
+                            responder.respond(response)
+                        })?;
+                        Ok(())
+                    }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let sessions = sessions.clone();
+                move |request: AcpRetryRequest, responder: Responder<serde_json::Value>, cx: ConnectionTo<Client>| {
+                    let sessions = sessions.clone();
+                    async move {
+                        if request.v != 1 { return responder.respond_with_error(refused_params("unsupported _ego/retry version")); }
+                        let id = v1::SessionId::new(request.session_id);
+                        if let Err(error) = parse_session(&id) { return responder.respond_with_error(error); }
+                        let ingress = match sessions.steering(&id) {
+                            Ok(Some(ingress)) => ingress,
+                            Ok(None) => return responder.respond(serde_json::json!({"v":1,"state":"not-waiting"})),
+                            Err(error) => return responder.respond_with_error(error),
+                        };
+                        cx.spawn(async move {
+                            let response = match ingress.retry_now().await {
+                                Ok(()) => serde_json::json!({"v":1,"state":"accepted"}),
+                                Err(ego_core::turn::ControlError::Closed | ego_core::turn::ControlError::Unavailable(_)) => serde_json::json!({"v":1,"state":"not-waiting"}),
                                 Err(error) => serde_json::json!({"v":1,"state":"rejected","reason":error.to_string()}),
                             };
                             responder.respond(response)

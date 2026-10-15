@@ -17,6 +17,7 @@ pub(super) struct HeadlessGeneration<'a> {
     pub(super) admission: Arc<EvidenceAdmissionService>,
     pub(super) invocation: RunInvocationId,
     pub(super) config: TurnConfig,
+    pub(super) provider_recovery: bool,
     pub(super) gate: SharedBudgetGate,
     pub(super) hook_layers: Option<&'a [Sourced<ConfigLayer>]>,
     pub(super) hook_trust: Trust,
@@ -73,6 +74,7 @@ pub(super) async fn drive_headless_turn(
         admission,
         invocation,
         config,
+        provider_recovery,
         gate,
         hook_layers,
         hook_trust,
@@ -238,6 +240,7 @@ pub(super) async fn drive_headless_turn(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?
+    .with_provider_recovery(provider_recovery.then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON))
     .with_skill_invocation_port(skill_owner.clone())
     .with_pause_token(pause.clone());
     let loop_ = match recovered_policy.as_ref() {

@@ -547,11 +547,20 @@ impl EventSink for TextSink<'_> {
                 limit,
                 delay_ms,
                 cause,
+                recovery_remaining_ms,
                 ..
-            } if !self.quiet => {
+            } if !self.quiet || recovery_remaining_ms.is_some() => {
                 self.finish();
+                let counter = if let Some(remaining) = recovery_remaining_ms {
+                    format!(
+                        "attempt {attempt}, recovery horizon {:.0}s; retry now: /retry or Meta-r",
+                        *remaining as f64 / 1_000.0
+                    )
+                } else {
+                    format!("attempt {attempt}/{limit}")
+                };
                 self.out.note(&format!(
-                    "{cause} — connection problem, retrying in {:.1}s (attempt {attempt}/{limit})",
+                    "{cause} — connection problem, retrying in {:.1}s ({counter})",
                     *delay_ms as f64 / 1_000.0
                 ));
             }

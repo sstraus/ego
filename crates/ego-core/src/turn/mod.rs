@@ -369,6 +369,7 @@ pub struct TurnConfig {
     /// A ceiling on this session's cumulative billed tokens.
     pub token_ceiling: Option<u64>,
     /// Additional delivery-safe attempts allowed for each model candidate.
+    /// A host-selected recovery horizon supersedes this finite allowance.
     pub retry: u32,
     /// Ordered candidates considered after a safely-unsent failure or refusal.
     pub fallbacks: Vec<ModelRef>,
@@ -456,6 +457,7 @@ struct PendingCall {
 enum InterruptDisposition {
     Return,
     AwaitEffect,
+    RetryWait,
 }
 
 enum Controlled<T> {
@@ -486,6 +488,12 @@ fn apply_intent(
     process: Option<&dyn crate::permit::ProcessExecutor>,
 ) -> Result<bool, StoreError> {
     match intent {
+        ControlIntent::RetryNow { reply } => {
+            let _ = reply.send(Err(ControlError::Unavailable(
+                "no provider retry wait is active".into(),
+            )));
+            Ok(false)
+        }
         ControlIntent::Background { reply } => {
             let Some((process, id)) =
                 process.and_then(|process| process.foreground_exec().map(|id| (process, id)))
@@ -639,6 +647,12 @@ where
             ControlRace::Intent(None) => {
                 *control = None;
             }
+            ControlRace::Intent(Some(ControlIntent::RetryNow { reply }))
+                if disposition == InterruptDisposition::RetryWait =>
+            {
+                let _ = reply.send(Ok(()));
+                return Controlled::Interrupted;
+            }
             ControlRace::Intent(Some(intent)) => {
                 let applied = {
                     let coordinator = control
@@ -711,6 +725,16 @@ pub struct GenerationRuntime {
 pub trait RetryPause: Send + Sync {
     fn pause(&self, delay: Duration) -> futures::future::BoxFuture<'static, ()>;
 
+    /// Monotonic time; deterministic runtimes can advance a virtual clock.
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    /// Runtime-owned timer bounding a recovery attempt, not a stream-idle timer.
+    fn deadline(&self, _deadline: Instant) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(futures::future::pending())
+    }
+
     /// Downward jitter in basis points (0..=2500), sampled by the runtime.
     /// Deterministic runtimes can retain the upper bound.
     fn jitter_basis_points(&self) -> u16 {
@@ -722,10 +746,12 @@ pub trait RetryPause: Send + Sync {
 /// and 32 seconds for the six retries of the default plan).
 pub const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 
-/// The longest wait a retry accepts. The exponential interval is capped at
-/// it; a provider `Retry-After` above it is a provider saying the condition
-/// is not momentary, so the plan stops instead of retrying early.
-pub const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
+/// Ceiling for local exponential waits and finite-plan provider waits.
+/// Recovery honors a longer provider wait, bounded by its remaining horizon.
+pub const RETRY_MAX_DELAY: Duration = Duration::from_secs(120);
+
+/// Default recovery horizon for interactive and managed seats.
+pub const PROVIDER_RECOVERY_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The wait before retry number `retry` (1-based) of one candidate.
 ///
@@ -1130,6 +1156,8 @@ pub struct TurnLoop<'session, 'turn> {
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
     retry_pause: Arc<dyn RetryPause>,
+    provider_recovery: Option<Duration>,
+    recovery_deadline: Option<Instant>,
     /// Set when the last generation plan stopped on a provider failure.
     provider_failure: Option<ProviderFailure>,
     /// Journal error count at entry, so an earlier turn cannot supply the cause.
@@ -1277,6 +1305,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             generation_role: GenerationRole::Main,
             automatic_compaction: false,
             retry_pause: runtime.retry_pause,
+            provider_recovery: None,
+            recovery_deadline: None,
             provider_failure: None,
             turn_error_start: 0,
         })
@@ -1315,6 +1345,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     }
 
     /// Attach the session's sole bounded interactive-intent receiver.
+    /// Enable delivery-safe long-outage recovery at the host composition boundary.
+    pub fn with_provider_recovery(mut self, horizon: Option<Duration>) -> Self {
+        self.provider_recovery = horizon;
+        self
+    }
+
     pub fn with_interactive_control(mut self, control: &'turn mut InteractiveControl) -> Self {
         control.refresh(self.state().queue_status());
         control.open();
@@ -3474,7 +3510,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 });
             }
             let mut candidate_conversation = conversation.clone();
-            let mut additional_attempts = 0;
+            let mut additional_attempts = 0_u32;
+            self.recovery_deadline = None;
 
             loop {
                 let model_request = match candidate.as_ref() {
@@ -3856,16 +3893,33 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 // shown twice, so an attempt that emitted any is final.
                 let retryable = stop == StopReason::Error
                     && drained.error_kind == Some(ErrorKind::Transient)
-                    && (unsent || !drained.emitted_output);
+                    && !drained.emitted_output;
+                if retryable && self.recovery_deadline.is_none() {
+                    self.recovery_deadline = self
+                        .provider_recovery
+                        .and_then(|horizon| self.retry_pause.now().checked_add(horizon));
+                }
+                let recovery_remaining = self
+                    .recovery_deadline
+                    .map(|deadline| deadline.saturating_duration_since(self.retry_pause.now()));
                 if retryable
-                    && additional_attempts < self.config.retry
-                    && let Some(delay) = retry_delay_with_jitter(
-                        additional_attempts + 1,
-                        retry_after.flatten(),
-                        self.retry_pause.jitter_basis_points(),
-                    )
+                    && recovery_remaining
+                        .map_or(additional_attempts < self.config.retry, |remaining| {
+                            !remaining.is_zero()
+                        })
+                    && let Some(delay) =
+                        if recovery_remaining.is_some() && retry_after.flatten().is_some() {
+                            retry_after.flatten()
+                        } else {
+                            retry_delay_with_jitter(
+                                additional_attempts.saturating_add(1),
+                                retry_after.flatten(),
+                                self.retry_pause.jitter_basis_points(),
+                            )
+                        }
                 {
-                    additional_attempts += 1;
+                    let delay = recovery_remaining.map_or(delay, |remaining| delay.min(remaining));
+                    additional_attempts = additional_attempts.saturating_add(1);
                     self.journal.publish(&PublicEvent::ProviderRetry {
                         turn,
                         attempt: additional_attempts,
@@ -3873,6 +3927,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                         kind: ErrorKind::Transient,
                         cause,
+                        recovery_remaining_ms: recovery_remaining.map(|remaining| {
+                            u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
+                        }),
                     })?;
                     let pause = self.retry_pause.pause(delay);
                     match await_controlled(
@@ -3881,12 +3938,21 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         &mut self.control,
                         turn,
                         pause,
-                        InterruptDisposition::Return,
+                        InterruptDisposition::RetryWait,
                         None,
                     )
                     .await
                     {
-                        Controlled::Completed(()) if !self.cancel.is_cancelled() => continue,
+                        Controlled::Completed(()) | Controlled::Interrupted
+                            if !self.cancel.is_cancelled() =>
+                        {
+                            if self
+                                .recovery_deadline
+                                .is_none_or(|deadline| self.retry_pause.now() < deadline)
+                            {
+                                continue;
+                            }
+                        }
                         Controlled::Completed(()) | Controlled::Interrupted => {
                             return Ok(Generated::Cancelled {
                                 cause: self.cancel.cause().unwrap_or(CancelCause::User),
@@ -4280,12 +4346,24 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let settlement_currency = self.settlement_currency;
 
         loop {
+            let deadline = self
+                .recovery_deadline
+                .map(|deadline| self.retry_pause.deadline(deadline));
+            let next = async {
+                match deadline {
+                    Some(deadline) => match select(Box::pin(stream.next()), deadline).await {
+                        Either::Left((event, _)) => event,
+                        Either::Right(_) => None,
+                    },
+                    None => stream.next().await,
+                }
+            };
             let event = match await_controlled(
                 &self.journal,
                 &self.cancel,
                 &mut self.control,
                 turn,
-                stream.next(),
+                next,
                 InterruptDisposition::Return,
                 None,
             )

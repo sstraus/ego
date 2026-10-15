@@ -42,7 +42,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 11;
+pub const PUBLIC_EVENT_VERSION: u32 = 12;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -271,14 +271,16 @@ pub enum PublicEvent {
     /// directly and no `DomainEvent` records it; a replay never shows a wait
     /// that ended long ago.
     ///
-    /// `attempt` counts retries from 1 to `limit`, the candidate's retry
-    /// allowance. `cause` is host-safe by construction (see
+    /// `attempt` counts retries from 1. `limit` applies only without a
+    /// recovery horizon; recovery instead exposes its remaining time. `cause` is host-safe by construction (see
     /// [`AiEvent::ProviderFailure`](crate::generator::port::AiEvent::ProviderFailure)).
     /// The status ends when a later item, or the turn's completion, arrives.
     ProviderRetry {
         turn: TurnId,
         attempt: u32,
         limit: u32,
+        /// Remaining long-outage horizon; `None` means the finite retry allowance applies.
+        recovery_remaining_ms: Option<u64>,
         delay_ms: u64,
         kind: ErrorKind,
         cause: String,
