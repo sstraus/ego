@@ -89,6 +89,10 @@ fn setup_configured_model_selects_only_closed_probes_without_store_writes() {
 fn setup_unsupported_model_operation_falls_back_without_effects() {
     let (report, home, workspace, _) = setup(Some(r#"[{"kind":"exec","command":"touch forged"}]"#));
     assert!(report.contains("interpretation is unknown"), "{report}");
+    assert!(
+        report.contains("invalid closed probe selection"),
+        "{report}"
+    );
     assert!(report.contains("AGENTS.md"), "{report}");
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
     assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 1);
@@ -98,6 +102,7 @@ fn setup_unsupported_model_operation_falls_back_without_effects() {
 #[test]
 fn setup_without_provider_reports_prompt_unknown_and_inventory_without_writes() {
     let (report, home, workspace, _) = setup(None);
+    assert!(report.contains("no configured model"), "{report}");
     assert!(report.contains("interpretation is unknown"), "{report}");
     assert!(report.contains("AGENTS.md"), "{report}");
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
@@ -193,4 +198,45 @@ fn setup_provider_token_ceiling_binds_without_rates_or_store_writes() {
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
         assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 1);
     }
+}
+
+// Catches: setup discards a valid closed response from the hosted Responses path.
+#[test]
+fn setup_openai_valid_closed_response_selects_probes() {
+    let selection = r#"[{"kind":"tool","name":"hosted-setup-tool","reason":"requested"}]"#;
+    let delta = serde_json::json!({"type":"response.output_text.delta", "delta":selection});
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(format!(
+            "data: {delta}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\",\"usage\":{{\"input_tokens\":20,\"output_tokens\":30}}}}}}\n\n"
+        ))],
+        ..Plan::default()
+    });
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model='openai/gpt-6-luna'\nsandbox='off'\nroots=[]\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ego"))
+        .env_clear()
+        .env("EGO_HOME", home.path())
+        .env("HOME", home.path())
+        .env("PATH", support::fixture_path())
+        .env("OPENAI_API_KEY", "fixture-key")
+        .env("OPENAI_BASE_URL", format!("http://{}", stub.address))
+        .current_dir(workspace.path())
+        .args(["setup", "inspect the work"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("Configured provider inference"), "{report}");
+    assert!(report.contains("hosted-setup-tool"), "{report}");
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
 }
