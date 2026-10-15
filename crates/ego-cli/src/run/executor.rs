@@ -483,6 +483,39 @@ impl CliCompactionCommand {
             .store
             .evidence_records(&source_id)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let source_catalogue = records
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                EvidenceRecord::GenerationAdmission(admission)
+                    if admission.role() != GenerationRole::Compaction =>
+                {
+                    Some(admission.tool_catalogue())
+                }
+                _ => None,
+            })
+            .flatten()
+            .map(|digest| {
+                records
+                    .iter()
+                    .find_map(|record| match record {
+                        EvidenceRecord::ToolCatalogue(catalogue) if &catalogue.digest == digest => {
+                            Some(catalogue.tools.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        CompactionError::Internal(
+                            "source tool catalogue evidence is missing".to_owned(),
+                        )
+                    })
+            })
+            .transpose()?;
+        if source_catalogue.is_none() {
+            eprintln!(
+                "Warning: source has no durable tool catalogue; cold compaction uses the current catalogue (best effort, cache prefix may differ)."
+            );
+        }
         let mut args = self.args.clone();
         if let Some(model) = records.iter().rev().find_map(|record| match record {
             EvidenceRecord::GenerationAdmission(admission)
@@ -629,6 +662,9 @@ impl CliCompactionCommand {
         let tools = Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd));
         let mut loop_ = TurnLoop::new(session, runtime, tools)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        if let Some(tools) = source_catalogue {
+            loop_ = loop_.with_compaction_source_tools(tools);
+        }
         if let Some(replayed) = active.replayed() {
             loop_ = loop_.with_replayed_context(replayed);
         }

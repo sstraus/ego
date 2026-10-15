@@ -852,3 +852,86 @@ fn generation_evidence_rejects_old_outer_and_inner_versions_at_every_authority()
         assert!(std::fs::metadata(stale_log).is_ok());
     }
 }
+
+// Catches: unchanged catalogues grow the journal on every generation, or an
+// empty catalogue is confused with absent historical evidence after reopen.
+#[test]
+fn tool_catalogue_is_deduplicated_and_empty_catalogue_survives_reopen() {
+    use ego_core::evidence::{EvidenceLogSource, ToolCatalogueEvidence};
+    let root = tempdir().unwrap();
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let session = SessionId::new();
+    let invocation = RunInvocationId::new();
+    let service = EvidenceAdmissionService::new();
+    let tools = Vec::<ego_core::generator::types::ToolDescriptor>::new();
+    let digest = service.canonical_digest(&tools).unwrap();
+    let record = EvidenceRecord::ToolCatalogue(ToolCatalogueEvidence {
+        version: EVIDENCE_SCHEMA_VERSION,
+        session,
+        digest: digest.clone(),
+        tools,
+    });
+    let opened = store.open_writer(&session, lease()).unwrap();
+    service
+        .admit_run_context(&opened.writer, context(session, invocation))
+        .unwrap();
+    opened.writer.write(record.key(), record.clone()).unwrap();
+    let before = std::fs::metadata(log_path(root.path(), &session))
+        .unwrap()
+        .len();
+    assert!(
+        opened
+            .writer
+            .write(record.key(), record.clone())
+            .unwrap()
+            .is_already_recorded()
+    );
+    assert_eq!(
+        before,
+        std::fs::metadata(log_path(root.path(), &session))
+            .unwrap()
+            .len()
+    );
+    service
+        .admit_generation(
+            &opened.writer,
+            generation(session, invocation, AttemptRef::first(GenerationId::new()))
+                .with_tool_catalogue(digest.clone()),
+        )
+        .unwrap();
+    drop(opened);
+    let reopened = store.open_writer(&session, lease()).unwrap();
+    assert!(
+        reopened
+            .writer
+            .write(record.key(), record)
+            .unwrap()
+            .is_already_recorded()
+    );
+    let records = store.evidence_records(&session).unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| matches!(r, EvidenceRecord::ToolCatalogue(_)))
+            .count(),
+        1
+    );
+    assert!(records.iter().any(|r| matches!(r, EvidenceRecord::GenerationAdmission(g) if g.tool_catalogue() == Some(&digest))));
+}
+
+// Catches: corrupted descriptor bytes are accepted under another catalogue's digest.
+#[test]
+fn tool_catalogue_digest_mismatch_is_refused() {
+    use ego_core::evidence::ToolCatalogueEvidence;
+    let root = tempdir().unwrap();
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let session = SessionId::new();
+    let opened = store.open_writer(&session, lease()).unwrap();
+    let record = EvidenceRecord::ToolCatalogue(ToolCatalogueEvidence {
+        version: EVIDENCE_SCHEMA_VERSION,
+        session,
+        digest: ego_core::evidence::EvidenceDigest::of_bytes(b"not the catalogue"),
+        tools: Vec::new(),
+    });
+    assert!(opened.writer.write(record.key(), record).is_err());
+}

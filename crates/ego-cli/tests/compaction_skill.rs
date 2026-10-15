@@ -190,3 +190,43 @@ fn compaction_target_carries_old_skill_history_and_reopens_with_fresh_catalogue(
         "target request carried stale source skill material: {target_request}"
     );
 }
+
+// Catches: cold compaction replaces a restricted source catalogue with defaults.
+#[test]
+fn cold_compaction_preserves_restricted_source_tools() {
+    let stub = Stub::start(fixture_plan());
+    let places = Places::new();
+    places.ego(&stub).home_file(
+        "config.toml",
+        r#"model = "ollama/qwen3"
+thinking = "off"
+sandbox = "off"
+"#,
+    );
+    let source = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "off",
+            "--tools",
+            "read",
+            "--session-id",
+            FIXTURE_SESSION_ID,
+        ])
+        .arg("Reply READY.")
+        .run();
+    assert_eq!(source.code, Some(0), "{}", source.stderr);
+    let compacted = places
+        .ego(&stub)
+        .subcommand("compact")
+        .arg(FIXTURE_SESSION_ID)
+        .args(["--output", "json"])
+        .run();
+    assert_eq!(compacted.code, Some(0), "{}", compacted.stderr);
+    let requests = stub.generations();
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        requests[1]["tools"], requests[0]["tools"],
+        "cold compaction must retain the exact source tool prefix"
+    );
+}

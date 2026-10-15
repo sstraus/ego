@@ -10166,8 +10166,12 @@ mod turn {
             user_invocable: true,
             model_invocable: false,
         };
-        let final_directive = "FINAL DIRECTIVE: report the unresolved evidence before proposing changes.";
-        let body = format!("{}\n{final_directive}", "Reference material.\n".repeat(4_000));
+        let final_directive =
+            "FINAL DIRECTIVE: report the unresolved evidence before proposing changes.";
+        let body = format!(
+            "{}\n{final_directive}",
+            "Reference material.\n".repeat(4_000)
+        );
         let catalogue = Arc::new(
             ego_core::skill::SkillCatalogue::new(vec![
                 ego_core::skill::SkillSpec::new(descriptor.clone(), body.into_bytes()).unwrap(),

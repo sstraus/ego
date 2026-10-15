@@ -143,6 +143,17 @@ impl EvidenceIndex {
                 attempt,
             } = key.clone()
             {
+                if let EvidenceRecord::GenerationAdmission(admission) = &record
+                    && let Some(digest) = admission.tool_catalogue()
+                    && !index.records.contains_key(&EvidenceKey::ToolCatalogue {
+                        session,
+                        digest: digest.clone(),
+                    })
+                {
+                    return Err(invalid_log(
+                        "generation evidence precedes its tool catalogue",
+                    ));
+                }
                 let context = EvidenceKey::RunContext {
                     session,
                     invocation,
@@ -1408,6 +1419,18 @@ impl JsonlStore {
                 previous.digest(),
                 record.digest(),
             ));
+        }
+        if let EvidenceRecord::GenerationAdmission(admission) = &record
+            && let Some(digest) = admission.tool_catalogue()
+            && !index.records.contains_key(&EvidenceKey::ToolCatalogue {
+                session: *id,
+                digest: digest.clone(),
+            })
+        {
+            return Err(EvidenceError::Store {
+                key: key.clone(),
+                diagnostic: "generation evidence requires its durable tool catalogue".to_owned(),
+            });
         }
         if let EvidenceKey::GenerationAdmission {
             session,

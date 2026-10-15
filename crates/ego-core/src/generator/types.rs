@@ -839,7 +839,7 @@ impl From<Conversation> for Vec<Message> {
 /// A tool the model may call: name, description and JSON Schema for its
 /// parameters — the same shape `Tool::descriptor` returns (ARCH §3.2), so a
 /// `GenRequest` can be built directly from a tool registry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
     pub name: String,
     pub description: String,

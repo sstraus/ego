@@ -972,6 +972,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
             &profile,
             reference,
             role,
+            &request.tools,
         )
         .map_err(|error| {
             ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
@@ -1106,7 +1107,8 @@ pub struct TurnLoop<'session, 'turn> {
     lineage_root: SessionId,
     judge: Option<JudgeContext>,
     main_model_identity: Option<ModelRef>,
-    last_request: Option<(GenRequest, Conversation)>,
+    last_request: Option<GenRequest>,
+    compaction_source_tools: Option<Vec<ToolDescriptor>>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
         crate::config::Trust,
@@ -1151,6 +1153,7 @@ fn admit_generation_evidence(
     profile: &GenerationProfile,
     attempt: crate::generator::attempt::AttemptRef,
     role: GenerationRole,
+    tools: &[ToolDescriptor],
 ) -> Result<(), StoreError> {
     let provider = profile
         .identity
@@ -1169,6 +1172,19 @@ fn admit_generation_evidence(
             reason: profile.metering.identity().to_string(),
         },
     };
+    let digest = admission
+        .canonical_digest(&tools)
+        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+    let catalogue =
+        crate::evidence::EvidenceRecord::ToolCatalogue(crate::evidence::ToolCatalogueEvidence {
+            version: crate::evidence::EVIDENCE_SCHEMA_VERSION,
+            session,
+            digest: digest.clone(),
+            tools: tools.to_vec(),
+        });
+    store
+        .write(catalogue.key(), catalogue)
+        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
     let evidence = GenerationAdmissionEvidence::new(
         session,
         invocation,
@@ -1181,7 +1197,8 @@ fn admit_generation_evidence(
         ),
         profile.capabilities.clone(),
         pricing,
-    );
+    )
+    .with_tool_catalogue(digest);
     match admission.admit_generation(store, evidence) {
         Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
             tracing::warn!(%diagnostic, "generation evidence manifest projection failed");
@@ -1259,6 +1276,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             judge: None,
             main_model_identity: None,
             last_request: None,
+            compaction_source_tools: None,
             analysis_cache: None,
             analysis_observation: None,
             execution_observation: None,
@@ -1457,6 +1475,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         profile: &GenerationProfile,
         attempt: crate::generator::attempt::AttemptRef,
         role: GenerationRole,
+        tools: &[ToolDescriptor],
     ) -> Result<(), StoreError> {
         admit_generation_evidence(
             self.session_id,
@@ -1466,7 +1485,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             profile,
             attempt,
             role,
+            tools,
         )
+    }
+
+    /// Restore the exact source catalogue for a cold compaction request only.
+    pub fn with_compaction_source_tools(mut self, tools: Vec<ToolDescriptor>) -> Self {
+        self.compaction_source_tools = Some(tools);
+        self
     }
 
     /// The session so far.
@@ -1662,7 +1688,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         ) {
             return Err(CompactionError::Internal(message));
         }
-        let live_request = self.last_request.as_ref().and_then(|(previous, history)| {
+        let live_request = self.last_request.as_ref().and_then(|previous| {
             // History coalesces adjacent messages, so compare content blocks,
             // not message counts. Include the source's final response/results.
             let blocks = |conversation: &Conversation| {
@@ -1678,7 +1704,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     })
                     .collect::<Vec<_>>()
             };
-            let old = blocks(history);
+            let old = blocks(&previous.messages);
             let current = blocks(&source_history);
             if !current.starts_with(&old) {
                 return None;
@@ -1708,7 +1734,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 }),
                 model: profile.request_model.clone(),
                 messages: source_messages,
-                tools: target_tools.clone(),
+                tools: self
+                    .compaction_source_tools
+                    .clone()
+                    .unwrap_or_else(|| target_tools.clone()),
                 thinking: profile.thinking,
                 max_output_tokens: profile.output_ceiling(),
                 parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
@@ -1768,8 +1797,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         )
         .map_err(CompactionError::Budget)?;
         let reference = attempt.attempt();
-        self.admit_generation(&profile, reference, GenerationRole::Compaction)
-            .map_err(CompactionError::Store)?;
+        self.admit_generation(
+            &profile,
+            reference,
+            GenerationRole::Compaction,
+            &request.tools,
+        )
+        .map_err(CompactionError::Store)?;
         let generation = self.journal.append(
             turn,
             None,
@@ -3799,7 +3833,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 };
                 let reference = attempt.attempt();
                 next_attempt = reference.retry();
-                self.admit_generation(&profile, reference, self.generation_role)?;
+                self.admit_generation(&profile, reference, self.generation_role, &request.tools)?;
                 let generation = self.journal.append(
                     turn,
                     None,
@@ -3812,7 +3846,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         .then(|| self.prompt_snapshot.clone()),
                     },
                 )?;
-                self.last_request = Some((request.clone(), request.messages.clone()));
+                self.last_request = Some(request.clone());
                 let stream = profile.generator.generate(request, attempt);
                 let drained = self
                     .drain(
@@ -4165,14 +4199,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             rendered.push_str(identity);
             rendered.push('\n');
         }
-        for invocation in self.active_skill_invocations.values() {
-            rendered.push_str(&format!(
-                "Admitted skill instruction (invocation {}; {}):\n{}\n",
-                invocation.id(),
-                invocation.provenance_tag(),
-                invocation.rendered_text()
-            ));
-        }
         for note in notes {
             rendered.push_str("Host-provided context:\n");
             rendered.push_str(&note);
@@ -4181,6 +4207,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if rendered.len() > MAX_CONTEXT_BYTES {
             rendered.truncate(rendered.floor_char_boundary(MAX_CONTEXT_BYTES));
             rendered.push_str("\n[context truncated]");
+        }
+        // Admitted skill instructions are executable task authority, not volatile
+        // host notes. Preserve their exact bytes outside the host display cap.
+        for invocation in self.active_skill_invocations.values() {
+            rendered.push_str(&format!(
+                "Admitted skill instruction (invocation {}; {}):\n{}\n",
+                invocation.id(),
+                invocation.provenance_tag(),
+                invocation.rendered_text()
+            ));
         }
         if has_context {
             let previous = self

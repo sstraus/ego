@@ -53,7 +53,7 @@ fn requests(stub: &Stub) -> Vec<String> {
 }
 
 /// Keep raw JSON slices: reparsing and serializing would hide byte differences.
-fn stable_prefix(body: &str, history_messages: usize) -> Vec<&str> {
+fn stable_prefix<'a>(body: &'a str, current_prompt: &str) -> Vec<&'a str> {
     let fields: BTreeMap<&str, &RawValue> = serde_json::from_str(body).unwrap();
     let system: Value = serde_json::from_str(fields["system"].get()).unwrap();
     assert_eq!(
@@ -61,41 +61,56 @@ fn stable_prefix(body: &str, history_messages: usize) -> Vec<&str> {
         serde_json::json!({"type":"ephemeral"})
     );
     let messages: Vec<&RawValue> = serde_json::from_str(fields["messages"].get()).unwrap();
-    assert!(
-        messages.len() > history_messages,
-        "no volatile/request tail"
+    let values: Vec<Value> = messages
+        .iter()
+        .map(|message| serde_json::from_str(message.get()).unwrap())
+        .collect();
+    // The current intent is stable for this request, but is not inherited by
+    // the sibling. Compare raw inherited bytes before that independently known
+    // fixture intent, not a historical hard-coded number of role messages.
+    let boundary = values
+        .iter()
+        .position(|message| {
+            message["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["text"].as_str() == Some(current_prompt))
+        })
+        .expect("current intent is present as its own content block");
+    assert!(boundary > 0, "fixture must contain inherited history");
+    let breakpoints: Vec<_> = values
+        .iter()
+        .enumerate()
+        .flat_map(|(index, message)| {
+            message["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|block| block.get("cache_control").is_some())
+                .map(move |block| (index, block))
+        })
+        .collect();
+    assert_eq!(breakpoints.len(), 1, "exactly one message breakpoint");
+    assert_eq!(
+        breakpoints[0].0, boundary,
+        "breakpoint follows the current intent, before volatile context"
     );
-    for (index, message) in messages.iter().enumerate() {
-        let value: Value = serde_json::from_str(message.get()).unwrap();
-        let blocks = value["content"].as_array().unwrap();
-        let marked: Vec<_> = blocks
+    assert_eq!(
+        breakpoints[0].1["cache_control"],
+        serde_json::json!({"type":"ephemeral"})
+    );
+    // Identical context is not appended twice. A changed context may follow
+    // the intent, but no tail block may move the cache boundary.
+    assert!(values[boundary + 1..].iter().all(|message| {
+        message["content"]
+            .as_array()
+            .unwrap()
             .iter()
-            .filter(|block| block.get("cache_control").is_some())
-            .collect();
-        if index + 1 == history_messages {
-            assert_eq!(value["role"], "assistant");
-            assert_eq!(
-                marked.len(),
-                1,
-                "last stable message must have one breakpoint"
-            );
-            assert_eq!(
-                blocks.last().unwrap()["cache_control"],
-                serde_json::json!({"type":"ephemeral"})
-            );
-        } else {
-            assert!(
-                marked.is_empty(),
-                "breakpoint on another history block or volatile tail"
-            );
-        }
-    }
+            .all(|block| block.get("cache_control").is_none())
+    }));
     let mut prefix = vec![fields["tools"].get(), fields["system"].get()];
-    prefix.extend(
-        messages[..history_messages]
-            .iter()
-            .map(|message| message.get()),
-    );
+    prefix.extend(messages[..boundary].iter().map(|message| message.get()));
     prefix
 }
 
@@ -139,7 +154,10 @@ fn tip_fork_keeps_source_continuation_bytes_through_the_stable_breakpoint() {
     let bodies = requests(&stub);
     assert_eq!(bodies.len(), 4);
     assert_ne!(bodies[2], bodies[3], "the current prompts must differ");
-    assert_eq!(stable_prefix(&bodies[2], 4), stable_prefix(&bodies[3], 4));
+    assert_eq!(
+        stable_prefix(&bodies[2], "source continuation"),
+        stable_prefix(&bodies[3], "a different topic")
+    );
 }
 
 // Catches: an earlier fork includes later source messages or uses the current
@@ -204,5 +222,8 @@ fn earlier_turn_fork_keeps_source_boundary_bytes_through_the_stable_breakpoint()
     let bodies = requests(&stub);
     assert_eq!(bodies.len(), 3);
     assert_ne!(bodies[1], bodies[2], "the current prompts must differ");
-    assert_eq!(stable_prefix(&bodies[1], 2), stable_prefix(&bodies[2], 2));
+    assert_eq!(
+        stable_prefix(&bodies[1], "later source topic"),
+        stable_prefix(&bodies[2], "an earlier branch on a different topic")
+    );
 }

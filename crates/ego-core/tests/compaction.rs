@@ -195,7 +195,7 @@ fn seeded_event(kind: EventKind) -> DomainEvent {
 
 #[test]
 fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
-    assert_eq!(COMPACTION_PROMPT_REVISION, 1);
+    assert_eq!(COMPACTION_PROMPT_REVISION, 2);
     assert!(COMPACTION_PROMPT.contains("Produce one self-contained context checkpoint"));
     assert!(COMPACTION_PROMPT.contains("do not continue the task"));
     assert!(COMPACTION_PROMPT.contains("# Objective"));
@@ -207,6 +207,11 @@ fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
     assert!(COMPACTION_PROMPT.contains("# Ordered next steps"));
     assert!(COMPACTION_PROMPT.contains("# Critical references"));
     assert!(COMPACTION_PROMPT.contains("Return only the checkpoint"));
+    // Catches: copied source headings (including fenced shell comments) are
+    // requested verbatim even though the strict parser rejects them.
+    assert!(COMPACTION_PROMPT.contains("even inside fenced code"));
+    assert!(COMPACTION_PROMPT.contains("indent the line by four spaces"));
+    assert!(COMPACTION_PROMPT.contains("each once, in this order"));
 }
 
 #[test]
@@ -265,7 +270,7 @@ fn compaction_seed_event_carries_exact_source_lineage_revision_and_checkpoint() 
     let encoded = serde_json::to_value(&seeded).expect("seed event is serialisable");
     assert_eq!(encoded["kind"]["kind"], "CompactionSeeded");
     assert_eq!(encoded["kind"]["source"], SOURCE);
-    assert_eq!(encoded["kind"]["prompt_revision"], 1);
+    assert_eq!(encoded["kind"]["prompt_revision"], 2);
     assert_eq!(encoded["kind"]["checkpoint"], checkpoint());
 
     let decoded: DomainEvent = serde_json::from_value(encoded).expect("seed event decodes");

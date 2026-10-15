@@ -60,6 +60,12 @@ pub struct ExportBundle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExportRecord {
+    ToolCatalogueEvidence {
+        session: SessionId,
+        position: Seq,
+        digest: EvidenceDigest,
+        tools: usize,
+    },
     Session {
         session: SessionId,
         lineage: Option<SessionLineage>,
@@ -641,6 +647,15 @@ fn project_evidence(
     redactions: &mut Redactions,
 ) -> ExportRecord {
     match record {
+        EvidenceRecord::ToolCatalogue(catalogue) => {
+            redactions.opaque_prose += catalogue.tools.len() as u64;
+            ExportRecord::ToolCatalogueEvidence {
+                session,
+                position,
+                digest: catalogue.digest.clone(),
+                tools: catalogue.tools.len(),
+            }
+        }
         EvidenceRecord::RunContext(context) => {
             let instructions = context
                 .instructions()
@@ -1289,6 +1304,7 @@ impl EvidenceValidation {
             return evidence_error(session, position, ExportEvidenceFailure::Duplicate { key });
         }
         match record {
+            EvidenceRecord::ToolCatalogue(_) => {}
             EvidenceRecord::RunContext(context) => {
                 if context.session() != session {
                     return evidence_error(
