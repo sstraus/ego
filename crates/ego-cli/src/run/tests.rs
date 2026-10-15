@@ -2551,3 +2551,31 @@ fn recovery_retrying_output_and_non_tty_boundaries() {
         }
     }
 }
+
+/// catches: recovery OSC held in the interactive row buffer until provider output.
+#[test]
+fn recovery_interactive_signals_do_not_wait_for_a_text_row() {
+    let (sender, received) = crossbeam::channel::unbounded();
+    let output = crate::output::InteractiveOutput::new(crate::repl::SurfaceOutput::new(
+        sender,
+        CancelToken::new(),
+    ));
+    let announce = Announce::new(&output, capabilities(OscProfile::Tuic), false);
+    for sequence in [
+        "\x1b]7770;ego-recovery={\"phase\":\"waiting\",\"next_attempt_ms\":1000,\"attempt\":1}\x07",
+        "\x1b]7770;ego-recovery={\"phase\":\"retrying\",\"next_attempt_ms\":null,\"attempt\":1}\x07",
+        "\x1b]7770;ego-recovery=clear\x07",
+    ] {
+        announce.emit(sequence.to_owned());
+        assert_eq!(
+            received
+                .try_recv()
+                .expect("signal must reach terminal before the next provider event"),
+            sequence
+        );
+        // A finish barrier is allowed, but never a synthetic transcript newline.
+        for row in received.try_iter() {
+            assert!(row.is_empty());
+        }
+    }
+}

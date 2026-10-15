@@ -728,6 +728,7 @@ impl<'a> Announce<'a> {
     pub(super) fn emit(&self, sequence: String) {
         if !sequence.is_empty() {
             self.out.write(&sequence);
+            self.out.finish();
         }
     }
 
