@@ -114,10 +114,11 @@ fn every_current_snapshot_model_is_in_the_builtin_catalogue_with_the_snapshot_li
 #[test]
 fn the_builtin_catalogue_lists_nothing_beyond_the_current_generations() {
     let (snapshot, policy) = (snapshot(), policy());
-    let wanted: BTreeSet<String> = expected(&snapshot, &policy)
+    let mut wanted: BTreeSet<String> = expected(&snapshot, &policy)
         .into_iter()
         .flat_map(|(name, ids)| ids.into_iter().map(move |id| format!("{name}/{id}")))
         .collect();
+    wanted.extend(policy["stated"].as_table().unwrap().keys().cloned());
     let listed: BTreeSet<String> = builtin().model.into_keys().collect();
     assert_eq!(
         listed.difference(&wanted).collect::<Vec<_>>(),
@@ -210,12 +211,29 @@ fn every_generated_row_names_the_pinned_snapshot_revision() {
     let read = snapshot["read"].as_str().expect("a read date");
     assert!(GENERATED.contains(&format!("# revision = {revision}")));
     assert!(GENERATED.contains(&format!("# read = {read}")));
+    let policy = policy();
     let lines: Vec<&str> = GENERATED.lines().collect();
     let mut tables = 0;
     for (index, line) in lines.iter().enumerate() {
         if line.starts_with("[model.\"") && line.ends_with(".capabilities]") {
             tables += 1;
             let provenance = lines[index - 1];
+            let slug = line
+                .strip_prefix("[model.\"")
+                .unwrap()
+                .strip_suffix("\".capabilities]")
+                .unwrap();
+            if let Some(stated) = policy["stated"].get(slug) {
+                assert_eq!(
+                    provenance,
+                    format!(
+                        "# {} read {}: {slug}",
+                        stated["source"].as_str().unwrap(),
+                        stated["read"].as_str().unwrap()
+                    )
+                );
+                continue;
+            }
             assert!(
                 provenance.starts_with(&format!("# models.dev {} read {read}: ", &revision[..8])),
                 "row `{line}` lacks its provenance line: {provenance:?}"
