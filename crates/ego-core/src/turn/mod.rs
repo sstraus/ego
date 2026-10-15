@@ -1620,6 +1620,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         target_system: Option<SystemPrompt>,
         target_tools: Vec<ToolDescriptor>,
     ) -> Result<PreparedCompaction, CompactionError> {
+        self.journal
+            .recover_interrupted_attempts(TurnId::new())
+            .map_err(|error| CompactionError::Store(error.into()))?;
         if !self.state().unacknowledged_prompts().is_empty() {
             return Err(CompactionError::NotIdle(CompactionBusy::AcceptedPrompt));
         }
@@ -2374,6 +2377,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         reason = "TurnAbandoned carries the exact durable session state by contract"
     )]
     pub async fn resume_turn(&mut self, turn: TurnId) -> Result<TurnOutcome, TurnAbandoned> {
+        if let Err(cause) = self.journal.recover_interrupted_attempts(turn) {
+            return Err(self.abandon(turn, cause));
+        }
         self.mark_turn_error_start();
         let live = self
             .state()
@@ -2776,6 +2782,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         )>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
+        if let Err(cause) = self.journal.recover_interrupted_attempts(turn) {
+            return Err(self.abandon(turn, cause));
+        }
         let live = self
             .state()
             .live_attempts

@@ -1968,6 +1968,15 @@ UTF-8 characters are not split at the page boundary. Small files keep their
 plain-text result. The guarded filesystem read and its permission checks do not
 change; this is a provider-visible output bound, not a filesystem memory bound.
 
+When a session is reopened after a process or host crash, attempts without a
+durable settlement are recorded as interrupted (`Aborted`, `PossiblySent`).
+A notice names each interrupted attempt and warns that its request may have
+reached the provider. Ego does not replay that request automatically. The next
+explicit user request can run in the same session. Recorded usage is retained;
+missing usage remains unknown, not free. This also applies to ACP continuation
+and clean-session compaction. Live attempts in the current process are not
+interrupted by opening another turn coordinator over the same journal.
+
 Durable CLI interactive sessions, including TUIC-managed terminal sessions,
 automatically invoke the existing clean-session compaction operation at 90% of
 the last measured provider context window. An ongoing tool turn yields before
