@@ -50,6 +50,14 @@ details when they matter. Reconcile repeated or superseded information. If an
 earlier context checkpoint is present, preserve every still-relevant fact from
 it. Return only the checkpoint."###;
 
+/// Exact parser feedback for the single authorized corrective generation.
+pub(crate) fn checkpoint_correction(error: &CheckpointError) -> String {
+    format!(
+        "The checkpoint parser refused your previous output: {error}\nReturn a corrected complete checkpoint only. Use exactly these headings, once each, in this order:\n{}\nIndent or quote copied lines beginning with '# ', including within code fences. Do not call tools or continue the task.",
+        HEADINGS.join("\n")
+    )
+}
+
 const HEADINGS: [&str; 8] = [
     "# Objective",
     "# Binding constraints and preferences",

@@ -1200,7 +1200,8 @@ fn admit_generation_evidence(
         profile.capabilities.clone(),
         pricing,
     )
-    .with_tool_catalogue(digest);
+    .with_tool_catalogue(digest)
+    .with_thinking(profile.thinking);
     match admission.admit_generation(store, evidence) {
         Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
             tracing::warn!(%diagnostic, "generation evidence manifest projection failed");
@@ -1745,7 +1746,90 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
             }
         });
-        let gaps = profile.capabilities.request_gaps(&request);
+        let checkpoint_text = self
+            .generate_compaction_text(turn, &profile, &request)
+            .await?;
+        if checkpoint_text.trim().is_empty() {
+            return Err(CompactionError::EmptyCheckpoint);
+        }
+        let checkpoint = match Checkpoint::parse(&checkpoint_text) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                let mut correction = request;
+                let mut messages: Vec<Message> = correction.messages.into();
+                messages.push(Message::text(Role::Assistant, checkpoint_text));
+                messages.push(Message::text(
+                    Role::User,
+                    crate::compact::checkpoint_correction(&error),
+                ));
+                correction.messages =
+                    Conversation::new(messages).map_err(CompactionError::History)?;
+                let text = self
+                    .generate_compaction_text(turn, &profile, &correction)
+                    .await?;
+                Checkpoint::parse(text).map_err(CompactionError::InvalidCheckpoint)?
+            }
+        };
+
+        let main = Arc::clone(&self.source)
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await
+            .map_err(|error| CompactionError::Resolution {
+                role: GenerationRole::Main,
+                error,
+            })?;
+        let mut target_messages = Vec::new();
+        if let Some(system) = target_system {
+            target_messages.push(Message::text(Role::System, system.text));
+        }
+        target_messages.push(Message::text(
+            Role::User,
+            checkpoint_frame(checkpoint.text()),
+        ));
+        let baseline = GenRequest {
+            cache: None,
+            model: main.request_model.clone(),
+            messages: Conversation::new(target_messages).map_err(CompactionError::History)?,
+            tools: target_tools,
+            thinking: main.thinking,
+            max_output_tokens: main.output_ceiling(),
+            parallel_tool_calls: main.capabilities.supports_parallel_tool_calls,
+        };
+        let gaps = main.capabilities.request_gaps(&baseline);
+        if !gaps.is_empty() {
+            return Err(CompactionError::Capability {
+                role: GenerationRole::Main,
+                gaps,
+            });
+        }
+        main.generator
+            .ensure_expressible(&baseline)
+            .map_err(|error| CompactionError::Expressibility {
+                role: GenerationRole::Main,
+                error,
+            })?;
+
+        Ok(PreparedCompaction {
+            source: self.session_id,
+            source_seq,
+            checkpoint,
+            baseline,
+            title,
+            goal,
+        })
+    }
+
+    /// One private, independently reserved and settled compaction generation.
+    async fn generate_compaction_text(
+        &mut self,
+        turn: TurnId,
+        profile: &GenerationProfile,
+        request: &GenRequest,
+    ) -> Result<String, CompactionError> {
+        if let Some(cause) = self.cancel.cause() {
+            return Err(CompactionError::Cancelled(cause));
+        }
+        let gaps = profile.capabilities.request_gaps(request);
         if !gaps.is_empty() {
             return Err(CompactionError::Capability {
                 role: GenerationRole::Compaction,
@@ -1754,7 +1838,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
         profile
             .generator
-            .ensure_expressible(&request)
+            .ensure_expressible(request)
             .map_err(|error| CompactionError::Expressibility {
                 role: GenerationRole::Compaction,
                 error,
@@ -1782,7 +1866,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             .reserve(
                 &profile.metering,
                 quote.as_ref(),
-                &request,
+                request,
                 &profile.capabilities,
             )
             .map_err(|error| match error {
@@ -1794,13 +1878,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             reservation,
             &profile.metering,
             quote.as_ref(),
-            &request,
+            request,
             &profile.capabilities,
         )
         .map_err(CompactionError::Budget)?;
         let reference = attempt.attempt();
         self.admit_generation(
-            &profile,
+            profile,
             reference,
             GenerationRole::Compaction,
             &request.tools,
@@ -1817,7 +1901,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             },
         )?;
 
-        let stream = profile.generator.generate(request, attempt);
+        let stream = profile.generator.generate(request.clone(), attempt);
         let drained = self
             .drain(
                 turn,
@@ -1888,59 +1972,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 },
             ));
         }
-        let checkpoint_text = drained.private_text;
-        if checkpoint_text.trim().is_empty() {
-            return Err(CompactionError::EmptyCheckpoint);
-        }
-        let checkpoint =
-            Checkpoint::parse(checkpoint_text).map_err(CompactionError::InvalidCheckpoint)?;
-
-        let main = Arc::clone(&self.source)
-            .resolve(GenerationModelRequest::new(GenerationRole::Main))
-            .await
-            .map_err(|error| CompactionError::Resolution {
-                role: GenerationRole::Main,
-                error,
-            })?;
-        let mut target_messages = Vec::new();
-        if let Some(system) = target_system {
-            target_messages.push(Message::text(Role::System, system.text));
-        }
-        target_messages.push(Message::text(
-            Role::User,
-            checkpoint_frame(checkpoint.text()),
-        ));
-        let baseline = GenRequest {
-            cache: None,
-            model: main.request_model.clone(),
-            messages: Conversation::new(target_messages).map_err(CompactionError::History)?,
-            tools: target_tools,
-            thinking: main.thinking,
-            max_output_tokens: main.output_ceiling(),
-            parallel_tool_calls: main.capabilities.supports_parallel_tool_calls,
-        };
-        let gaps = main.capabilities.request_gaps(&baseline);
-        if !gaps.is_empty() {
-            return Err(CompactionError::Capability {
-                role: GenerationRole::Main,
-                gaps,
-            });
-        }
-        main.generator
-            .ensure_expressible(&baseline)
-            .map_err(|error| CompactionError::Expressibility {
-                role: GenerationRole::Main,
-                error,
-            })?;
-
-        Ok(PreparedCompaction {
-            source: self.session_id,
-            source_seq,
-            checkpoint,
-            baseline,
-            title,
-            goal,
-        })
+        Ok(drained.private_text)
     }
 
     /// Enable pressure yielding only when the host owns a durable session transition.

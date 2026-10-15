@@ -1300,14 +1300,17 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
             "provider",
         ),
     ] {
-        let (compact_profile, _) = compaction_profile(
+        let (mut compact_profile, _) = compaction_profile(
             "compaction-model",
             ThinkingLevel::Low,
             32_000,
             4_096,
             false,
-            script,
+            script.clone(),
         );
+        if expected == "malformed" {
+            compact_profile.generator = Arc::new(FakeGenerator::new(vec![script.clone(), script]));
+        }
         let (main_profile, _) = compaction_profile(
             "main-model",
             ThinkingLevel::Low,
@@ -1337,7 +1340,7 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
         );
         assert_eq!(
             source_state.charges.len(),
-            1,
+            if expected == "malformed" { 2 } else { 1 },
             "{expected} remains source-accounted"
         );
     }
@@ -1532,4 +1535,68 @@ fn live_compaction_keeps_source_request_and_final_answer() {
         compact.messages.messages().last(),
         Some(&Message::text(Role::User, COMPACTION_PROMPT))
     );
+}
+
+// Catches: one malformed checkpoint aborts without the authorized correction,
+// or correction rewrites the previous input prefix or loses private accounting.
+#[test]
+fn malformed_checkpoint_gets_one_append_only_correction() {
+    let malformed = format!("{}\n# copied comment", checkpoint());
+    let (mut profile, _) = compaction_profile(
+        "source",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let generator = Arc::new(FakeGenerator::new(vec![
+        vec![
+            AiEvent::TextDelta {
+                text: malformed.clone(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    ]));
+    profile.generator = generator.clone();
+    let (main, _) = compaction_profile(
+        "source",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(profile)),
+        (GenerationRole::Main, Ok(main)),
+    ]);
+    let (mut turn, store, _) = compaction_turn(source);
+    futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
+        .expect("one correction succeeds");
+    let calls = generator.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[1]
+            .messages
+            .messages()
+            .starts_with(calls[0].messages.messages())
+    );
+    assert_eq!(calls[1].tools, calls[0].tools);
+    assert_eq!(calls[1].thinking, calls[0].thinking);
+    assert_eq!(calls[1].cache, calls[0].cache);
+    let tail = calls[1].messages.messages().last().unwrap();
+    assert_eq!(tail.role, Role::User);
+    let ego_core::generator::types::ContentBlock::Text { text } = &tail.content[0] else {
+        panic!("correction text")
+    };
+    assert!(text.contains("checkpoint contains unknown heading # copied comment"));
+    assert!(text.contains("# Critical references"));
+    let state = SessionState::replay(store.events());
+    assert!(state.live_attempts.is_empty());
+    assert_eq!(state.charges.len(), 2);
 }

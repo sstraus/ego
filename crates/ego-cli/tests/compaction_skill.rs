@@ -230,3 +230,42 @@ sandbox = "off"
         "cold compaction must retain the exact source tool prefix"
     );
 }
+
+// Catches: cold compaction uses current thinking instead of source admission.
+#[test]
+fn cold_compaction_recovers_source_thinking() {
+    let stub = Stub::start(fixture_plan());
+    let places = Places::new();
+    places.ego(&stub).home_file(
+        "config.toml",
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    );
+    let source = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "off",
+            "--thinking",
+            "low",
+            "--tools",
+            "read",
+            "--session-id",
+            FIXTURE_SESSION_ID,
+        ])
+        .arg("Reply READY.")
+        .run();
+    assert_eq!(source.code, Some(0), "{}", source.stderr);
+    let compacted = places
+        .ego(&stub)
+        .subcommand("compact")
+        .arg(FIXTURE_SESSION_ID)
+        .args(["--output", "json"])
+        .run();
+    assert_eq!(compacted.code, Some(0), "{}", compacted.stderr);
+    let requests = stub.generations();
+    assert_eq!(requests[0]["reasoning_effort"], "low");
+    assert_eq!(
+        requests[1]["reasoning_effort"], requests[0]["reasoning_effort"],
+        "cold compaction must preserve source thinking"
+    );
+}

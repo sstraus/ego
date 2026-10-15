@@ -643,6 +643,8 @@ pub struct GenerationAdmissionEvidence {
     pricing: PricingEvidence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_catalogue: Option<EvidenceDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thinking: Option<crate::generator::types::ThinkingLevel>,
 }
 
 impl GenerationAdmissionEvidence {
@@ -666,7 +668,17 @@ impl GenerationAdmissionEvidence {
             capabilities,
             pricing,
             tool_catalogue: None,
+            thinking: None,
         }
+    }
+
+    pub fn with_thinking(mut self, thinking: crate::generator::types::ThinkingLevel) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+
+    pub fn thinking(&self) -> Option<crate::generator::types::ThinkingLevel> {
+        self.thinking
     }
 
     pub fn with_tool_catalogue(mut self, digest: EvidenceDigest) -> Self {

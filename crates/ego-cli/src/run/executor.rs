@@ -527,6 +527,25 @@ impl CliCompactionCommand {
         }) {
             args.model = Some(model);
         }
+        if let Some(thinking) = records
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                EvidenceRecord::GenerationAdmission(admission)
+                    if admission.role() != GenerationRole::Compaction =>
+                {
+                    Some(admission.thinking())
+                }
+                _ => None,
+            })
+            .flatten()
+        {
+            args.thinking = Some(thinking);
+        } else {
+            eprintln!(
+                "Warning: source has no durable thinking effort; cold compaction uses current thinking (best effort)."
+            );
+        }
         let settings = settings(&args, |_| Trust::Untrusted, &Stderr)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         let Materials {
