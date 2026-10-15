@@ -1571,6 +1571,32 @@ fn a_turn_in_a_tuic_pane_tells_tuic_its_title_intent_busy_and_idle() {
     }
 }
 
+// Catches: removal readiness accepts a prompt before its editor frame completes.
+#[cfg(not(windows))]
+#[test]
+fn image_removal_wait_rejects_incomplete_repaint() {
+    // Completed empty frame captured from the real rb transcript in regression_case.
+    let empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
+    // Captured from the native image-removal PTY run in regression_case. The
+    // status row is part of the prompt, not text in the editor buffer.
+    let status_empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96mfixture-vision \xc2\xb7 off \xc2\xb7 auto \xc2\xb7 ctx ?\r\n> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
+    assert_eq!(
+        support::ready_prompt_count_with_status(status_empty),
+        1,
+        "completed empty editor with a status row was rejected"
+    );
+    let (sender, receiver) = mpsc::channel();
+    let mut output = empty.to_vec();
+    let start = output.len();
+    output.extend_from_slice(&empty[..empty.len() - 6]);
+    sender.send(empty.to_vec()).expect("completed empty frame");
+    until_draft_ready(&receiver, &mut output, start);
+    assert!(
+        support::ready_prompt_count(&output[start..]) > 0,
+        "image removal readiness accepted an incomplete editor frame"
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn image_paste_chip_can_be_removed_before_submission() {
@@ -1611,10 +1637,15 @@ fn image_paste_chip_can_be_removed_before_submission() {
         .expect("paste image path");
     input.flush().expect("paste flush");
     until_normalized(&reader, &mut output, paste_start, "[image: remove.png]");
+    // The label can arrive before Reedline completes its repaint. Finish that
+    // frame and exclude queued chip repaints from the removal observation.
+    let chip_start = paste_start + find(&output[paste_start..], b"[image: remove.png]");
+    until_from(&reader, &mut output, chip_start, b"\x1b[?25h");
+    drain_until_quiet(&reader, &mut output);
     let removal_start = output.len();
     input.write_all(b"\x1b").expect("remove chip");
     input.flush().expect("remove flush");
-    until_prompt_from(&reader, &mut output, removal_start);
+    until_draft_ready(&reader, &mut output, removal_start);
     let after_removal = normalized(&output[removal_start..]);
     input
         .write_all(b"describe without attachment\r")
@@ -2966,8 +2997,17 @@ fn slash_action_stall_reports_command_and_waiting_step() {
 }
 
 fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
+    until_ready_prompt_after(receiver, output, previous, support::ready_prompt_count);
+}
+
+fn until_ready_prompt_after(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    previous: usize,
+    count: fn(&[u8]) -> usize,
+) {
     let deadline = Instant::now() + PROGRESS_DEADLINE;
-    while support::ready_prompt_count(output) <= previous {
+    while count(output) <= previous {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             drain(receiver, output);
@@ -3087,6 +3127,14 @@ fn find(output: &[u8], needle: &[u8]) -> usize {
 
 fn until_draft_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
     let mut pending = output.split_off(start);
+    #[cfg(not(windows))]
+    until_ready_prompt_after(
+        receiver,
+        &mut pending,
+        0,
+        support::ready_prompt_count_with_status,
+    );
+    #[cfg(windows)]
     until_prompt_after(receiver, &mut pending, 0);
     output.extend(pending);
 }
