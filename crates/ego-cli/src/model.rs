@@ -871,6 +871,172 @@ mod tests {
         assert!(error.to_string().contains("thinking"));
     }
 
+    // Catches: fresh model resolution discards the previous tool response and socket.
+    #[tokio::test]
+    async fn codex_generation_boundaries_preserve_incremental_tool_continuation() {
+        use ego_ai::http::HttpWebSocket;
+        use ego_core::budget::BudgetGate;
+        use ego_core::cost::CurrencyCode;
+        use ego_core::event::id::{GenerationId, SessionId};
+        use ego_core::generator::attempt::GenerationAttempt;
+        use ego_core::generator::types::{ContentBlock, PromptCache};
+        use futures::StreamExt;
+        use std::sync::Mutex;
+
+        const CHILD: &str = "EGO_TEST_CODEX_GENERATION_BOUNDARY";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            // Synthetic subscription state; never inspect the developer's credentials.
+            std::fs::write(home.path().join("auth.json"), serde_json::json!({
+                "openai-codex": {"type":"oauth", "access":
+                    "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig"}
+            }).to_string()).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "model::tests::codex_generation_boundaries_preserve_incremental_tool_continuation", "--nocapture"])
+                .env(CHILD, "1")
+                .env("EGO_HOME", home.path())
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        #[derive(Default)]
+        struct RecordingHttp(Arc<Mutex<Vec<serde_json::Value>>>);
+        struct Socket {
+            requests: Arc<Mutex<Vec<serde_json::Value>>>,
+            events: std::collections::VecDeque<serde_json::Value>,
+        }
+        impl ego_ai::http::Http for RecordingHttp {
+            fn begin_call(&self) -> Box<dyn HttpCall> {
+                Box::new(NoHttpCall)
+            }
+            fn open_websocket(
+                &self,
+                _call: PreparedHttpCall,
+            ) -> BoxFuture<'static, Result<Box<dyn HttpWebSocket>, TransportError>> {
+                let socket = Socket {
+                    requests: self.0.clone(),
+                    events: Default::default(),
+                };
+                Box::pin(async move { Ok(Box::new(socket) as Box<dyn HttpWebSocket>) })
+            }
+        }
+        impl HttpWebSocket for Socket {
+            fn send(
+                &mut self,
+                call: PreparedHttpCall,
+            ) -> BoxFuture<'_, Result<(), TransportError>> {
+                let (_, _, _, request) = call.into_parts();
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(serde_json::from_slice(request.body()).unwrap());
+                let tool = serde_json::json!({"type":"function_call", "id":"fc1", "call_id":"c1", "name":"read", "arguments":"{}"});
+                if requests.len() == 1 {
+                    self.events.push_back(
+                        serde_json::json!({"type":"response.output_item.added", "item":tool}),
+                    );
+                    self.events.push_back(serde_json::json!({"type":"response.completed", "response":{"id":"resp_1", "status":"completed", "output":[tool]}}));
+                } else {
+                    self.events.push_back(serde_json::json!({"type":"response.completed", "response":{"id":"resp_2", "status":"completed", "output":[]}}));
+                }
+                Box::pin(async { Ok(()) })
+            }
+            fn receive(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
+                let event = self
+                    .events
+                    .pop_front()
+                    .map(|event| serde_json::to_vec(&event).unwrap());
+                Box::pin(async move { Ok(event) })
+            }
+        }
+
+        let recording = Arc::new(RecordingHttp::default());
+        let http = recording.clone() as Arc<dyn Http>;
+        let source = Arc::new(CliGenerationModelSource::new(
+            ModelRef("openai-codex/gpt-6.1-sol".into()),
+            Some(ThinkingLevel::Low),
+            None,
+            Ceilings::default(),
+            Default::default(),
+        ))
+        .bind(http, CancelToken::new(), None);
+        let id = SessionId::new();
+        let mut messages = vec![Message::text(Role::User, "read")];
+        for generation in 0..2 {
+            let profile = source
+                .resolve(GenerationModelRequest::new(GenerationRole::Main))
+                .await
+                .unwrap();
+            let req = GenRequest {
+                cache: Some(PromptCache {
+                    session_id: id,
+                    lineage_root: id,
+                    retention: CacheRetention::Short,
+                    stable_messages: 0,
+                }),
+                model: profile.request_model.clone(),
+                messages: Conversation::new(messages.clone()).unwrap(),
+                tools: vec![],
+                thinking: profile.thinking,
+                max_output_tokens: Some(16),
+                parallel_tool_calls: false,
+            };
+            let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").unwrap());
+            let reservation = gate
+                .reserve(&profile.metering, None, &req, &profile.capabilities)
+                .unwrap();
+            let attempt = GenerationAttempt::new(
+                GenerationId::new(),
+                reservation,
+                &profile.metering,
+                None,
+                &req,
+                &profile.capabilities,
+            )
+            .unwrap();
+            let events: Vec<_> = profile.generator.generate(req, attempt).collect().await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(ego_core::generator::port::AiEvent::Stop(_))
+                ),
+                "{events:?}"
+            );
+            if generation == 0 {
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        call_id: "c1".into(),
+                        name: "read".into(),
+                        args: "{}".into(),
+                    }],
+                });
+                messages.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        call_id: "c1".into(),
+                        output: "ok".into(),
+                        is_error: false,
+                    }],
+                });
+            }
+        }
+        let requests = recording.0.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1]["previous_response_id"], "resp_1",
+            "model resolution must retain the completed response across tool generations"
+        );
+        assert_eq!(
+            requests[1]["input"],
+            serde_json::json!([{"type":"function_call_output","call_id":"c1","output":"ok"}])
+        );
+    }
+
     #[test]
     fn codex_login_never_turns_into_a_chat_completions_row() {
         let row = ProviderRow::openai_codex_default();
