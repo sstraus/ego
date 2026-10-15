@@ -16,6 +16,8 @@ Run an agent from a prompt, headless.
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text
 - `--bare` — No ambient discovery, even in a trusted workspace
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
+- `--context-clear` — Permit the model to discard conversation history using clear
+- `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `--ephemeral` — Refused: every run uses a durable session
@@ -32,6 +34,7 @@ Run an agent from a prompt, headless.
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support
+- `--no-context-tool` — Disable model-requested context transitions
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
@@ -67,6 +70,8 @@ Continue a session; no ID = latest in this workspace.
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text
 - `--bare` — No ambient discovery, even in a trusted workspace
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
+- `--context-clear` — Permit the model to discard conversation history using clear
+- `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `--ephemeral` — Refused: every run uses a durable session
@@ -83,6 +88,7 @@ Continue a session; no ID = latest in this workspace.
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support
+- `--no-context-tool` — Disable model-requested context transitions
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
@@ -149,6 +155,8 @@ Continue a session; no ID = latest in this workspace.
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text
 - `--bare` — No ambient discovery, even in a trusted workspace
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
+- `--context-clear` — Permit the model to discard conversation history using clear
+- `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `--ephemeral` — Refused: every run uses a durable session
@@ -165,6 +173,7 @@ Continue a session; no ID = latest in this workspace.
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support
+- `--no-context-tool` — Disable model-requested context transitions
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl

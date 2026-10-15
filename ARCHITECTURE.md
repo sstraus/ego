@@ -23,6 +23,7 @@ State is a **reduction over an append-only event log** (pi's reducer,
 ```
 SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested | SessionPaused |
 SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
+ContextRequested | ContextRequestConsumed | ContextCooldown |
 GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
 AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState |
@@ -39,7 +40,7 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-57 variants in the current schema, and this list is exhaustive by contract.
+60 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
 57, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, skill, and clean-session compaction lifecycles.

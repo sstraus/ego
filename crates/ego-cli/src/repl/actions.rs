@@ -1388,7 +1388,14 @@ mod tests {
         }
         let catalogue = roots.catalogue();
         let captured = catalogue.capture().expect("capture");
-        assert!(captured.descriptors().is_empty());
+        assert_eq!(
+            captured
+                .descriptors()
+                .iter()
+                .map(|spec| spec.name())
+                .collect::<Vec<_>>(),
+            vec!["context-management"]
+        );
         for name in ["help", "skills", "hooks", "quit", "q"] {
             assert!(
                 captured

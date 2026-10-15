@@ -163,6 +163,8 @@ pub struct PreparedCompaction {
     pub(crate) baseline: GenRequest,
     pub(crate) title: Option<String>,
     pub(crate) goal: Option<GoalRecord>,
+    pub(crate) context_interval: Option<u32>,
+    pub(crate) context_request: Option<crate::context::ContextRequest>,
 }
 
 impl PreparedCompaction {
@@ -196,6 +198,7 @@ impl PreparedCompaction {
         )
         .with_title(self.title.clone())
         .with_goal(self.goal.as_ref())
+        .with_context_transition(self.context_request.as_ref(), self.context_interval)
     }
 }
 
@@ -659,6 +662,8 @@ mod transition_contract_tests {
             },
             title: None,
             goal: None,
+            context_interval: None,
+            context_request: None,
         }
     }
 

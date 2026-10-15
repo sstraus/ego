@@ -57,6 +57,7 @@ _arguments "${_arguments_options[@]}" : \
 '--budget=[Hard cap\: '\''2.5\$'\'' or '\''400k'\'' tokens]:BUDGET:_default' \
 '--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
 '--goal=[Set a checked session objective]:GOAL:_default' \
+'--context-interval=[Minimum completed turns between model-requested transitions]:CONTEXT_INTERVAL:_default' \
 '--goal-turns=[Maximum automatic goal continuation turns]:GOAL_TURNS:_default' \
 '*--goal-check-command=[Evaluator argv as a JSON string array; reads evidence JSON on stdin]:GOAL_CHECK_COMMAND:_default' \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
@@ -70,6 +71,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
+'--no-context-tool[Disable model-requested context transitions]' \
+'--context-clear[Permit the model to discard conversation history using clear]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
 '-q[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
@@ -112,6 +115,7 @@ _arguments "${_arguments_options[@]}" : \
 '--budget=[Hard cap\: '\''2.5\$'\'' or '\''400k'\'' tokens]:BUDGET:_default' \
 '--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
 '--goal=[Set a checked session objective]:GOAL:_default' \
+'--context-interval=[Minimum completed turns between model-requested transitions]:CONTEXT_INTERVAL:_default' \
 '--goal-turns=[Maximum automatic goal continuation turns]:GOAL_TURNS:_default' \
 '*--goal-check-command=[Evaluator argv as a JSON string array; reads evidence JSON on stdin]:GOAL_CHECK_COMMAND:_default' \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
@@ -125,6 +129,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
+'--no-context-tool[Disable model-requested context transitions]' \
+'--context-clear[Permit the model to discard conversation history using clear]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
 '-q[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
@@ -168,6 +174,7 @@ _arguments "${_arguments_options[@]}" : \
 '--budget=[Hard cap\: '\''2.5\$'\'' or '\''400k'\'' tokens]:BUDGET:_default' \
 '--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
 '--goal=[Set a checked session objective]:GOAL:_default' \
+'--context-interval=[Minimum completed turns between model-requested transitions]:CONTEXT_INTERVAL:_default' \
 '--goal-turns=[Maximum automatic goal continuation turns]:GOAL_TURNS:_default' \
 '*--goal-check-command=[Evaluator argv as a JSON string array; reads evidence JSON on stdin]:GOAL_CHECK_COMMAND:_default' \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
@@ -181,6 +188,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
+'--no-context-tool[Disable model-requested context transitions]' \
+'--context-clear[Permit the model to discard conversation history using clear]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
 '-q[Suppress progress and diagnostics on stderr; stdout is unaffected]' \

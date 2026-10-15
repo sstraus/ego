@@ -233,6 +233,7 @@ pub struct ToolTiming {
 /// ```text
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
 /// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
+/// ContextRequested | ContextRequestConsumed | ContextCooldown |
 /// GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
@@ -327,6 +328,14 @@ pub enum EventKind {
     },
     /// System-owned work admitted after an independent goal check.
     GoalContinuation { id: GoalId, text: String },
+    /// Model-authored request, serviced only by the idle session owner.
+    ContextRequested {
+        request: crate::context::ContextRequest,
+    },
+    /// Cross-session cooldown carried by the atomic target seed.
+    ContextCooldown { turns: u32 },
+    /// The idle owner consumed a model request; never retry it implicitly.
+    ContextRequestConsumed,
     /// A check could not continue safely or exhausted its allowance.
     GoalCheckStopped { id: GoalId, reason: String },
     /// The model updated its own objective.
@@ -787,6 +796,9 @@ impl EventKind {
             EventKind::SessionResumed { .. } => "session_resumed",
             EventKind::GoalSet { .. } => "goal_set",
             EventKind::GoalContinuation { .. } => "goal_continuation",
+            EventKind::ContextRequested { .. } => "context_requested",
+            EventKind::ContextCooldown { .. } => "context_cooldown",
+            EventKind::ContextRequestConsumed => "context_request_consumed",
             EventKind::GoalCheckConfigured { .. } => "goal_check_configured",
             EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
             EventKind::GoalUpdated { .. } => "goal_updated",

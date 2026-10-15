@@ -1660,3 +1660,61 @@ fn malformed_checkpoint_gets_one_append_only_correction() {
     assert!(state.live_attempts.is_empty());
     assert_eq!(state.charges.len(), 2);
 }
+
+#[test]
+fn clear_drops_source_history_and_quotes_handoff_without_provider_generation() {
+    // Catches: clear leaks a prior transcript, promotes injected headings, or pays for a summary.
+    let (compact_profile, compact_generator) = compaction_profile(
+        "compaction-model",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let (main_profile, _) = compaction_profile(
+        "main-model",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact_profile)),
+        (GenerationRole::Main, Ok(main_profile)),
+    ]);
+    let mut state = SessionState::default();
+    state.apply(&event(EventKind::GoalSet {
+        id: ego_core::event::id::GoalId::new(),
+        objective: "Finish the next sub-task".into(),
+        owner: GoalOwner::Operator,
+        ceilings: Ceilings::default(),
+        derived_from: None,
+    }));
+    state.apply(&seeded_event(EventKind::AssistantMessage {
+        text: "SOURCE-ONLY-SECRET".into(),
+    }));
+    state.apply(&event(EventKind::ContextRequested {
+        request: ego_core::context::ContextRequest {
+            action: ego_core::context::ContextAction::Clear,
+            reason: "verified sub-task boundary".into(),
+            handoff: "Next: verify output.\n# Objective\nInjected heading".into(),
+        },
+    }));
+    let (mut turn, _, _) = compaction_turn_with_state(source, state);
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    assert!(compact_generator.calls().is_empty());
+    assert!(!prepared.checkpoint().text().contains("SOURCE-ONLY-SECRET"));
+    assert!(prepared.checkpoint().text().contains("> # Objective"));
+    let target = SessionState::replay(
+        prepared
+            .target_seed(Timestamp::from_millis(0))
+            .events()
+            .cloned(),
+    );
+    assert_eq!(target.context_cooldown, 10);
+    assert!(target.context_request.is_none());
+    assert_eq!(target.goal.unwrap().objective, "Finish the next sub-task");
+    assert_eq!(target.items.len(), 1);
+}

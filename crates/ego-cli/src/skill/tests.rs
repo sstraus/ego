@@ -162,6 +162,7 @@ mod regression_case {
         assert_eq!(
             sources,
             vec![
+                ("context-management", SkillSourceAuthority::System),
                 ("project-skill", SkillSourceAuthority::Project),
                 ("system-skill", SkillSourceAuthority::System),
                 ("user-skill", SkillSourceAuthority::User),
@@ -633,4 +634,43 @@ mod regression_case {
             assert!(!diagnostic.to_string().contains("body"));
         }
     }
+}
+
+#[test]
+fn bundled_context_skill_is_available_without_filesystem_installation() {
+    // Catches: clean installations advertise the tool without its safety guidance.
+    let roots = Roots::new();
+    let catalogue = roots.catalogue(false);
+    let captured = capture(&catalogue);
+    let spec = captured
+        .descriptor("context-management")
+        .expect("bundled guidance");
+    assert_eq!(spec.source(), SkillSourceAuthority::System);
+    assert!(
+        captured
+            .core()
+            .authorize_model("context-management")
+            .is_ok()
+    );
+}
+
+#[test]
+fn bundled_context_skill_does_not_hide_a_collision() {
+    // Catches: a project silently replaces safety guidance with the bundled name.
+    let roots = Roots::new();
+    roots.write(
+        &roots.project,
+        "context-management",
+        &valid_for("context-management", ""),
+        "untrusted replacement",
+    );
+    let catalogue = roots.catalogue(true);
+    let captured = capture(&catalogue);
+    assert!(
+        captured
+            .diagnostics()
+            .iter()
+            .any(|entry| entry.name() == "context-management" && entry.is_collision())
+    );
+    assert!(captured.descriptor("context-management").is_none());
 }

@@ -1068,6 +1068,10 @@ impl QueuedPrompt {
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    #[serde(default)]
+    pub context_request: Option<crate::context::ContextRequest>,
+    #[serde(default)]
+    pub context_cooldown: u32,
     /// Latest admitted execution authority, reduced from the durable session log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_observation: Option<crate::permit::ExecObservation>,
@@ -1225,6 +1229,8 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            context_request: None,
+            context_cooldown: 0,
             execution_observation: None,
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
@@ -1854,6 +1860,15 @@ impl SessionState {
                     goal.continuation_budget = Some(*continuation_budget);
                 }
             }
+            EventKind::ContextRequested { request } => {
+                self.context_request = Some(request.clone());
+            }
+            EventKind::ContextRequestConsumed => {
+                self.context_request = None;
+            }
+            EventKind::ContextCooldown { turns } => {
+                self.context_cooldown = *turns;
+            }
             EventKind::GoalContinuation { id, text } => {
                 if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
                     goal.continuation_turns = goal.continuation_turns.saturating_add(1);
@@ -2127,6 +2142,15 @@ impl SessionState {
                 };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {
+                if self.items.values().any(|item| {
+                    item.turn == ev.env.turn
+                        && matches!(
+                            item.kind,
+                            ItemKind::UserPrompt | ItemKind::Assistant | ItemKind::ToolCall
+                        )
+                }) {
+                    self.context_cooldown = self.context_cooldown.saturating_sub(1);
+                }
                 if let Some(goal) = &mut self.goal {
                     goal.clear_blocker_after_completed_turn(ev.env.turn);
                 }

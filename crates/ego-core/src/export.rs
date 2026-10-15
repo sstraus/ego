@@ -230,6 +230,9 @@ pub enum ExportEvent {
     GoalSet,
     GoalTransitioned,
     GoalContinuation,
+    ContextRequested,
+    ContextCooldown,
+    ContextRequestConsumed,
     GoalCheckConfigured,
     GoalUpdated,
     GoalCheckStopped,
@@ -820,6 +823,12 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             id: _,
             continuation_budget: _,
         } => ExportEvent::GoalCheckConfigured,
+        EventKind::ContextRequested { request: _ } => {
+            redactions.opaque_prose += 2;
+            ExportEvent::ContextRequested
+        }
+        EventKind::ContextCooldown { turns: _ } => ExportEvent::ContextCooldown,
+        EventKind::ContextRequestConsumed => ExportEvent::ContextRequestConsumed,
         EventKind::GoalContinuation { id: _, text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalContinuation

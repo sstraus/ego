@@ -527,6 +527,23 @@ impl TargetSeed {
         self
     }
 
+    pub(crate) fn with_context_transition(
+        mut self,
+        request: Option<&crate::context::ContextRequest>,
+        interval: Option<u32>,
+    ) -> Self {
+        if let Some(request) = request {
+            self.push_trailing(EventKind::ContextRequested {
+                request: request.clone(),
+            });
+            self.push_trailing(EventKind::ContextRequestConsumed);
+        }
+        if let Some(turns) = interval {
+            self.push_trailing(EventKind::ContextCooldown { turns });
+        }
+        self
+    }
+
     fn push_trailing(&mut self, kind: EventKind) {
         let previous = self.trailing_events.last().unwrap_or(&self.event);
         let mut seq = previous.env.seq;
