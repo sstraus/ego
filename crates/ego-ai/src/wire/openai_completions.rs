@@ -490,11 +490,19 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
 
 /// Provider-specific fields stay out of the generic compatible mapping.
 pub fn openrouter_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
-    if super::cache::routing_key(req, "openrouter").is_none() {
-        return request_body(req);
-    }
     let mut body: serde_json::Value =
         serde_json::from_slice(&request_body(req)?).expect("request JSON");
+    if req.thinking == ThinkingLevel::Off {
+        // The unified switch also disables reasoning models whose default is on;
+        // omitting effort alone would leave that provider default active.
+        body.as_object_mut()
+            .expect("request object")
+            .remove("reasoning_effort");
+        body["reasoning"] = serde_json::json!({"enabled": false});
+    }
+    if super::cache::routing_key(req, "openrouter").is_none() {
+        return Ok(serde_json::to_vec(&body).expect("a JSON value serialises"));
+    }
     if let Some(key) = super::cache::routing_key(req, "openrouter") {
         body["session_id"] = key.into();
     }

@@ -850,3 +850,152 @@ fn openrouter_current_inventory_resolves_its_owned_wire_without_prices() {
     assert!(resolved.rates.is_none());
     assert_eq!(stub.paths(), ["/api/v1/models"]);
 }
+
+// Catches: published OpenRouter reasoning support is discarded and low is refused locally.
+#[test]
+fn openrouter_published_reasoning_admits_low() {
+    for model in ["openai/gpt-6-luna", "anthropic/claude-sonnet-5.5"] {
+        let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+        let (http, _) = server([(
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        )]);
+        let resolved = block_on(catalogue.resolve(
+            &ModelSlug::parse(&format!("openrouter/{model}")).unwrap(),
+            &http,
+            &credential(),
+        ))
+        .unwrap();
+        assert_eq!(
+            resolved
+                .capabilities
+                .resolve_reasoning_effort(Some(ThinkingLevel::Low)),
+            Ok(ThinkingLevel::Low),
+            "{model} publishes reasoning in supported_parameters"
+        );
+        let mut req = request(model, vec![]);
+        req.thinking = ThinkingLevel::Low;
+        assert!(resolved.capabilities.request_gaps(&req).is_empty());
+        let body: Value = serde_json::from_slice(
+            &ego_ai::wire::openai_completions::openrouter_request_body(&req).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reasoning_effort"], "low");
+        // Claude's published list excludes minimal and none; do not generalize the vocabulary.
+        assert!(
+            resolved
+                .capabilities
+                .resolve_reasoning_effort(Some(ThinkingLevel::Minimal))
+                .is_err()
+        );
+    }
+}
+
+// Catches: a non-reasoning inventory row inherits a paid reasoning default or accepts low.
+#[test]
+fn openrouter_absent_reasoning_defaults_off_and_rejects_explicit_low() {
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+    let (http, _) = server([(
+        200,
+        include_str!("goldens/openrouter/models-2026-10-15.json"),
+    )]);
+    let resolved = block_on(catalogue.resolve(
+        &ModelSlug::parse("openrouter/~unbiased/pareto-latest").unwrap(),
+        &http,
+        &credential(),
+    ))
+    .unwrap();
+    assert_eq!(
+        resolved.capabilities.resolve_reasoning_effort(None),
+        Ok(ThinkingLevel::Off)
+    );
+    assert!(
+        resolved
+            .capabilities
+            .resolve_reasoning_effort(Some(ThinkingLevel::Low))
+            .is_err()
+    );
+    let req = request(&resolved.model, vec![]);
+    assert!(resolved.capabilities.request_gaps(&req).is_empty());
+    let body: Value = serde_json::from_slice(
+        &ego_ai::wire::openai_completions::openrouter_request_body(&req).unwrap(),
+    )
+    .unwrap();
+    assert!(body.get("reasoning_effort").is_none());
+    assert_eq!(body["reasoning"], json!({"enabled": false}));
+}
+
+// Catches: a reasoning parameter alone fabricates effort support; a missing field grants low.
+#[test]
+fn openrouter_incomplete_reasoning_facts_do_not_invent_efforts() {
+    for document in [
+        r#"{"data":[{"id":"fixture/model"}]}"#,
+        r#"{"data":[{"id":"fixture/model","supported_parameters":["reasoning"]}]}"#,
+        r#"{"data":[{"id":"fixture/model","supported_parameters":["reasoning"],"reasoning":{"supported_efforts":["future-effort"]}}]}"#,
+    ] {
+        let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+        let (http, _) = server([(200, document)]);
+        let resolved = block_on(catalogue.resolve(
+            &ModelSlug::parse("openrouter/fixture/model").unwrap(),
+            &http,
+            &credential(),
+        ))
+        .unwrap();
+        assert!(
+            resolved
+                .capabilities
+                .resolve_reasoning_effort(Some(ThinkingLevel::Low))
+                .is_err()
+        );
+    }
+}
+
+// Catches: discovery replaces an operator's stronger capability facts.
+#[test]
+fn openrouter_supplied_reasoning_overrides_discovery() {
+    use ego_core::generator::capabilities::ReasoningEffortSupport;
+    let mut capabilities = supplied_capabilities();
+    capabilities.reasoning_efforts = ReasoningEffortSupport::Only([ThinkingLevel::Off].into());
+    capabilities.default_reasoning_effort = Some(ThinkingLevel::Off);
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]).with_hosted(
+        "openrouter/openai/gpt-6-luna",
+        HostedModel {
+            capabilities,
+            authority: SuppliedAuthority::User,
+            metering: ego_ai::catalogue::subscription("fixture"),
+            rates: None,
+        },
+    );
+    let (http, _) = server([(
+        200,
+        include_str!("goldens/openrouter/models-2026-10-15.json"),
+    )]);
+    let resolved = block_on(catalogue.resolve(
+        &ModelSlug::parse("openrouter/openai/gpt-6-luna").unwrap(),
+        &http,
+        &credential(),
+    ))
+    .unwrap();
+    assert_eq!(
+        resolved.capabilities.resolve_reasoning_effort(None),
+        Ok(ThinkingLevel::Off)
+    );
+    assert!(
+        resolved
+            .capabilities
+            .resolve_reasoning_effort(Some(ThinkingLevel::Low))
+            .is_err()
+    );
+}
+
+// Catches: omitting Off's effort leaves OpenRouter's default-enabled reasoning active.
+#[test]
+fn openrouter_off_disables_reasoning_even_when_the_model_defaults_on() {
+    let req = request("openai/gpt-6-luna", vec![]);
+    let body: Value = serde_json::from_slice(
+        &ego_ai::wire::openai_completions::openrouter_request_body(&req).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reasoning"], json!({"enabled": false}));
+    assert!(body.get("reasoning_effort").is_none());
+}

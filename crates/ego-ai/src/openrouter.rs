@@ -6,6 +6,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
+use ego_core::generator::types::ThinkingLevel;
 use ego_core::public::MeteringKind;
 use serde::Deserialize;
 
@@ -29,7 +30,27 @@ struct Model {
     top_provider: Option<TopProvider>,
     #[serde(default)]
     supported_parameters: Vec<String>,
+    reasoning: Option<Reasoning>,
 }
+#[derive(Deserialize)]
+struct Reasoning {
+    supported_efforts: Option<Vec<String>>,
+    default_effort: Option<String>,
+}
+
+fn effort(value: &str) -> Option<ThinkingLevel> {
+    match value {
+        "none" => Some(ThinkingLevel::Off),
+        "minimal" => Some(ThinkingLevel::Minimal),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        "xhigh" => Some(ThinkingLevel::XHigh),
+        "max" => Some(ThinkingLevel::Max),
+        _ => None,
+    }
+}
+
 #[derive(Deserialize)]
 struct TopProvider {
     max_completion_tokens: Option<u64>,
@@ -74,6 +95,30 @@ async fn inventory(
                 return Err("OpenRouter models response contains an empty id".to_owned());
             }
             let parameters = model.supported_parameters;
+            let has_reasoning = parameters.iter().any(|parameter| parameter == "reasoning");
+            let reasoning_efforts = if has_reasoning {
+                model
+                    .reasoning
+                    .as_ref()
+                    .and_then(|reasoning| reasoning.supported_efforts.as_ref())
+                    .map(|levels| {
+                        ReasoningEffortSupport::Only(
+                            levels.iter().filter_map(|level| effort(level)).collect(),
+                        )
+                    })
+                    .unwrap_or(ReasoningEffortSupport::Unknown)
+            } else {
+                ReasoningEffortSupport::Only([ThinkingLevel::Off].into())
+            };
+            let default_reasoning_effort = if has_reasoning {
+                model
+                    .reasoning
+                    .as_ref()
+                    .and_then(|reasoning| reasoning.default_effort.as_deref())
+                    .and_then(effort)
+            } else {
+                Some(ThinkingLevel::Off)
+            };
             Ok(ModelDiscoveryEntry {
                 slug: ModelSlug {
                     provider: row.id().to_owned(),
@@ -90,8 +135,8 @@ async fn inventory(
                         .iter()
                         .any(|parameter| parameter == "parallel_tool_calls"),
                     reasoning_carryover: ReasoningCarryover::Unsupported,
-                    reasoning_efforts: ReasoningEffortSupport::Unknown,
-                    default_reasoning_effort: None,
+                    reasoning_efforts,
+                    default_reasoning_effort,
                     reasoning_state_dialect: None,
                     cancel: CancelSemantics::Unsupported,
                     cache: CacheRetention::None,
@@ -154,8 +199,8 @@ pub async fn resolve(
         .iter()
         .map(|entry| entry.slug.model.clone())
         .collect();
-    // OpenRouter's response states no reasoning facts: a row the operator wrote
-    // in `models.toml` replaces the listed one, and stands for an unlisted model.
+    // An operator row in `models.toml` overrides discovery, including reasoning
+    // facts, and can also describe an unlisted model.
     let capabilities = match catalogue.supplied_capabilities(&format!("{}/{model}", row.id())) {
         Some(supplied) => supplied.clone(),
         None => {

@@ -203,6 +203,22 @@ pub(crate) fn supplied_request_profile(
         .map_err(generation_error)
 }
 
+/// Explain the conservative OpenRouter default without weakening explicit requests.
+pub(crate) fn reasoning_default_notice(
+    identity: &ModelRef,
+    capabilities: &ego_core::generator::capabilities::ModelCapabilities,
+    requested: Option<ThinkingLevel>,
+) -> Option<&'static str> {
+    use ego_core::generator::capabilities::ReasoningEffortSupport;
+    (identity.0.starts_with("openrouter/")
+        && requested.is_none()
+        && matches!(&capabilities.reasoning_efforts, ReasoningEffortSupport::Only(levels)
+            if levels.len() == 1 && levels.contains(&ThinkingLevel::Off)))
+    .then_some(
+        "This OpenRouter model has no stated non-off reasoning support; using reasoning off.",
+    )
+}
+
 /// Use the least effort the resolved judge explicitly supports.
 /// Startup and generation must validate the same effort policy.
 pub(crate) fn judge_thinking(
@@ -707,6 +723,32 @@ mod tests {
             metering: subscription("ego/test/codex-subscription/v1"),
             rates: None,
         }
+    }
+
+    // Catches: the conservative discovered default becomes silent or overrides explicit effort.
+    #[test]
+    fn openrouter_missing_reasoning_notice_preserves_explicit_requests() {
+        let mut capabilities = codex_hosted().capabilities;
+        capabilities.reasoning_efforts = ReasoningEffortSupport::Only([ThinkingLevel::Off].into());
+        capabilities.default_reasoning_effort = Some(ThinkingLevel::Off);
+        let identity = ModelRef("openrouter/fixture/model".into());
+        assert!(
+            reasoning_default_notice(&identity, &capabilities, None)
+                .unwrap()
+                .contains("reasoning off")
+        );
+        assert!(
+            reasoning_default_notice(&identity, &capabilities, Some(ThinkingLevel::Low)).is_none()
+        );
+        assert!(
+            capabilities
+                .resolve_reasoning_effort(Some(ThinkingLevel::Low))
+                .is_err()
+        );
+        assert!(
+            reasoning_default_notice(&ModelRef("openai/model".into()), &capabilities, None)
+                .is_none()
+        );
     }
 
     fn selectable() -> Vec<String> {
