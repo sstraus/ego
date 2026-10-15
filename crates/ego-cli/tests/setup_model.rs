@@ -3,19 +3,35 @@ mod support;
 use support::{Plan, Reply, Stub, text};
 
 fn setup(response: Option<&str>) -> (String, tempfile::TempDir, tempfile::TempDir, Option<Stub>) {
+    setup_budget(response, None)
+}
+
+fn setup_budget(
+    response: Option<&str>,
+    budget: Option<&str>,
+) -> (String, tempfile::TempDir, tempfile::TempDir, Option<Stub>) {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("AGENTS.md"), "fixture instructions\n").unwrap();
     let stub = response.map(|response| {
         Stub::start(Plan {
-            completions: vec![Reply::Sse(text(response))],
+            completions: vec![Reply::Sse(if budget.is_some() {
+                support::costing(response, 1000, 1)
+            } else {
+                text(response)
+            })],
             ..Plan::default()
         })
     });
     if stub.is_some() {
         std::fs::write(
             home.path().join("config.toml"),
-            "model='ollama/qwen3'\nsandbox='off'\nroots=[]\n",
+            format!(
+                "model='ollama/qwen3'\nsandbox='off'\nroots=[]\n{}",
+                budget
+                    .map(|budget| format!("budget='{budget}'\n"))
+                    .unwrap_or_default()
+            ),
         )
         .unwrap();
     }
@@ -160,4 +176,21 @@ fn setup_provider_sigint_returns_cancelled_without_store_writes() {
     );
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
     assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+}
+
+// Catches: setup ignores the resolved token ceiling at its generation boundaries.
+#[test]
+fn setup_provider_token_ceiling_binds_without_rates_or_store_writes() {
+    let response = r#"[{"kind":"tool","name":"token-bound-tool","reason":"need"}]"#;
+    for (budget, inferred, requests) in [("0k", false, 0), ("1k", false, 1), ("2k", true, 1)] {
+        let (report, home, workspace, stub) = setup_budget(Some(response), Some(budget));
+        assert_eq!(
+            report.contains("Configured provider inference"),
+            inferred,
+            "{budget}: {report}"
+        );
+        assert_eq!(stub.unwrap().generations().len(), requests, "{budget}");
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 1);
+    }
 }

@@ -307,6 +307,12 @@ async fn interpret(
     use futures::StreamExt;
     use std::sync::Arc;
 
+    if ego_core::ceiling::tokens_reached(
+        effective.ceilings.tokens,
+        &ego_core::state::Usage::IDENTITY,
+    ) {
+        return Err("setup token ceiling reached".into());
+    }
     let model = effective.model.as_ref().ok_or("no configured model")?;
     let provider = model.0.split_once('/').ok_or("invalid model")?.0;
     if effective
@@ -406,9 +412,16 @@ async fn interpret(
             _ => {}
         }
     }
-    stream
+    let settlement = stream
         .settle(&mut gate)
         .map_err(|error| error.to_string())?;
+    if effective.ceilings.tokens.is_some() {
+        match settlement.outcome.usage() {
+            ego_core::generator::attempt::UsageReport::Reported(usage)
+                if !ego_core::ceiling::tokens_reached(effective.ceilings.tokens, &usage) => {}
+            _ => return Err("setup token ceiling reached or usage unknown".into()),
+        }
+    }
     if invalid {
         return Err("invalid setup provider output".into());
     }
