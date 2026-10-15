@@ -70,7 +70,7 @@ pub struct DurableAcpFixture {
     pub store: Arc<Store>,
     ids: Arc<TestIds>,
     effects: Arc<EffectCounts>,
-    executor: Arc<Executor>,
+    pub executor: Arc<Executor>,
     spawner: Arc<TestSpawner>,
 }
 

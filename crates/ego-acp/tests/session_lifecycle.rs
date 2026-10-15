@@ -368,6 +368,10 @@ async fn initialize_advertises_exactly_the_composed_v1_lifecycle_surface() {
     let capabilities = &response["result"]["agentCapabilities"];
 
     assert_eq!(capabilities["loadSession"], true);
+    assert_eq!(
+        capabilities["sessionCapabilities"]["delete"]["_meta"]["ego"]["force"],
+        true
+    );
     for method in ["list", "delete", "fork", "resume", "close"] {
         assert!(
             capabilities["sessionCapabilities"][method].is_object(),
@@ -2018,6 +2022,90 @@ async fn result_resume_busy_turn_queues_one_consolidated_pending_turn() {
         fixture.executor_effect_counts().1,
         2,
         "one pending consolidated turn"
+    );
+    connection.finish().await;
+}
+
+// Catches: advertised force is not boolean-validated, or delete bypasses durable holds.
+#[tokio::test]
+async fn delete_validates_force_and_refuses_held_sessions_even_with_force() {
+    let fixture = support::DurableAcpFixture::new();
+    let target = fixture.seed_replay_session(ROOT, "Held", 200_000);
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (invalid, _) = connection
+        .request(
+            "session/delete",
+            serde_json::json!({
+                "sessionId": target.session_id, "_meta": {"ego": {"force": "yes"}}
+            }),
+        )
+        .await;
+    assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
+    let (paused, _) = connection.request("_ego/pause", serde_json::json!({
+        "v": 1, "sessionId": target.session_id, "requestId": uuid::Uuid::now_v7().to_string()
+    })).await;
+    assert!(paused.get("result").is_some(), "{paused}");
+    let (deleted, _) = connection
+        .request(
+            "session/delete",
+            serde_json::json!({
+                "sessionId": target.session_id, "_meta": {"ego": {"force": true}}
+            }),
+        )
+        .await;
+    assert_eq!(deleted["error"]["code"], -32011, "{deleted}");
+    let (listed, _) = connection
+        .request("session/list", serde_json::json!({"cwd": ROOT}))
+        .await;
+    assert!(
+        listed["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["sessionId"] == target.session_id)
+    );
+    connection.finish().await;
+}
+
+// Catches: delete hides a session while its first prompt is preparing to run.
+#[tokio::test]
+async fn delete_refuses_a_prompt_preparing_its_first_run_even_with_force() {
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    fixture.executor.block_preparation();
+    let prompt = connection
+        .send_request(
+            "session/prompt",
+            serde_json::json!({"sessionId":session, "prompt":[{"type":"text","text":"start"}]}),
+        )
+        .await;
+    regression_case_phase(
+        "first prompt preparation",
+        fixture.executor.preparation_started(),
+    )
+    .await;
+    let (deleted, _) = connection
+        .request(
+            "session/delete",
+            serde_json::json!({"sessionId":session, "_meta":{"ego":{"force":true}}}),
+        )
+        .await;
+    fixture.executor.release_preparation();
+    let (prompted, _) = connection.response(prompt).await;
+    assert_eq!(deleted["error"]["code"], -32010, "{deleted}");
+    assert!(prompted["result"].is_object(), "{prompted}");
+    let (listed, _) = connection
+        .request("session/list", serde_json::json!({"cwd":ROOT}))
+        .await;
+    assert!(
+        listed["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["sessionId"] == session)
     );
     connection.finish().await;
 }

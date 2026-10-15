@@ -905,3 +905,20 @@ fn parse_goal_check_command(value: &str) -> Result<GoalCheckCommand, String> {
     }
     Ok(GoalCheckCommand(argv))
 }
+
+/// Delete one stored session without taking a model turn.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego rm",
+    about = "Delete a stored session (history is retained for descendants).",
+    disable_help_subcommand = true
+)]
+pub(super) struct RmCommand {
+    pub(super) source: String,
+    #[arg(long)]
+    pub(super) yes: bool,
+    #[arg(long)]
+    pub(super) force: bool,
+    #[command(flatten)]
+    pub(super) places: Places,
+}
