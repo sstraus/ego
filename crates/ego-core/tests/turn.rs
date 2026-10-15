@@ -10419,6 +10419,24 @@ mod turn {
                 "the pending turn must recover without another human prompt"
             );
             assert_eq!(trace.requests.lock().unwrap().len(), 8);
+            // catches: a countdown inventing retrying before the real dispatch,
+            // or a resumed dispatch remaining labelled as waiting.
+            let phases = fx
+                .sink
+                .events()
+                .iter()
+                .filter_map(|event| match event {
+                    PublicEvent::ProviderRetry { attempt, .. } => Some(("waiting", *attempt)),
+                    PublicEvent::ProviderRetrying { attempt, .. } => Some(("retrying", *attempt)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                phases,
+                (1..=7)
+                    .flat_map(|attempt| [("waiting", attempt), ("retrying", attempt)])
+                    .collect::<Vec<_>>()
+            );
             assert_eq!(
                 *pause.delays.lock().unwrap(),
                 [1, 2, 4, 8, 16, 32, 64].map(std::time::Duration::from_secs)

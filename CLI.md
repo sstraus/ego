@@ -604,7 +604,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 13,
+  "v": 14,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -924,6 +924,15 @@ headers), OSC 9;4 for the progress indicator — cleared on every exit path,
 including failure — the window title, a desktop notification for a run that
 took longer than a minute (suppressed by `-q`), and OSC 7770 `state`/`intent`
 under TUICommander, which is proven by `TUIC_SOCKET` and not by `TERM_PROGRAM`.
+Provider retry waits also emit OSC 7770 `ego-recovery` on this same terminal-only
+path: compact JSON with exactly `phase`, `next_attempt_ms`, and `attempt`.
+`waiting` carries the next attempt's Unix epoch milliseconds; `retrying` carries
+null and is emitted at actual dispatch, never inferred from a countdown.
+`attempt` counts retries from 1. Output, turn completion (including cancellation
+or give-up), and process exit emit `ego-recovery=clear` while recovery is active.
+The payload stays below 256 UTF-8 bytes. `/retry` or Meta-r releases the active
+provider wait through the same ingress control used by ACP.
+
 The human-facing product name is `εgo`, and every window title begins with the
 exact prefix `ɛ । `. Every payload is stripped of control characters before it
 goes into a sequence: a tool name, an error message and an intent line all come

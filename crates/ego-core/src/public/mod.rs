@@ -35,6 +35,7 @@ use crate::state::Usage;
 /// Version 9 adds the closed question target to the public report. Version 10
 /// adds the sanitized fallback decision event. Version 11 adds the live
 /// provider retry status. Version 13 adds the optional CLI goal outcome report.
+/// Version 14 adds the live provider retry dispatch transition.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -42,7 +43,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 13;
+pub const PUBLIC_EVENT_VERSION: u32 = 14;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -285,6 +286,9 @@ pub enum PublicEvent {
         kind: ErrorKind,
         cause: String,
     },
+    /// A previously announced provider wait ended and its next request is dispatching.
+    /// Live presentation only, like `ProviderRetry`; never persisted or replayed.
+    ProviderRetrying { turn: TurnId, attempt: u32 },
     /// A fallback was sanitized or skipped before any network effect.
     FallbackDecision {
         turn: TurnId,

@@ -2444,3 +2444,138 @@ fn adaptive_host_failures_are_named_without_offline_listener_advice() {
         );
     }
 }
+
+/// catches: recovery remaining invisible in TUIC and surviving success or cancellation.
+#[test]
+fn recovery_waiting_and_settlement_emit_exact_osc() {
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    let state = SessionState::default();
+    let waiting = PublicEvent::ProviderRetry {
+        turn: TurnId::new(),
+        attempt: 3,
+        limit: 6,
+        delay_ms: 0,
+        kind: ego_core::generator::types::ErrorKind::Transient,
+        cause: "connection failed".into(),
+        recovery_remaining_ms: Some(60_000),
+    };
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let bytes = inside.signal(&waiting, &state);
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let json = bytes
+        .strip_prefix("\x1b]7770;ego-recovery=")
+        .expect("waiting OSC")
+        .strip_suffix('\x07')
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(json).unwrap();
+    let next = value["next_attempt_ms"].as_u64().unwrap();
+    assert!((before..=after).contains(&u128::from(next)));
+    assert_eq!(
+        bytes,
+        format!(
+            "\x1b]7770;ego-recovery={{\"phase\":\"waiting\",\"next_attempt_ms\":{next},\"attempt\":3}}\x07"
+        )
+    );
+    for exit_reason in [
+        ego_core::event::domain::ExitReason::Completed,
+        ego_core::event::domain::ExitReason::Cancelled(ego_core::event::domain::CancelCause::User),
+        ego_core::event::domain::ExitReason::Provider,
+    ] {
+        // A distinct live recovery before each terminal outcome.
+        inside.signal(&waiting, &state);
+        assert_eq!(
+            inside.signal(
+                &PublicEvent::TurnCompleted {
+                    turn: TurnId::new(),
+                    ok: false,
+                    exit_reason
+                },
+                &state
+            ),
+            "\x1b]7770;ego-recovery=clear\x07\x1b]7770;state=idle\x07"
+        );
+    }
+}
+
+/// catches: a retry countdown guessing dispatch, or recovery sticking after output.
+#[test]
+fn recovery_retrying_output_and_non_tty_boundaries() {
+    let out = Stdout::new(CancelToken::new());
+    let state = SessionState::default();
+    let waiting = PublicEvent::ProviderRetry {
+        turn: TurnId::new(),
+        attempt: u32::MAX,
+        limit: 6,
+        delay_ms: u64::MAX,
+        kind: ego_core::generator::types::ErrorKind::Transient,
+        cause: "untrusted \x1b\x07".into(),
+        recovery_remaining_ms: Some(60_000),
+    };
+    let dispatch = PublicEvent::ProviderRetrying {
+        turn: TurnId::new(),
+        attempt: u32::MAX,
+    };
+    let output = PublicEvent::ItemDelta {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        kind: ego_core::public::ItemKind::AgentMessage,
+        text: "back online".into(),
+    };
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), true);
+    let bytes = inside.signal(&waiting, &state);
+    assert_eq!(
+        bytes,
+        "\x1b]7770;ego-recovery={\"phase\":\"waiting\",\"next_attempt_ms\":8640000000000000,\"attempt\":4294967295}\x07"
+    );
+    assert!(bytes.len() < 256);
+    assert_eq!(
+        inside.signal(&dispatch, &state),
+        "\x1b]7770;ego-recovery={\"phase\":\"retrying\",\"next_attempt_ms\":null,\"attempt\":4294967295}\x07"
+    );
+    assert_eq!(
+        inside.signal(&output, &state),
+        "\x1b]7770;ego-recovery=clear\x07"
+    );
+    assert_eq!(inside.signal(&output, &state), "");
+    for caps in [Capabilities::plain(), capabilities(OscProfile::Standard)] {
+        let outside = Announce::new(&out, caps, false);
+        for event in [&waiting, &dispatch, &output] {
+            assert_eq!(outside.signal(event, &state), "");
+        }
+    }
+}
+
+/// catches: recovery OSC held in the interactive row buffer until provider output.
+#[test]
+fn recovery_interactive_signals_do_not_wait_for_a_text_row() {
+    let (sender, received) = crossbeam::channel::unbounded();
+    let output = crate::output::InteractiveOutput::new(crate::repl::SurfaceOutput::new(
+        sender,
+        CancelToken::new(),
+    ));
+    let announce = Announce::new(&output, capabilities(OscProfile::Tuic), false);
+    for sequence in [
+        "\x1b]7770;ego-recovery={\"phase\":\"waiting\",\"next_attempt_ms\":1000,\"attempt\":1}\x07",
+        "\x1b]7770;ego-recovery={\"phase\":\"retrying\",\"next_attempt_ms\":null,\"attempt\":1}\x07",
+        "\x1b]7770;ego-recovery=clear\x07",
+    ] {
+        announce.emit(sequence.to_owned());
+        assert_eq!(
+            received
+                .try_recv()
+                .expect("signal must reach terminal before the next provider event"),
+            sequence
+        );
+        // A finish barrier is allowed, but never a synthetic transcript newline.
+        for row in received.try_iter() {
+            assert!(row.is_empty());
+        }
+    }
+}

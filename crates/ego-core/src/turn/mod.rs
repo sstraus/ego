@@ -4436,6 +4436,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     },
                 )?;
                 self.last_request = Some(request.clone());
+                if additional_attempts > 0 {
+                    self.journal.publish(&PublicEvent::ProviderRetrying {
+                        turn,
+                        attempt: additional_attempts,
+                    })?;
+                }
                 let stream = profile.generator.generate(request, attempt);
                 let drained = self
                     .drain(
