@@ -55,7 +55,7 @@
 # test holds that. The revision is what a retirement error names, so a stale
 # constant would send an operator to the wrong catalogue.
 #
-# revision = 2026-10-11
+# revision = 2026-10-15
 
 # First-run policy refreshed on 2026-09-29 for gpt-6.1-sol, released that day;
 # availability is still observed.
