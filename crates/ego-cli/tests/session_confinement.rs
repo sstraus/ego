@@ -87,8 +87,30 @@ async fn measured_rows(
     (supported, unsupported)
 }
 
+// Direct adapter calls must resolve operator config in an isolated process,
+// just like the stdio fixtures, rather than inheriting the runner's ~/Gits root.
+fn isolated_adapter_test(name: &str) -> bool {
+    if std::env::var_os("EGO_ISOLATED_ADAPTER_TEST").is_some() {
+        return false;
+    }
+    let home = tempfile::tempdir().expect("isolated adapter home");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", name, "--nocapture"])
+        .env("EGO_ISOLATED_ADAPTER_TEST", "1")
+        .env("HOME", home.path())
+        .env("EGO_HOME", home.path())
+        .output()
+        .expect("isolated adapter process");
+    assert!(output.status.success(), "{output:?}");
+    true
+}
+
 #[tokio::test]
 async fn cli_adapter_measures_the_offer_and_preserves_typed_unsupported_rows() {
+    if isolated_adapter_test("cli_adapter_measures_the_offer_and_preserves_typed_unsupported_rows")
+    {
+        return;
+    }
     let sessions = tempfile::tempdir().expect("session root");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_root = workspace
@@ -155,6 +177,10 @@ async fn cli_adapter_measures_the_offer_and_preserves_typed_unsupported_rows() {
 // Catches: offer initialization admits a candidate authority or loses its probe evidence.
 #[tokio::test]
 async fn cli_adapter_commits_measurement_evidence_before_publishing_the_offer() {
+    if isolated_adapter_test("cli_adapter_commits_measurement_evidence_before_publishing_the_offer")
+    {
+        return;
+    }
     let sessions = tempfile::tempdir().expect("session root");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_root = workspace
@@ -361,4 +387,60 @@ fn durable_tool_result(ego: &Ego, session: &str) -> Option<bool> {
             EventKind::ToolCallCompleted { ok, .. } => Some(ok),
             _ => None,
         })
+}
+
+// Catches: ACP measures a bare policy instead of the resolved default/configured
+// filesystem authority, refusing the first prompt before the provider is reached.
+#[test]
+fn fresh_acp_prompt_preserves_resolved_filesystem_authority() {
+    for policy in ["default", "empty", "read", "exec"] {
+        let stub = Stub::start(Plan {
+            completions: vec![Reply::Sse(text("first prompt reached provider"))],
+            ..Plan::default()
+        });
+        let ego = Ego::against(&stub);
+        let home = tempfile::tempdir().expect("operator home distinct from EGO_HOME");
+        std::fs::create_dir(home.path().join("Gits")).expect("default root");
+        let extra = ego.home_path().join("extra");
+        std::fs::create_dir(&extra).expect("extra root");
+        let extra = extra.canonicalize().expect("canonical extra root");
+        let perimeter = match policy {
+            "default" => String::new(),
+            "empty" => "roots=[]\n".to_owned(),
+            "read" => format!("roots=[{{path='{}',access='read'}}]\n", extra.display()),
+            "exec" => format!("roots=[]\nexec_paths=['{}']\n", extra.display()),
+            _ => unreachable!(),
+        };
+        ego.home_file(
+            "config.toml",
+            &format!("model='ollama/qwen3'\nthinking='off'\nsandbox='workspace'\n{perimeter}"),
+        );
+        let running = Ego::at(ego.home_path(), ego.workspace_path(), Some(&stub))
+            .subcommand("acp")
+            .args([
+                "--bare",
+                "--tools",
+                "read,edit",
+                "--allow",
+                "exec(/bin/sh *)",
+            ])
+            .env("HOME", home.path().to_str().expect("UTF-8 operator home"))
+            .spawn_conversing();
+        let mut host = AcpHost::adopt(running);
+        host.initialize();
+        let session = host.new_session(&ego.workspace_path().to_string_lossy());
+        let answer = host.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{"type": "text", "text": "Reply without tools."}],
+            }),
+        );
+        let stderr = host.finish();
+        assert_eq!(
+            answer["result"]["stopReason"], "end_turn",
+            "{policy} authority refused the first prompt: {answer}; {stderr}"
+        );
+        assert_eq!(stub.generations().len(), 1, "{policy} provider request");
+    }
 }
