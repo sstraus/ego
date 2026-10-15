@@ -405,31 +405,33 @@ async fn a_failed_fetch_with_no_cache_refuses_as_a_provider_failure() {
     assert_eq!(wire.calls(), 1, "it was tried");
 }
 
-/// **034's criterion 4.** A model the table does not carry is not an error
-/// here: it is the absence the gate turns into
-/// `UnknownCost::NoPricingQuote`, which must answer only "you asked for a
-/// ceiling on a model I cannot price".
-///
-/// Distinguished from every failure above precisely so that refusal can be
-/// specific. A table that could not be fetched and a table that simply does
-/// not list your model send an operator to two different places.
+// Catches: a missing public OpenAI price emits only an opaque NoPricingQuote.
 #[tokio::test]
-async fn a_model_the_table_does_not_list_is_unpriced_rather_than_a_failure() {
+async fn missing_price_names_provider_model_and_mode() {
     let fixture = Fixture::new();
     fixture.cached(TABLE, Duration::ZERO);
     let wire = Wire::silent();
     let http = transport(&wire);
-
     let mut absent = model(tabulated());
     absent.model = "gpt-99".to_string();
-
-    let rates = fixture
+    let error = fixture
         .source(&http, false)
         .rates(&absent, &limited())
         .await
-        .expect("an unlisted model is not a broken table");
-
-    assert!(rates.is_none());
+        .expect_err("missing row must fail closed");
+    assert!(
+        matches!(&error, NoRates::MissingRow { provider, model } if provider == "openai" && model == "gpt-99")
+    );
+    let diagnostic = error.to_string();
+    for expected in [
+        "NoPricingQuote",
+        "provider=openai",
+        "model=gpt-99",
+        "mode=chat",
+    ] {
+        assert!(diagnostic.contains(expected), "{diagnostic}");
+    }
+    assert_eq!(wire.calls(), 0);
 }
 
 /// §5 is an *order*, first hit wins: rates the operator wrote down are never

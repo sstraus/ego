@@ -189,6 +189,7 @@ pub enum Network {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileLayer {
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
     #[serde(default, deserialize_with = "mode")]
@@ -903,6 +904,7 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
     /// Prompt caching: short (default), none, or explicit user opt-in long.
     pub cache: Option<crate::generator::capabilities::CacheRetention>,
     pub model: Option<ModelRef>,

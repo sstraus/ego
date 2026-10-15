@@ -111,11 +111,8 @@ mod budget {
         GenRequest {
             cache: None,
             model: "claude-opus-5".to_string(),
-            messages: Conversation::new(vec![Message::text(
-                Role::User,
-                "list the files".to_string(),
-            )])
-            .expect("one user message is a conversation"),
+            messages: Conversation::new(vec![Message::text(Role::User, "x".repeat(200_000))])
+                .expect("one user message is a conversation"),
             tools: Vec::new(),
             thinking: ThinkingLevel::Off,
             max_output_tokens,
@@ -264,6 +261,73 @@ mod budget {
     }
 
     // --- the upper bound --------------------------------------------------
+
+    // Catches: a tiny capped request reserves the model's entire context.
+    #[test]
+    fn short_capped_prompt_fits_a_small_currency_budget() {
+        let mut short = request(Some(100));
+        short.messages = Conversation::new(vec![Message::text(Role::User, "hello")]).unwrap();
+        let bound = quote()
+            .upper_bound(&short, &caps(Some(200_000), Some(64_000)))
+            .expect("the fully priced request has a bound");
+        assert!(
+            bound.amount < usd("0.01").amount,
+            "short prompt reserved {bound:?}"
+        );
+    }
+
+    // Catches: byte-counting opaque reasoning understates provider context.
+    #[test]
+    fn opaque_reasoning_preserves_the_full_window_bound() {
+        use ego_core::generator::types::{ContentBlock, ReasoningState};
+        let mut req = request(Some(1_024));
+        req.messages = Conversation::new(vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning {
+                state: ReasoningState {
+                    blob: "encrypted".into(),
+                    dialect: "provider".into(),
+                },
+            }],
+        }])
+        .unwrap();
+        let bound = quote()
+            .upper_bound(&req, &caps(Some(200_000), Some(64_000)))
+            .unwrap();
+        let CostDelta::Known { amount: actual, .. } = quote().price(&tokens(0, 0, 200_000, 1_024))
+        else {
+            panic!("priced usage")
+        };
+        assert_eq!(bound, actual);
+    }
+
+    // Catches: small image byte counts under-reserve large visual contexts.
+    #[test]
+    fn image_request_preserves_the_full_window_bound() {
+        use ego_core::generator::types::{ContentBlock, Image, ImageMediaType};
+        let image = Image::new(
+            vec![
+                71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 128, 0, 0, 255, 255, 255, 0, 0, 0, 33, 249, 4,
+                1, 0, 0, 0, 0, 44, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 68, 1, 0, 59,
+            ],
+            ImageMediaType::Gif,
+        )
+        .unwrap();
+        let mut req = request(Some(1_024));
+        req.messages = Conversation::new(vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image { image }],
+        }])
+        .unwrap();
+        let bound = quote()
+            .upper_bound(&req, &caps(Some(200_000), Some(64_000)))
+            .unwrap();
+        let CostDelta::Known { amount: actual, .. } = quote().price(&tokens(200_000, 0, 0, 1_024))
+        else {
+            panic!("priced usage")
+        };
+        assert!(bound.amount >= actual.amount);
+    }
 
     #[test]
     fn the_upper_bound_is_a_full_context_at_the_dearest_input_rate_plus_max_output() {
@@ -997,27 +1061,17 @@ mod budget {
         );
     }
 
-    /// A deliberate *non*-property, recorded so it is not mistaken for an
-    /// oversight. The bound already assumes a full context window at the
-    /// dearest input rate, so no rewording of a prompt can cost more than
-    /// what was authorised — and refusing one would be this type claiming an
-    /// authority over content that it does not have and cannot enforce.
+    // Catches: a changed request reuses a reservation with another byte bound.
     #[test]
-    fn rewording_the_prompt_does_not_change_what_was_authorised() {
+    fn changing_the_prompt_size_requires_a_fresh_reservation() {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = reserve_standard(&mut gate);
-
         let mut reworded = request(Some(1_024));
-        reworded.messages = Conversation::new(vec![Message::text(
-            Role::User,
-            "something else entirely, and much longer".repeat(100),
-        )])
-        .expect("one user message is a conversation");
-        assert_eq!(
+        reworded.messages = Conversation::new(vec![Message::text(Role::User, "shorter")]).unwrap();
+        assert!(matches!(
             reservation.authorises(&metered(), Some(&quote()), &reworded, &standard_caps()),
-            Ok(()),
-            "a reservation is budget authority, not content authority"
-        );
+            Err(BudgetDenied::QuoteChanged { .. })
+        ));
     }
 
     #[test]

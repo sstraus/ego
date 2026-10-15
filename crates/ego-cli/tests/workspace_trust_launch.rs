@@ -117,9 +117,15 @@ fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
     .enumerate()
     {
         let id = format!("01900000-0000-7000-8000-{index:012}");
-        let ego = places
-            .ego(&stub)
-            .args(["--sandbox", "off", "--session-id", &id, "task"]);
+        let ego = places.ego(&stub).args([
+            "--sandbox",
+            "off",
+            "--max-output-tokens",
+            "100",
+            "--session-id",
+            &id,
+            "task",
+        ]);
         let ego = if let Some(flag) = flag {
             ego.args([flag])
         } else {
@@ -129,6 +135,10 @@ fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
         assert_eq!(result.code, Some(0), "{}", result.stderr);
         let requests = stub.generations();
         let generation = requests.last().unwrap();
+        assert_eq!(
+            generation["max_tokens"], 100,
+            "output cap must reach the wire"
+        );
         assert_eq!(
             generation["model"],
             if admitted { "project" } else { "qwen3" }

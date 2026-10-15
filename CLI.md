@@ -35,7 +35,7 @@ ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or 
                               --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
 ego fork <ID> [--at ITEM_ID]   branch after a completed turn
-ego compact <ID> [--request-id UUID]
+ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
                               publish one idempotent checkpoint target
 ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
                 [-C DIR] [--session-dir DIR]
@@ -1971,3 +1971,22 @@ contract. One-shot headless runs keep explicit recovery because they do not own
 an interactive active-session transition. Ephemeral sources cannot compact.
 Human terminal sessions use the same automatic policy as managed terminals, so
 recovery does not depend on detecting a terminal's operator.
+
+### Request output and reservation bounds
+
+`ego run` and `ego compact` accept `--max-output-tokens N`, where `N` is a
+positive integer. The same `max_output_tokens` key is accepted in configuration
+and named profiles. Each generated request uses the smaller of the configured
+cap and the model output maximum. Without a cap, ego uses the model output
+maximum, not the context window. A missing output maximum fails closed when a
+bounded reservation needs it. System output caps cannot be relaxed by lower
+configuration layers. `ego compact --budget LIMIT` uses the same spend grammar
+and admission gate as `run`.
+
+Currency admission bounds text input by serialized UTF-8 bytes, including
+message framing and tool schemas, capped by the model context window. Image
+and opaque reasoning inputs retain the full context-window bound because ego
+has no provider-independent maximum for those inputs. Input uses the dearest
+reachable rate, including cache creation; output uses the request cap. Actual
+provider usage settles the reservation after the response. Missing table
+prices fail closed and name the provider, model and required `chat` mode row.

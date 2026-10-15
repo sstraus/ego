@@ -1867,3 +1867,40 @@ fn child_controls_merge_per_field_and_validate_inactive_profiles() {
         .is_err()
     );
 }
+
+// Catches: flags widen a system output ceiling or untrusted project caps apply.
+#[test]
+fn output_caps_follow_trust_precedence_and_system_clamping() {
+    let system = ConfigLayer::parse(Source::System, "max_output_tokens = 500").unwrap();
+    let project = ConfigLayer::parse(Source::Project, "max_output_tokens = 100").unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "max_output_tokens = 1000").unwrap();
+    assert_eq!(
+        resolve(
+            &[system.clone(), project.clone(), flags],
+            Trust::Trusted,
+            None
+        )
+        .unwrap()
+        .max_output_tokens
+        .unwrap()
+        .get(),
+        500
+    );
+    assert_eq!(
+        resolve(&[system.clone(), project.clone()], Trust::Trusted, None)
+            .unwrap()
+            .max_output_tokens
+            .unwrap()
+            .get(),
+        100
+    );
+    assert_eq!(
+        resolve(&[system, project], Trust::Untrusted, None)
+            .unwrap()
+            .max_output_tokens
+            .unwrap()
+            .get(),
+        500
+    );
+    assert!(ConfigLayer::parse(Source::User, "max_output_tokens = 0").is_err());
+}

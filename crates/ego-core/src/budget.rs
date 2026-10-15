@@ -231,14 +231,11 @@ impl PricingQuote {
 
     /// The most `req` could possibly cost against a model with `caps`.
     ///
-    /// Deliberately crude, and crude in the safe direction: it assumes the
-    /// request fills the entire context window with the dearest input the
-    /// quote prices, and that the model emits its maximum permitted output.
-    /// Both are true upper bounds for any request that the model will accept
-    /// at all, and neither needs a tokenizer, which `ego-core` does not have
-    /// and must not grow (it would have to match the provider's tokenizer
-    /// exactly to be worth anything, and a bound that is *nearly* right is
-    /// not a bound).
+    /// Text requests reserve a conservative UTF-8 byte bound, including
+    /// message framing and tool schemas, capped by the context window. Image
+    /// and opaque reasoning requests retain the full context bound. Input
+    /// uses the dearest reachable rate, including cache creation. Output uses
+    /// the explicit request cap, or the model maximum when none is set.
     ///
     /// A model whose context or output ceiling is unknown has no upper
     /// bound, so the gate fails closed. That is the whole point: an
@@ -249,7 +246,8 @@ impl PricingQuote {
         caps: &ModelCapabilities,
     ) -> Result<Money, UnknownCost> {
         let (context, output) = ceilings(req, caps)?;
-        let context = Amount::new(u128::from(context), 0).map_err(|_| UnknownCost::Overflow)?;
+        let input_bound = request_input_bound(req, context)?;
+        let context = Amount::new(u128::from(input_bound), 0).map_err(|_| UnknownCost::Overflow)?;
         let input = self
             .dearest_input_rate()?
             .checked_mul(&context)
@@ -504,6 +502,27 @@ fn ceilings(req: &GenRequest, caps: &ModelCapabilities) -> Result<(u64, u64), Un
         }
     };
     Ok((context, output))
+}
+
+/// Text is bounded by UTF-8 bytes, including serialized message framing and
+/// tool schemas. Images and opaque reasoning have no model-independent token
+/// bound here, so retain the context ceiling for those requests.
+fn request_input_bound(req: &GenRequest, context: u64) -> Result<u64, UnknownCost> {
+    use crate::generator::types::ContentBlock;
+    if req.messages.messages().iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Image { .. } | ContentBlock::Reasoning { .. }
+            )
+        })
+    }) {
+        return Ok(context);
+    }
+    let bytes =
+        serde_json::to_vec(&(&req.messages, &req.tools)).map_err(|_| UnknownCost::Overflow)?;
+    let bound = u64::try_from(bytes.len()).map_err(|_| UnknownCost::Overflow)?;
+    Ok(bound.min(context))
 }
 
 /// What a reservation authorised, in the only terms a budget understands.

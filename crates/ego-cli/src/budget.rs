@@ -126,32 +126,48 @@ pub struct TableSource<'a> {
 /// different places.
 #[derive(Debug)]
 pub enum NoRates {
+    MissingRow {
+        provider: String,
+        model: String,
+    },
     /// `--offline`, and nothing usable is cached.
     ///
     /// §7's exit 2: the operator asked for an air-gapped posture *and* for a
     /// guarantee that needs the network, so the command line is what must
     /// change. Carries what the cache said so the message can distinguish "no
     /// table has ever been fetched here" from "the one here is too old".
-    Offline { cache: CacheError },
+    Offline {
+        cache: CacheError,
+    },
     /// Online, and the fetch did not produce a table.
     ///
     /// §7's exit 4, reached only when nothing usable was cached — a fresh
     /// cache is used without a fetch at all, so there is no "fetch failed but
     /// we carried on" case for this build to report.
-    Fetch { source: FetchError },
+    Fetch {
+        source: FetchError,
+    },
     /// A table was found and cannot be read for this model.
     ///
     /// Not "unlisted", which is `Ok(None)`. This is the document being wrong:
     /// bytes that are not a table, a rate that is not a number, or a model
     /// listed twice under two spellings with different prices.
-    Table { source: TableError },
+    Table {
+        source: TableError,
+    },
     /// The cache itself could not be read or written.
-    Cache { source: CacheError },
+    Cache {
+        source: CacheError,
+    },
 }
 
 impl fmt::Display for NoRates {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            NoRates::MissingRow { provider, model } => write!(
+                f,
+                "NoPricingQuote: missing price row provider={provider}, model={model}, mode=chat; configure a quote or update the price table"
+            ),
             NoRates::Offline { cache } => write!(
                 f,
                 "a money ceiling needs prices and --offline forbids fetching them: {cache}"
@@ -295,7 +311,9 @@ impl TableSource<'_> {
             Ok(entry) => Ok(Some(table_rates(entry.into_quote(revision.clone())))),
             // The one absence that is not a failure: the gate turns it into
             // `NoPricingQuote`, naming the model rather than the table.
-            Err(TableError::NoEntry { .. }) => Ok(None),
+            Err(TableError::NoEntry { provider, model }) => {
+                Err(NoRates::MissingRow { provider, model })
+            }
             Err(source) => Err(NoRates::Table { source }),
         }
     }

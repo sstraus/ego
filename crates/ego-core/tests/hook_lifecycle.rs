@@ -565,6 +565,7 @@ impl ego_core::generation_model_source::GenerationModelSource for GeneratorSourc
     > {
         Box::pin(std::future::ready(Ok(
             ego_core::generation_model_source::GenerationProfile {
+                output_limit: None,
                 identity: ModelRef("test/model".to_owned()),
                 request_model: "test-model".to_owned(),
                 thinking: ThinkingLevel::Off,

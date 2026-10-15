@@ -1823,6 +1823,7 @@ mod turn {
                 .map_or_else(|| self.settings.model.clone(), |model| model.0.clone());
             Box::pin(futures::future::ready(Ok(
                 ego_core::generation_model_source::GenerationProfile {
+                    output_limit: None,
                     identity: ModelRef(request_model.clone()),
                     request_model,
                     thinking: self.settings.thinking,
@@ -6774,6 +6775,7 @@ mod turn {
             capabilities.max_output_tokens = settings.output_ceiling;
             capabilities.supports_parallel_tool_calls = settings.parallel_tool_calls;
             let profile = GenerationProfile {
+                output_limit: None,
                 identity: ego_core::config::ModelRef(slug.to_string()),
                 request_model: slug.split_once('/').unwrap().1.to_string(),
                 thinking: settings.thinking,

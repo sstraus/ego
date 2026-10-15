@@ -395,6 +395,7 @@ pub struct CliGenerationModelSource {
     selection: Arc<GenerationSelection>,
     initial_identity: ModelRef,
     initial_thinking: Option<ThinkingLevel>,
+    output_limit: Option<std::num::NonZeroU64>,
     judge: Option<ModelRef>,
     ceilings: Ceilings,
     auth: std::collections::HashMap<String, AuthProviderLayer>,
@@ -413,11 +414,17 @@ impl CliGenerationModelSource {
             selection: Arc::new(GenerationSelection::unresolved()),
             initial_identity: identity,
             initial_thinking: thinking,
+            output_limit: None,
             judge,
             ceilings,
             auth,
             credential_commands: Arc::new(crate::auth::OsCredentialCommand),
         }
+    }
+
+    pub fn with_output_limit(mut self, limit: Option<std::num::NonZeroU64>) -> Self {
+        self.output_limit = limit;
+        self
     }
 
     pub fn selection(&self) -> Arc<GenerationSelection> {
@@ -556,6 +563,7 @@ impl CliGenerationModelSource {
             credential,
         ));
         Ok(GenerationProfile {
+            output_limit: self.output_limit,
             identity,
             request_model,
             thinking,

@@ -138,6 +138,12 @@ pub(super) struct ForkCommand {
     disable_help_subcommand = true
 )]
 pub(super) struct CompactCommand {
+    /// Hard spend ceiling, as for run.
+    #[arg(long)]
+    pub(super) budget: Option<String>,
+    /// Maximum generated tokens per request.
+    #[arg(long)]
+    pub(super) max_output_tokens: Option<std::num::NonZeroU64>,
     pub(super) source: String,
 
     #[arg(long = "request-id")]
@@ -731,6 +737,10 @@ pub(super) struct Flags {
     /// Hard cap: '2.5$' or '400k' tokens.
     #[arg(long)]
     pub(super) budget: Option<String>,
+
+    /// Maximum generated tokens per request.
+    #[arg(long)]
+    pub(super) max_output_tokens: Option<std::num::NonZeroU64>,
 
     /// Cap the turns this run may take.
     #[arg(long)]
