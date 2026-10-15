@@ -2055,3 +2055,25 @@ Usage report v2 is the current closed contract: its role lines are `main`,
 `judge`, `goal_check`, `compaction`, `subagent`, `hook`, and `total`.
 `goal_check` is required in v2 reports, including zero usage; no legacy-report
 decoder or compatibility default is provided.
+
+### Model-requested context changes
+
+Durable interactive sessions expose `context` with `action: compact|clear`,
+`reason`, and `handoff`. The model-authored request is recorded in the source
+log and its tool result shows the action and reason. The idle owner waits for
+the complete tool batch and pending operator work before it uses the existing
+compaction publication path. The successor continues without an operator prompt.
+`compact` uses the canonical checkpoint and captured source request prefix.
+`clear` skips checkpoint generation and retains only the active goal and its
+ceilings, fresh instructions, and the model-written handoff. Historical text
+stays untrusted. Both actions use the existing checkpoint lineage and publisher.
+
+The bundled `context-management` skill explains safe sub-task boundaries,
+measured context pressure and topic changes, and forbids transitions with
+unfinished effects or pending questions. The default cooldown is 10 completed
+work turns after a model transition, carried in the atomic successor seed.
+`--context-interval N` changes it (N must be positive). `--no-context-tool`
+disables model requests, not automatic pressure recovery. Clear is disabled
+unless the operator passes `--context-clear`, and requires an active goal.
+Headless and ACP hosts do not advertise the tool until they can own automatic
+successor activation; their explicit compaction commands remain unchanged.

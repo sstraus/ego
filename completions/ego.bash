@@ -470,7 +470,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__continue)
-            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
+            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -593,6 +593,10 @@ _ego() {
                     return 0
                     ;;
                 --goal)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --context-interval)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -948,7 +952,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__resume)
-            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
+            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1071,6 +1075,10 @@ _ego() {
                     return 0
                     ;;
                 --goal)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --context-interval)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1316,7 +1324,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__run)
-            opts="-f -m -C -c -q -h --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
+            opts="-f -m -C -c -q -h --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1435,6 +1443,10 @@ _ego() {
                     return 0
                     ;;
                 --goal)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --context-interval)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

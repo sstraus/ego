@@ -745,6 +745,18 @@ pub(super) struct Flags {
     #[arg(long)]
     pub(super) goal: Option<String>,
 
+    /// Disable model-requested context transitions.
+    #[arg(long)]
+    pub(super) no_context_tool: bool,
+
+    /// Permit the model to discard conversation history using clear.
+    #[arg(long)]
+    pub(super) context_clear: bool,
+
+    /// Minimum completed turns between model-requested transitions.
+    #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..))]
+    pub(super) context_interval: u32,
+
     /// Maximum automatic goal continuation turns.
     #[arg(long, default_value_t = 20)]
     pub(super) goal_turns: u32,

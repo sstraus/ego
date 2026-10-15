@@ -712,12 +712,43 @@ impl JsonlStore {
                 }
             )
         };
-        let valid_shape = match trailing {
+        // Context metadata is an ordered suffix of the same atomic seed,
+        // never an arbitrary additional conversation record.
+        let (metadata, context) = match trailing.iter().position(|event| {
+            matches!(
+                event.kind,
+                EventKind::ContextRequested { .. } | EventKind::ContextCooldown { .. }
+            )
+        }) {
+            Some(index) => trailing.split_at(index),
+            None => (trailing, &[][..]),
+        };
+        let valid_context = match context {
             [] => true,
-            [only] => is_title(only) || is_goal(only),
-            [title, goal] => is_title(title) && is_goal(goal),
+            [cooldown] => matches!(cooldown.kind, EventKind::ContextCooldown { .. }),
+            [request, consumed, cooldown] => {
+                matches!(request.kind, EventKind::ContextRequested { .. })
+                    && matches!(consumed.kind, EventKind::ContextRequestConsumed)
+                    && matches!(cooldown.kind, EventKind::ContextCooldown { .. })
+            }
             _ => false,
         };
+        let valid_shape = valid_context
+            && match metadata {
+                [] => true,
+                [only] => is_title(only) || is_goal(only),
+                [title, goal] if is_title(title) => is_title(title) && is_goal(goal),
+                [goal, allowance] => {
+                    is_goal(goal)
+                        && matches!((&goal.kind, &allowance.kind), (EventKind::GoalSet { id, .. }, EventKind::GoalAllowanceInherited { id: inherited, .. }) if id == inherited)
+                }
+                [title, goal, allowance] => {
+                    is_title(title)
+                        && is_goal(goal)
+                        && matches!((&goal.kind, &allowance.kind), (EventKind::GoalSet { id, .. }, EventKind::GoalAllowanceInherited { id: inherited, .. }) if id == inherited)
+                }
+                _ => false,
+            };
         let mut expected_seq = first;
         let mut previous_id = event.env.id;
         let valid_chain = trailing.iter().all(|trailing| {

@@ -117,6 +117,7 @@ impl From<SharedJournalError> for CompactionError {
 /// permission policy, and guarded I/O; human input crosses its own typed port.
 #[derive(Clone)]
 pub enum RegisteredTool {
+    Context,
     Goal,
     Effect(Arc<dyn crate::permit::Tool>),
     HumanInput(Arc<dyn crate::question::HumanInputTool>),
@@ -132,6 +133,7 @@ pub enum RegisteredTool {
 impl RegisteredTool {
     pub fn descriptor(&self) -> crate::generator::types::ToolDescriptor {
         match self {
+            Self::Context => crate::context::descriptor(),
             Self::Goal => crate::generator::types::ToolDescriptor {
                 name: "goal".into(), description: "Set or update your model-authored session goal. An operator-owned active goal cannot be replaced.".into(),
                 parameters: serde_json::json!({"type":"object","required":["objective"],"additionalProperties":false,"properties":{"objective":{"type":"string","minLength":1}}}),
@@ -216,7 +218,8 @@ impl RegisteredTool {
     pub fn as_effect(&self) -> Option<&Arc<dyn crate::permit::Tool>> {
         match self {
             Self::Effect(tool) => Some(tool),
-            Self::Goal
+            Self::Context
+            | Self::Goal
             | Self::HumanInput(_)
             | Self::Skill(_)
             | Self::Task
@@ -227,9 +230,12 @@ impl RegisteredTool {
     pub fn as_human_input(&self) -> Option<&Arc<dyn crate::question::HumanInputTool>> {
         match self {
             Self::HumanInput(tool) => Some(tool),
-            Self::Goal | Self::Effect(_) | Self::Skill(_) | Self::Task | Self::History { .. } => {
-                None
-            }
+            Self::Context
+            | Self::Goal
+            | Self::Effect(_)
+            | Self::Skill(_)
+            | Self::Task
+            | Self::History { .. } => None,
         }
     }
 }
@@ -1237,6 +1243,8 @@ pub struct TurnLoop<'session, 'turn> {
     task_usage: Option<Arc<dyn Fn() -> Usage + Send + Sync + 'turn>>,
     generation_role: GenerationRole,
     automatic_compaction: bool,
+    context_clear: bool,
+    context_interval: u32,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
     retry_pause: Arc<dyn RetryPause>,
@@ -1413,6 +1421,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             task_usage: None,
             generation_role: GenerationRole::Main,
             automatic_compaction: false,
+            context_clear: false,
+            context_interval: 10,
             retry_pause: runtime.retry_pause,
             provider_recovery: None,
             recovery_deadline: None,
@@ -1726,6 +1736,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if !self.state().live_attempts.is_empty() {
             return Err(CompactionError::NotIdle(CompactionBusy::LiveAttempt));
         }
+        if self.state().context_request.is_some()
+            && self.state().detached_execs.values().any(Option::is_none)
+        {
+            self.journal
+                .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)?;
+            return Err(CompactionError::Internal(
+                "model context transition refused while a detached effect is unsettled".into(),
+            ));
+        }
         if let Some(cause) = self.cancel.cause() {
             return Err(CompactionError::Cancelled(cause));
         }
@@ -1792,6 +1811,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // the checkpoint. Later input stays terminal-owned for the successor.
         self.close_and_drain_controls(turn).await?;
         let delivered = self.deliver_pending(turn)?;
+        if delivered
+            && self
+                .state()
+                .context_request
+                .as_ref()
+                .is_some_and(|request| request.action == crate::context::ContextAction::Clear)
+        {
+            return Err(CompactionError::Internal(
+                "clear refused because new operator input reached the source boundary".into(),
+            ));
+        }
         // Keep the receiver attached so checkpoint generation can be cancelled
         // even though prompt admission is closed at the history barrier.
         if let Some(cause) = self.cancel.cause() {
@@ -1897,9 +1927,20 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
             }
         });
-        let checkpoint_text = self
-            .generate_compaction_text(turn, &profile, &request)
-            .await?;
+        let checkpoint_text = if let Some(context) = self
+            .state()
+            .context_request
+            .filter(|request| request.action == crate::context::ContextAction::Clear)
+        {
+            let goal = goal
+                .as_ref()
+                .filter(|goal| goal.state == crate::goal::GoalState::Active)
+                .ok_or_else(|| CompactionError::Internal("clear requires an active goal".into()))?;
+            context.clear_checkpoint(goal).into_text()
+        } else {
+            self.generate_compaction_text(turn, &profile, &request)
+                .await?
+        };
         if checkpoint_text.trim().is_empty() {
             return Err(CompactionError::EmptyCheckpoint);
         }
@@ -1967,6 +2008,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             baseline,
             title,
             goal,
+            context_interval: Some(if self.state().context_request.is_some() {
+                self.context_interval
+            } else {
+                self.state().context_cooldown
+            }),
+            context_request: self.state().context_request,
         })
     }
 
@@ -2129,6 +2176,21 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     /// Enable pressure yielding only when the host owns a durable session transition.
     pub fn with_automatic_compaction(mut self) -> Self {
         self.automatic_compaction = true;
+        self
+    }
+
+    pub fn with_context_policy(mut self, clear: bool, interval: u32) -> Self {
+        self.context_clear = clear;
+        self.context_interval = interval.max(1);
+        self
+    }
+
+    pub fn last_generation_request(&self) -> Option<GenRequest> {
+        self.last_request.clone()
+    }
+
+    pub fn with_last_generation_request(mut self, request: Option<GenRequest>) -> Self {
+        self.last_request = request;
         self
     }
 
@@ -2960,6 +3022,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             let (exit_reason, denied) = match driven {
                 DriveOutcome::Ended(exit_reason, denied) => (exit_reason, denied),
                 DriveOutcome::QuestionRequired => {
+                    if self.state().context_request.is_some() {
+                        self.journal
+                            .append(turn, None, None, EventKind::ContextRequestConsumed)?;
+                    }
                     self.close_control();
                     self.refresh_control_status();
                     return Ok(TurnOutcome {
@@ -2973,15 +3039,22 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     });
                 }
             };
+            if !matches!(exit_reason, ExitReason::Completed)
+                && self.state().context_request.is_some()
+            {
+                self.journal
+                    .append(turn, None, None, EventKind::ContextRequestConsumed)?;
+            }
             let usage_error = self.usage_error(exit_reason);
             let ok = matches!(exit_reason, ExitReason::Completed);
             // Observe before completion: the reducer resets the blocker audit only
             // when a turn completed without an observation of the same condition.
-            let continuation = if ok && self.must_stop().is_none() {
-                self.check_goal(turn).await?
-            } else {
-                None
-            };
+            let continuation =
+                if ok && self.must_stop().is_none() && self.state().context_request.is_none() {
+                    self.check_goal(turn).await?
+                } else {
+                    None
+                };
             self.journal.append(
                 turn,
                 None,
@@ -3767,6 +3840,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 )
                 .await
             {
+                return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
+            }
+            if self.state().context_request.is_some() {
                 return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
             }
             self.deliver_pending(turn)?;
@@ -5488,6 +5564,48 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
         };
         let (tool, mut prepared, mut presentation) = match prepared {
+            PreparedToolCall::Context(request) => {
+                let state = self.state();
+                if !self.automatic_compaction
+                    || state.context_request.is_some()
+                    || state.context_cooldown > 0
+                    || state.pending_question().is_some()
+                    || state.detached_execs.values().any(Option::is_none)
+                    || !state.unacknowledged_prompts().is_empty()
+                {
+                    return Ok(answered(
+                        false,
+                        "context transition unavailable or cooldown active".into(),
+                    ));
+                }
+                if request.action == crate::context::ContextAction::Clear
+                    && (!self.context_clear
+                        || state
+                            .goal
+                            .as_ref()
+                            .is_none_or(|goal| goal.state != crate::goal::GoalState::Active))
+                {
+                    return Ok(answered(
+                        false,
+                        "clear requires operator opt-in and an active goal".into(),
+                    ));
+                }
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::ContextRequested {
+                        request: request.clone(),
+                    },
+                )?;
+                return Ok(answered(
+                    true,
+                    format!(
+                        "Model-authored {:?} requested: {}. Runs only at idle after this batch; work then continues in the successor.",
+                        request.action, request.reason
+                    ),
+                ));
+            }
             PreparedToolCall::Goal { objective } => {
                 use crate::goal::{GoalOwner, GoalState};
                 let kind = match self.state().goal {

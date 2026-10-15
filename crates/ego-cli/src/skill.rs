@@ -407,7 +407,10 @@ impl Candidate {
         } else {
             Trust::Untrusted
         };
-        let mut admitted = Vec::new();
+        let mut admitted = vec![(
+            bundled_context_skill(),
+            PathBuf::from("bundled/context-management/SKILL.md"),
+        )];
         let mut diagnostics = Vec::new();
         for (source, root, enabled) in [
             (SkillSourceAuthority::System, discovery.system, true),
@@ -503,6 +506,22 @@ impl Candidate {
             publication,
         }
     }
+}
+
+fn bundled_context_skill() -> SkillSpec {
+    let body = include_str!("skills/context-management.md");
+    let source = SkillSourceAuthority::System;
+    let location = SkillSourceLocation::parse("skills/context-management/SKILL.md")
+        .expect("bundled skill location");
+    let digest = SkillContentDigest::parse(&ego_core::digest::sha256_hex(body.as_bytes()))
+        .expect("bundled skill digest");
+    SkillSpec::new(SkillDescriptorEvidence {
+        id: SkillId::derive(source, &location, "context-management", &digest),
+        name: "context-management".into(),
+        description: "Decide when to compact or clear context at a safe sub-task boundary, and continue the active goal.".into(),
+        trigger: None, argument_hint: None, source, location, source_digest: digest,
+        user_invocable: true, model_invocable: true,
+    }, body.as_bytes().to_vec()).expect("bundled context skill")
 }
 
 fn discover_root(

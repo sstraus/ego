@@ -319,6 +319,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?
+            .with_context_policy(args.context_clear, args.context_interval)
             .with_goal(args.goal.clone(), args.goal_turns)
             .with_goal_policy(effective.ceilings.clone(), args.goal_check_command.clone())
             .with_hook_binding(
@@ -611,7 +612,11 @@ pub(super) async fn drive_execution<S: EventSink>(
             let mut pending_attachments = args.attach.clone();
             let mut staged_images = Vec::<StagedPasteImage>::new();
             let mut epoch_start = EpochStart::Initial;
+            if !args.no_context_tool && args.tools.is_none() {
+                registry.push(RegisteredTool::Context);
+            }
             let mut checkpoint_pending = false;
+            let mut last_generation_request = None;
             let mut automatic_compaction_failed = false;
 
             // Borrow-scoped session authorities live in one lexical epoch.
@@ -849,9 +854,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 // The terminal owner keeps its next read active while this
                                 // coordinator drives the turn; output returns through that
                                 // same owner's bounded painter channel.
+                                let model_compaction =
+                                    state.context_request.is_some() && !args.no_context_tool;
                                 let automatic_compaction = !automatic_compaction_failed
                                     && !pending_work
-                                    && ego_core::turn::compaction_due(state.context);
+                                    && (model_compaction
+                                        || ego_core::turn::compaction_due(state.context));
                                 let line = if automatic_compaction {
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Compact,
@@ -1175,6 +1183,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             }
                                         };
                                         registry = next_registry;
+                                        if !args.no_context_tool && args.tools.is_none() {
+                                            registry.push(RegisteredTool::Context);
+                                        }
                                         if published {
                                             diagnostics.note(&format!(
                                                 "skills: published generation {}",
@@ -1969,7 +1980,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             let target_skills = prepared_skills
                                                 .as_ref()
                                                 .map(crate::skill::PreparedSkillRescan::capture);
-                                            let target_registry =
+                                            let mut target_registry =
                                                 super::composition::tools_with_mode(
                                                     args.tools.as_ref(),
                                                     target_skills.as_ref().map(
@@ -1990,6 +2001,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 .map_err(|error| {
                                                     CompactionError::Internal(error.to_string())
                                                 })?;
+                                            if !args.no_context_tool && args.tools.is_none() {
+                                                target_registry.push(RegisteredTool::Context);
+                                            }
                                             let target_tools: Vec<ToolDescriptor> = target_registry
                                                 .iter()
                                                 .map(RegisteredTool::descriptor)
@@ -2073,6 +2087,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())
                                             })?
+                                            .with_context_policy(
+                                                args.context_clear,
+                                                args.context_interval,
+                                            )
+                                            .with_last_generation_request(
+                                                last_generation_request.clone(),
+                                            )
                                             .with_hook_binding(
                                                 session_hooks.state.clone(),
                                                 Arc::clone(&session_hooks.binding),
@@ -2117,6 +2138,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             if !state.unacknowledged_prompts().is_empty()
                                                 || state.pending_question().is_some()
                                                 || !state.live_attempts.is_empty()
+                                                || (model_compaction
+                                                    && state
+                                                        .detached_execs
+                                                        .values()
+                                                        .any(Option::is_none))
                                             {
                                                 return Err(CompactionError::Internal(
                                         "compaction stopped before target creation because new source work became pending"
@@ -2154,6 +2180,21 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             Err(error) => {
                                                 diagnostics
                                                     .note(&format!("compaction failed: {error}"));
+                                                if model_compaction {
+                                                    session_journal
+                                                        .append(
+                                                            TurnId::new(),
+                                                            None,
+                                                            None,
+                                                            EventKind::ContextRequestConsumed,
+                                                        )
+                                                        .map_err(|error| {
+                                                            RunTermination::Failed {
+                                                                message: error.to_string(),
+                                                            }
+                                                        })?;
+                                                    state = session_hooks.state.state();
+                                                }
                                                 if let Some(status) = status.as_ref()
                                                     && status.human
                                                     && let Ok(selected) = selection.snapshot()
@@ -2163,6 +2204,19 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 continue;
                                             }
                                         };
+                                        if model_compaction {
+                                            session_journal
+                                                .append(
+                                                    TurnId::new(),
+                                                    None,
+                                                    None,
+                                                    EventKind::ContextRequestConsumed,
+                                                )
+                                                .map_err(|error| RunTermination::Failed {
+                                                    message: error.to_string(),
+                                                })?;
+                                            state = session_hooks.state.state();
+                                        }
                                         let target = receipt.target;
                                         let target_opened = match session::open(
                                             jsonl_store.as_ref(),
@@ -2417,6 +2471,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     },
                                 },
                             };
+                            last_generation_request = loop_.last_generation_request();
                             drop(loop_);
                             state = session_hooks.state.state();
                             for (id, snapshot) in &state.detached_execs {

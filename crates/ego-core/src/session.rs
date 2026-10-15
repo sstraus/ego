@@ -517,13 +517,36 @@ impl TargetSeed {
         let Some(goal) = goal.filter(|goal| goal.state == GoalState::Active) else {
             return self;
         };
+        let id = crate::event::id::GoalId::new();
         self.push_trailing(EventKind::GoalSet {
-            id: crate::event::id::GoalId::new(),
+            id,
             objective: goal.objective.clone(),
             owner: goal.owner,
             ceilings: goal.ceilings.clone(),
             derived_from: Some(goal.id),
         });
+        self.push_trailing(EventKind::GoalAllowanceInherited {
+            id,
+            continuation_budget: goal.continuation_budget,
+            continuation_turns: goal.continuation_turns,
+        });
+        self
+    }
+
+    pub(crate) fn with_context_transition(
+        mut self,
+        request: Option<&crate::context::ContextRequest>,
+        interval: Option<u32>,
+    ) -> Self {
+        if let Some(request) = request {
+            self.push_trailing(EventKind::ContextRequested {
+                request: request.clone(),
+            });
+            self.push_trailing(EventKind::ContextRequestConsumed);
+        }
+        if let Some(turns) = interval {
+            self.push_trailing(EventKind::ContextCooldown { turns });
+        }
         self
     }
 

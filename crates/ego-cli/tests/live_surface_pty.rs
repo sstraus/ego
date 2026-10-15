@@ -1533,7 +1533,8 @@ fn a_turn_in_a_tuic_pane_tells_tuic_its_title_intent_busy_and_idle() {
         .env("TUIC_SOCKET", "/nonexistent/tuic.sock");
     ego.home_file(
         "models.toml",
-        &support::vision_model_facts(support::READS_PICTURES),
+        &support::vision_model_facts(support::READS_PICTURES)
+            .replace("max_tools = 16", "max_tools = 32"),
     );
     ego.file("AGENTS.md", "# signal fixture\n");
     let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
@@ -8741,7 +8742,8 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
     input.write_all(b"first with mcp off\r").expect("prompt");
     input.flush().expect("flush");
     until(&reader, &mut output, b"MCP-OFF-REQUEST");
-    until_prompt_from(&reader, &mut output, off_start);
+    let off_done = output.len();
+    until_prompt_from(&reader, &mut output, off_done);
     let on_start = output.len();
     input.write_all(b"/mcp toggle auto\r").expect("toggle on");
     input.flush().expect("flush");
@@ -8753,7 +8755,8 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
     input.write_all(b"second with mcp on\r").expect("prompt");
     input.flush().expect("flush");
     until(&reader, &mut output, b"MCP-ON-REQUEST");
-    until_prompt_from(&reader, &mut output, on_start);
+    let on_done = output.len();
+    until_prompt_from(&reader, &mut output, on_done);
     let add_start = output.len();
     let added_server = ego.file(
         "added-server.py",
@@ -9021,4 +9024,74 @@ fn context_pressure_compaction_cancellation(interrupt: &[u8]) {
         cancellation_output.contains("compaction was cancelled by User"),
         "operator interrupt must cancel checkpoint preparation, not reject it: {cancellation_output}"
     );
+}
+
+// Catches: a model request reaches idle but never publishes or continues in a successor.
+#[test]
+fn model_context_compact_and_clear_continue_without_operator_prompt() {
+    for clear in [false, true] {
+        let checkpoint = "# Objective\nContinue the next sub-task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nVerified first sub-task.\n# Work in progress\nFinish next sub-task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish.\n# Critical references\nNone.";
+        let action = if clear { "clear" } else { "compact" };
+        let mut completions = vec![Reply::Sse(support::tool_call(
+            "context-transition", "context",
+            &serde_json::json!({"action":action,"reason":"verified first sub-task","handoff":"REGRESSION-MARKER"}).to_string(),
+        ))];
+        if !clear {
+            completions.push(Reply::Sse(text(checkpoint)));
+        }
+        completions.push(Reply::Sse(text("REGRESSION-MARKER-CONTINUED")));
+        // The successor keeps the independent goal check; success must still be verified.
+        completions.push(Reply::Sse(text(
+            r#"{"achieved":true,"reason":"next sub-task verified"}"#,
+        )));
+        let stub = Stub::start(Plan {
+            completions,
+            context_length: Some(272000),
+            ..Plan::default()
+        });
+        let places = support::Places::new();
+        places.file("AGENTS.md", "# context tool fixture\n");
+        let mut ego = places.ego(&stub).conversing().args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--goal",
+            "Finish both sub-tasks",
+        ]);
+        if clear {
+            ego = ego.args(["--context-clear"]);
+        }
+        let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+        let mut output = Vec::new();
+        until(&reader, &mut output, b"Trust project files");
+        let start = output.len();
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, start);
+        input.write_all(b"REGRESSION-MARKER\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-CONTINUED");
+        // Require a fresh idle frame after the successor answer, not startup's frame.
+        let completed = output.len();
+        until_prompt_from(&reader, &mut output, completed);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        let requests = stub.generations();
+        assert_eq!(requests.len(), if clear { 3 } else { 4 }, "{action}");
+        let successor = requests[if clear { 1 } else { 2 }].to_string();
+        assert!(!successor.contains("REGRESSION-MARKER"), "{successor}");
+        assert!(
+            successor.contains(if clear {
+                "REGRESSION-MARKER"
+            } else {
+                "Continue the next sub-task."
+            }),
+            "{successor}"
+        );
+        assert!(successor.contains("Finish both sub-tasks"), "{successor}");
+    }
 }

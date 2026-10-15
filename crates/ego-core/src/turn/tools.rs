@@ -89,6 +89,7 @@ impl GenerationToolCatalogue {
 /// A model call after the mixed registry has selected its typed boundary.
 /// Human input never acquires an effect tool or enters permission policy.
 pub(crate) enum PreparedToolCall {
+    Context(crate::context::ContextRequest),
     Goal {
         objective: String,
     },
@@ -390,7 +391,8 @@ impl<'a> Tools<'a> {
             .iter()
             .find_map(|registered| match registered {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
-                RegisteredTool::Goal
+                RegisteredTool::Context
+                | RegisteredTool::Goal
                 | RegisteredTool::Effect(_)
                 | RegisteredTool::HumanInput(_)
                 | RegisteredTool::Task
@@ -580,6 +582,9 @@ impl<'a> Tools<'a> {
                 call: self.prepare_params(tool.as_ref(), params.clone())?,
                 presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
+            RegisteredTool::Context => {
+                crate::context::ContextRequest::parse(params).map(PreparedToolCall::Context)
+            }
             RegisteredTool::Goal => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]

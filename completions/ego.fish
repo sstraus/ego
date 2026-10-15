@@ -75,6 +75,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l fallback -d 'Ordered pro
 complete -c ego -n "__fish_ego_using_subcommand run" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l goal -d 'Set a checked session objective' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l context-interval -d 'Minimum completed turns between model-requested transitions' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l goal-turns -d 'Maximum automatic goal continuation turns' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l goal-check-command -d 'Evaluator argv as a JSON string array; reads evidence JSON on stdin' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l max-turns -d 'Cap the turns this run may take' -r
@@ -87,6 +88,8 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l bare -d 'No ambient disc
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand run" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand run" -l ephemeral -d 'Refused: every run uses a durable session'
+complete -c ego -n "__fish_ego_using_subcommand run" -l no-context-tool -d 'Disable model-requested context transitions'
+complete -c ego -n "__fish_ego_using_subcommand run" -l context-clear -d 'Permit the model to discard conversation history using clear'
 complete -c ego -n "__fish_ego_using_subcommand run" -l plan -d 'Shorthand for --mode plan'
 complete -c ego -n "__fish_ego_using_subcommand run" -l yolo -d 'Shorthand for --mode yolo'
 complete -c ego -n "__fish_ego_using_subcommand run" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
@@ -122,6 +125,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l fallback -d 'Ordered 
 complete -c ego -n "__fish_ego_using_subcommand resume" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l goal -d 'Set a checked session objective' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l context-interval -d 'Minimum completed turns between model-requested transitions' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l goal-turns -d 'Maximum automatic goal continuation turns' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l goal-check-command -d 'Evaluator argv as a JSON string array; reads evidence JSON on stdin' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l max-turns -d 'Cap the turns this run may take' -r
@@ -134,6 +138,8 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l bare -d 'No ambient d
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l ephemeral -d 'Refused: every run uses a durable session'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l no-context-tool -d 'Disable model-requested context transitions'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l context-clear -d 'Permit the model to discard conversation history using clear'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l plan -d 'Shorthand for --mode plan'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l yolo -d 'Shorthand for --mode yolo'
 complete -c ego -n "__fish_ego_using_subcommand resume" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
@@ -169,6 +175,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l fallback -d 'Ordere
 complete -c ego -n "__fish_ego_using_subcommand continue" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l goal -d 'Set a checked session objective' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l context-interval -d 'Minimum completed turns between model-requested transitions' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l goal-turns -d 'Maximum automatic goal continuation turns' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l goal-check-command -d 'Evaluator argv as a JSON string array; reads evidence JSON on stdin' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l max-turns -d 'Cap the turns this run may take' -r
@@ -181,6 +188,8 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l bare -d 'No ambient
 complete -c ego -n "__fish_ego_using_subcommand continue" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l ephemeral -d 'Refused: every run uses a durable session'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l no-context-tool -d 'Disable model-requested context transitions'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l context-clear -d 'Permit the model to discard conversation history using clear'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l plan -d 'Shorthand for --mode plan'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l yolo -d 'Shorthand for --mode yolo'
 complete -c ego -n "__fish_ego_using_subcommand continue" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'

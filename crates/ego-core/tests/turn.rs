@@ -2745,6 +2745,60 @@ mod turn {
     }
 
     #[test]
+    fn context_request_waits_for_sibling_tools_and_yields_before_another_generation() {
+        // Catches: a transition runs mid batch, or another generation starts before the idle owner.
+        for (cooldown, enabled) in [(0, true), (3, true), (0, false)] {
+            let fx = Fixture::new(vec![
+                vec![
+                    AiEvent::ToolCall { call_id: "context-1".into(), name: "context".into(), args: r#"{"action":"compact","reason":"sub-task verified","handoff":"Continue the next sub-task."}"#.into() },
+                    AiEvent::ToolCall { call_id: "context-2".into(), name: "context".into(), args: r#"{"action":"compact","reason":"duplicate","handoff":"Continue."}"#.into() },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]);
+            let evidence = SkillEvidence::new();
+            let registry = vec![RegisteredTool::Context];
+            let tools = Tools::from_registry(
+                &registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut gate = fx.gate.borrow_mut();
+            let runtime = model(&fx.generator, &mut gate);
+            let mut state = SessionState::default();
+            state.context_cooldown = cooldown;
+            let mut loop_ = TurnLoop::open(
+                session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+                runtime,
+                tools,
+            );
+            if enabled {
+                loop_ = loop_.with_automatic_compaction();
+            }
+            block_on(loop_.run("finish sub-task")).unwrap();
+            let state = loop_.state();
+            let accepted = enabled && cooldown == 0;
+            assert_eq!(state.context_request.is_some(), accepted);
+            assert_eq!(fx.generator.calls().len(), if accepted { 1 } else { 2 });
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .filter(|item| item.kind == ItemKind::ToolCall && item.tool_result.is_some())
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
     fn goal_tool_records_model_authorship_and_refuses_operator_goal_replacement() {
         // Catches: model goal updates overwrite operator authority or lose authorship.
         for operator in [false, true] {
