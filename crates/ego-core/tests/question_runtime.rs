@@ -878,6 +878,42 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
 }
 
 #[test]
+fn resumed_foreign_question_does_not_silently_skip_active_goal_check() {
+    // Catches: answering an MCP question completes work without checking the active goal.
+    // This fixture deliberately has no verdict evidence store: checking must expose
+    // that evaluator failure instead of silently reporting ordinary completion.
+    let generator = foreign_input_generator();
+    let foreign_port = Arc::new(RecordingForeignQuestionPort::scripted(Vec::new(), None));
+    with_foreign_turn(
+        generator,
+        Arc::new(UnavailableElicitor),
+        foreign_port,
+        None,
+        None,
+        false,
+        |turn, _store| {
+            let mut turn = turn.with_goal(Some("verify the MCP operation".into()), 1);
+            let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
+                .expect("question suspends normally");
+            assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+            let state = turn.state();
+            let pending = state.pending_question().expect("pending MCP question");
+            let question = pending.item_id();
+            let answer = QuestionAnswer::from_json(pending.request(), r#"{"target":"staging"}"#)
+                .expect("valid answer");
+            let resumed = futures::executor::block_on(turn.resume_question(question, answer))
+                .expect("answered question completes normally");
+            assert!(resumed.ok);
+            let goal = turn.state().goal.expect("active goal remains durable");
+            assert!(
+                goal.check_stop.is_some(),
+                "resumed work must check its goal and expose unavailable evaluator evidence"
+            );
+        },
+    );
+}
+
+#[test]
 fn form_question_accepts_object_answers_and_rejects_schema_or_type_before_mutation() {
     let request = foreign_question_request();
     let original = request.clone();
