@@ -56,7 +56,15 @@ pub fn options(state: &SessionControlState) -> Vec<v1::SessionConfigOption> {
         select(
             MODE,
             "Mode",
-            "The permission mode the next generation is judged under.",
+            if state.mode.available.contains(&Mode::Auto) {
+                "The permission mode the next generation is judged under."
+            } else {
+                "The permission mode the next generation is judged under. \
+                 auto is unavailable in this session. It needs a configured \
+                 [permissions] judge: ego config set 'permissions.judge=\"openai-codex/gpt-6.1-sol\"'. \
+                 If this session uses a profile, add --profile <name> to that command. \
+                 Start a new session after configuration. The session max_mode can also restrict auto."
+            },
             v1::SessionConfigOptionCategory::Mode,
             &state.mode,
             false,
@@ -126,7 +134,16 @@ pub fn change(
             "this agent advertises no `{config}` session config option"
         ))),
     }
-    .map_err(|_| refuse(format!("`{value}` is not an available `{config}`")))
+    .map_err(|_| {
+        if config == MODE && value == "auto" {
+            refuse(
+                "`auto` needs a configured `[permissions] judge` and must be allowed by the session max_mode"
+                    .to_owned(),
+            )
+        } else {
+            refuse(format!("`{value}` is not an available `{config}`"))
+        }
+    })
 }
 
 /// A real confinement spelling from a sandbox request, offered or not.
