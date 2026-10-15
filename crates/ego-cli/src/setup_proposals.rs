@@ -26,6 +26,8 @@ pub(crate) struct Preview {
     pub judge: Option<String>,
     actions: Vec<(Probe, String)>,
     pub rules: Vec<String>,
+    permissions_before: (Vec<String>, Vec<String>),
+    permissions_after: (Vec<String>, Vec<String>),
     pub target: UserConfigTarget,
     pub layers: Vec<Sourced<ConfigLayer>>,
     pub identities: Vec<String>,
@@ -198,6 +200,33 @@ fn action_identity(probe: &Probe) -> Result<String, String> {
         path_identity(Path::new(&argv[0]))?,
         path_identity(cwd)?
     ))
+}
+
+fn permission_rows(effective: &Effective) -> (Vec<String>, Vec<String>) {
+    (
+        effective
+            .permissions
+            .allow
+            .iter()
+            .map(|entry| entry.rule().to_string())
+            .collect(),
+        effective
+            .permissions
+            .deny
+            .iter()
+            .map(|entry| entry.rule().to_string())
+            .collect(),
+    )
+}
+
+fn action_reachable(effective: &Effective, workspace: &CanonPath, probe: &Probe) -> bool {
+    use ego_core::setup::ProbeReader;
+    let Probe::Action { argv, .. } = probe else {
+        return false;
+    };
+    ego_tools::setup::NativeProbeReader::capture()
+        .metadata(Path::new(&argv[0]))
+        .is_ok_and(|observation| exec_admitted(effective, workspace, &observation.canonical))
 }
 
 fn action_resolution(effective: &Effective, workspace: &CanonPath, call: PreparedCall) -> u8 {
@@ -451,10 +480,28 @@ pub(crate) fn preview(
         let Some(path) = finding.canonical.as_ref() else {
             continue;
         };
-        if action_resolution(effective, workspace, call.clone()) != 2
-            || !exec_admitted(effective, workspace, &CanonPath::new(path))
-        {
+        let unresolved = action_resolution(effective, workspace, call.clone());
+        if unresolved == 0 {
             continue;
+        }
+        let needs_reach = !exec_admitted(effective, workspace, &CanonPath::new(path));
+        if !needs_reach && unresolved == 1 {
+            continue;
+        }
+        let mut proposed_exec = exec_after.clone();
+        if needs_reach {
+            let Some(directory) = path.parent() else {
+                continue;
+            };
+            if workspace.as_path().starts_with(directory)
+                || home.starts_with(directory)
+                || directory.starts_with(home)
+            {
+                continue;
+            }
+            if !proposed_exec.contains(&directory.to_path_buf()) {
+                proposed_exec.push(directory.to_path_buf());
+            }
         }
         let plan = ego_core::config::rule_management::RuleManagement::remember(
             &call,
@@ -463,6 +510,13 @@ pub(crate) fn preview(
         )
         .map_err(|e| e.to_string())?;
         let mut proposed = changes.clone();
+        if needs_reach {
+            proposed.push(UserConfigMutation::ManagedSet {
+                target: target.clone(),
+                key: ManagedConfigKey::ExecPaths,
+                value: ManagedConfigValue::ExecPaths(proposed_exec.clone()),
+            });
+        }
         // A permissions list replaces a layer: retain every effective predicate.
         let mut additions = Vec::new();
         for (effect, entries) in [
@@ -480,12 +534,16 @@ pub(crate) fn preview(
                 rule: entry.rule().clone(),
             }));
         }
-        additions.extend(plan.candidates.iter().cloned().map(|rule| {
-            ego_core::config::RuleMutation {
-                effect: ego_core::config::ManagedRuleEffect::Allow,
-                rule,
-            }
-        }));
+        additions.extend(
+            plan.candidates
+                .iter()
+                .filter(|_| unresolved == 2)
+                .cloned()
+                .map(|rule| ego_core::config::RuleMutation {
+                    effect: ego_core::config::ManagedRuleEffect::Allow,
+                    rule,
+                }),
+        );
         proposed.push(UserConfigMutation::Rules {
             target: target.clone(),
             changes: additions,
@@ -515,12 +573,23 @@ pub(crate) fn preview(
                     .iter()
                     .any(|new| new.rule() == entry.rule())
             })
+            || !exec_admitted(&after, workspace, &CanonPath::new(path))
+            || !effective
+                .exec_paths
+                .iter()
+                .all(|path| after.exec_paths.contains(path))
             || action_resolution(&after, workspace, call) != 1
         {
             continue;
         }
         let identity = action_identity(probe)?;
-        rules.extend(plan.candidates.iter().map(ToString::to_string));
+        rules.extend(
+            plan.candidates
+                .iter()
+                .filter(|_| unresolved == 2)
+                .map(ToString::to_string),
+        );
+        exec_after = proposed_exec;
         actions.push((probe.clone(), identity));
         items.push(finding.id);
         changes = proposed;
@@ -533,7 +602,10 @@ pub(crate) fn preview(
         .map_err(|error| error.to_string())?;
     let after = resolve_candidate(layers, batch.candidate(), workspace)?;
     if actions.iter().any(|(probe, _)| {
-        action_call(probe).map_or(true, |call| action_resolution(&after, workspace, call) != 1)
+        action_call(probe).map_or(true, |call| {
+            !action_reachable(&after, workspace, probe)
+                || action_resolution(&after, workspace, call) != 1
+        })
     }) {
         return Err("combined setup action proposal is ineffective".into());
     }
@@ -566,6 +638,8 @@ pub(crate) fn preview(
         judge: None,
         actions,
         rules,
+        permissions_before: permission_rows(effective),
+        permissions_after: permission_rows(&after),
         target,
         layers: layers.to_vec(),
         identities,
@@ -598,13 +672,17 @@ pub(crate) fn confirm_apply(
     let base = format!("{:x}", Sha256::digest(preview.batch.before().as_bytes()));
     let candidate = format!("{:x}", Sha256::digest(preview.batch.candidate().as_bytes()));
     let question = format!(
-        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}; exec directories {:?} -> {:?} (directory reach, not single executable)\nExact permission rules {:?}; exec rules omit cwd, timeout and environment and match future calls with the same argv. Action assessment is policy-only; image identity/native success unproven.\nJudge {:?}: future inference may spend money; this does not grant an action or lift network/floors\nPaths {:?}; concrete actions {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
+        "Setup {setup_id}: items {:?}, target {:?}\nDirectory exposure includes siblings/descendants. Stored roots {:?} -> {:?}; exec directories {:?} -> {:?} (directory reach, not single executable)\npermissions.allow before {:?}\npermissions.allow after {:?}\npermissions.deny before {:?}\npermissions.deny after {:?}\nExact permission rules {:?}; exec rules omit cwd, timeout and environment and match future calls with the same argv. Action assessment is policy-only; image identity/native success unproven.\nJudge {:?}: future inference may spend money; this does not grant an action or lift network/floors\nPaths {:?}; concrete actions {:?}\nBase {base}, candidate {candidate}. Apply? [y/N] ",
         preview.items,
         preview.target,
         preview.stored_before,
         preview.stored_after,
         preview.exec_before,
         preview.exec_after,
+        preview.permissions_before.0,
+        preview.permissions_after.0,
+        preview.permissions_before.1,
+        preview.permissions_after.1,
         preview.rules,
         preview.judge,
         preview.paths,
@@ -696,6 +774,7 @@ pub(crate) fn confirm_apply(
     }
     for (probe, identity) in actions {
         let fixed = action_identity(&probe).ok().as_ref() == Some(&identity)
+            && action_reachable(&effective, workspace, &probe)
             && action_call(&probe)
                 .is_ok_and(|call| action_resolution(&effective, workspace, call) == 1);
         report.push_str(&format!("Re-probe concrete action: {}; policy-only, no execution; existing run authority unchanged.\n", if fixed { "fixed approval" } else { "still blocked/unknown" }));
@@ -994,6 +1073,56 @@ mod tests {
             std::fs::read_to_string(&program).unwrap(),
             "replacement image"
         );
+    }
+
+    // Catches: an action lacking both exec reach and approval cannot get one bound proposal.
+    #[test]
+    fn setup_action_combines_executable_reach_with_exact_rule_and_permission_diff() {
+        let (_temp, workspace, home, layers, effective, _, findings) = fixture("sandbox='ro'\n");
+        let program = findings[0].requested.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let probe: Probe = serde_json::from_value(serde_json::json!({
+            "kind":"action", "argv":[program, "build"], "cwd":workspace.as_path(), "reason":"expected work"
+        })).unwrap();
+        let reader = ego_tools::setup::NativeProbeReader::capture();
+        let policy = PolicyEngine::new(
+            workspace.clone(),
+            ego_core::config::Mode::Default,
+            effective.permissions.clone(),
+        );
+        let scope = ego_core::setup::DiagnosticScope::new(Vec::new());
+        let findings = ego_core::setup::Controller::new(&reader, &policy, &scope)
+            .inspect(std::slice::from_ref(&probe))
+            .unwrap();
+        let proposal = preview(
+            &layers,
+            &effective,
+            &workspace,
+            &home,
+            None,
+            &[probe],
+            &findings,
+        )
+        .unwrap()
+        .expect("combined reach and approval proposal missing");
+        assert_eq!(
+            proposal.exec_after,
+            vec![program.parent().unwrap().to_path_buf()]
+        );
+        let after = resolve_candidate(&layers, proposal.batch.candidate(), &workspace).unwrap();
+        assert!(exec_admitted(&after, &workspace, &CanonPath::new(&program)));
+        let report = confirm_apply(proposal, &workspace, &home, &|question| {
+            assert!(question.contains("permissions.allow before"));
+            assert!(question.contains("permissions.allow after"));
+            false
+        })
+        .unwrap();
+        assert!(report.contains("declined"));
+        assert_eq!(std::fs::read_to_string(&program).unwrap(), "task evidence");
     }
 
     // Catches: a dry-run persists config or replaces the original list without improving read admission.
