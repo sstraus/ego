@@ -7,6 +7,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
             &[
                 ActionId::Help,
                 ActionId::Config,
+                ActionId::Setup,
                 ActionId::Doctor,
                 ActionId::Version,
             ],

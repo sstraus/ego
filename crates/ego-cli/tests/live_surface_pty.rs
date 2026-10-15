@@ -5656,7 +5656,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 28] = [
+    const COMMANDS: [&str; 29] = [
         "help",
         "model",
         "thinking",
@@ -5673,6 +5673,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "statusline",
         "export",
         "config",
+        "setup",
         "doctor",
         "quit",
         "refresh",
@@ -5723,6 +5724,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mode", "Choose execution mode"),
         ("permissions", "Choose permission operation"),
         ("statusline", "Choose status-line setup"),
+        ("setup", "Select setup proposal items"),
     ] {
         let start = output.len();
         input
@@ -6259,21 +6261,13 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     let multiple_submit_start = output.len();
     input.write_all(b"\r").expect("multiple answer");
     input.flush().expect("multiple answer flush");
-    // The trailing space is the whole point. A tool call is announced by
-    // printing its arguments, so `{"prompt":"Free question"}` renders the
-    // question's own text one frame before the widget that asks it — and there
-    // the text is followed by a quote, never by a space. Waiting on the bare
-    // text matched that announcement, and under load the two frames were far
-    // enough apart that the answer below was typed at the REPL instead, where
-    // it became a steer message while the widget waited for an answer nobody
-    // could still give. The single and multiple cases above survive the same
-    // ambiguity only because each is followed by a wait on an option row,
-    // which no announcement can contain; free text has no option row.
+    // The question widget now puts its answer on a separate marked line.
+    // Wait for that frame rather than the earlier tool-argument announcement.
     until_normalized(
         &reader,
         &mut output,
         multiple_submit_start,
-        "Free question ",
+        "Free question\n",
     );
     input.write_all(b"free answer\r").expect("free-text answer");
     input.flush().expect("free-text answer flush");
