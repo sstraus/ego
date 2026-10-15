@@ -10059,17 +10059,17 @@ mod turn {
             .messages
             .messages()
             .iter()
-            .filter(|message| message.role == Role::System)
+            .filter(|message| message.role == Role::User)
             .flat_map(|message| message.content.iter())
             .find_map(|block| match block {
-                ContentBlock::Text { text } if text.starts_with("Admitted skill instruction (") => {
+                ContentBlock::Text { text } if text.contains("Admitted skill instruction (") => {
                     Some(text)
                 }
                 _ => None,
             })
-            .expect("the request carries the admitted skill as a system instruction");
+            .expect("the request carries the admitted skill in the ego-owned context tail");
         assert!(
-            instruction.ends_with("\nExplain this request: preserve these raw arguments: {x: 1}"),
+            instruction.contains("\nExplain this request: preserve these raw arguments: {x: 1}"),
             "the request contains the rendered skill body: {instruction}"
         );
         assert!(
@@ -10121,12 +10121,12 @@ mod turn {
             calls[1].model, "test-model",
             "the skill model pin is cleared"
         );
-        assert!(!calls[1].messages.messages().iter().any(|message| {
+        assert!(calls[1].messages.messages().iter().any(|message| {
             message.content.iter().any(|block| {
                 matches!(
                     block,
                     ContentBlock::Text { text }
-                        if text.starts_with("Admitted skill instruction (")
+                        if text.contains("Admitted skill instruction (")
                 )
             })
         }));

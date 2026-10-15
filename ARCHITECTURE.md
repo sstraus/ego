@@ -21,7 +21,7 @@ State is a **reduction over an append-only event log** (pi's reducer,
 `ARCHITECTURE.md` §3, generalised):
 
 ```
-SessionTitleChanged | SessionDeleted | SessionPauseRequested | SessionPaused |
+SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested | SessionPaused |
 SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
 AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState |

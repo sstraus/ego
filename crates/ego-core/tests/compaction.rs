@@ -1015,7 +1015,7 @@ fn prepare_compaction_captures_prefix_and_keeps_compaction_text_private() {
         vec![GenerationRole::Compaction, GenerationRole::Main]
     );
     assert_eq!(compaction_generator.calls().len(), 1);
-    assert!(compaction_generator.calls()[0].tools.is_empty());
+    assert_eq!(compaction_generator.calls()[0].tools, target_tools());
     assert!(
         main_generator.calls().is_empty(),
         "baseline must not generate"
@@ -1410,4 +1410,121 @@ impl ego_core::turn::RetryPause for NoRetryPause {
     fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
         Box::pin(futures::future::ready(()))
     }
+}
+
+// Catches: compaction drops source cache affinity and hoists its instruction
+// into the system prefix instead of extending the conversation tail.
+#[test]
+fn compaction_preserves_lineage_and_appends_user_instruction() {
+    let (compact_profile, generator) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (main_profile, _) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact_profile)),
+        (GenerationRole::Main, Ok(main_profile)),
+    ]);
+    let (mut turn, _, _) = compaction_turn(source);
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    let calls = generator.calls();
+    let request = &calls[0];
+    assert_eq!(
+        request
+            .cache
+            .as_ref()
+            .expect("compaction keeps source affinity")
+            .lineage_root,
+        prepared.source()
+    );
+    let tail = request.messages.messages().last().unwrap();
+    assert_eq!(
+        tail.role,
+        Role::User,
+        "checkpoint instruction must not change system bytes"
+    );
+    assert_eq!(tail, &Message::text(Role::User, COMPACTION_PROMPT));
+}
+
+// Catches: a live checkpoint loses either the previous request prefix or the
+// final source answer when reusing the in-memory request.
+#[test]
+fn live_compaction_keeps_source_request_and_final_answer() {
+    let (main_profile, main_generator) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta {
+                text: "final source evidence".into(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (compact_profile, generator) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (target_profile, _) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Main, Ok(main_profile)),
+        (GenerationRole::Compaction, Ok(compact_profile)),
+        (GenerationRole::Main, Ok(target_profile)),
+    ]);
+    let (mut turn, _, _) = compaction_turn(source);
+    futures::executor::block_on(turn.run("source intent")).unwrap();
+    futures::executor::block_on(turn.prepare_compaction(None, target_tools())).unwrap();
+    let original = &main_generator.calls()[0];
+    let compact = &generator.calls()[0];
+    assert_eq!(compact.cache, original.cache);
+    assert_eq!(compact.model, original.model);
+    assert_eq!(compact.tools, original.tools);
+    assert_eq!(compact.thinking, original.thinking);
+    assert!(
+        compact
+            .messages
+            .messages()
+            .starts_with(original.messages.messages())
+    );
+    assert!(
+        compact
+            .messages
+            .messages()
+            .iter()
+            .any(|message| message == &Message::text(Role::Assistant, "final source evidence"))
+    );
+    assert_eq!(
+        compact.messages.messages().last(),
+        Some(&Message::text(Role::User, COMPACTION_PROMPT))
+    );
 }

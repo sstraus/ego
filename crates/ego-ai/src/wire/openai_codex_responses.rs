@@ -235,9 +235,17 @@ pub fn build_request(
         request
             .headers
             .retain(|header| !header.name().eq_ignore_ascii_case("session-id"));
+        request.headers.push(crate::http::public_header(
+            "session-id",
+            key.clone().into_bytes(),
+        ));
         request
             .headers
-            .push(crate::http::public_header("session-id", key.into_bytes()));
+            .retain(|header| !header.name().eq_ignore_ascii_case("x-client-request-id"));
+        request.headers.push(crate::http::public_header(
+            "x-client-request-id",
+            key.into_bytes(),
+        ));
     }
     if !request
         .headers
@@ -323,6 +331,8 @@ struct WireUsage {
 struct InputDetails {
     #[serde(default)]
     cached_tokens: u64,
+    #[serde(default)]
+    cache_write_tokens: u64,
 }
 
 fn map_usage(usage: &WireUsage) -> Option<Usage> {
@@ -330,11 +340,18 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         .input_tokens_details
         .as_ref()
         .map_or(0, |details| details.cached_tokens);
-    let uncached_input_tokens = usage.input_tokens.checked_sub(cache_read_tokens)?;
+    let cache_write_tokens = usage
+        .input_tokens_details
+        .as_ref()
+        .map_or(0, |details| details.cache_write_tokens);
+    let uncached_input_tokens = usage
+        .input_tokens
+        .checked_sub(cache_read_tokens)?
+        .checked_sub(cache_write_tokens)?;
     Some(Usage {
         uncached_input_tokens,
         cache_read_tokens,
-        cache_write_tokens: 0,
+        cache_write_tokens,
         cache_write_extended_tokens: 0,
         output_tokens: usage.output_tokens,
         reasoning_tokens: None,

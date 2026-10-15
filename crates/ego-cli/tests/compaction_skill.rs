@@ -105,6 +105,12 @@ fn compaction_target_carries_old_skill_history_and_reopens_with_fresh_catalogue(
         &skill_file(TARGET_SKILL, "TARGET-B-FRESH :: $ARGUMENTS"),
     );
 
+    // Catches: a cold compaction silently selects the current default rather
+    // than the source generation's admitted model.
+    ego.home_file(
+        "config.toml",
+        "model = \"ollama/not-the-source-model\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    );
     let compacted = places
         .ego(&stub)
         .subcommand("compact")
@@ -139,6 +145,10 @@ fn compaction_target_carries_old_skill_history_and_reopens_with_fresh_catalogue(
         "compaction used current source bytes instead of durable material: {compaction_request}"
     );
 
+    ego.home_file(
+        "config.toml",
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    );
     let target = compacted.report()["target_session_id"]
         .as_str()
         .expect("compact JSON has target_session_id")

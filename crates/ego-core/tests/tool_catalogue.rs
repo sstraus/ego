@@ -1017,7 +1017,7 @@ impl AdmittedToolSource for HostNotes {
 
 // Catches: volatile host snapshots becoming System text or preceding the cached history.
 #[test]
-fn host_updates_preserve_the_prefix_and_leave_current_user_intent_last() {
+fn host_updates_preserve_the_prefix_and_append_context_after_current_user() {
     let notes = Arc::new(Mutex::new("host workspace revision one".to_owned()));
     let generator = Arc::new(FakeGenerator::new([
         vec![AiEvent::Stop(StopReason::Stop)],
@@ -1045,10 +1045,10 @@ fn host_updates_preserve_the_prefix_and_leave_current_user_intent_last() {
         let messages = call.messages.messages();
         assert_eq!(
             call.cache.as_ref().unwrap().stable_messages,
-            messages.len() - 2,
-            "the boundary excludes live data and the current intent"
+            messages.len() - 1,
+            "the boundary excludes the new context delta"
         );
-        let user = messages.last().expect("current prompt");
+        let user = &messages[messages.len() - 2];
         assert_eq!(user.role, Role::User);
         assert_eq!(
             user.content,
@@ -1056,13 +1056,13 @@ fn host_updates_preserve_the_prefix_and_leave_current_user_intent_last() {
                 text: intent.to_owned()
             }]
         );
-        let data = &messages[messages.len() - 2];
+        let data = messages.last().expect("context tail");
         assert_eq!(data.role, Role::User);
         assert!(format!("{:?}", data.content).contains(note));
     }
     let durable = store.events.lock().expect("events");
     assert!(
-        !serde_json::to_string(&*durable)
+        serde_json::to_string(&*durable)
             .expect("journal")
             .contains("host workspace revision")
     );
@@ -1121,7 +1121,7 @@ fn fork_and_resume_reuse_the_snapshot_until_explicit_refresh() {
     let replayed = SessionState::replay(child_store.events.lock().expect("journal").clone());
     assert_eq!(replayed.prompt_snapshot, child.state().prompt_snapshot);
     assert!(
-        !serde_json::to_string(&*child_store.events.lock().expect("journal"))
+        serde_json::to_string(&*child_store.events.lock().expect("journal"))
             .expect("json")
             .contains("child host")
     );
@@ -1143,13 +1143,13 @@ fn oversized_host_context_is_bounded_without_splitting_unicode_or_user_text() {
     futures::executor::block_on(turn.run("the user decides")).expect("turn");
     let calls = generator.calls();
     let messages = calls[0].messages.messages();
-    let ContentBlock::Text { text } = &messages[messages.len() - 2].content[0] else {
+    let ContentBlock::Text { text } = &messages.last().unwrap().content[0] else {
         panic!("data text");
     };
     assert!(text.len() <= 65_536 + "\n[context truncated]".len());
     assert!(text.ends_with("[context truncated]"));
     assert_eq!(
-        messages.last().expect("user").content,
+        messages.first().expect("user").content,
         vec![ContentBlock::Text {
             text: "the user decides".into()
         }]
@@ -1163,4 +1163,128 @@ impl ego_core::turn::RetryPause for NoRetryPause {
     fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
         Box::pin(futures::future::ready(()))
     }
+}
+
+// Catches: live compaction discards the captured MCP instructions, tool order,
+// or volatile host note when reconstructing its source prefix.
+#[test]
+fn live_compaction_preserves_the_captured_mcp_and_host_prefix() {
+    let pin = InstructingPin {
+        instructions: vec![McpServerInstructions::new(
+            "alpha",
+            "Stable server guidance",
+        )],
+        servers: vec!["alpha".to_owned()],
+    };
+    let state = Arc::new(Mutex::new(SourceState {
+        captures: 0,
+        order: None,
+        trace: None,
+        catalogues: VecDeque::from([CapturedToolCatalogue::new_mcp(
+            "g1",
+            vec![RegisteredTool::from(TaggedTool::new("dynamic-a"))],
+            pin,
+        )
+        .unwrap()]),
+    }));
+    let checkpoint = "# Objective\nContinue source\n# Binding constraints and preferences\nRead only\n# Completed work and evidence\nSource answered\n# Work in progress\nNone\n# Decisions and rationale\nRetain prefix\n# Blockers and uncertainty\nNone\n# Ordered next steps\nContinue\n# Critical references\nSource";
+    let generator = Arc::new(FakeGenerator::new([
+        vec![
+            AiEvent::TextDelta {
+                text: "source answer".into(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+        vec![
+            AiEvent::TextDelta {
+                text: checkpoint.into(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    ]));
+    let (mut turn, _) = loop_with_policy(
+        generator.clone(),
+        &[],
+        Arc::new(SequencedSource { state }),
+        common::default_policy_source(),
+        Some(SystemPrompt::verbatim("stable system")),
+        None,
+    )
+    .unwrap();
+    futures::executor::block_on(turn.run("source intent")).unwrap();
+    futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    let calls = generator.calls();
+    assert_eq!(system_texts(&calls[0]), system_texts(&calls[1]));
+    assert_eq!(calls[0].tools, calls[1].tools);
+    assert_eq!(calls[0].cache, calls[1].cache);
+    assert!(
+        calls[1]
+            .messages
+            .messages()
+            .starts_with(calls[0].messages.messages())
+    );
+    assert!(
+        serde_json::to_string(&calls[1])
+            .unwrap()
+            .contains("source answer")
+    );
+}
+
+// Catches: refreshing volatile context removes the prior host item and breaks
+// the source request prefix at the next user turn or after cold replay.
+#[test]
+fn host_context_deltas_append_after_history_and_survive_replay() {
+    let notes = Arc::new(Mutex::new("host revision one".to_owned()));
+    let generator = Arc::new(FakeGenerator::new([
+        vec![
+            AiEvent::TextDelta {
+                text: "first answer".into(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+        vec![AiEvent::Stop(StopReason::Stop)],
+    ]));
+    let (mut turn, store) = loop_with_policy(
+        generator.clone(),
+        &[],
+        Arc::new(HostNotes(notes.clone())),
+        common::default_policy_source(),
+        Some(SystemPrompt::verbatim("stable system")),
+        None,
+    )
+    .unwrap();
+    futures::executor::block_on(turn.run("first intent")).unwrap();
+    *notes.lock().unwrap() = "host revision two".into();
+    futures::executor::block_on(turn.run("second intent")).unwrap();
+    let calls = generator.calls();
+    assert!(
+        calls[1]
+            .messages
+            .messages()
+            .starts_with(calls[0].messages.messages()),
+        "host refresh must extend the previous request, not remove or insert an item"
+    );
+    let first = calls[0].messages.messages();
+    assert!(format!("{:?}", first.last().unwrap()).contains("host revision one"));
+    let replayed = SessionState::replay(store.events.lock().unwrap().clone());
+    let resumed_generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+    let (mut resumed, _) = loop_with_session_state(
+        resumed_generator.clone(),
+        &[],
+        Arc::new(HostNotes(notes)),
+        common::default_policy_source(),
+        None,
+        None,
+        replayed,
+    )
+    .unwrap();
+    futures::executor::block_on(resumed.run("third intent")).unwrap();
+    let resumed_calls = resumed_generator.calls();
+    let text = serde_json::to_string(&resumed_calls[0]).unwrap();
+    assert!(text.contains("host revision one") && text.contains("host revision two"));
+    assert_eq!(
+        text.matches("host revision two").count(),
+        1,
+        "unchanged context is not appended again"
+    );
 }

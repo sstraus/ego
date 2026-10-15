@@ -476,7 +476,25 @@ impl CliCompactionCommand {
         &self,
         source_id: SessionId,
     ) -> Result<PreparedCompaction, CompactionError> {
-        let settings = settings(&self.args, |_| Trust::Untrusted, &Stderr)
+        // Cold compaction has no live selection. Recover the last admitted
+        // source model rather than silently using the user's current default.
+        use ego_core::evidence::EvidenceLogSource;
+        let records = self
+            .store
+            .evidence_records(&source_id)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let mut args = self.args.clone();
+        if let Some(model) = records.iter().rev().find_map(|record| match record {
+            EvidenceRecord::GenerationAdmission(admission)
+                if admission.role() != GenerationRole::Compaction =>
+            {
+                Some(admission.target().canonical_model().0.clone())
+            }
+            _ => None,
+        }) {
+            args.model = Some(model);
+        }
+        let settings = settings(&args, |_| Trust::Untrusted, &Stderr)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         let Materials {
             system,

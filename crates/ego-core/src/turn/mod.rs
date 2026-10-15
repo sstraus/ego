@@ -1106,6 +1106,7 @@ pub struct TurnLoop<'session, 'turn> {
     lineage_root: SessionId,
     judge: Option<JudgeContext>,
     main_model_identity: Option<ModelRef>,
+    last_request: Option<(GenRequest, Conversation)>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
         crate::config::Trust,
@@ -1257,6 +1258,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             lineage_root: session_id,
             judge: None,
             main_model_identity: None,
+            last_request: None,
             analysis_cache: None,
             analysis_observation: None,
             execution_observation: None,
@@ -1631,38 +1633,87 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if !repairs.is_empty() {
             tracing::warn!(?repairs, "source history was repaired for compaction");
         }
-        let mut source_messages: Vec<Message> = self.with_system(history).into();
+        let source_history = self.with_system(history);
+        let mut source_messages: Vec<Message> = source_history.clone().into();
         source_messages.extend(
             self.durable_skill_messages()
                 .map_err(CompactionError::Store)?,
         );
-        source_messages.push(Message::text(Role::System, COMPACTION_PROMPT));
+        source_messages.push(Message::text(Role::User, COMPACTION_PROMPT));
         let source_messages =
             Conversation::new(source_messages).map_err(CompactionError::History)?;
 
         let source = Arc::clone(&self.source);
-        let profile = source
-            .resolve(GenerationModelRequest::new(GenerationRole::Compaction))
-            .await
-            .map_err(|error| CompactionError::Resolution {
-                role: GenerationRole::Compaction,
-                error,
-            })?;
+        let mut selection = GenerationModelRequest::new(GenerationRole::Compaction);
+        if let Some(model) = self.main_model_identity.as_ref() {
+            selection = selection.with_model(model.clone());
+        }
+        let profile =
+            source
+                .resolve(selection)
+                .await
+                .map_err(|error| CompactionError::Resolution {
+                    role: GenerationRole::Compaction,
+                    error,
+                })?;
         if let Some(message) = context_capacity::exhausted(
             self.state().context,
             profile.capabilities.max_context_tokens,
         ) {
             return Err(CompactionError::Internal(message));
         }
-        let request = GenRequest {
-            cache: None,
-            model: profile.request_model.clone(),
-            messages: source_messages,
-            tools: Vec::new(),
-            thinking: profile.thinking,
-            max_output_tokens: profile.output_ceiling(),
-            parallel_tool_calls: false,
-        };
+        let live_request = self.last_request.as_ref().and_then(|(previous, history)| {
+            // History coalesces adjacent messages, so compare content blocks,
+            // not message counts. Include the source's final response/results.
+            let blocks = |conversation: &Conversation| {
+                conversation
+                    .messages()
+                    .iter()
+                    .filter(|message| message.role != Role::System)
+                    .flat_map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .map(|block| (message.role, block.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let old = blocks(history);
+            let current = blocks(&source_history);
+            if !current.starts_with(&old) {
+                return None;
+            }
+            let mut request = previous.clone();
+            let mut messages: Vec<Message> = request.messages.into();
+            messages.extend(
+                current
+                    .into_iter()
+                    .skip(old.len())
+                    .map(|(role, block)| Message {
+                        role,
+                        content: vec![block],
+                    }),
+            );
+            messages.push(Message::text(Role::User, COMPACTION_PROMPT));
+            request.messages = Conversation::new(messages).ok()?;
+            Some(request)
+        });
+        let request = live_request.unwrap_or_else(|| {
+            let stable_messages = source_messages.messages().len().saturating_sub(1);
+            GenRequest {
+                cache: Some(crate::generator::types::PromptCache {
+                    lineage_root: self.lineage_root,
+                    retention: self.config.cache,
+                    stable_messages,
+                }),
+                model: profile.request_model.clone(),
+                messages: source_messages,
+                tools: target_tools.clone(),
+                thinking: profile.thinking,
+                max_output_tokens: profile.output_ceiling(),
+                parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
+            }
+        });
         let gaps = profile.capabilities.request_gaps(&request);
         if !gaps.is_empty() {
             return Err(CompactionError::Capability {
@@ -3572,11 +3623,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         &mcp_servers,
                     )
                 });
-                let (messages, stable_messages) = Self::with_host_context(
+                let (messages, stable_messages) = self.with_host_context(
+                    turn,
                     candidate_conversation.clone(),
                     self.tools.context_notes(),
                     identity.as_deref(),
-                );
+                )?;
                 let mut request = GenRequest {
                     cache: Some(crate::generator::types::PromptCache {
                         lineage_root: self.lineage_root,
@@ -3618,11 +3670,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             },
                         },
                     )?;
-                    let (messages, stable_messages) = Self::with_host_context(
+                    let (messages, stable_messages) = self.with_host_context(
+                        turn,
                         candidate_conversation.clone(),
                         self.tools.context_notes(),
                         identity.as_deref(),
-                    );
+                    )?;
                     request.messages = messages;
                     if let Some(cache) = request.cache.as_mut() {
                         cache.stable_messages = stable_messages;
@@ -3759,6 +3812,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         .then(|| self.prompt_snapshot.clone()),
                     },
                 )?;
+                self.last_request = Some((request.clone(), request.messages.clone()));
                 let stream = profile.generator.generate(request, attempt);
                 let drained = self
                     .drain(
@@ -4036,15 +4090,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if let Some(system) = self.prompt_snapshot.system.as_ref() {
             system_messages.push(Message::text(Role::System, &system.text));
         }
-        for invocation in self.active_skill_invocations.values() {
-            let rendered = format!(
-                "Admitted skill instruction (invocation {}; {}):\n{}",
-                invocation.id(),
-                invocation.provenance_tag(),
-                invocation.rendered_text()
-            );
-            system_messages.push(Message::text(Role::System, rendered));
-        }
         messages.splice(0..0, system_messages);
         Conversation::new(messages)
             .expect("a text message adds no call and answers none, so a valid history stays valid")
@@ -4100,42 +4145,18 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             .expect("a text message adds no call and answers none, so a valid history stays valid")
     }
 
-    /// Transient data follows the stable history and precedes the current user intent.
+    /// Changed provider-visible context is appended after the complete history.
     fn with_host_context(
+        &mut self,
+        turn: TurnId,
         history: Conversation,
         notes: Vec<String>,
         identity: Option<&str>,
-    ) -> (Conversation, usize) {
-        let has_context = !notes.is_empty() || identity.is_some();
+    ) -> Result<(Conversation, usize), StoreError> {
+        let has_context =
+            !notes.is_empty() || identity.is_some() || !self.active_skill_invocations.is_empty();
         let mut messages: Vec<Message> = history.into();
-        let mut current_user = messages
-            .iter()
-            .rposition(|message| {
-                message.role == Role::User
-                    && message
-                        .content
-                        .iter()
-                        .any(|block| matches!(block, ContentBlock::Text { .. }))
-            })
-            .unwrap_or(messages.len());
-        if let Some(user) = messages.get_mut(current_user)
-            && let Some(start) = user
-                .content
-                .iter()
-                .rposition(|block| matches!(block, ContentBlock::Text { .. }))
-            && start > 0
-        {
-            // History groups adjacent users. Keep older text in the stable prefix.
-            let current = user.content.split_off(start);
-            current_user += 1;
-            messages.insert(
-                current_user,
-                Message {
-                    role: Role::User,
-                    content: current,
-                },
-            );
-        }
+        let stable_messages = messages.len();
         // Host data is already bounded at admission; also bound its combined display.
         const MAX_CONTEXT_BYTES: usize = 64 * 1024;
         let mut rendered =
@@ -4143,6 +4164,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if let Some(identity) = identity {
             rendered.push_str(identity);
             rendered.push('\n');
+        }
+        for invocation in self.active_skill_invocations.values() {
+            rendered.push_str(&format!(
+                "Admitted skill instruction (invocation {}; {}):\n{}\n",
+                invocation.id(),
+                invocation.provenance_tag(),
+                invocation.rendered_text()
+            ));
         }
         for note in notes {
             rendered.push_str("Host-provided context:\n");
@@ -4154,12 +4183,36 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             rendered.push_str("\n[context truncated]");
         }
         if has_context {
-            messages.insert(current_user, Message::text(Role::User, rendered));
+            let previous = self
+                .state()
+                .items
+                .values()
+                .filter(|item| item.kind == crate::state::ItemKind::HostContext)
+                .max_by_key(|item| item.seq)
+                .map(|item| item.text.clone());
+            if previous.as_deref() != Some(rendered.as_str()) {
+                self.journal.append(
+                    turn,
+                    Some(ItemId::new()),
+                    None,
+                    EventKind::HostContextAppended {
+                        text: rendered.clone(),
+                    },
+                )?;
+                messages.push(Message::text(Role::User, rendered));
+            } else if !messages
+                .iter()
+                .any(|message| message == &Message::text(Role::User, &rendered))
+            {
+                // A delivery-safe retry rebuilds from the same pre-admission
+                // history; its already-durable context still belongs on wire.
+                messages.push(Message::text(Role::User, rendered));
+            }
         }
-        (
+        Ok((
             Conversation::new(messages).expect("context data adds no tool call or answer"),
-            current_user,
-        )
+            stable_messages,
+        ))
     }
 
     fn durable_skill_messages(&self) -> Result<Vec<Message>, StoreError> {
@@ -4196,7 +4249,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 ))
             })?;
             messages.push(Message::text(
-                Role::System,
+                Role::User,
                 format!(
                     "Admitted skill instruction (invocation {}; source={:?} \
                      location={} digest={}):\n{text}",

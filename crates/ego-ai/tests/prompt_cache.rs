@@ -71,6 +71,15 @@ fn codex_consecutive_turns_keep_cache_key_and_session_affinity() {
                 .any(|header| header.name() == "session-id" && header.value() == key.as_bytes())
         );
     }
+    for headers in [&a.headers, &b.headers] {
+        assert!(
+            headers
+                .iter()
+                .any(|header| header.name() == "x-client-request-id"
+                    && header.value() == key.as_bytes()),
+            "Codex request correlation must use the same opaque lineage identity"
+        );
+    }
     assert_eq!(a_body["instructions"], b_body["instructions"]);
     assert_eq!(
         a_body["input"].as_array().unwrap()[..2],
@@ -393,5 +402,33 @@ fn minimax_long_preference_never_exports_an_unsupported_one_hour_ttl() {
             a["messages"].as_array().unwrap()[..2],
             b["messages"].as_array().unwrap()[..2]
         );
+    }
+}
+
+// Catches: unsupported current models receive the older 24h retention field,
+// or an explicit long preference is ignored for a documented supported model.
+#[test]
+fn public_openai_long_retention_is_limited_to_documented_models() {
+    for (model, expected) in [
+        ("gpt-5.5", true),
+        ("gpt-4.1", true),
+        ("gpt-5.6", false),
+        ("gpt-6.1-sol", false),
+        ("custom-model", false),
+    ] {
+        let mut req = request(model, SessionId::new(), "host");
+        for retention in [
+            CacheRetention::Short,
+            CacheRetention::Long,
+            CacheRetention::None,
+        ] {
+            req.cache.as_mut().unwrap().retention = retention;
+            let body = json(openai_responses::request_body(&req).unwrap());
+            assert_eq!(
+                body.get("prompt_cache_retention").and_then(Value::as_str),
+                (expected && retention == CacheRetention::Long).then_some("24h"),
+                "{model} {retention:?}"
+            );
+        }
     }
 }

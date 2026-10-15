@@ -239,6 +239,7 @@ pub enum ExportEvent {
     },
     AssistantDelta,
     AssistantMessage,
+    HostContextAppended,
     ReasoningDelta,
     ReasoningState,
     ToolCallStarted,
@@ -862,6 +863,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::ToolCallCompleted { ok: *ok }
         }
         EventKind::ToolCallMeasured { timing } => ExportEvent::ToolCallMeasured { timing: *timing },
+        EventKind::HostContextAppended { text: _ } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::HostContextAppended
+        }
         EventKind::DetachedExecStarted { id } => ExportEvent::DetachedExecStarted { id: *id },
         EventKind::DetachedExecSettled { snapshot } => {
             use crate::permit::DetachedExecOutcome;
