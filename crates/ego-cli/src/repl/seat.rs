@@ -374,6 +374,7 @@ fn repaint_status(status: &SharedStatus) {
 }
 
 struct SurfaceStatus {
+    setup_cancel: Option<tokio::sync::watch::Sender<bool>>,
     queue: QueueStatus,
     drafts: usize,
     activity: bool,
@@ -430,6 +431,7 @@ impl SurfaceStatus {
 impl Default for SurfaceStatus {
     fn default() -> Self {
         Self {
+            setup_cancel: None,
             queue: QueueStatus::default(),
             drafts: 0,
             activity: false,
@@ -542,6 +544,28 @@ impl DraftStash {
 
     fn pop_active(&mut self) -> Option<ComposerDraft> {
         self.by_session.get_mut(&self.active).and_then(Vec::pop)
+    }
+}
+
+pub(crate) struct SetupCancellation {
+    receiver: tokio::sync::watch::Receiver<bool>,
+    status: Option<SharedStatus>,
+}
+
+impl SetupCancellation {
+    pub(crate) async fn cancelled(&mut self) {
+        if self.status.is_none() {
+            std::future::pending::<()>().await;
+        }
+        let _ = self.receiver.changed().await;
+    }
+}
+
+impl Drop for SetupCancellation {
+    fn drop(&mut self) {
+        if let Some(status) = &self.status {
+            status.lock().expect("surface status lock").setup_cancel = None;
+        }
     }
 }
 
@@ -1477,6 +1501,22 @@ impl Seat {
     pub fn question(&self, id: ItemId, request: QuestionRequest) -> QuestionOutcome {
         futures::executor::block_on(self.elicit(id, request))
             .unwrap_or(QuestionOutcome::Unavailable)
+    }
+
+    /// Own a transient cancellation route instead of the ordinary turn ingress.
+    pub(crate) fn setup_cancellation(&self) -> SetupCancellation {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let status = match &self.kind {
+            SeatKind::Live(live) => {
+                live.status
+                    .lock()
+                    .expect("surface status lock")
+                    .setup_cancel = Some(sender);
+                Some(Arc::clone(&live.status))
+            }
+            _ => None,
+        };
+        SetupCancellation { receiver, status }
     }
 
     /// Transient host selection: no model tool question or durable event.

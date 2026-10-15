@@ -151,6 +151,20 @@ pub(super) fn surface_line(
         let signal = editor.read_line(prompt);
         let failed = signal.is_err();
         let line = answer(asked_for_image.swap(false, Ordering::Relaxed), signal);
+        if matches!(
+            line,
+            Line::Interrupted | Line::HostCommand(HostCommand::Interrupt)
+        ) {
+            let cancel = status
+                .lock()
+                .expect("surface status lock")
+                .setup_cancel
+                .clone();
+            if let Some(cancel) = cancel {
+                let _ = cancel.send(true);
+                continue;
+            }
+        }
         if let Line::Submitted(text) = &line
             && phase.get() != EditPhase::Modal
         {

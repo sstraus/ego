@@ -1488,8 +1488,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 _ => None,
                                             }
                                         };
+                                        let mut setup_cancel = status
+                                            .as_ref()
+                                            .map(|status| status.seat.setup_cancellation());
+                                        let terminal_cancel = async {
+                                            match setup_cancel.as_mut() {
+                                                Some(cancel) => cancel.cancelled().await,
+                                                None => std::future::pending::<()>().await,
+                                            }
+                                        };
                                         let setup_result = tokio::select! {
                                             biased;
+                                            _ = terminal_cancel => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
                                             _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
                                             result = crate::setup::observed_selection_host(
                                                 root.clone(),
@@ -1498,6 +1508,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 Some(&select),
                                             ) => result,
                                         };
+                                        drop(setup_cancel);
                                         match setup_result {
                                             Ok(report) => diagnostics.note(&report),
                                             Err(error) => diagnostics.note(&error.to_string()),

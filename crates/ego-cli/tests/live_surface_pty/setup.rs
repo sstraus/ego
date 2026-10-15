@@ -109,3 +109,62 @@ fn setup_slash_case(pick: &[u8], answer: Option<&[u8]>, applied: bool) {
         "slash setup must not start ordinary generation"
     );
 }
+
+// Catches: raw terminal Ctrl-C queues an idle interrupt instead of stopping setup inference.
+#[test]
+fn setup_slash_raw_ctrl_c_stops_stalled_inference_without_publication() {
+    let gate = support::ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::GatedPaced {
+            head: String::new(),
+            tail: text("[]"),
+            gate: gate.clone(),
+        }],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    let original = "model='ollama/qwen3'\nsandbox='off'\nroots=[]\n";
+    std::fs::write(places.home_path().join("config.toml"), original).unwrap();
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--yolo",
+        "--trust-workspace",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 32, 140, None);
+    let mut output = Vec::new();
+    until_prompt_from(&reader, &mut output, 0);
+    input.write_all(b"/setup inspect task\r").unwrap();
+    input.flush().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while stub.generations().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "setup inference did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Bound the scripted server even when the regression assertion fails.
+    let release = gate.clone();
+    let release_thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        release.release();
+    });
+    let start = output.len();
+    input.write_all(b"\x03").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+    gate.release();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    release_thread.join().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(places.home_path().join("config.toml")).unwrap(),
+        original
+    );
+    assert_eq!(stub.generations().len(), 1);
+}
