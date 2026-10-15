@@ -258,14 +258,24 @@ async fn ordinary_main() -> std::process::ExitCode {
                     mcp_errors: Vec::new(),
                 }
             }
-            Ok(Invocation::Setup(args)) => Ended {
-                termination: ego_cli::setup::execute(&args, &out).await,
-                session: ego_core::event::id::SessionId::new(),
-                state: ego_core::state::SessionState::default(),
-                result: serde_json::Value::String(String::new()),
-                selected_session: None,
-                mcp_errors: Vec::new(),
-            },
+            Ok(Invocation::Setup(args)) => {
+                let termination = tokio::select! {
+                    biased;
+                    cause = run::stop_signal(None) => {
+                        cancel.cancel(cause);
+                        run::cancelled_termination(&cancel)
+                    }
+                    result = ego_cli::setup::execute(&args, &out) => result,
+                };
+                Ended {
+                    termination,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    selected_session: None,
+                    mcp_errors: Vec::new(),
+                }
+            }
             Ok(Invocation::Doctor(args)) => Ended {
                 termination: ego_cli::doctor::execute(&args, &out),
                 session: ego_core::event::id::SessionId::new(),

@@ -1488,14 +1488,17 @@ pub(super) async fn drive_execution<S: EventSink>(
                                                 _ => None,
                                             }
                                         };
-                                        match crate::setup::observed_selection_host(
-                                            root.clone(),
-                                            &setup_args,
-                                            Some(&confirm),
-                                            Some(&select),
-                                        )
-                                        .await
-                                        {
+                                        let setup_result = tokio::select! {
+                                            biased;
+                                            _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
+                                            result = crate::setup::observed_selection_host(
+                                                root.clone(),
+                                                &setup_args,
+                                                Some(&confirm),
+                                                Some(&select),
+                                            ) => result,
+                                        };
+                                        match setup_result {
                                             Ok(report) => diagnostics.note(&report),
                                             Err(error) => diagnostics.note(&error.to_string()),
                                         }
