@@ -1366,7 +1366,7 @@ fn receipt_only_prompts_and_interruptions_are_not_dropped_from_replay() {
         6,
         "three real prompts and three recorded failures, no assistant reply"
     );
-    for pair in frames.chunks_exact(2) {
+    for pair in frames.as_chunks::<2>().0 {
         assert!(
             matches!(&pair[0].event, PublicEvent::ItemCompleted { kind: ItemKind::UserMessage, text: Some(text), .. } if text == "ciao")
         );
