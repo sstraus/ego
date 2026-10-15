@@ -1248,6 +1248,7 @@ impl Seat {
             ActionId::Expand,
             ActionId::Skills,
             ActionId::Hooks,
+            ActionId::Retry,
             ActionId::Config,
             ActionId::Doctor,
             ActionId::Setup,

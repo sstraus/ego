@@ -3502,6 +3502,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut primary_model: Option<ModelRef> = None;
         let mut primary_capabilities = None;
 
+        self.recovery_deadline = None;
         for (candidate_index, candidate) in candidates.into_iter().enumerate() {
             if let Some(cause) = self.cancel.cause() {
                 return Ok(Generated::Cancelled {
@@ -3511,9 +3512,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
             let mut candidate_conversation = conversation.clone();
             let mut additional_attempts = 0_u32;
-            self.recovery_deadline = None;
 
             loop {
+                if self
+                    .recovery_deadline
+                    .is_some_and(|deadline| self.retry_pause.now() >= deadline)
+                {
+                    return Ok(Generated::Ended(ExitReason::Provider));
+                }
                 let model_request = match candidate.as_ref() {
                     Some(model) => self.main_model_request().with_model(model.clone()),
                     None => primary_model.as_ref().map_or_else(
@@ -3521,18 +3527,32 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         |model| self.main_model_request().with_model(model.clone()),
                     ),
                 };
+                let resolution_deadline = self
+                    .recovery_deadline
+                    .map(|deadline| self.retry_pause.deadline(deadline));
+                let resolve = async {
+                    match resolution_deadline {
+                        Some(deadline) => {
+                            match select(source.resolve(model_request), deadline).await {
+                                Either::Left((profile, _)) => Some(profile),
+                                Either::Right(_) => None,
+                            }
+                        }
+                        None => Some(source.resolve(model_request).await),
+                    }
+                };
                 let profile = match await_controlled(
                     &self.journal,
                     &self.cancel,
                     &mut self.control,
                     turn,
-                    source.resolve(model_request),
+                    resolve,
                     InterruptDisposition::Return,
                     None,
                 )
                 .await
                 {
-                    Controlled::Completed(Ok(profile)) => {
+                    Controlled::Completed(Some(Ok(profile))) => {
                         if candidate_index == 0 && primary_model.is_none() {
                             primary_model = Some(profile.identity.clone());
                             primary_capabilities = Some(profile.capabilities.clone());
@@ -3540,7 +3560,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         self.main_model_identity = Some(profile.identity.clone());
                         profile
                     }
-                    Controlled::Completed(Err(error)) => {
+                    Controlled::Completed(Some(Err(error))) => {
                         let exit = match error.class {
                             GenerationModelErrorClass::Usage => ExitReason::Usage,
                             GenerationModelErrorClass::Provider => ExitReason::Provider,
@@ -3574,6 +3594,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             }
                         }
                         break;
+                    }
+                    Controlled::Completed(None) => {
+                        return Ok(Generated::Ended(ExitReason::Provider));
                     }
                     Controlled::Interrupted => {
                         return Ok(Generated::Cancelled {
@@ -3733,6 +3756,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     }
                     last_preflight_exit = ExitReason::Usage;
                     break;
+                }
+
+                // Resolution and request admission can advance monotonic time.
+                // Never reserve or dispatch paid work past this generation's horizon.
+                if self
+                    .recovery_deadline
+                    .is_some_and(|deadline| self.retry_pause.now() >= deadline)
+                {
+                    return Ok(Generated::Ended(ExitReason::Provider));
                 }
 
                 let budget = self

@@ -37,6 +37,10 @@
           "pause": "_ego/pause",
           "resume": "_ego/resume"
         },
+        "retry": {
+          "version": 1,
+          "method": "_ego/retry"
+        },
         "steer": {
           "version": 1,
           "method": "_ego/steer",
