@@ -262,6 +262,34 @@ mod budget {
 
     // --- the upper bound --------------------------------------------------
 
+    // Catches: user-selected long caching spends above the admitted reservation.
+    #[test]
+    fn long_cache_reservation_covers_extended_write_spend() {
+        use ego_core::event::id::SessionId;
+        use ego_core::generator::types::PromptCache;
+        let mut req = request(Some(1_024));
+        req.messages =
+            Conversation::new(vec![Message::text(Role::User, "a ".repeat(190_000))]).unwrap();
+        req.cache = Some(PromptCache {
+            lineage_root: SessionId::new(),
+            retention: CacheRetention::Long,
+            stable_messages: 1,
+        });
+        let mut prices = quote();
+        prices.cache_write_extended = Some(amount("0.000006"));
+        let bound = prices.upper_bound(&req, &standard_caps()).unwrap();
+        let CostDelta::Known { amount: actual, .. } = prices.price(&Usage {
+            cache_write_extended_tokens: 180_000,
+            ..tokens(0, 0, 0, 1_024)
+        }) else {
+            panic!("the extended write is fully priced");
+        };
+        assert!(
+            bound.amount >= actual.amount,
+            "long-cache reservation {bound:?} is below actual spend {actual:?}"
+        );
+    }
+
     // Catches: a tiny capped request reserves the model's entire context.
     #[test]
     fn short_capped_prompt_fits_a_small_currency_budget() {
