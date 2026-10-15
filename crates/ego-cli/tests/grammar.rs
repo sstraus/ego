@@ -1584,3 +1584,37 @@ fn row(doc: &str) -> String {
         })
         .to_owned()
 }
+
+// Catches: run or compact silently drops explicit output and spend bounds.
+#[test]
+fn run_and_compact_accept_positive_output_caps_and_budget() {
+    let args = parsed([
+        "run",
+        "--max-output-tokens",
+        "100",
+        "--budget",
+        "1$",
+        "hello",
+    ]);
+    assert_eq!(args.max_output_tokens.unwrap().get(), 100);
+    assert_eq!(args.budget.as_deref(), Some("1$"));
+    let Invocation::Compact(args) = cli::parse(
+        vec![
+            "ego",
+            "compact",
+            "01900000-0000-7000-8000-000000000001",
+            "--max-output-tokens",
+            "100",
+            "--budget",
+            "1$",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    )
+    .unwrap() else {
+        panic!("compact")
+    };
+    assert_eq!(args.max_output_tokens.unwrap().get(), 100);
+    assert_eq!(args.budget.as_deref(), Some("1$"));
+}

@@ -197,7 +197,7 @@ fn request() -> GenRequest {
     GenRequest {
         cache: None,
         model: "grok-5".to_string(),
-        messages: Conversation::new(vec![Message::text(Role::User, "list the files")])
+        messages: Conversation::new(vec![Message::text(Role::User, "x".repeat(200_000))])
             .expect("one user message is a conversation"),
         tools: Vec::new(),
         thinking: ThinkingLevel::Off,

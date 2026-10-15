@@ -1823,6 +1823,7 @@ mod turn {
                 .map_or_else(|| self.settings.model.clone(), |model| model.0.clone());
             Box::pin(futures::future::ready(Ok(
                 ego_core::generation_model_source::GenerationProfile {
+                    output_limit: None,
                     identity: ModelRef(request_model.clone()),
                     request_model,
                     thinking: self.settings.thinking,
@@ -6593,7 +6594,7 @@ mod turn {
         );
         assert_eq!(
             committed(&fx.gate.borrow()),
-            Some(usd("0.76536")),
+            Some(usd("0.0155925")),
             "an unknown cost charges the bound, never zero"
         );
     }
@@ -6774,6 +6775,7 @@ mod turn {
             capabilities.max_output_tokens = settings.output_ceiling;
             capabilities.supports_parallel_tool_calls = settings.parallel_tool_calls;
             let profile = GenerationProfile {
+                output_limit: None,
                 identity: ego_core::config::ModelRef(slug.to_string()),
                 request_model: slug.split_once('/').unwrap().1.to_string(),
                 thinking: settings.thinking,
@@ -6786,10 +6788,7 @@ mod turn {
                 metering: metering(),
                 rates: Some(rates()),
             };
-            assert_eq!(
-                profile.output_ceiling(),
-                settings.output_ceiling.or(settings.context_ceiling)
-            );
+            assert_eq!(profile.output_ceiling(), settings.output_ceiling);
             profile
         }
 
@@ -7004,7 +7003,7 @@ mod turn {
                             AiEvent::Stop(StopReason::Stop),
                         ],
                         &trace,
-                        None,
+                        Some(4_096),
                         Some(4_096),
                         ThinkingLevel::Off,
                         false,
@@ -7527,7 +7526,7 @@ mod turn {
                             AiEvent::Stop(StopReason::Stop),
                         ],
                         &trace,
-                        None,
+                        Some(8_192),
                     )),
                     Ok(profile(
                         "openai/main",
@@ -8035,7 +8034,7 @@ mod turn {
                 }
             )));
             assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.06144")));
+            assert_eq!(committed(&gate), Some(usd("0.03205875")));
         }
 
         #[test]
@@ -8363,7 +8362,7 @@ mod turn {
                 )));
                 drop(turn);
                 assert_eq!(outstanding(&gate), Some(usd("0")));
-                assert_eq!(committed(&gate), Some(usd("0.06144")));
+                assert_eq!(committed(&gate), Some(usd("0.03205875")));
             }
         }
 
@@ -8472,7 +8471,7 @@ mod turn {
                 }
             )));
             assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.06144")));
+            assert_eq!(committed(&gate), Some(usd("0.03205875")));
             assert!(cache.0.lock().unwrap().is_empty());
         }
 
@@ -8588,7 +8587,7 @@ mod turn {
             )));
             drop(turn);
             assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.06144")));
+            assert_eq!(committed(&gate), Some(usd("0.03205875")));
         }
 
         /// The occupancy report names the window of the model that produced

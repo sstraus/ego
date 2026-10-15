@@ -726,6 +726,7 @@ fn compaction_profile(
     let generator = Arc::new(FakeGenerator::new(vec![script]));
     (
         GenerationProfile {
+            output_limit: None,
             identity: ModelRef(model.to_string()),
             request_model: model.to_string(),
             thinking,

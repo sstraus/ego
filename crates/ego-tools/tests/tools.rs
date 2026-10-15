@@ -2037,6 +2037,7 @@ mod end_to_end {
             _request: GenerationModelRequest,
         ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
             Box::pin(futures::future::ready(Ok(GenerationProfile {
+                output_limit: None,
                 identity: ego_core::config::ModelRef("test-model".into()),
                 request_model: "test-model".into(),
                 thinking: ThinkingLevel::Off,

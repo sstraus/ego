@@ -218,11 +218,8 @@ mod lifecycle {
         GenRequest {
             cache: None,
             model: model.to_string(),
-            messages: Conversation::new(vec![Message::text(
-                Role::User,
-                "list the files".to_string(),
-            )])
-            .expect("one user message is a conversation"),
+            messages: Conversation::new(vec![Message::text(Role::User, "x".repeat(200_000))])
+                .expect("one user message is a conversation"),
             tools: Vec::new(),
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1_024),

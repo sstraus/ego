@@ -366,6 +366,8 @@ pub async fn compact(
         let mut runtime_args = protocol_args(args.session_dir.clone(), SessionShape::default());
         runtime_args.directory = Some(root);
         runtime_args.output = args.output;
+        runtime_args.budget = args.budget.clone();
+        runtime_args.max_output_tokens = args.max_output_tokens;
         let command = CliCompactionCommand::new(runtime_args, store, admission);
         command
             .compact(CompactionTransitionRequest {

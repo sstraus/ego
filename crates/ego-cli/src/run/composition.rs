@@ -1416,13 +1416,17 @@ pub(super) async fn generation_preflight_inner(
     } else {
         None
     };
-    let source = Arc::new(model::CliGenerationModelSource::new(
-        ego_core::config::ModelRef(slug),
-        thinking,
-        judge_identity,
-        effective.ceilings.clone(),
-        effective.auth.clone(),
-    ));
+    let source = Arc::new(
+        model::CliGenerationModelSource::new(
+            ego_core::config::ModelRef(slug),
+            thinking,
+            judge_identity,
+            effective.ceilings.clone(),
+            effective.auth.clone(),
+        )
+        .with_output_limit(effective.max_output_tokens)
+        .with_offline(confinement.offline()),
+    );
     let selection = source.selection();
     let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);
     let main = bound

@@ -1268,6 +1268,9 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     // side. `2026-08-21-a-run-with-no-ceiling.md` §4: an administrator's
     // system layer is the only source of non-relaxable ceilings, and it can
     // only clamp a figure that went through the same resolution it did.
+    if let Some(cap) = args.max_output_tokens {
+        toml.push_str(&format!("max_output_tokens = {cap}\n"));
+    }
     if let Some(budget) = &args.budget {
         toml.push_str(&format!("budget = {}\n", quote(budget)));
     }

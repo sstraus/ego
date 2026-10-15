@@ -485,6 +485,8 @@ pub struct ForkArgs {
 /// UUID ritual in the normal command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactArgs {
+    pub budget: Option<String>,
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
     pub source: SessionId,
     pub request_id: RequestId,
     pub session_dir: Option<PathBuf>,
@@ -819,6 +821,7 @@ pub struct Args {
     /// Ordered model candidates used after a safely-unsent failure or refusal.
     pub fallbacks: Vec<ModelRef>,
     pub budget: Option<String>,
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
     pub max_turns: Option<u32>,
     pub timeout: Option<String>,
     pub tools: Option<Vec<String>>,
@@ -1431,6 +1434,8 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 Ok(Invocation::Compact(Box::new(CompactArgs {
                     source,
                     request_id,
+                    budget: parsed.budget,
+                    max_output_tokens: parsed.max_output_tokens,
                     session_dir: parsed.common.places.session_dir,
                     directory: parsed.common.places.directory,
                     output: parsed.common.output.unwrap_or(Output::Text),
@@ -1884,6 +1889,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         provider_recovery: retry_default != 0 && flags.retry.is_none(),
         fallbacks: flags.fallbacks,
         budget: flags.budget,
+        max_output_tokens: flags.max_output_tokens,
         max_turns: flags.max_turns,
         timeout: flags.timeout,
         tools: shape.tools,

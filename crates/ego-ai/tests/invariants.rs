@@ -243,6 +243,7 @@ impl GenerationModelSource for SingleGenerationSource {
         _request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
         let profile = GenerationProfile {
+            output_limit: None,
             identity: self.profile.identity.clone(),
             request_model: self.profile.request_model.clone(),
             thinking: self.profile.thinking,
@@ -439,6 +440,7 @@ async fn turn_over_http(
         GenerationRuntime {
             source: Arc::new(SingleGenerationSource {
                 profile: GenerationProfile {
+                    output_limit: None,
                     identity: ego_core::config::ModelRef(slug.to_string()),
                     request_model: resolved.model.clone(),
                     thinking: ThinkingLevel::Off,

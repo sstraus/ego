@@ -317,6 +317,7 @@ impl ego_core::generation_model_source::GenerationModelSource for TestGeneration
         };
         Box::pin(futures::future::ready(Ok(
             ego_core::generation_model_source::GenerationProfile {
+                output_limit: None,
                 identity: ego_core::config::ModelRef("catalogue-test".to_owned()),
                 request_model: "catalogue-test".to_owned(),
                 thinking: ego_core::generator::types::ThinkingLevel::Off,

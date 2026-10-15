@@ -322,6 +322,7 @@ impl GenerationModelSource for FixedSource {
         _request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
         Box::pin(futures::future::ready(Ok(GenerationProfile {
+            output_limit: None,
             identity: ModelRef("test-model".into()),
             request_model: "test-model".into(),
             thinking: ego_core::generator::types::ThinkingLevel::Off,

@@ -82,6 +82,7 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
     /// Fields reduced by an explicitly selected host profile ceiling.
     pub profile_warnings: Vec<String>,
     pub cache: crate::generator::capabilities::CacheRetention,
@@ -175,6 +176,7 @@ impl std::fmt::Display for Discarded {
 /// eligibility, so it is never discarded and saying it was would be false.
 fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     let ConfigLayer {
+        max_output_tokens,
         cache,
         model,
         thinking,
@@ -197,6 +199,7 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     } = layer;
     let mut settings = Vec::new();
     for (present, name) in [
+        (max_output_tokens.is_some(), "max_output_tokens"),
         (cache.is_some(), "cache"),
         (model.is_some(), "model"),
         (thinking.is_some(), "thinking"),
@@ -372,6 +375,7 @@ fn resolve_inner(
     } else {
         None
     };
+    let mut max_output_tokens = None;
     let mut cache = crate::generator::capabilities::CacheRetention::Short;
     let mut model = None;
     let mut thinking = None;
@@ -416,6 +420,12 @@ fn resolve_inner(
             );
         }
 
+        if let Some(value) = profile
+            .and_then(|p| p.max_output_tokens)
+            .or(sourced.value.max_output_tokens)
+        {
+            max_output_tokens = Some(value);
+        }
         if let Some(value) = sourced.value.cache
             && (value != crate::generator::capabilities::CacheRetention::Long
                 || sourced.source == Source::User)
@@ -743,7 +753,17 @@ fn resolve_inner(
         }
     }
 
+    if let Some(limit) = profile_ceiling.and_then(|ceiling| ceiling.max_output_tokens) {
+        max_output_tokens = Some(max_output_tokens.map_or(limit, |value| value.min(limit)));
+    }
+    // System output limits cannot be relaxed by lower layers.
+    for layer in layers.iter().filter(|layer| layer.source == Source::System) {
+        if let Some(limit) = layer.value.max_output_tokens {
+            max_output_tokens = Some(max_output_tokens.map_or(limit, |value| value.min(limit)));
+        }
+    }
     Ok(Effective {
+        max_output_tokens,
         profile_warnings,
         cache,
         model,

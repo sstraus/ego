@@ -64,6 +64,7 @@ impl GenerationModelRequest {
 
 /// Everything one generation attempt needs from the currently selected model.
 pub struct GenerationProfile {
+    pub output_limit: Option<std::num::NonZeroU64>,
     pub identity: ModelRef,
     pub request_model: String,
     pub thinking: ThinkingLevel,
@@ -76,9 +77,11 @@ pub struct GenerationProfile {
 impl GenerationProfile {
     /// The response bound used by both ordinary and judge requests.
     pub fn output_ceiling(&self) -> Option<u64> {
-        self.capabilities
-            .max_output_tokens
-            .or(self.capabilities.max_context_tokens)
+        match (self.output_limit, self.capabilities.max_output_tokens) {
+            (Some(limit), Some(max)) => Some(limit.get().min(max)),
+            (Some(limit), None) => Some(limit.get()),
+            (None, maximum) => maximum,
+        }
     }
 }
 

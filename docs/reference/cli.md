@@ -23,6 +23,7 @@ Run an agent from a prompt, headless.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
+- `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
@@ -47,7 +48,7 @@ Run an agent from a prompt, headless.
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
-- `--trust-workspace` — Trust this interactive launch's workspace without asking; remember the answer
+- `--trust-workspace` — Trust this launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
 - `--yolo` — Shorthand for --mode yolo
 - `<PROMPT>` — The prompt. `-` reads it from stdin
@@ -70,6 +71,7 @@ Continue a session; no ID = latest in this workspace.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
+- `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
@@ -94,7 +96,7 @@ Continue a session; no ID = latest in this workspace.
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
-- `--trust-workspace` — Trust this interactive launch's workspace without asking; remember the answer
+- `--trust-workspace` — Trust this launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
 - `--yolo` — Shorthand for --mode yolo
 - `<ID>` — The session to continue. Omit it for the latest in this workspace
@@ -148,6 +150,7 @@ Continue a session; no ID = latest in this workspace.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
+- `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
@@ -172,7 +175,7 @@ Continue a session; no ID = latest in this workspace.
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
-- `--trust-workspace` — Trust this interactive launch's workspace without asking; remember the answer
+- `--trust-workspace` — Trust this launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
 - `--yolo` — Shorthand for --mode yolo
 - `<ID>` — The session to continue. Omit it for the latest in this workspace
@@ -223,8 +226,10 @@ Fork a session at its tip or after the completed turn containing a message.
 
 Compact a session into its deterministic successor.
 
+- `--budget <BUDGET>` — Hard spend ceiling, as for run
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
+- `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--output <OUTPUT>` — text|json|jsonl
 - `--request-id <REQUEST_ID>` — (undocumented)
 - `--session-dir <SESSION_DIR>` — Override the store location

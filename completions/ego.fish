@@ -73,6 +73,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l schema-retries -d 'How m
 complete -c ego -n "__fish_ego_using_subcommand run" -l retry -d 'Additional delivery-safe attempts for each candidate' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l fallback -d 'Ordered provider/model candidate used after a delivery-safe failure' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l max-turns -d 'Cap the turns this run may take' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
@@ -81,7 +82,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -s c -l set -d 'Dotted-path
 complete -c ego -n "__fish_ego_using_subcommand run" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_using_subcommand run" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-tools -d 'Offer no tools at all'
-complete -c ego -n "__fish_ego_using_subcommand run" -l trust-workspace -d 'Trust this interactive launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_using_subcommand run" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand run" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand run" -l plan -d 'Shorthand for --mode plan'
 complete -c ego -n "__fish_ego_using_subcommand run" -l yolo -d 'Shorthand for --mode yolo'
@@ -116,6 +117,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l schema-retries -d 'Ho
 complete -c ego -n "__fish_ego_using_subcommand resume" -l retry -d 'Additional delivery-safe attempts for each candidate' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l fallback -d 'Ordered provider/model candidate used after a delivery-safe failure' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l max-turns -d 'Cap the turns this run may take' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
@@ -124,7 +126,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -s c -l set -d 'Dotted-p
 complete -c ego -n "__fish_ego_using_subcommand resume" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-tools -d 'Offer no tools at all'
-complete -c ego -n "__fish_ego_using_subcommand resume" -l trust-workspace -d 'Trust this interactive launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l plan -d 'Shorthand for --mode plan'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l yolo -d 'Shorthand for --mode yolo'
@@ -159,6 +161,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l schema-retries -d '
 complete -c ego -n "__fish_ego_using_subcommand continue" -l retry -d 'Additional delivery-safe attempts for each candidate' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l fallback -d 'Ordered provider/model candidate used after a delivery-safe failure' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l max-turns -d 'Cap the turns this run may take' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
@@ -167,7 +170,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -s c -l set -d 'Dotted
 complete -c ego -n "__fish_ego_using_subcommand continue" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l no-tools -d 'Offer no tools at all'
-complete -c ego -n "__fish_ego_using_subcommand continue" -l trust-workspace -d 'Trust this interactive launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l plan -d 'Shorthand for --mode plan'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l yolo -d 'Shorthand for --mode yolo'
@@ -181,6 +184,8 @@ complete -c ego -n "__fish_ego_using_subcommand fork" -l output -d 'text|json|js
 json\t''
 jsonl\t''"
 complete -c ego -n "__fish_ego_using_subcommand fork" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand compact" -l budget -d 'Hard spend ceiling, as for run' -r
+complete -c ego -n "__fish_ego_using_subcommand compact" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand compact" -l request-id -r
 complete -c ego -n "__fish_ego_using_subcommand compact" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand compact" -s C -d 'Run as if started in DIR' -r -F
