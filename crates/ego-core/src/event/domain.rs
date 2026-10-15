@@ -397,6 +397,8 @@ pub enum EventKind {
     ToolCallMeasured { timing: ToolTiming },
     /// The launch authority was admitted before the process starts.
     DetachedExecStarted { id: DetachedExecId },
+    /// Ego-owned append-only provider context; never an operator prompt.
+    HostContextAppended { text: String },
     /// One terminal observation, delivered to the model at a generation boundary.
     DetachedExecSettled { snapshot: DetachedExecSnapshot },
     /// A typed human-input request became durable before any host was asked.
@@ -786,6 +788,7 @@ impl EventKind {
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
             EventKind::ToolCallMeasured { .. } => "tool_call_measured",
             EventKind::DetachedExecStarted { .. } => "detached_exec_started",
+            EventKind::HostContextAppended { .. } => "host_context_appended",
             EventKind::DetachedExecSettled { .. } => "detached_exec_settled",
             EventKind::QuestionRequested { .. } => "question_requested",
             EventKind::QuestionSettled { .. } => "question_settled",

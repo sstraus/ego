@@ -195,6 +195,9 @@ fn conversation_from_inner(
                 }
                 push(&mut messages, Role::User, text_block(&item.text));
             }
+            ItemKind::HostContext => {
+                messages.push(Message::text(Role::User, &item.text));
+            }
             ItemKind::DetachedExecNotification => {
                 push(&mut messages, Role::User, text_block(&item.text));
             }
@@ -332,7 +335,7 @@ fn text_block(text: &str) -> ContentBlock {
 /// results of parallel calls into one user turn is what Anthropic requires.
 fn push(messages: &mut Vec<Message>, role: Role, block: ContentBlock) {
     match messages.last_mut() {
-        Some(last) if last.role == role => last.content.push(block),
+        Some(last) if last.role == role && !last.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.starts_with("Current context data."))) => last.content.push(block),
         _ => messages.push(Message {
             role,
             content: vec![block],

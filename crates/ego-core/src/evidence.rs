@@ -621,6 +621,15 @@ where
     Ok(descriptors)
 }
 
+/// Ordered provider-visible catalogue, stored once per content digest in a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCatalogueEvidence {
+    pub version: u32,
+    pub session: SessionId,
+    pub digest: EvidenceDigest,
+    pub tools: Vec<crate::generator::types::ToolDescriptor>,
+}
+
 /// Exact generation facts bound before a provider call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationAdmissionEvidence {
@@ -632,6 +641,10 @@ pub struct GenerationAdmissionEvidence {
     target: GenerationTarget,
     capabilities: ModelCapabilities,
     pricing: PricingEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_catalogue: Option<EvidenceDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thinking: Option<crate::generator::types::ThinkingLevel>,
 }
 
 impl GenerationAdmissionEvidence {
@@ -654,7 +667,27 @@ impl GenerationAdmissionEvidence {
             target,
             capabilities,
             pricing,
+            tool_catalogue: None,
+            thinking: None,
         }
+    }
+
+    pub fn with_thinking(mut self, thinking: crate::generator::types::ThinkingLevel) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+
+    pub fn thinking(&self) -> Option<crate::generator::types::ThinkingLevel> {
+        self.thinking
+    }
+
+    pub fn with_tool_catalogue(mut self, digest: EvidenceDigest) -> Self {
+        self.tool_catalogue = Some(digest);
+        self
+    }
+
+    pub fn tool_catalogue(&self) -> Option<&EvidenceDigest> {
+        self.tool_catalogue.as_ref()
     }
 
     pub fn pricing(&self) -> &PricingEvidence {
@@ -694,6 +727,10 @@ impl GenerationAdmissionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EvidenceKey {
+    ToolCatalogue {
+        session: SessionId,
+        digest: EvidenceDigest,
+    },
     RunContext {
         session: SessionId,
         invocation: RunInvocationId,
@@ -708,9 +745,9 @@ pub enum EvidenceKey {
 impl EvidenceKey {
     pub const fn session(&self) -> SessionId {
         match self {
-            Self::RunContext { session, .. } | Self::GenerationAdmission { session, .. } => {
-                *session
-            }
+            Self::ToolCatalogue { session, .. }
+            | Self::RunContext { session, .. }
+            | Self::GenerationAdmission { session, .. } => *session,
         }
     }
 }
@@ -719,6 +756,7 @@ impl EvidenceKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EvidenceRecord {
+    ToolCatalogue(ToolCatalogueEvidence),
     RunContext(RunContextEvidence),
     GenerationAdmission(GenerationAdmissionEvidence),
 }
@@ -726,6 +764,10 @@ pub enum EvidenceRecord {
 impl EvidenceRecord {
     pub fn key(&self) -> EvidenceKey {
         match self {
+            Self::ToolCatalogue(value) => EvidenceKey::ToolCatalogue {
+                session: value.session,
+                digest: value.digest.clone(),
+            },
             Self::RunContext(value) => EvidenceKey::RunContext {
                 session: value.session,
                 invocation: value.invocation,
@@ -744,6 +786,7 @@ impl EvidenceRecord {
 
     pub const fn version(&self) -> u32 {
         match self {
+            Self::ToolCatalogue(value) => value.version,
             Self::RunContext(value) => value.version,
             Self::GenerationAdmission(value) => value.version,
         }
@@ -760,6 +803,15 @@ impl EvidenceRecord {
             });
         }
         match self {
+            Self::ToolCatalogue(value)
+                if canonical_digest(&value.tools).ok().as_ref() != Some(&value.digest) =>
+            {
+                Some(EvidenceError::Store {
+                    key: self.key(),
+                    diagnostic: "tool catalogue digest does not match its ordered descriptors"
+                        .to_owned(),
+                })
+            }
             Self::GenerationAdmission(value)
                 if value.capabilities.schema_version != ModelCapabilities::SCHEMA_VERSION =>
             {
@@ -769,7 +821,7 @@ impl EvidenceRecord {
                     required: ModelCapabilities::SCHEMA_VERSION,
                 })
             }
-            Self::RunContext(_) | Self::GenerationAdmission(_) => None,
+            Self::ToolCatalogue(_) | Self::RunContext(_) | Self::GenerationAdmission(_) => None,
         }
     }
 
@@ -961,10 +1013,11 @@ impl ManifestEvidence {
                     EvidenceError::UnsupportedVersion {
                         found, required, ..
                     } => ManifestEvidenceError::UnsupportedVersion { found, required },
-                    _ => unreachable!("schema validation returns only schema errors"),
+                    _ => return Err(ManifestEvidenceError::InvalidCatalogue),
                 });
             }
             match record {
+                EvidenceRecord::ToolCatalogue(_) => {}
                 EvidenceRecord::RunContext(value) => projected.run_contexts.push(value.clone()),
                 EvidenceRecord::GenerationAdmission(value) => {
                     if let Some(existing_invocation) =
@@ -1018,6 +1071,7 @@ pub trait EvidenceLogSource: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestEvidenceError {
+    InvalidCatalogue,
     UnknownRecord,
     UnsupportedVersion {
         found: u32,
@@ -1035,6 +1089,9 @@ pub enum ManifestEvidenceError {
 impl fmt::Display for ManifestEvidenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidCatalogue => {
+                f.write_str("tool catalogue digest does not match its ordered descriptors")
+            }
             Self::UnknownRecord => f.write_str("unknown evidence record in valid log prefix"),
             Self::UnsupportedVersion { found, required } => write!(
                 f,

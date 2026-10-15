@@ -19,14 +19,16 @@ use crate::run::RequestId;
 use crate::session::{TargetPublication, TargetSeed};
 use crate::store::session_store::StoreError;
 
-pub const COMPACTION_PROMPT_REVISION: u32 = 1;
+pub const COMPACTION_PROMPT_REVISION: u32 = 2;
 
-pub const COMPACTION_PROMPT: &str = r#"Produce one self-contained context checkpoint for continuing this work in a
+pub const COMPACTION_PROMPT: &str = r###"Produce one self-contained context checkpoint for continuing this work in a
 new session. Preserve every material fact from the complete context above, but
 do not continue the task, address the operator, call tools, or invent missing
 information.
 
-Use these headings:
+Output format is a strict parser contract, not a suggestion. Start immediately
+with # Objective, with no preamble or outer code fence. Use exactly these eight
+level-one headings, each once, in this order:
 # Objective
 # Binding constraints and preferences
 # Completed work and evidence
@@ -36,10 +38,25 @@ Use these headings:
 # Ordered next steps
 # Critical references
 
+Do not emit any other line that starts with "# ", even inside fenced code or
+quoted source excerpts. For copied Markdown headings, shell comments, or error
+lines that start with "# ", indent the line by four spaces or prefix it with
+"> " so it is body text, not a checkpoint heading. Use level-two headings
+("## ") for any additional sections. Do not repeat checkpoint headings when
+quoting an earlier checkpoint; merge its facts into the sections above.
+
 Include exact file paths, symbols, commands, results, identifiers, and error
 details when they matter. Reconcile repeated or superseded information. If an
 earlier context checkpoint is present, preserve every still-relevant fact from
-it. Return only the checkpoint."#;
+it. Return only the checkpoint."###;
+
+/// Exact parser feedback for the single authorized corrective generation.
+pub(crate) fn checkpoint_correction(error: &CheckpointError) -> String {
+    format!(
+        "The checkpoint parser refused your previous output: {error}\nReturn a corrected complete checkpoint only. Use exactly these headings, once each, in this order:\n{}\nIndent or quote copied lines beginning with '# ', including within code fences. Do not call tools or continue the task.",
+        HEADINGS.join("\n")
+    )
+}
 
 const HEADINGS: [&str; 8] = [
     "# Objective",

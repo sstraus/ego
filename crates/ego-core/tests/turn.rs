@@ -10465,17 +10465,17 @@ mod turn {
             .messages
             .messages()
             .iter()
-            .filter(|message| message.role == Role::System)
+            .filter(|message| message.role == Role::User)
             .flat_map(|message| message.content.iter())
             .find_map(|block| match block {
-                ContentBlock::Text { text } if text.starts_with("Admitted skill instruction (") => {
+                ContentBlock::Text { text } if text.contains("Admitted skill instruction (") => {
                     Some(text)
                 }
                 _ => None,
             })
-            .expect("the request carries the admitted skill as a system instruction");
+            .expect("the request carries the admitted skill in the ego-owned context tail");
         assert!(
-            instruction.ends_with("\nExplain this request: preserve these raw arguments: {x: 1}"),
+            instruction.contains("\nExplain this request: preserve these raw arguments: {x: 1}"),
             "the request contains the rendered skill body: {instruction}"
         );
         assert!(
@@ -10527,12 +10527,12 @@ mod turn {
             calls[1].model, "test-model",
             "the skill model pin is cleared"
         );
-        assert!(!calls[1].messages.messages().iter().any(|message| {
+        assert!(calls[1].messages.messages().iter().any(|message| {
             message.content.iter().any(|block| {
                 matches!(
                     block,
                     ContentBlock::Text { text }
-                        if text.starts_with("Admitted skill instruction (")
+                        if text.contains("Admitted skill instruction (")
                 )
             })
         }));
@@ -10543,6 +10543,87 @@ mod turn {
             "completed typed skill turns leave no active skill hooks"
         );
         assert_eq!(state.skill_events().len(), 1);
+    }
+
+    // Catches: moving admitted skill instructions into bounded host context
+    // silently drops the final directive of a valid long skill.
+    #[test]
+    fn long_admitted_skill_keeps_its_final_directive_on_wire() {
+        let location =
+            ego_core::event::skill::SkillSourceLocation::parse("skills/explain/SKILL.md").unwrap();
+        let source_digest = ego_core::event::skill::SkillContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let descriptor = ego_core::event::skill::SkillDescriptorEvidence {
+            id: ego_core::event::skill::SkillId::derive(
+                ego_core::event::skill::SkillSourceAuthority::User,
+                &location,
+                "explain",
+                &source_digest,
+            ),
+            name: "explain".into(),
+            description: "Explain a request".into(),
+            trigger: None,
+            argument_hint: None,
+            source: ego_core::event::skill::SkillSourceAuthority::User,
+            location,
+            source_digest,
+            user_invocable: true,
+            model_invocable: false,
+        };
+        let final_directive =
+            "FINAL DIRECTIVE: report the unresolved evidence before proposing changes.";
+        let body = format!(
+            "{}\n{final_directive}",
+            "Reference material.\n".repeat(4_000)
+        );
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![
+                ego_core::skill::SkillSpec::new(descriptor.clone(), body.into_bytes()).unwrap(),
+            ])
+            .unwrap(),
+        );
+        let operation = ego_core::skill::AdmittedSkillOperation::invoke(&descriptor, "");
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let skill_evidence = SkillEvidence::new();
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::from_registry(
+            &[RegisteredTool::skill(catalogue)],
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        )
+        .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
+        let outcome = block_on(turn.run_admitted_skill(operation)).unwrap();
+        assert!(outcome.ok, "the valid skill was admitted");
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].messages.messages().iter().any(|message| {
+                message.content.iter().any(|block| {
+                    matches!(block, ContentBlock::Text { text } if text.contains(final_directive))
+                })
+            }),
+            "admitted skill's final directive was silently truncated before generation"
+        );
     }
 
     #[test]

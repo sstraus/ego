@@ -60,6 +60,12 @@ pub struct ExportBundle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExportRecord {
+    ToolCatalogueEvidence {
+        session: SessionId,
+        position: Seq,
+        digest: EvidenceDigest,
+        tools: usize,
+    },
     Session {
         session: SessionId,
         lineage: Option<SessionLineage>,
@@ -239,6 +245,7 @@ pub enum ExportEvent {
     },
     AssistantDelta,
     AssistantMessage,
+    HostContextAppended,
     ReasoningDelta,
     ReasoningState,
     ToolCallStarted,
@@ -640,6 +647,15 @@ fn project_evidence(
     redactions: &mut Redactions,
 ) -> ExportRecord {
     match record {
+        EvidenceRecord::ToolCatalogue(catalogue) => {
+            redactions.opaque_prose += catalogue.tools.len() as u64;
+            ExportRecord::ToolCatalogueEvidence {
+                session,
+                position,
+                digest: catalogue.digest.clone(),
+                tools: catalogue.tools.len(),
+            }
+        }
         EvidenceRecord::RunContext(context) => {
             let instructions = context
                 .instructions()
@@ -862,6 +878,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::ToolCallCompleted { ok: *ok }
         }
         EventKind::ToolCallMeasured { timing } => ExportEvent::ToolCallMeasured { timing: *timing },
+        EventKind::HostContextAppended { text: _ } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::HostContextAppended
+        }
         EventKind::DetachedExecStarted { id } => ExportEvent::DetachedExecStarted { id: *id },
         EventKind::DetachedExecSettled { snapshot } => {
             use crate::permit::DetachedExecOutcome;
@@ -1284,6 +1304,7 @@ impl EvidenceValidation {
             return evidence_error(session, position, ExportEvidenceFailure::Duplicate { key });
         }
         match record {
+            EvidenceRecord::ToolCatalogue(_) => {}
             EvidenceRecord::RunContext(context) => {
                 if context.session() != session {
                     return evidence_error(

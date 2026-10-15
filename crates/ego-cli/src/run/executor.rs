@@ -477,7 +477,56 @@ impl CliCompactionCommand {
         &self,
         source_id: SessionId,
     ) -> Result<PreparedCompaction, CompactionError> {
-        let settings = settings(&self.args, |_| Trust::Untrusted, &Stderr)
+        // Cold compaction has no live selection. Recover the last admitted
+        // source model rather than silently using the user's current default.
+        use ego_core::evidence::EvidenceLogSource;
+        let records = self
+            .store
+            .evidence_records(&source_id)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let source_admission = records.iter().rev().find_map(|record| match record {
+            EvidenceRecord::GenerationAdmission(admission)
+                if admission.role() == GenerationRole::Main =>
+            {
+                Some(admission)
+            }
+            _ => None,
+        });
+        let source_catalogue = source_admission
+            .and_then(|admission| admission.tool_catalogue())
+            .map(|digest| {
+                records
+                    .iter()
+                    .find_map(|record| match record {
+                        EvidenceRecord::ToolCatalogue(catalogue) if &catalogue.digest == digest => {
+                            Some(catalogue.tools.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        CompactionError::Internal(
+                            "source tool catalogue evidence is missing".to_owned(),
+                        )
+                    })
+            })
+            .transpose()?;
+        if source_catalogue.is_none() {
+            eprintln!(
+                "Warning: source has no durable tool catalogue; cold compaction uses the current catalogue (best effort, cache prefix may differ)."
+            );
+        }
+        let mut args = self.args.clone();
+        if let Some(admission) = source_admission {
+            args.model = Some(admission.target().canonical_model().0.clone());
+        }
+        if let Some(thinking) = source_admission.and_then(|admission| admission.thinking()) {
+            args.thinking = Some(thinking);
+        } else {
+            eprintln!(
+                "Warning: source has no durable thinking effort; cold compaction uses current thinking (best effort)."
+            );
+        }
+        let settings = settings(&args, |_| Trust::Untrusted, &Stderr)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         let Materials {
             system,
@@ -612,6 +661,9 @@ impl CliCompactionCommand {
         let tools = Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd));
         let mut loop_ = TurnLoop::new(session, runtime, tools)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        if let Some(tools) = source_catalogue {
+            loop_ = loop_.with_compaction_source_tools(tools);
+        }
         if let Some(replayed) = active.replayed() {
             loop_ = loop_.with_replayed_context(replayed);
         }

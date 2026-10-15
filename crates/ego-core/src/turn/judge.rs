@@ -123,6 +123,7 @@ impl JudgeGeneration<'_, '_, '_> {
             profile,
             reference,
             GenerationRole::Judge,
+            &request.tools,
         )?;
         self.journal.append(
             turn,

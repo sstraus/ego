@@ -125,6 +125,8 @@ impl From<Inexpressible> for RequestRefused {
 struct WireRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_retention: Option<&'static str>,
     model: &'a str,
     stream: bool,
     /// Always `false`. See this module's header: the default is `true`.
@@ -291,6 +293,27 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         .collect();
     let wire = WireRequest {
         prompt_cache_key: super::cache::routing_key(req, "openai"),
+        prompt_cache_retention: req.cache.as_ref().and_then(|cache| {
+            // Current vendor guide: GPT-5.6+ uses a different TTL contract.
+            // Do not infer support from a model-name prefix.
+            const EXTENDED: &[&str] = &[
+                "gpt-5.5",
+                "gpt-5.5-pro",
+                "gpt-5.4",
+                "gpt-5.2",
+                "gpt-5.1-codex-max",
+                "gpt-5.1",
+                "gpt-5.1-codex",
+                "gpt-5.1-codex-mini",
+                "gpt-5.1-chat-latest",
+                "gpt-5",
+                "gpt-5-codex",
+                "gpt-4.1",
+            ];
+            (cache.retention == ego_core::generator::capabilities::CacheRetention::Long
+                && EXTENDED.contains(&req.model.as_str()))
+            .then_some("24h")
+        }),
         model: &req.model,
         stream: true,
         store: false,

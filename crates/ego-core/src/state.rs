@@ -385,6 +385,7 @@ pub enum ItemKind {
     ToolCall,
     Question,
     DetachedExecNotification,
+    HostContext,
 }
 
 /// Per-item state: accumulated text for messages, reasoning and tool calls.
@@ -1937,6 +1938,11 @@ impl SessionState {
             EventKind::ToolCallMeasured { timing } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
                     item.tool_timing = Some(*timing);
+                }
+            }
+            EventKind::HostContextAppended { text } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::HostContext) {
+                    item.text = text.clone();
                 }
             }
             EventKind::DetachedExecStarted { id } => {

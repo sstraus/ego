@@ -204,3 +204,34 @@ fn the_row_selects_this_mapping_not_completions() {
     );
     assert_eq!(row.base().as_str(), "https://chatgpt.com/backend-api/");
 }
+
+// Catches: Codex cache writes counted as ordinary input, or incoherent usage
+// accepted after subtracting only cache reads.
+#[tokio::test]
+async fn codex_usage_partitions_cache_writes_and_rejects_overflow() {
+    for (total, read, write, expected) in [(12, 2, 3, Some(7)), (12, 2, 11, None)] {
+        let sse = format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\",\"usage\":{{\"input_tokens\":{total},\"output_tokens\":3,\"input_tokens_details\":{{\"cached_tokens\":{read},\"cache_write_tokens\":{write}}}}}}}}}\n\n"
+        );
+        let events: Vec<_> = OpenAiCodexResponses
+            .decode(
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: Box::pin(futures::stream::iter(vec![Ok(bytes::Bytes::from(sse))])),
+                }),
+                None,
+            )
+            .collect()
+            .await;
+        let usage = events.iter().find_map(|event| match event {
+            AiEvent::Usage(usage) => Some(usage),
+            _ => None,
+        });
+        assert_eq!(usage.map(|usage| usage.uncached_input_tokens), expected);
+        if let Some(usage) = usage {
+            assert_eq!(usage.cache_write_tokens, write);
+            assert_eq!(usage.cache_read_tokens, read);
+        }
+    }
+}

@@ -195,7 +195,7 @@ fn seeded_event(kind: EventKind) -> DomainEvent {
 
 #[test]
 fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
-    assert_eq!(COMPACTION_PROMPT_REVISION, 1);
+    assert_eq!(COMPACTION_PROMPT_REVISION, 2);
     assert!(COMPACTION_PROMPT.contains("Produce one self-contained context checkpoint"));
     assert!(COMPACTION_PROMPT.contains("do not continue the task"));
     assert!(COMPACTION_PROMPT.contains("# Objective"));
@@ -207,6 +207,11 @@ fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
     assert!(COMPACTION_PROMPT.contains("# Ordered next steps"));
     assert!(COMPACTION_PROMPT.contains("# Critical references"));
     assert!(COMPACTION_PROMPT.contains("Return only the checkpoint"));
+    // Catches: copied source headings (including fenced shell comments) are
+    // requested verbatim even though the strict parser rejects them.
+    assert!(COMPACTION_PROMPT.contains("even inside fenced code"));
+    assert!(COMPACTION_PROMPT.contains("indent the line by four spaces"));
+    assert!(COMPACTION_PROMPT.contains("each once, in this order"));
 }
 
 #[test]
@@ -265,7 +270,7 @@ fn compaction_seed_event_carries_exact_source_lineage_revision_and_checkpoint() 
     let encoded = serde_json::to_value(&seeded).expect("seed event is serialisable");
     assert_eq!(encoded["kind"]["kind"], "CompactionSeeded");
     assert_eq!(encoded["kind"]["source"], SOURCE);
-    assert_eq!(encoded["kind"]["prompt_revision"], 1);
+    assert_eq!(encoded["kind"]["prompt_revision"], 2);
     assert_eq!(encoded["kind"]["checkpoint"], checkpoint());
 
     let decoded: DomainEvent = serde_json::from_value(encoded).expect("seed event decodes");
@@ -1015,7 +1020,7 @@ fn prepare_compaction_captures_prefix_and_keeps_compaction_text_private() {
         vec![GenerationRole::Compaction, GenerationRole::Main]
     );
     assert_eq!(compaction_generator.calls().len(), 1);
-    assert!(compaction_generator.calls()[0].tools.is_empty());
+    assert_eq!(compaction_generator.calls()[0].tools, target_tools());
     assert!(
         main_generator.calls().is_empty(),
         "baseline must not generate"
@@ -1295,14 +1300,17 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
             "provider",
         ),
     ] {
-        let (compact_profile, _) = compaction_profile(
+        let (mut compact_profile, _) = compaction_profile(
             "compaction-model",
             ThinkingLevel::Low,
             32_000,
             4_096,
             false,
-            script,
+            script.clone(),
         );
+        if expected == "malformed" {
+            compact_profile.generator = Arc::new(FakeGenerator::new(vec![script.clone(), script]));
+        }
         let (main_profile, _) = compaction_profile(
             "main-model",
             ThinkingLevel::Low,
@@ -1332,7 +1340,7 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
         );
         assert_eq!(
             source_state.charges.len(),
-            1,
+            if expected == "malformed" { 2 } else { 1 },
             "{expected} remains source-accounted"
         );
     }
@@ -1410,4 +1418,190 @@ impl ego_core::turn::RetryPause for NoRetryPause {
     fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
         Box::pin(futures::future::ready(()))
     }
+}
+
+// Catches: compaction drops source cache affinity and hoists its instruction
+// into the system prefix instead of extending the conversation tail.
+#[test]
+fn compaction_preserves_lineage_and_appends_user_instruction() {
+    let (compact_profile, generator) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (main_profile, _) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact_profile)),
+        (GenerationRole::Main, Ok(main_profile)),
+    ]);
+    let (mut turn, _, _) = compaction_turn(source);
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    let calls = generator.calls();
+    let request = &calls[0];
+    assert_eq!(
+        request
+            .cache
+            .as_ref()
+            .expect("compaction keeps source affinity")
+            .lineage_root,
+        prepared.source()
+    );
+    let tail = request.messages.messages().last().unwrap();
+    assert_eq!(
+        tail.role,
+        Role::User,
+        "checkpoint instruction must not change system bytes"
+    );
+    assert_eq!(tail, &Message::text(Role::User, COMPACTION_PROMPT));
+}
+
+// Catches: a live checkpoint loses either the previous request prefix or the
+// final source answer when reusing the in-memory request.
+#[test]
+fn live_compaction_keeps_source_request_and_final_answer() {
+    let (main_profile, main_generator) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta {
+                text: "final source evidence".into(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (compact_profile, generator) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (target_profile, _) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Main, Ok(main_profile)),
+        (GenerationRole::Compaction, Ok(compact_profile)),
+        (GenerationRole::Main, Ok(target_profile)),
+    ]);
+    let (mut turn, _, _) = compaction_turn(source);
+    futures::executor::block_on(turn.run("source intent")).unwrap();
+    futures::executor::block_on(turn.prepare_compaction(None, target_tools())).unwrap();
+    let original = &main_generator.calls()[0];
+    let compact = &generator.calls()[0];
+    assert_eq!(compact.cache, original.cache);
+    assert_eq!(compact.model, original.model);
+    assert_eq!(compact.tools, original.tools);
+    assert_eq!(compact.thinking, original.thinking);
+    assert!(
+        compact
+            .messages
+            .messages()
+            .starts_with(original.messages.messages())
+    );
+    assert!(
+        compact
+            .messages
+            .messages()
+            .iter()
+            .any(|message| message == &Message::text(Role::Assistant, "final source evidence"))
+    );
+    assert_eq!(
+        compact.messages.messages().last(),
+        Some(&Message::text(Role::User, COMPACTION_PROMPT))
+    );
+}
+
+// Catches: one malformed checkpoint aborts without the authorized correction,
+// or correction rewrites the previous input prefix or loses private accounting.
+#[test]
+fn malformed_checkpoint_gets_one_append_only_correction() {
+    let malformed = format!("{}\n# copied comment", checkpoint());
+    let (mut profile, _) = compaction_profile(
+        "source",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let generator = Arc::new(FakeGenerator::new(vec![
+        vec![
+            AiEvent::TextDelta {
+                text: malformed.clone(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    ]));
+    profile.generator = generator.clone();
+    let (main, _) = compaction_profile(
+        "source",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(profile)),
+        (GenerationRole::Main, Ok(main)),
+    ]);
+    let (mut turn, store, _) = compaction_turn(source);
+    futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
+        .expect("one correction succeeds");
+    let calls = generator.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[1]
+            .messages
+            .messages()
+            .starts_with(calls[0].messages.messages())
+    );
+    assert_eq!(calls[1].tools, calls[0].tools);
+    assert_eq!(calls[1].thinking, calls[0].thinking);
+    assert_eq!(calls[1].cache, calls[0].cache);
+    assert_eq!(
+        calls[1].messages.messages()[calls[0].messages.messages().len()],
+        Message::text(Role::Assistant, malformed),
+        "the refused output remains assistant evidence, not a new user instruction"
+    );
+    let tail = calls[1].messages.messages().last().unwrap();
+    assert_eq!(tail.role, Role::User);
+    let ego_core::generator::types::ContentBlock::Text { text } = &tail.content[0] else {
+        panic!("correction text")
+    };
+    assert!(text.contains("checkpoint contains unknown heading # copied comment"));
+    assert!(text.contains("# Critical references"));
+    let state = SessionState::replay(store.events());
+    assert!(state.live_attempts.is_empty());
+    assert_eq!(state.charges.len(), 2);
 }

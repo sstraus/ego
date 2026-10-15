@@ -21,7 +21,7 @@ State is a **reduction over an append-only event log** (pi's reducer,
 `ARCHITECTURE.md` §3, generalised):
 
 ```
-SessionTitleChanged | SessionDeleted | SessionPauseRequested | SessionPaused |
+SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested | SessionPaused |
 SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
 AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState |
@@ -673,3 +673,10 @@ before its contract.
 4. **fx attribution** — any verbatim reuse of fx's system prompt sections
    requires Apache-2.0 attribution in `NOTICE`. Decide at M0 when the prompt
    is written.
+
+Tool catalogue evidence binds cold compaction to the source request's ordered
+provider-visible descriptors. The session log stores one catalogue per content
+digest; generation admission records only that digest. The catalogue does not
+grant tool execution authority. Historical journals without it retain explicit
+best-effort cold compaction. Sanitized export exposes digest and tool count,
+not descriptions or schemas.
