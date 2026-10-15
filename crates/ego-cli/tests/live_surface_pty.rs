@@ -8,6 +8,8 @@ mod missing_program;
 mod permission_receipts;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
+#[path = "live_surface_pty/setup.rs"]
+mod setup;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
