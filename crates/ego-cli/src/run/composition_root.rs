@@ -30,6 +30,7 @@ pub struct CliPrepared {
     pub(super) max_turns: Option<u32>,
     pub(super) goal: Option<String>,
     pub(super) goal_turns: u32,
+    pub(super) goal_check_command: Option<Vec<String>>,
     pub(super) run_deadline: Option<std::time::Instant>,
     pub(super) root: PathBuf,
     pub(super) cwd: PathBuf,
@@ -224,6 +225,7 @@ impl CliPrepared {
         let max_turns = args.max_turns;
         let goal = args.goal.clone();
         let goal_turns = args.goal_turns;
+        let goal_check_command = args.goal_check_command.clone();
         let instructions = system
             .as_ref()
             .map(|prompt| prompt.sources.clone())
@@ -254,6 +256,7 @@ impl CliPrepared {
                 max_turns,
                 goal,
                 goal_turns,
+                goal_check_command,
                 run_deadline,
                 root,
                 cwd,
@@ -504,6 +507,8 @@ impl CliPrepared {
                 provider_recovery: self.provider_recovery,
                 goal: self.goal,
                 goal_turns: self.goal_turns,
+                goal_check_command: self.goal_check_command,
+                goal_ceilings: self.effective.ceilings.clone(),
                 gate,
                 hook_layers: self.profile_layers.as_deref(),
                 hook_trust: self.trust,

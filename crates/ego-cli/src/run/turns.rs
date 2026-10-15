@@ -312,6 +312,8 @@ impl Turns<'_> {
             if self.max_turns.is_some_and(|max| taken >= max) {
                 return (RunTermination::MaxTurns, self.answer(&loop_.state()));
             }
+            let before_turns = loop_.state().turns.len();
+            loop_.set_turn_allowance(self.max_turns.map(|max| max.saturating_sub(taken)));
             let outcome = match next {
                 TurnStart::Checkpoint => {
                     self.one_running(loop_.continue_checkpoint(), cancel).await
@@ -327,7 +329,20 @@ impl Turns<'_> {
                 Ok(outcome) => outcome,
                 Err(termination) => return (termination, self.answer(&loop_.state())),
             };
-            taken += 1;
+            taken = taken.saturating_add(
+                u32::try_from(loop_.state().turns.len().saturating_sub(before_turns))
+                    .unwrap_or(u32::MAX)
+                    .max(1),
+            );
+            if loop_
+                .state()
+                .goal
+                .as_ref()
+                .and_then(|goal| goal.check_stop.as_deref())
+                == Some("run max-turns reached")
+            {
+                return (RunTermination::MaxTurns, self.answer(&loop_.state()));
+            }
 
             if let Some(pending) = loop_.state().pending_question() {
                 return (

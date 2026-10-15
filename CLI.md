@@ -2029,9 +2029,19 @@ for operator-owned goals. `/goal achieve` remains an operator attestation.
 An unmet condition admits a durable `goal_continuation` system message, never an
 operator prompt. Five consecutive observations of the same normalized condition
 block the goal. A changed condition resets that count. The default allowance is
-20 automatic work turns per run; `--goal-turns N` changes it. `ego run --goal TEXT`
+20 automatic work turns per goal identity; `--goal-turns N` sets it when
+checks first start. The allowance and consumed count survive resume. Internal
+continuations count toward `--max-turns`. `ego run --goal TEXT`
 sets an operator-owned objective. The `goal` tool sets or updates a model-authored
 objective, but cannot replace an operator-owned active goal. Provider, permission,
 pause, cancellation and budget stops do not admit automatic work. Invalid checks
 and exhausted allowances emit a visible diagnostic and retain the active goal;
-they never claim achievement.
+they never claim achievement. ACP managed plan metadata exposes `goalStatus`,
+`goalStop`, and `goalContinuationTurns` separately from work-turn completion.
+
+`--goal-check-command '["/path/to/check", "arg"]'` selects a command evaluator
+instead of a model. It receives objective and session evidence JSON on stdin
+and returns only `{ "achieved": true|false, "reason": "evidence or unmet condition" }`
+on stdout. Its exact exec authority must be granted by ordinary policy; it uses
+the same confinement and cancellation scope, with a 60-second timeout. Command
+checks do not incur model cost. Model checks remain accounted generations.

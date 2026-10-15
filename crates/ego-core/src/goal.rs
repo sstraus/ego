@@ -76,6 +76,12 @@ pub struct GoalRecord {
     pub derived_from: Option<GoalId>,
     pub created_seq: Seq,
     pub state: GoalState,
+    #[serde(default)]
+    pub continuation_turns: u32,
+    #[serde(default)]
+    pub continuation_budget: Option<u32>,
+    #[serde(default)]
+    pub check_stop: Option<String>,
     pub blocker_reason: Option<String>,
     pub blocker_observations: u64,
     pub achieved_by: Option<GoalOwner>,

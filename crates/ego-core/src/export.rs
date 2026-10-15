@@ -230,6 +230,7 @@ pub enum ExportEvent {
     GoalSet,
     GoalTransitioned,
     GoalContinuation,
+    GoalCheckConfigured,
     GoalUpdated,
     GoalCheckStopped,
     PromptQueued {
@@ -815,6 +816,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::GoalSet
         }
+        EventKind::GoalCheckConfigured { .. } => ExportEvent::GoalCheckConfigured,
         EventKind::GoalContinuation { .. } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalContinuation

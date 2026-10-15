@@ -337,6 +337,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         max_output_tokens: None,
         goal: None,
         goal_turns: 20,
+        goal_check_command: None,
         max_turns: None,
         timeout: None,
         tools: shape.tools,

@@ -320,6 +320,11 @@ pub enum EventKind {
         ceilings: crate::ceiling::Ceilings,
         derived_from: Option<GoalId>,
     },
+    /// The goal continuation allowance admitted for this goal identity.
+    GoalCheckConfigured {
+        id: GoalId,
+        continuation_budget: u32,
+    },
     /// System-owned work admitted after an independent goal check.
     GoalContinuation { id: GoalId, text: String },
     /// A check could not continue safely or exhausted its allowance.
@@ -782,6 +787,7 @@ impl EventKind {
             EventKind::SessionResumed { .. } => "session_resumed",
             EventKind::GoalSet { .. } => "goal_set",
             EventKind::GoalContinuation { .. } => "goal_continuation",
+            EventKind::GoalCheckConfigured { .. } => "goal_check_configured",
             EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
             EventKind::GoalUpdated { .. } => "goal_updated",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",

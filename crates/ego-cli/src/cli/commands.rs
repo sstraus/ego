@@ -749,6 +749,10 @@ pub(super) struct Flags {
     #[arg(long, default_value_t = 20)]
     pub(super) goal_turns: u32,
 
+    /// Evaluator argv as a JSON string array; reads evidence JSON on stdin.
+    #[arg(long, value_parser = parse_goal_check_command)]
+    pub(super) goal_check_command: Option<Vec<String>>,
+
     /// Cap the turns this run may take.
     #[arg(long)]
     pub(super) max_turns: Option<u32>,
@@ -857,4 +861,12 @@ pub(super) struct SetupCommand {
     pub(super) profile: Option<String>,
     #[arg(long)]
     pub(super) directory: Option<PathBuf>,
+}
+
+fn parse_goal_check_command(value: &str) -> Result<Vec<String>, String> {
+    let argv: Vec<String> = serde_json::from_str(value).map_err(|error| error.to_string())?;
+    if argv.is_empty() || argv[0].trim().is_empty() {
+        return Err("goal check command must name an executable".into());
+    }
+    Ok(argv)
 }

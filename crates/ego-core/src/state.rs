@@ -1831,6 +1831,9 @@ impl SessionState {
                         derived_from: *derived_from,
                         created_seq: ev.env.seq,
                         state: GoalState::Active,
+                        continuation_turns: 0,
+                        continuation_budget: None,
+                        check_stop: None,
                         blocker_reason: None,
                         blocker_observations: 0,
                         achieved_by: None,
@@ -1839,12 +1842,32 @@ impl SessionState {
                     });
                 }
             }
-            EventKind::GoalContinuation { text, .. } => {
+            EventKind::GoalCheckConfigured {
+                id,
+                continuation_budget,
+            } => {
+                if let Some(goal) = self
+                    .goal
+                    .as_mut()
+                    .filter(|goal| goal.id == *id && goal.continuation_budget.is_none())
+                {
+                    goal.continuation_budget = Some(*continuation_budget);
+                }
+            }
+            EventKind::GoalContinuation { id, text } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.continuation_turns = goal.continuation_turns.saturating_add(1);
+                    goal.check_stop = None;
+                }
                 if let Some(item) = self.item_mut(ev, ItemKind::GoalContinuation) {
                     item.text = text.clone();
                 }
             }
-            EventKind::GoalCheckStopped { .. } => {}
+            EventKind::GoalCheckStopped { id, reason } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.check_stop = Some(reason.clone());
+                }
+            }
             EventKind::GoalUpdated { id, objective } => {
                 if let Some(goal) = self.goal.as_mut().filter(|goal| {
                     goal.id == *id

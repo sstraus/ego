@@ -252,3 +252,41 @@ fn independent_check_can_achieve_operator_goal_but_requires_evidence() {
     }
     assert_eq!(state.goal.unwrap().achieved_by, Some(GoalOwner::Check));
 }
+
+#[test]
+fn goal_continuation_count_and_stop_survive_replay_for_managed_consumers() {
+    // Catches: a resumed loop forgets its allowance and reports a stopped goal as ordinary completion.
+    let turn = TurnId::new();
+    let (creation, id) = started(turn, 1, GoalOwner::Operator);
+    let events = vec![
+        creation,
+        event(
+            turn,
+            2,
+            EventKind::GoalContinuation {
+                id,
+                text: "continue verification".into(),
+            },
+        ),
+        event(
+            turn,
+            3,
+            EventKind::GoalCheckStopped {
+                id,
+                reason: "goal continuation budget exhausted (1)".into(),
+            },
+        ),
+        event(
+            turn,
+            4,
+            EventKind::TurnCompleted {
+                ok: true,
+                exit_reason: ExitReason::Completed,
+            },
+        ),
+    ];
+    let state = SessionState::replay(events);
+    let goal = serde_json::to_value(state.goal.unwrap()).unwrap();
+    assert_eq!(goal["continuation_turns"], 1);
+    assert_eq!(goal["check_stop"], "goal continuation budget exhausted (1)");
+}
