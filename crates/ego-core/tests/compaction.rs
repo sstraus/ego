@@ -1589,6 +1589,11 @@ fn malformed_checkpoint_gets_one_append_only_correction() {
     assert_eq!(calls[1].tools, calls[0].tools);
     assert_eq!(calls[1].thinking, calls[0].thinking);
     assert_eq!(calls[1].cache, calls[0].cache);
+    assert_eq!(
+        calls[1].messages.messages()[calls[0].messages.messages().len()],
+        Message::text(Role::Assistant, malformed),
+        "the refused output remains assistant evidence, not a new user instruction"
+    );
     let tail = calls[1].messages.messages().last().unwrap();
     assert_eq!(tail.role, Role::User);
     let ego_core::generator::types::ContentBlock::Text { text } = &tail.content[0] else {

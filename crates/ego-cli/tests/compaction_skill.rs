@@ -269,3 +269,81 @@ fn cold_compaction_recovers_source_thinking() {
         "cold compaction must preserve source thinking"
     );
 }
+
+// Catches: a trailing Judge/Hook/Subagent admission replaces Main cache affinity.
+#[test]
+fn cold_compaction_ignores_trailing_judge_admission() {
+    use ego_core::event::id::{GenerationId, Seq};
+    use ego_core::generator::attempt::AttemptRef;
+    use ego_core::store::codec::encode_record;
+    let stub = Stub::start(fixture_plan());
+    let places = Places::new();
+    let source = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--thinking",
+            "low",
+            "--tools",
+            "read",
+            "--session-id",
+            FIXTURE_SESSION_ID,
+        ])
+        .arg("Reply READY.")
+        .run();
+    assert_eq!(source.code, Some(0), "{}", source.stderr);
+    let log = places
+        .home_path()
+        .join("sessions")
+        .join(FIXTURE_SESSION_ID)
+        .join("events.jsonl");
+    let image = std::fs::read_to_string(&log).unwrap();
+    let records: Vec<Value> = image
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let mut admission = records
+        .iter()
+        .rev()
+        .find_map(|record| {
+            let evidence = &record["payload"]["evidence"];
+            (evidence["kind"] == "generation_admission").then(|| evidence.clone())
+        })
+        .expect("source admission exists");
+    admission["role"] = serde_json::json!("judge");
+    admission["thinking"] = serde_json::json!("off");
+    admission["target"]["canonical_model"] = serde_json::json!("ollama/not-the-main-model");
+    admission["target"]["wire_model"] = serde_json::json!("not-the-main-model");
+    admission["attempt"] = serde_json::to_value(AttemptRef::first(GenerationId::new())).unwrap();
+    let payload = serde_json::json!({"kind":"evidence", "evidence":admission});
+    let seq: Seq = serde_json::from_value(serde_json::json!(
+        records.last().unwrap()["seq"].as_u64().unwrap() + 1
+    ))
+    .unwrap();
+    let encoded = encode_record(seq, &payload).unwrap();
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+    file.write_all(&encoded).unwrap();
+    file.write_all(b"\n").unwrap();
+    drop(file);
+    let compacted = places
+        .ego(&stub)
+        .subcommand("compact")
+        .arg(FIXTURE_SESSION_ID)
+        .args(["--output", "json"])
+        .run();
+    assert_eq!(compacted.code, Some(0), "{}", compacted.stderr);
+    let requests = stub.generations();
+    assert_eq!(
+        requests[1]["model"], requests[0]["model"],
+        "trailing judge must not replace Main model"
+    );
+    assert_eq!(
+        requests[1]["reasoning_effort"], "low",
+        "trailing judge must not replace Main effort"
+    );
+    assert_eq!(requests[1]["tools"], requests[0]["tools"]);
+}

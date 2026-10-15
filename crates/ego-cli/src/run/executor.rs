@@ -483,18 +483,16 @@ impl CliCompactionCommand {
             .store
             .evidence_records(&source_id)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
-        let source_catalogue = records
-            .iter()
-            .rev()
-            .find_map(|record| match record {
-                EvidenceRecord::GenerationAdmission(admission)
-                    if admission.role() != GenerationRole::Compaction =>
-                {
-                    Some(admission.tool_catalogue())
-                }
-                _ => None,
-            })
-            .flatten()
+        let source_admission = records.iter().rev().find_map(|record| match record {
+            EvidenceRecord::GenerationAdmission(admission)
+                if admission.role() == GenerationRole::Main =>
+            {
+                Some(admission)
+            }
+            _ => None,
+        });
+        let source_catalogue = source_admission
+            .and_then(|admission| admission.tool_catalogue())
             .map(|digest| {
                 records
                     .iter()
@@ -517,29 +515,10 @@ impl CliCompactionCommand {
             );
         }
         let mut args = self.args.clone();
-        if let Some(model) = records.iter().rev().find_map(|record| match record {
-            EvidenceRecord::GenerationAdmission(admission)
-                if admission.role() != GenerationRole::Compaction =>
-            {
-                Some(admission.target().canonical_model().0.clone())
-            }
-            _ => None,
-        }) {
-            args.model = Some(model);
+        if let Some(admission) = source_admission {
+            args.model = Some(admission.target().canonical_model().0.clone());
         }
-        if let Some(thinking) = records
-            .iter()
-            .rev()
-            .find_map(|record| match record {
-                EvidenceRecord::GenerationAdmission(admission)
-                    if admission.role() != GenerationRole::Compaction =>
-                {
-                    Some(admission.thinking())
-                }
-                _ => None,
-            })
-            .flatten()
-        {
+        if let Some(thinking) = source_admission.and_then(|admission| admission.thinking()) {
             args.thinking = Some(thinking);
         } else {
             eprintln!(
