@@ -30,6 +30,40 @@ fn card_notice_is_a_standard_message_with_an_open_result_action() {
 }
 
 #[test]
+fn replay_does_not_merge_distinct_failures_from_the_same_turn_into_one_card() {
+    use ego_acp::project::project_replay_v1;
+    use ego_core::event::id::TurnId;
+    use ego_core::generator::types::ErrorKind;
+    use ego_core::public::PublicEvent;
+    use ego_core::session_lifecycle::ReplayFrame;
+
+    // A failed provider attempt and a later failed attempt can both emit
+    // item-less errors in one turn. ACP chunks with one message id append.
+    let turn = TurnId::new();
+    let frames = ["first provider failed", "fallback provider failed"]
+        .into_iter()
+        .map(|message| ReplayFrame {
+            event: PublicEvent::Error {
+                turn,
+                item: None,
+                message: message.to_owned(),
+                kind: ErrorKind::Unclassified,
+            },
+            state: Default::default(),
+            inherited: false,
+        })
+        .collect::<Vec<_>>();
+    let updates = project_replay_v1(&frames, None, std::path::Path::new("/workspace"));
+    assert_eq!(updates.len(), 2);
+    let first = serde_json::to_value(&updates[0]).unwrap();
+    let second = serde_json::to_value(&updates[1]).unwrap();
+    assert_ne!(
+        first["messageId"], second["messageId"],
+        "distinct historical failures must not append into one ACP card"
+    );
+}
+
+#[test]
 fn replay_keeps_historical_failure_as_a_card_without_changing_live_errors() {
     use ego_acp::project::{project_replay_v1, project_v1};
     use ego_core::event::id::TurnId;
