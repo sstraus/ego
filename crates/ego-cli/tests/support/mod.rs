@@ -1683,7 +1683,13 @@ impl AcpHost {
             .inbox
             .read_line(&mut line)
             .expect("the agent is writing");
-        assert!(read > 0, "the agent closed without answering");
+        if read == 0 {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = self.running.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            panic!("the agent closed without answering: {stderr}");
+        }
         serde_json::from_str(&line)
             .unwrap_or_else(|error| panic!("ACP stdout was not JSON-RPC ({error}): {line}"))
     }

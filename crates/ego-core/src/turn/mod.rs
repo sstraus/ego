@@ -3044,7 +3044,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     None,
                     EventKind::GoalContinuation { id, text },
                 )?;
-                driven = self.drive(turn, &[]).await?;
+                // The ordinary caller already holds a drive future while it
+                // finishes the turn. Keep continuation drive state off that
+                // stack, including for ACP calls without an active goal.
+                driven = Box::pin(self.drive(turn, &[])).await?;
                 continue;
             }
             self.close_and_drain_controls(turn).await?;
