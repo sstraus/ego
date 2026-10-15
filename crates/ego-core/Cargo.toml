@@ -21,6 +21,8 @@ jsonschema = { version = "0.49.9", default-features = false }
 # Full bounded PNG validation. Pure computation; exact source bytes are retained.
 png = "0.18.1"
 schemars = "1.2.2"
+# Pure argument tokenization; never invokes a shell.
+shell-words = "1.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 # Instruction-file digests (docs/decisions/2026-08-21-instructions-a-workspace-
 # may-hand-a-model.md §7). Deliberately not the store's xxhash64: that detects

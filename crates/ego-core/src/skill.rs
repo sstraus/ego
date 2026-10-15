@@ -370,21 +370,85 @@ impl SkillSpec {
         }
         let body = std::str::from_utf8(&self.body)
             .map_err(|_| SkillError::new("admitted skill body is not UTF-8"))?;
-        Ok(render_once(body, arguments))
+        render_once(body, arguments, &self.arguments)
     }
 }
 
-fn render_once(body: &str, arguments: &str) -> String {
-    const TOKEN: &str = "$ARGUMENTS";
+// Interpret only source tokens: inserted argument bytes are never scanned again.
+fn render_once(body: &str, arguments: &str, names: &[String]) -> Result<String, SkillError> {
+    let values = shell_words::split(arguments)
+        .map_err(|error| SkillError::new(format!("invalid skill argument quoting: {error}")))?;
     let mut rendered = String::with_capacity(body.len().saturating_add(arguments.len()));
     let mut remaining = body;
-    while let Some(offset) = remaining.find(TOKEN) {
-        rendered.push_str(&remaining[..offset]);
-        rendered.push_str(arguments);
-        remaining = &remaining[offset + TOKEN.len()..];
+    let mut received = false;
+    while let Some(offset) = remaining.find('$') {
+        let prefix = &remaining[..offset];
+        let tail = &remaining[offset + 1..];
+        let (length, value) = argument_token(tail, arguments, &values, names);
+        // Exactly one immediately preceding backslash escapes a known token.
+        let escaped = prefix.ends_with('\\') && !prefix.ends_with("\\\\");
+        if length > 0 && escaped {
+            rendered.push_str(&prefix[..prefix.len() - 1]);
+            rendered.push('$');
+            rendered.push_str(&tail[..length]);
+        } else {
+            rendered.push_str(prefix);
+            if let Some(value) = value {
+                rendered.push_str(value);
+                received = true;
+            } else {
+                rendered.push('$');
+                rendered.push_str(&tail[..length]);
+            }
+        }
+        remaining = &tail[length..];
     }
     rendered.push_str(remaining);
-    rendered
+    if !received && !arguments.is_empty() {
+        rendered.push_str("\n\nARGUMENTS: ");
+        rendered.push_str(arguments);
+    }
+    Ok(rendered)
+}
+
+fn argument_token<'a>(
+    tail: &str,
+    raw: &'a str,
+    values: &'a [String],
+    names: &[String],
+) -> (usize, Option<&'a str>) {
+    if let Some(indexed) = tail.strip_prefix("ARGUMENTS[") {
+        let digits = indexed.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && indexed[digits..].starts_with(']') {
+            let value = indexed[..digits]
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| values.get(i));
+            return (11 + digits, value.map(String::as_str));
+        }
+        // A malformed indexed token must not be consumed as the raw prefix.
+        return (0, None);
+    }
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        let value = tail[..digits]
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| values.get(i));
+        return (digits, value.map(String::as_str));
+    }
+    let length = tail
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        .count();
+    let name = &tail[..length];
+    if name == "ARGUMENTS" {
+        return (length, Some(raw));
+    }
+    if let Some(index) = names.iter().position(|candidate| candidate == name) {
+        return (length, Some(values.get(index).map_or("", String::as_str)));
+    }
+    (0, None)
 }
 
 /// One canonical immutable catalogue used by user and model admission.

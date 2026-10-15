@@ -58,7 +58,7 @@ use ego_core::turn::{CancelToken, Journal, RegisteredTool, SharedJournal};
 
 const DIGEST_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const DIGEST_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-const BODY: &[u8] = b"Explain $ARGUMENTS and keep $1 inert.";
+const BODY: &[u8] = br"Explain $ARGUMENTS and keep \$1 inert.";
 
 type BlobRecord = (BlobRef, Vec<u8>);
 type CommittedBlobs = Arc<Mutex<BTreeMap<String, BlobRecord>>>;
@@ -469,6 +469,106 @@ fn renderer_is_one_inert_pass_and_preserves_the_exact_raw_argument_tail() {
     let rendered = skill.render(&operation).expect("inert skill rendering");
     assert_eq!(rendered, "Explain $(touch /tmp/nope) and keep $1 inert.");
     assert_eq!(skill.render(&operation).unwrap(), rendered);
+}
+
+// Catches: raw-prefix replacement corrupts indexed tokens and skips named values.
+#[test]
+fn renderer_preserves_index_boundaries_named_values_and_literal_insertions() {
+    let skill = spec_with_body("args", DIGEST_A, true, true,
+        b"raw=[$ARGUMENTS]; zero=[$0]; one=[$ARGUMENTS[1]]; first=[$first]; missing=[$2]; absent=[$third]")
+        .with_arguments(["first", "second", "third"]);
+    let operation = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "alpha beta".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&operation).unwrap(),
+        "raw=[alpha beta]; zero=[alpha]; one=[beta]; first=[alpha]; missing=[$2]; absent=[]"
+    );
+    let operation = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "\"$ARGUMENTS hello\" 'second value'".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&operation).unwrap(),
+        "raw=[\"$ARGUMENTS hello\" 'second value']; zero=[$ARGUMENTS hello]; one=[second value]; first=[$ARGUMENTS hello]; missing=[$2]; absent=[]"
+    );
+}
+
+// Catches: unused arguments disappear when no placeholder receives a value.
+#[test]
+fn renderer_appends_unused_arguments_but_not_after_missing_named_values() {
+    for (body, expected) in [
+        ("body", "body\n\nARGUMENTS: alpha"),
+        ("$2", "$2\n\nARGUMENTS: alpha"),
+        ("$missing", ""),
+    ] {
+        let skill = spec_with_body("args", DIGEST_A, true, true, body.as_bytes())
+            .with_arguments(["first", "missing"]);
+        let op = SkillOperation::Invoke {
+            name: "args".into(),
+            arguments: "alpha".into(),
+            bare: false,
+        };
+        assert_eq!(skill.render(&op).unwrap(), expected);
+    }
+}
+
+// Catches: empty quoted positions collapse or invalid quoting silently changes values.
+#[test]
+fn renderer_keeps_empty_positions_and_rejects_unterminated_quotes() {
+    let skill = spec_with_body(
+        "args",
+        DIGEST_A,
+        true,
+        true,
+        b"$0|$1|$2|$ARGUMENTS[99]|$ARGUMENTS[bad]",
+    );
+    let op = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "'' café tail".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&op).unwrap(),
+        "|café|tail|$ARGUMENTS[99]|$ARGUMENTS[bad]"
+    );
+    let op = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "'unclosed".into(),
+        bare: false,
+    };
+    assert!(
+        skill
+            .render(&op)
+            .unwrap_err()
+            .to_string()
+            .contains("quoting")
+    );
+}
+
+// Catches: escaped placeholders expand or prefixes consume unknown names.
+#[test]
+fn renderer_respects_escapes_token_boundaries_and_multi_digit_positions() {
+    let skill = spec_with_body(
+        "args",
+        DIGEST_A,
+        true,
+        true,
+        br"\$0 \\$1 $10 $firstly $ARGUMENTS_SUFFIX $first",
+    )
+    .with_arguments(["first"]);
+    let op = SkillOperation::Invoke {
+        name: "args".into(),
+        arguments: "a b c d e f g h i j k".into(),
+        bare: false,
+    };
+    assert_eq!(
+        skill.render(&op).unwrap(),
+        r"$0 \\b k $firstly $ARGUMENTS_SUFFIX a"
+    );
 }
 
 #[test]
