@@ -36,6 +36,7 @@ complete -c ego -n "__fish_ego_needs_command" -f -a "usage" -d 'Report usage, co
 complete -c ego -n "__fish_ego_needs_command" -f -a "models" -d 'List the shared model catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
+complete -c ego -n "__fish_ego_needs_command" -f -a "setup" -d 'Inspect expected work without running effects.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "acp" -d 'Serve the Agent Client Protocol on stdio or an endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "auth" -d 'Manage subscription credentials.'
@@ -218,6 +219,11 @@ complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcomman
 complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -l json -d 'Emit the exact versioned health snapshot'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand setup" -l items -d 'Limit proposals to these report item IDs (comma-separated)' -r
+complete -c ego -n "__fish_ego_using_subcommand setup" -l judge -d 'Offer a validated judge for unresolved policy; never authorizes an action' -r
+complete -c ego -n "__fish_ego_using_subcommand setup" -l profile -r
+complete -c ego -n "__fish_ego_using_subcommand setup" -l directory -r -F
+complete -c ego -n "__fish_ego_using_subcommand setup" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -s C -d 'Run as if started in DIR' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included' -r

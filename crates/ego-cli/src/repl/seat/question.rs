@@ -131,6 +131,28 @@ pub(super) fn answer_control(
         control => control,
     };
     let control = match control {
+        Control::SelectSetup { request, reply } => {
+            let outcome = if phase.get() == EditPhase::Busy {
+                QuestionOutcome::Unavailable
+            } else {
+                let after = phase.get();
+                let saved = enter_modal(editor, phase, surface.status);
+                let outcome = answer_question(editor, surface, &request);
+                leave_modal(editor, phase, surface.status, saved, after);
+                outcome
+            };
+            let _ = reply.send(outcome);
+            return true;
+        }
+        Control::ConfirmSetup { text, reply } => {
+            let confirmation = if phase.get() == EditPhase::Busy {
+                Confirmation::Declined
+            } else {
+                confirm_surface_action(editor, phase, surface.status, &text, false)
+            };
+            let _ = reply.send(confirmation);
+            return true;
+        }
         Control::ConfirmRemember { reply } => {
             let busy = phase.get() == EditPhase::Busy;
             let confirmation = confirm_surface_action(
@@ -338,6 +360,9 @@ pub(super) fn answer_control(
         }
         Control::ActivateSession { .. } => unreachable!("activation is handled before modal entry"),
         Control::Activate { .. } => unreachable!("activation is handled before modal entry"),
+        Control::SelectSetup { .. } | Control::ConfirmSetup { .. } => {
+            unreachable!("setup confirmation is handled before modal entry")
+        }
         Control::ConfirmRemember { .. } => {
             unreachable!("remember confirmation is handled before modal entry")
         }

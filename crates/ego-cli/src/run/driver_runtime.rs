@@ -1429,6 +1429,92 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         }
                                         continue;
                                     }
+                                    repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
+                                        let setup_args = crate::cli::SetupArgs {
+                                            items: None,
+                                            judge: None,
+                                            prompt: (!prompt.is_empty()).then_some(prompt),
+                                            profile: None,
+                                            directory: Some(root.clone()),
+                                        };
+                                        let confirm = |question: String| {
+                                            status
+                                                .as_ref()
+                                                .filter(|status| status.human)
+                                                .is_some_and(|status| {
+                                                    matches!(
+                                                        status.seat.confirm_setup(question),
+                                                        repl::Confirmation::Confirmed
+                                                    )
+                                                })
+                                        };
+                                        let select = |findings: &[ego_core::setup::Finding]| {
+                                            use ego_core::question::{
+                                                QuestionAnswer, QuestionMode, QuestionOption,
+                                                QuestionOutcome, QuestionRequest,
+                                            };
+                                            let status =
+                                                status.as_ref().filter(|status| status.human)?;
+                                            let options = findings
+                                                .iter()
+                                                .map(|finding| {
+                                                    QuestionOption::new(
+                                                        finding.id.to_string(),
+                                                        ego_core::permit::terminal_safe(&format!(
+                                                            "{}: {} — {}",
+                                                            finding.id,
+                                                            finding.requested.display(),
+                                                            finding.evidence
+                                                        )),
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>();
+                                            if options.is_empty() {
+                                                return Some(Vec::new());
+                                            }
+                                            let request = QuestionRequest::new(
+                                                "Select setup proposal items; only selected items enter the preview. Final confirmation still required.",
+                                                QuestionMode::Multiple,
+                                                options,
+                                                false,
+                                            );
+                                            match status.seat.select_setup(request) {
+                                                QuestionOutcome::Answered(
+                                                    QuestionAnswer::Multiple(ids),
+                                                ) => ids
+                                                    .into_iter()
+                                                    .map(|id| id.parse::<usize>().ok())
+                                                    .collect(),
+                                                _ => None,
+                                            }
+                                        };
+                                        let mut setup_cancel = status
+                                            .as_ref()
+                                            .map(|status| status.seat.setup_cancellation());
+                                        let terminal_cancel = async {
+                                            match setup_cancel.as_mut() {
+                                                Some(cancel) => cancel.cancelled().await,
+                                                None => std::future::pending::<()>().await,
+                                            }
+                                        };
+                                        let setup_result = tokio::select! {
+                                            biased;
+                                            _ = terminal_cancel => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
+                                            _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
+                                            result = crate::setup::observed_selection_host(
+                                                root.clone(),
+                                                &setup_args,
+                                                Some(&confirm),
+                                                Some(&select),
+                                            ) => result,
+                                        };
+                                        drop(setup_cancel);
+                                        match setup_result {
+                                            Ok(report) => diagnostics.note(&report),
+                                            Err(error) => diagnostics.note(&error.to_string()),
+                                        }
+                                        continue;
+                                    }
                                     // The same snapshot `ego doctor` prints,
                                     // built by the same probes. Two renderings
                                     // of one value is the whole contract; two

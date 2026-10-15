@@ -19,7 +19,7 @@ mod workspace_trust;
 
 pub use discovery::{
     CwdOutsideRoot, Found, INSTRUCTIONS_FILE, Instruction, InstructionIo, InstructionSet, Limits,
-    Refusal, Selection, Skipped, SystemPrompt, load, plan, system_prompt,
+    Refusal, Selection, Skipped, SystemPrompt, instruction_references, load, plan, system_prompt,
 };
 pub use error::ConfigError;
 pub use layer::{
@@ -29,9 +29,10 @@ pub use layer::{
     PermCfg, ProfileLayer, StatusSegmentName, StatuslineLayer, UiLayer, is_forbidden_auth_header,
 };
 pub use mutation::{
-    ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigEditHandle,
-    UserConfigEditResult, UserConfigError, UserConfigMutation, UserConfigMutationFacts,
-    UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
+    ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigBatch,
+    UserConfigEditHandle, UserConfigEditResult, UserConfigError, UserConfigMutation,
+    UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
+    UserConfigStore,
 };
 pub use provenance::SettingProvenance;
 pub use resolve::{

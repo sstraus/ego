@@ -28,6 +28,7 @@ pub enum ActionId {
     Statusline,
     Export,
     Doctor,
+    Setup,
     Config,
     Quit,
     New,
@@ -87,6 +88,7 @@ pub enum Dispatch {
     Fork(ego_core::event::id::ItemId),
     Hooks,
     Config(String),
+    Setup(String),
     Tasks(String),
     Mcp(String),
     Prompt,
@@ -505,6 +507,7 @@ impl ActionRegistry {
                 "config",
                 "Inspect configuration — /config [perimeter | set KEY VALUE]",
             ),
+            enabled(Setup, "setup", "Inspect expected work without effects"),
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(
@@ -912,6 +915,15 @@ impl ActionRegistry {
                 } else {
                     Dispatch::Refused {
                         reason: "export is unavailable",
+                    }
+                };
+            }
+            if name == "setup" && self.resolve_slash(name) == Some(ActionId::Setup) {
+                return if self.availability(ActionId::Setup) == Availability::Enabled {
+                    Dispatch::Setup(raw_arguments.trim().to_owned())
+                } else {
+                    Dispatch::Refused {
+                        reason: "setup is unavailable",
                     }
                 };
             }

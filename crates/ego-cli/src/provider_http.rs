@@ -20,7 +20,7 @@ use ego_mcp::{
 use ego_tools::clock::SystemClock;
 use ego_tools::credentials::{OsGenerationPolicyCaptureStore, OsResumeKey};
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts};
-use ego_tools::http::SystemResolver;
+use ego_tools::http::{InferenceHttpPorts, SystemResolver};
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
 use ego_tools::mcp_continuation::JsonlContinuationJournal;
 use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
@@ -31,27 +31,58 @@ const COMMAND_EVIDENCE_CAPACITY: u64 = 64 * 1024 * 1024;
 
 /// The CLI-owned adapter joining provider authority to one run's raw ports.
 pub struct ProviderHttpAdapter {
-    ports: Arc<RunEffectPorts>,
+    authority: ProviderHttpAuthority,
+}
+
+#[derive(Clone)]
+enum ProviderHttpAuthority {
+    Run(Arc<RunEffectPorts>),
+    Inference(Arc<InferenceHttpPorts>),
+}
+
+impl ProviderHttpAuthority {
+    fn begin_call(&self) -> Instant {
+        match self {
+            Self::Run(ports) => ports.begin_http_call(),
+            Self::Inference(ports) => ports.begin_call(),
+        }
+    }
+    fn guarded(&self) -> GuardedHttp {
+        match self {
+            Self::Run(ports) => GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle()),
+            Self::Inference(ports) => {
+                GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle())
+            }
+        }
+    }
 }
 
 impl ProviderHttpAdapter {
     pub fn new(ports: Arc<RunEffectPorts>) -> Self {
-        Self { ports }
+        Self {
+            authority: ProviderHttpAuthority::Run(ports),
+        }
+    }
+
+    pub fn inference(ports: Arc<InferenceHttpPorts>) -> Self {
+        Self {
+            authority: ProviderHttpAuthority::Inference(ports),
+        }
     }
 }
 
 impl Http for ProviderHttpAdapter {
     fn begin_call(&self) -> Box<dyn HttpCall> {
         Box::new(ProviderHttpCall {
-            deadline: self.ports.begin_http_call(),
-            ports: Arc::clone(&self.ports),
+            deadline: self.authority.begin_call(),
+            authority: self.authority.clone(),
             profile: None,
         })
     }
 }
 
 struct ProviderHttpCall {
-    ports: Arc<RunEffectPorts>,
+    authority: ProviderHttpAuthority,
     deadline: Instant,
     profile: Option<HttpProfileFingerprint>,
 }
@@ -73,10 +104,11 @@ impl HttpCall for ProviderHttpCall {
         }
         self.profile.get_or_insert(profile);
 
-        let ports = Arc::clone(&self.ports);
+        let authority = self.authority.clone();
         let deadline = self.deadline;
         Box::pin(async move {
-            GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle())
+            authority
+                .guarded()
                 .execute_admitted(route, connect, request, deadline)
                 .await
         })

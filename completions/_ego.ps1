@@ -34,6 +34,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('models', 'models', [CompletionResultType]::ParameterValue, 'List the shared model catalogue.')
             [CompletionResult]::new('hooks', 'hooks', [CompletionResultType]::ParameterValue, 'Inspect the admitted system and user hook catalogue.')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Report a read-only redacted health snapshot of this installation.')
+            [CompletionResult]::new('setup', 'setup', [CompletionResultType]::ParameterValue, 'Inspect expected work without running effects.')
             [CompletionResult]::new('acp', 'acp', [CompletionResultType]::ParameterValue, 'Serve the Agent Client Protocol on stdio or an endpoint.')
             [CompletionResult]::new('a2a', 'a2a', [CompletionResultType]::ParameterValue, 'Serve the Agent2Agent protocol on a local or loopback endpoint.')
             [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Manage subscription credentials.')
@@ -260,6 +261,15 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;doctor' {
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the exact versioned health snapshot')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;setup' {
+            [CompletionResult]::new('--items', '--items', [CompletionResultType]::ParameterName, 'Limit proposals to these report item IDs (comma-separated)')
+            [CompletionResult]::new('--judge', '--judge', [CompletionResultType]::ParameterName, 'Offer a validated judge for unresolved policy; never authorizes an action')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'directory')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

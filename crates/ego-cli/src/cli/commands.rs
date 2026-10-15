@@ -821,3 +821,23 @@ impl clap::ValueEnum for RootAccessValue {
         Some(clap::builder::PossibleValue::new(self.0.as_str()))
     }
 }
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego setup",
+    about = "Inspect expected work without running effects.",
+    disable_help_subcommand = true
+)]
+pub(super) struct SetupCommand {
+    /// Limit proposals to these report item IDs (comma-separated).
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub(super) items: Option<Vec<usize>>,
+    /// Offer a validated judge for unresolved policy; never authorizes an action.
+    #[arg(long)]
+    pub(super) judge: Option<String>,
+    pub(super) prompt: Option<String>,
+    #[arg(long)]
+    pub(super) profile: Option<String>,
+    #[arg(long)]
+    pub(super) directory: Option<PathBuf>,
+}

@@ -431,6 +431,15 @@ pub struct RuleSnapshot {
     pub deny: Vec<Rule>,
 }
 
+/// An adapter-owned, in-memory preview of one complete setup transaction.
+/// Consumed once after the host confirms the exact displayed candidate.
+pub trait UserConfigBatch: Any + Send {
+    fn before(&self) -> &str;
+    fn candidate(&self) -> &str;
+    #[doc(hidden)]
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
+}
+
 /// The narrow consumer port for stored user configuration.
 pub trait UserConfigStore: Send + Sync {
     /// Read one stored user authority without resolving inherited values.
@@ -446,6 +455,37 @@ pub trait UserConfigStore: Send + Sync {
         &self,
         mutation: UserConfigMutation,
     ) -> Result<UserConfigMutationResult, UserConfigError>;
+
+    /// Preview without creating lock, directory, temporary file, or candidate.
+    fn prepare_batch(
+        &self,
+        _changes: Vec<UserConfigMutation>,
+    ) -> Result<Box<dyn UserConfigBatch>, UserConfigError> {
+        Err(UserConfigError::new(
+            "prepared batches are not supported by this config store",
+        ))
+    }
+
+    /// Compare and publish the exact preview once under the existing lock.
+    fn publish_batch(
+        &self,
+        _batch: Box<dyn UserConfigBatch>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        Err(UserConfigError::new(
+            "prepared batches are not supported by this config store",
+        ))
+    }
+
+    /// Setup host rechecks policy/path identities while the publication lock is held.
+    fn publish_batch_checked(
+        &self,
+        _batch: Box<dyn UserConfigBatch>,
+        _check: &dyn Fn() -> Result<(), UserConfigError>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        Err(UserConfigError::new(
+            "checked setup publication is unavailable",
+        ))
+    }
 
     /// Copy the exact current user document into a private sibling candidate.
     fn prepare_edit(&self) -> Result<Box<dyn UserConfigEditHandle>, UserConfigError> {

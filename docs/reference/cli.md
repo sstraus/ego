@@ -287,6 +287,17 @@ Report a read-only redacted health snapshot of this installation.
 - `-h, --help` — Print help
 - `--json` — Emit the exact versioned health snapshot
 
+## `ego setup`
+
+Inspect expected work without running effects.
+
+- `--directory <DIRECTORY>` — (undocumented)
+- `-h, --help` — Print help
+- `--items <ITEMS>` — Limit proposals to these report item IDs (comma-separated)
+- `--judge <JUDGE>` — Offer a validated judge for unresolved policy; never authorizes an action
+- `--profile <PROFILE>` — (undocumented)
+- `<PROMPT>` — (undocumented)
+
 ## `ego acp`
 
 Serve the Agent Client Protocol on stdio or an endpoint.

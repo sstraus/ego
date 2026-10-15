@@ -132,6 +132,27 @@ impl Glob {
             .collect()
     }
 
+    /// Preserve literal argv token syntax when a rule is stored and parsed again.
+    pub(super) fn fmt_argv(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.pieces.is_empty() {
+            return f.write_str("''");
+        }
+        for piece in &self.pieces {
+            match piece {
+                Piece::Star => f.write_str("*")?,
+                Piece::Lit(text) => {
+                    for ch in text.chars() {
+                        if ch.is_whitespace() || matches!(ch, '*' | '\\' | '\'' | '"') {
+                            f.write_str("\\")?;
+                        }
+                        write!(f, "{ch}")?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The canonical bytes this glob contributes to a rule's ID.
     ///
     /// Length-prefixed so the encoding is injective: without it, a `Lit("a")`

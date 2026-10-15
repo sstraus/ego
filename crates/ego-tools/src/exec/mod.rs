@@ -40,6 +40,107 @@ use null::NullBackend;
 
 pub use crate::store::SessionEvidenceStore;
 pub use adaptive::admit_confinement;
+
+/// Conservative setup write preview. This never constructs or launches a backend.
+/// Directory reach that overlaps operator configuration is not proposed, even on
+/// subtractive backends; Linux cannot subtract it at all.
+pub fn setup_write_root_safe(
+    directory: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<bool, ProcessError> {
+    let protected = user_config::capture()?;
+    if protected
+        .iter()
+        .any(|path| path.starts_with(directory) || directory.starts_with(path))
+    {
+        return Ok(false);
+    }
+    if ["/System", "/Library", "/usr", "/bin", "/sbin", "/etc"]
+        .iter()
+        .any(|path| directory.starts_with(path))
+    {
+        return Ok(false);
+    }
+    // Setup cannot turn a control-file need into persistent directory authority.
+    for component in target.components() {
+        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            ".git" | ".codex" | ".claude" | "agents.md" | "claude.md"
+        ) {
+            return Ok(false);
+        }
+    }
+    Ok(!ego_core::config::Ruleset::is_credential_path(
+        &CanonPath::new(target),
+    ))
+}
+/// Policy-only write reach for setup, sharing Adaptive's captured floor contract.
+/// This does not construct a backend or prove a filesystem mutation will succeed.
+pub fn setup_write_reachable(
+    policy: &RunConfinement,
+    target: &CanonPath,
+) -> Result<bool, ProcessError> {
+    if !setup_write_root_safe(
+        target.as_path().parent().unwrap_or(target.as_path()),
+        target.as_path(),
+    )? {
+        return Ok(false);
+    }
+    if adaptive::floor::blocks(target.as_path(), policy) {
+        return Ok(false);
+    }
+    if policy.roots().iter().any(|root| {
+        root.access() == ego_core::permit::RootAccess::Read && target.is_or_under(root.path())
+    }) {
+        return Ok(false);
+    }
+    Ok(match policy.level() {
+        ego_core::permit::Confinement::Workspace | ego_core::permit::Confinement::Adaptive => {
+            target.is_or_under(policy.workspace())
+                || policy.roots().iter().any(|root| {
+                    root.access() == ego_core::permit::RootAccess::ReadWrite
+                        && target.is_or_under(root.path())
+                })
+                || policy.adaptive_perimeter().is_some_and(|perimeter| {
+                    perimeter
+                        .writable
+                        .iter()
+                        .any(|root| target.is_or_under(root))
+                })
+        }
+        _ => false,
+    })
+}
+
+/// Captured native executable reach only; no backend admission or subprocess.
+/// A successful answer is not proof of command policy or dependency health.
+pub fn setup_exec_reachable(
+    policy: &RunConfinement,
+    target: &CanonPath,
+) -> Result<bool, ProcessError> {
+    if matches!(
+        policy.level(),
+        ego_core::permit::Confinement::Adaptive | ego_core::permit::Confinement::Off
+    ) {
+        return Ok(true);
+    }
+    #[cfg(target_os = "macos")]
+    let runtime = seatbelt::derived_runtime_roots()?;
+    #[cfg(target_os = "linux")]
+    let runtime = landlock::derived_runtime_roots()?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return Err(ProcessError::Backend(
+        "setup executable reach is unsupported on this platform".into(),
+    ));
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Ok(target.is_or_under(policy.workspace())
+        || runtime
+            .iter()
+            .chain(policy.exec_paths())
+            .any(|root| target.is_or_under(root)))
+}
+
 pub use editor_process::{EditorProcessError, run_editor_process};
 pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]

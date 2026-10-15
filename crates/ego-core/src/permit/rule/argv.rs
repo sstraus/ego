@@ -192,10 +192,30 @@ impl fmt::Display for ArgvPattern {
                 f.write_str(" ")?;
             }
             match token {
-                ArgvToken::One(glob) => write!(f, "{glob}")?,
+                ArgvToken::One(glob) => glob.fmt_argv(f)?,
                 ArgvToken::AnyOne | ArgvToken::Rest => f.write_str("*")?,
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Catches: persisted exact exec rules turn literal stars into wildcards or split arguments.
+    #[test]
+    fn stored_argv_preserves_literals_empty_arguments_and_wildcards() {
+        for text in [
+            r"program literal\* two\ words ''",
+            r"program wildcard* *",
+            r#"program \\ \"quoted\""#,
+            r"program \'quoted\'",
+        ] {
+            let before = ArgvPattern::parse(text).unwrap();
+            let after = ArgvPattern::parse(&before.to_string()).unwrap();
+            assert_eq!(before, after, "{text}");
+        }
     }
 }

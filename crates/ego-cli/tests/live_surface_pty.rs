@@ -8,6 +8,8 @@ mod missing_program;
 mod permission_receipts;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
+#[path = "live_surface_pty/setup.rs"]
+mod setup;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
@@ -5654,7 +5656,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 28] = [
+    const COMMANDS: [&str; 29] = [
         "help",
         "model",
         "thinking",
@@ -5671,6 +5673,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "statusline",
         "export",
         "config",
+        "setup",
         "doctor",
         "quit",
         "refresh",
@@ -5721,6 +5724,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mode", "Choose execution mode"),
         ("permissions", "Choose permission operation"),
         ("statusline", "Choose status-line setup"),
+        ("setup", "Select setup proposal items"),
     ] {
         let start = output.len();
         input

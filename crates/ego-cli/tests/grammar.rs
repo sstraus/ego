@@ -66,6 +66,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Orchestrator(_) => {
             panic!("orchestration inspection is covered by its process tests")
         }
+        Invocation::Setup(_) => panic!("setup does not construct a run"),
         Invocation::Doctor(_) => panic!("`doctor` takes no Args: use the doctor tests for it"),
     }
 }

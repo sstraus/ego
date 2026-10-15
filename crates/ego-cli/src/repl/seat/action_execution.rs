@@ -7,6 +7,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
             &[
                 ActionId::Help,
                 ActionId::Config,
+                ActionId::Setup,
                 ActionId::Doctor,
                 ActionId::Version,
             ],
@@ -151,6 +152,20 @@ pub(super) fn surface_line(
         let signal = editor.read_line(prompt);
         let failed = signal.is_err();
         let line = answer(asked_for_image.swap(false, Ordering::Relaxed), signal);
+        if matches!(
+            line,
+            Line::Interrupted | Line::HostCommand(HostCommand::Interrupt)
+        ) {
+            let cancel = status
+                .lock()
+                .expect("surface status lock")
+                .setup_cancel
+                .clone();
+            if let Some(cancel) = cancel {
+                let _ = cancel.send(true);
+                continue;
+            }
+        }
         if let Line::Submitted(text) = &line
             && phase.get() != EditPhase::Modal
         {
@@ -253,6 +268,15 @@ pub(super) fn surface_line(
                         continue;
                     }
                     return (Line::HostCommand(HostCommand::Mcp(arguments)), failed);
+                }
+                Dispatch::Setup(arguments) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("setup is unavailable while a turn is running".into());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Setup(arguments)), failed);
                 }
                 Dispatch::Config(arguments) => {
                     if phase.get() == EditPhase::Busy {
@@ -462,6 +486,12 @@ pub(super) fn surface_line(
                     Dispatch::Mcp(_) => {
                         status.lock().expect("surface status lock").notice =
                             Some("MCP changes are unavailable while a turn is running".into());
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Setup(_) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some("setup is unavailable while a turn is running".into());
                         repaint_status(status);
                         continue;
                     }
@@ -870,6 +900,11 @@ pub(super) fn apply_surface_effect(
         }
         SurfaceActionEffect::Config => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Config)));
+        }
+        SurfaceActionEffect::Setup => {
+            if !busy {
+                return Some(Line::HostCommand(HostCommand::Setup(String::new())));
+            }
         }
         SurfaceActionEffect::Doctor => {
             // The whole snapshot, not the MCP corner of one. `/doctor` and

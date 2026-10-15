@@ -256,3 +256,108 @@ fn current_versions_keep_event_codec_additive_but_advance_public_and_snapshot_sh
     assert_eq!(ego_core::public::PUBLIC_EVENT_VERSION, 11);
     assert_eq!(SNAPSHOT_VERSION, 15);
 }
+
+// Catches: setup preview writes artifacts or publishes independent mutations.
+#[test]
+fn setup_batch_preview_has_no_effect_and_publishes_exact_candidate() {
+    use ego_core::config::{ManagedConfigKey, ManagedConfigValue, UserConfigTarget};
+    use ego_core::permit::RootAccess;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("absent/config.toml");
+    let store = OsUserConfigStore::new(Arc::new(OsIo), &path);
+    let changes = vec![
+        UserConfigMutation::Root {
+            target: UserConfigTarget::Base,
+            path: root.path().join("read"),
+            access: Some(RootAccess::Read),
+        },
+        UserConfigMutation::ManagedSet {
+            target: UserConfigTarget::Base,
+            key: ManagedConfigKey::ExecPaths,
+            value: ManagedConfigValue::ExecPaths(vec![root.path().join("bin")]),
+        },
+    ];
+    let preview = store.prepare_batch(changes.clone()).unwrap();
+    let candidate = preview.candidate().to_owned();
+    assert!(!path.parent().unwrap().exists());
+    drop(preview); // A declined confirmation leaves no lock, directory or file.
+    assert!(!path.parent().unwrap().exists());
+    let preview = store.prepare_batch(changes).unwrap();
+    let result = store.publish_batch(preview).unwrap();
+    assert!(result.changed);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), candidate);
+}
+
+// Catches: a stale preview overwrites a concurrent user policy change.
+#[test]
+fn setup_batch_conflict_preserves_concurrent_user_bytes() {
+    use ego_core::config::UserConfigTarget;
+    use ego_core::permit::RootAccess;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    std::fs::write(&path, "# old\n").unwrap();
+    let store = OsUserConfigStore::new(Arc::new(OsIo), &path);
+    let preview = store
+        .prepare_batch(vec![UserConfigMutation::Root {
+            target: UserConfigTarget::Base,
+            path: root.path().join("read"),
+            access: Some(RootAccess::Read),
+        }])
+        .unwrap();
+    std::fs::write(&path, "# concurrent\n").unwrap();
+    assert!(store.publish_batch(preview).is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "# concurrent\n");
+}
+
+// Catches: post-publication uncertainty is treated as rollback or retried.
+#[test]
+fn setup_batch_durability_uncertainty_retains_exact_new_authority() {
+    use ego_core::config::UserConfigTarget;
+    use ego_core::permit::RootAccess;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    let io = FaultIo::new();
+    let store = OsUserConfigStore::new(&io, &path);
+    let preview = store
+        .prepare_batch(vec![UserConfigMutation::Root {
+            target: UserConfigTarget::Base,
+            path: root.path().join("read"),
+            access: Some(RootAccess::Read),
+        }])
+        .unwrap();
+    let candidate = preview.candidate().to_owned();
+    io.uncertain_after_publish
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = store.publish_batch(preview).unwrap();
+    assert!(matches!(
+        result.publication,
+        UserConfigPublication::PublishedDurabilityUncertain { .. }
+    ));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), candidate);
+}
+
+// Catches: setup publication ignores a changed policy/path identity after confirmation.
+#[test]
+fn setup_batch_identity_recheck_refuses_publication_and_runs_under_lock() {
+    use ego_core::config::{UserConfigError, UserConfigTarget};
+    use ego_core::permit::RootAccess;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    std::fs::write(&path, "# authority\n").unwrap();
+    let store = OsUserConfigStore::new(Arc::new(OsIo), &path);
+    let preview = store
+        .prepare_batch(vec![UserConfigMutation::Root {
+            target: UserConfigTarget::Base,
+            path: root.path().join("read"),
+            access: Some(RootAccess::Read),
+        }])
+        .unwrap();
+    let checked = std::cell::Cell::new(false);
+    let result = store.publish_batch_checked(preview, &|| {
+        checked.set(true);
+        Err(UserConfigError::new("fixture path changed"))
+    });
+    assert!(checked.get());
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "# authority\n");
+}

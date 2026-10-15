@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 
 use ego_core::config::{
     ConfigLayer, ManagedConfigKey, ManagedConfigValue, ManagedRuleEffect, McpHttpAuth,
-    McpLayerEntry, McpServerConfig, RuleMutation, RuleSnapshot, Source, UserConfigEditHandle,
-    UserConfigEditResult, UserConfigError, UserConfigMutation, UserConfigMutationResult,
-    UserConfigPublication, UserConfigSnapshot, UserConfigStore, UserConfigTarget,
+    McpLayerEntry, McpServerConfig, RuleMutation, RuleSnapshot, Source, UserConfigBatch,
+    UserConfigEditHandle, UserConfigEditResult, UserConfigError, UserConfigMutation,
+    UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
+    UserConfigTarget,
 };
 use ego_core::permit::rule::{Rule, RuleId};
 use fd_lock::RwLock;
@@ -68,6 +69,52 @@ impl UserConfigEditHandle for OsUserConfigEdit {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }
+}
+
+struct OsUserConfigBatch {
+    path: PathBuf,
+    before: String,
+    candidate: String,
+    changes: Vec<UserConfigMutation>,
+}
+
+impl UserConfigBatch for OsUserConfigBatch {
+    fn before(&self) -> &str {
+        &self.before
+    }
+    fn candidate(&self) -> &str {
+        &self.candidate
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+fn batch_candidate(text: &str, changes: &[UserConfigMutation]) -> Result<String, UserConfigError> {
+    let mut document = text
+        .parse::<DocumentMut>()
+        .map_err(|error| UserConfigError::new(format!("invalid setup config TOML: {error}")))?;
+    for change in changes {
+        change.validate()?;
+        if !matches!(
+            change,
+            UserConfigMutation::Root { .. }
+                | UserConfigMutation::Rules { .. }
+                | UserConfigMutation::ManagedSet {
+                    key: ManagedConfigKey::ExecPaths | ManagedConfigKey::PermissionsJudge,
+                    ..
+                }
+        ) {
+            return Err(UserConfigError::new(
+                "setup batch contains unsupported mutation",
+            ));
+        }
+        let parsed = parse_user_config_bytes(document.to_string().as_bytes(), "setup candidate")?;
+        apply(&mut document, &parsed, change.clone())?;
+    }
+    let candidate = document.to_string();
+    parse_user_config_bytes(candidate.as_bytes(), "setup candidate")?;
+    Ok(candidate)
 }
 
 impl<I> UserConfigStore for OsUserConfigStore<I>
@@ -162,6 +209,86 @@ where
             facts,
             changed: true,
             publication,
+        })
+    }
+
+    fn prepare_batch(
+        &self,
+        changes: Vec<UserConfigMutation>,
+    ) -> Result<Box<dyn UserConfigBatch>, UserConfigError> {
+        if changes.is_empty()
+            || changes
+                .iter()
+                .any(|change| change.target() != changes[0].target())
+        {
+            return Err(UserConfigError::new(
+                "setup batch needs changes to one exact target",
+            ));
+        }
+        let (before, _) = read_user_config(&*self.io, &self.path)?;
+        let candidate = batch_candidate(&before, &changes)?;
+        Ok(Box::new(OsUserConfigBatch {
+            path: self.path.clone(),
+            before,
+            candidate,
+            changes,
+        }))
+    }
+
+    fn publish_batch(
+        &self,
+        batch: Box<dyn UserConfigBatch>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        self.publish_batch_checked(batch, &|| Ok(()))
+    }
+
+    fn publish_batch_checked(
+        &self,
+        batch: Box<dyn UserConfigBatch>,
+        check: &dyn Fn() -> Result<(), UserConfigError>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        let batch = batch
+            .into_any()
+            .downcast::<OsUserConfigBatch>()
+            .map_err(|_| UserConfigError::new("setup batch does not belong to OS config store"))?;
+        if batch.path != self.path {
+            return Err(UserConfigError::new("setup batch target changed"));
+        }
+        let mut lock = user_config_lock(&self.path)?;
+        let _guard = lock.write().map_err(transaction_error)?;
+        let current = read_user_config_bytes(&*self.io, &self.path)?;
+        if sha256(&current) != sha256(batch.before.as_bytes()) {
+            return Err(UserConfigError::new(
+                "user config changed after setup preview; confirm a fresh diff",
+            ));
+        }
+        let candidate = batch_candidate(&batch.before, &batch.changes)?;
+        if sha256(candidate.as_bytes()) != sha256(batch.candidate.as_bytes()) {
+            return Err(UserConfigError::new(
+                "setup candidate changed after confirmation",
+            ));
+        }
+        check()?;
+        let publication = if candidate.as_bytes() == current {
+            UserConfigPublication::NotPublished
+        } else {
+            match self
+                .io
+                .replace_atomic_publication(&self.path, candidate.as_bytes())
+                .map_err(transaction_error)?
+            {
+                AtomicReplacePublication::PublishedDurably => {
+                    UserConfigPublication::PublishedDurably
+                }
+                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                    UserConfigPublication::PublishedDurabilityUncertain { diagnostic }
+                }
+            }
+        };
+        Ok(UserConfigEditResult {
+            changed: candidate.as_bytes() != current,
+            publication,
+            candidate_cleanup_warning: None,
         })
     }
 

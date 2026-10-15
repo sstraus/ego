@@ -399,7 +399,7 @@ fn load_one(
         text: text.clone(),
     });
     active.push(path.to_path_buf());
-    for reference in import_lines(&text) {
+    for reference in instruction_references(&text) {
         if reference.is_empty() {
             set.skipped.push(Skipped {
                 path: path.to_path_buf(),
@@ -443,7 +443,7 @@ fn load_one(
 }
 
 /// Return only standalone references outside fenced and indented code.
-fn import_lines(text: &str) -> Vec<String> {
+pub fn instruction_references(text: &str) -> Vec<String> {
     let mut references = Vec::new();
     let mut fence: Option<(char, usize)> = None;
     for line in text.lines() {

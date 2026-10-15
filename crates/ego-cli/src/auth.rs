@@ -175,6 +175,44 @@ impl Credentials for StoreCredentials {
     }
 }
 
+/// Setup-only observation: no lock creation, refresh or login programs.
+#[derive(Debug)]
+pub(crate) struct ObservedCredentials {
+    store: AuthStore,
+}
+
+impl ObservedCredentials {
+    pub(crate) fn new(home: impl AsRef<Path>) -> Self {
+        Self {
+            store: AuthStore::new(home),
+        }
+    }
+}
+
+impl Credentials for ObservedCredentials {
+    fn secret(&self, name: &str) -> Result<Secret, MissingCredential> {
+        let Some(provider) = name.strip_prefix("oauth:") else {
+            return EnvCredentials.secret(name);
+        };
+        let unavailable = || MissingCredential {
+            var: format!("ego auth login {provider}"),
+        };
+        let entry = self
+            .store
+            .read_observed()
+            .map_err(|_| unavailable())?
+            .remove(provider)
+            .ok_or_else(unavailable)?;
+        if entry
+            .expires()
+            .is_some_and(|expires| expires <= now_ms().saturating_add(300_000))
+        {
+            return Err(unavailable());
+        }
+        Ok(entry.into_active_secret())
+    }
+}
+
 #[derive(Debug)]
 pub enum AuthError {
     Io {
@@ -1868,5 +1906,39 @@ mod tests {
         let err = apply_refresh_failure(&store, "openai-codex", limited).unwrap_err();
         assert!(matches!(err, AuthError::Temporary { status: 429, .. }));
         assert!(store.read().unwrap().contains_key("openai-codex"));
+    }
+}
+
+#[cfg(test)]
+mod setup_credentials_tests {
+    use super::*;
+
+    // Catches: setup uses expired subscription material or creates auth locks while observing.
+    #[test]
+    fn setup_observed_credentials_refuse_expired_without_refresh_or_artifacts() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("auth.json");
+        for expires in [1u64, 4_102_444_800_000] {
+            let bytes = format!(
+                r#"{{"openai-codex":{{"type":"o_auth","access":"synthetic-access","refresh":"never-refresh","expires":{expires}}}}}"#
+            );
+            fs::write(&path, &bytes).unwrap();
+            let credentials = ObservedCredentials::new(home.path());
+            let result = credentials.secret("oauth:openai-codex");
+            assert_eq!(
+                result.is_ok(),
+                expires > now_ms(),
+                "expired subscription admitted"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), bytes);
+            assert_eq!(fs::read_dir(home.path()).unwrap().count(), 1);
+        }
+        fs::remove_file(path).unwrap();
+        assert!(
+            ObservedCredentials::new(home.path())
+                .secret("oauth:openai-codex")
+                .is_err()
+        );
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
     }
 }
