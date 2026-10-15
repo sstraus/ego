@@ -8287,6 +8287,61 @@ fn compact_prints_a_receipt_naming_the_successor_and_reports_context_availabilit
     );
 }
 
+// Catches: the receipt helper permits /quit during a quiet activation gap, or
+// mistakes a source prompt or an unfinished successor repaint for readiness.
+#[test]
+fn successor_receipt_waits_for_delayed_complete_prompt_before_quit() {
+    let stub = Stub::start(Plan::default());
+    for action in ["compact", "fork"] {
+        let (sender, receiver) = mpsc::channel();
+        let (finished, completion) = mpsc::channel();
+        let mut output = b"\x1b[?25l> \x1b[?25h\r\n".to_vec();
+        output.extend(format!("{action}ed session source into target\r\n").as_bytes());
+        output.extend(b"\x1b[?25l> ");
+        thread::scope(|scope| {
+            let stub = &stub;
+            let worker = scope.spawn(move || {
+                until_successor_receipt_ready(&receiver, &mut output, 0, action, stub);
+                finished.send(()).unwrap();
+            });
+            // Withhold the final cursor-show byte sequence: quiet output is
+            // not evidence that the successor accepts input.
+            let premature = completion.recv_timeout(Duration::from_secs(1)).is_ok();
+            let _ = sender.send(b"\x1b[?25h".to_vec());
+            worker.join().unwrap();
+            assert!(
+                !premature,
+                "{action}: /quit allowed before the successor prompt completed"
+            );
+        });
+    }
+}
+
+fn until_successor_receipt_ready(
+    reader: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    action: &str,
+    stub: &Stub,
+) {
+    // A prompt redraw can occur while the checkpoint generation is still running.
+    // Wait for the actual publication receipt before quitting the successor.
+    until_normalized(
+        reader,
+        output,
+        start,
+        if action == "compact" {
+            "compacted session"
+        } else {
+            "forked session"
+        },
+    );
+    // Publication precedes successor activation. A quiet PTY can still be
+    // between sessions, so require its completed empty composer frame.
+    until_successor_ready(reader, output, start, action, stub);
+    drain_until_quiet(reader, output);
+}
+
 fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
     let mut replies = vec![Reply::Sse(text("CRITIC-SOURCE-ANSWER"))];
@@ -8324,19 +8379,7 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     let start = output.len();
     input.write_all(format!("/{action}\r").as_bytes()).unwrap();
     input.flush().unwrap();
-    // A prompt redraw can occur while the checkpoint generation is still running.
-    // Wait for the actual publication receipt before quitting the successor.
-    until_normalized(
-        &reader,
-        &mut output,
-        start,
-        if action == "compact" {
-            "compacted session"
-        } else {
-            "forked session"
-        },
-    );
-    drain_until_quiet(&reader, &mut output);
+    until_successor_receipt_ready(&reader, &mut output, start, action, &stub);
     let receipt = normalized(&output[start..]);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
