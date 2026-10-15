@@ -1848,6 +1848,16 @@ impl SessionState {
                     });
                 }
             }
+            EventKind::GoalAllowanceInherited {
+                id,
+                continuation_budget,
+                continuation_turns,
+            } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.continuation_budget = *continuation_budget;
+                    goal.continuation_turns = *continuation_turns;
+                }
+            }
             EventKind::GoalCheckConfigured {
                 id,
                 continuation_budget,

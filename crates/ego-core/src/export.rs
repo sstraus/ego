@@ -234,6 +234,7 @@ pub enum ExportEvent {
     ContextCooldown,
     ContextRequestConsumed,
     GoalCheckConfigured,
+    GoalAllowanceInherited,
     GoalUpdated,
     GoalCheckStopped,
     PromptQueued {
@@ -819,6 +820,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::GoalSet
         }
+        EventKind::GoalAllowanceInherited {
+            id: _,
+            continuation_budget: _,
+            continuation_turns: _,
+        } => ExportEvent::GoalAllowanceInherited,
         EventKind::GoalCheckConfigured {
             id: _,
             continuation_budget: _,

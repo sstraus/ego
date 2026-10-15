@@ -234,7 +234,7 @@ pub struct ToolTiming {
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
 /// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
-/// GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
+/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
@@ -325,6 +325,12 @@ pub enum EventKind {
     GoalCheckConfigured {
         id: GoalId,
         continuation_budget: u32,
+    },
+    /// Existing goal-check accounting carried by an atomic successor seed.
+    GoalAllowanceInherited {
+        id: GoalId,
+        continuation_budget: Option<u32>,
+        continuation_turns: u32,
     },
     /// System-owned work admitted after an independent goal check.
     GoalContinuation { id: GoalId, text: String },
@@ -800,6 +806,7 @@ impl EventKind {
             EventKind::ContextCooldown { .. } => "context_cooldown",
             EventKind::ContextRequestConsumed => "context_request_consumed",
             EventKind::GoalCheckConfigured { .. } => "goal_check_configured",
+            EventKind::GoalAllowanceInherited { .. } => "goal_allowance_inherited",
             EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
             EventKind::GoalUpdated { .. } => "goal_updated",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",

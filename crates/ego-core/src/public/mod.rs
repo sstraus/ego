@@ -495,6 +495,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::SessionPauseObserved { .. }
         | EventKind::SessionResumed { .. }
         | EventKind::GoalCheckConfigured { .. }
+        | EventKind::GoalAllowanceInherited { .. }
         | EventKind::GoalContinuation { .. }
         | EventKind::GoalUpdated { .. }
         | EventKind::GoalSet { .. }

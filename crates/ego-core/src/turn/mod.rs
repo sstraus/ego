@@ -1736,6 +1736,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if !self.state().live_attempts.is_empty() {
             return Err(CompactionError::NotIdle(CompactionBusy::LiveAttempt));
         }
+        if self.state().context_request.is_some()
+            && self.state().detached_execs.values().any(Option::is_none)
+        {
+            self.journal
+                .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)?;
+            return Err(CompactionError::Internal(
+                "model context transition refused while a detached effect is unsettled".into(),
+            ));
+        }
         if let Some(cause) = self.cancel.cause() {
             return Err(CompactionError::Cancelled(cause));
         }

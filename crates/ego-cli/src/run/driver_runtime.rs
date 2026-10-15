@@ -2138,6 +2138,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             if !state.unacknowledged_prompts().is_empty()
                                                 || state.pending_question().is_some()
                                                 || !state.live_attempts.is_empty()
+                                                || (model_compaction
+                                                    && state
+                                                        .detached_execs
+                                                        .values()
+                                                        .any(Option::is_none))
                                             {
                                                 return Err(CompactionError::Internal(
                                         "compaction stopped before target creation because new source work became pending"

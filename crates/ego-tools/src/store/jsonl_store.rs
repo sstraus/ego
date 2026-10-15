@@ -737,7 +737,16 @@ impl JsonlStore {
             && match metadata {
                 [] => true,
                 [only] => is_title(only) || is_goal(only),
-                [title, goal] => is_title(title) && is_goal(goal),
+                [title, goal] if is_title(title) => is_title(title) && is_goal(goal),
+                [goal, allowance] => {
+                    is_goal(goal)
+                        && matches!((&goal.kind, &allowance.kind), (EventKind::GoalSet { id, .. }, EventKind::GoalAllowanceInherited { id: inherited, .. }) if id == inherited)
+                }
+                [title, goal, allowance] => {
+                    is_title(title)
+                        && is_goal(goal)
+                        && matches!((&goal.kind, &allowance.kind), (EventKind::GoalSet { id, .. }, EventKind::GoalAllowanceInherited { id: inherited, .. }) if id == inherited)
+                }
                 _ => false,
             };
         let mut expected_seq = first;

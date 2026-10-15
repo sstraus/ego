@@ -517,12 +517,18 @@ impl TargetSeed {
         let Some(goal) = goal.filter(|goal| goal.state == GoalState::Active) else {
             return self;
         };
+        let id = crate::event::id::GoalId::new();
         self.push_trailing(EventKind::GoalSet {
-            id: crate::event::id::GoalId::new(),
+            id,
             objective: goal.objective.clone(),
             owner: goal.owner,
             ceilings: goal.ceilings.clone(),
             derived_from: Some(goal.id),
+        });
+        self.push_trailing(EventKind::GoalAllowanceInherited {
+            id,
+            continuation_budget: goal.continuation_budget,
+            continuation_turns: goal.continuation_turns,
         });
         self
     }
