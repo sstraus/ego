@@ -293,3 +293,79 @@ fn goal_command_invalid_child_verdict_never_achieves() {
     );
     assert_eq!(stub.generations().len(), 1);
 }
+
+/// Catches: a failed evaluator looks like an achieved goal in the JSON summary.
+#[cfg(unix)]
+#[test]
+fn goal_json_summary_reports_stopped_goal_with_reason() {
+    let report = goal_json_summary("printf 'precise failure tail\\n' >&2; exit 7", 0);
+    assert_eq!(report["goal"]["status"], "stopped");
+    let reason = report["goal"]["reason"].as_str().unwrap();
+    assert!(reason.contains("precise failure tail"), "{reason}");
+    assert!(reason.contains("Some(7)"), "{reason}");
+}
+
+/// Catches: achieved goals are indistinguishable from runs without a goal.
+#[cfg(unix)]
+#[test]
+fn goal_json_summary_reports_achieved_goal() {
+    let report = goal_json_summary(
+        r#"printf '%s\n' '{"achieved":true,"reason":"verified artifact"}'"#,
+        0,
+    );
+    assert_eq!(report["goal"]["status"], "achieved");
+    assert!(report["goal"].get("reason").is_none());
+}
+
+/// Catches: exhausted continuation allowance is reported as achieved or generic failure.
+#[cfg(unix)]
+#[test]
+fn goal_json_summary_reports_exhausted_goal() {
+    let report = goal_json_summary(
+        r#"printf '%s\n' '{"achieved":false,"reason":"artifact missing"}'"#,
+        0,
+    );
+    assert_eq!(report["goal"]["status"], "exhausted");
+    assert_eq!(
+        report["goal"]["reason"],
+        "goal continuation budget exhausted (0)"
+    );
+}
+
+#[cfg(unix)]
+fn goal_json_summary(verdict: &str, continuation_turns: u32) -> serde_json::Value {
+    use support::{Places, Plan, Reply, Stub, text};
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("finished"))],
+        ..Plan::default()
+    });
+    let script = places.file("check.sh", &format!("cat >/dev/null\n{verdict}\n"));
+    let command = serde_json::json!(["/bin/sh", script]).to_string();
+    let finished = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--output",
+            "json",
+            "--goal",
+            "Checked objective",
+            "--goal-turns",
+            &continuation_turns.to_string(),
+            "--goal-check-command",
+            &command,
+            "--allow",
+            "exec(/bin/sh *)",
+            "Finish the work",
+        ])
+        .run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert_eq!(stub.generations().len(), 1);
+    let report = finished.report();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["exit_reason"], "done");
+    report
+}

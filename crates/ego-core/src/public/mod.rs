@@ -34,7 +34,7 @@ use crate::state::Usage;
 /// durable codec stays at 7 because new event variants are additive.
 /// Version 9 adds the closed question target to the public report. Version 10
 /// adds the sanitized fallback decision event. Version 11 adds the live
-/// provider retry status.
+/// provider retry status. Version 13 adds the optional CLI goal outcome report.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -42,7 +42,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 12;
+pub const PUBLIC_EVENT_VERSION: u32 = 13;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
