@@ -1718,3 +1718,104 @@ fn clear_drops_source_history_and_quotes_handoff_without_provider_generation() {
     assert_eq!(target.goal.unwrap().objective, "Finish the next sub-task");
     assert_eq!(target.items.len(), 1);
 }
+
+#[test]
+fn model_clear_does_not_abandon_a_background_effect_started_later_in_its_batch() {
+    // Catches: context followed by background exec switches away from its live effect owner.
+    let (compact, _) = compaction_profile(
+        "compact",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let (main, _) = compaction_profile("main", ThinkingLevel::Low, 32_000, 4096, false, Vec::new());
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact)),
+        (GenerationRole::Main, Ok(main)),
+    ]);
+    let mut state = SessionState::default();
+    state.apply(&event(EventKind::GoalSet {
+        id: ego_core::event::id::GoalId::new(),
+        objective: "Finish the build".into(),
+        owner: GoalOwner::Operator,
+        ceilings: Ceilings::default(),
+        derived_from: None,
+    }));
+    state.apply(&event(EventKind::ContextRequested {
+        request: ego_core::context::ContextRequest {
+            action: ego_core::context::ContextAction::Clear,
+            reason: "sub-task finished".into(),
+            handoff: "Continue the build".into(),
+        },
+    }));
+    state.apply(&event(EventKind::DetachedExecStarted {
+        id: ego_core::event::id::DetachedExecId::new(),
+    }));
+    let (mut turn, _, _) = compaction_turn_with_state(source, state);
+    assert!(
+        futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).is_err(),
+        "model clear must not publish a successor while a later sibling effect is still running"
+    );
+}
+
+#[test]
+fn model_clear_preserves_the_spent_goal_continuation_allowance() {
+    // Catches: model transitions refill the operator's automatic goal-turn limit.
+    let (compact, _) = compaction_profile(
+        "compact",
+        ThinkingLevel::Low,
+        32_000,
+        4096,
+        false,
+        Vec::new(),
+    );
+    let (main, _) = compaction_profile("main", ThinkingLevel::Low, 32_000, 4096, false, Vec::new());
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact)),
+        (GenerationRole::Main, Ok(main)),
+    ]);
+    let id = ego_core::event::id::GoalId::new();
+    let mut state = SessionState::default();
+    state.apply(&event(EventKind::GoalSet {
+        id,
+        objective: "Finish the release".into(),
+        owner: GoalOwner::Operator,
+        ceilings: Ceilings::default(),
+        derived_from: None,
+    }));
+    state.apply(&event(EventKind::GoalCheckConfigured {
+        id,
+        continuation_budget: 2,
+    }));
+    state.apply(&event(EventKind::GoalContinuation {
+        id,
+        text: "Continue checking".into(),
+    }));
+    state.apply(&event(EventKind::ContextRequested {
+        request: ego_core::context::ContextRequest {
+            action: ego_core::context::ContextAction::Clear,
+            reason: "next sub-task".into(),
+            handoff: "Finish the release".into(),
+        },
+    }));
+    let (mut turn, _, _) = compaction_turn_with_state(source, state);
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    let target = SessionState::replay(
+        prepared
+            .target_seed(Timestamp::from_millis(0))
+            .events()
+            .cloned(),
+    );
+    let goal = target.goal.expect("active goal inherited");
+    assert_eq!(
+        goal.continuation_budget,
+        Some(2),
+        "configured goal allowance must survive the transition"
+    );
+    assert_eq!(
+        goal.continuation_turns, 1,
+        "spent goal turns must survive the transition"
+    );
+}
