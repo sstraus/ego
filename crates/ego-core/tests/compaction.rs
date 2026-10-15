@@ -1347,6 +1347,40 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
     }
 }
 
+// Catches: an attempt inherited from a dead process blocks clean-session recovery forever.
+#[test]
+fn regression_case_compaction_recovers_inherited_attempt_before_checkpoint() {
+    let (profile, _) = compaction_profile(
+        "compaction-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (main, _) = compaction_profile(
+        "main-model",
+        ThinkingLevel::Low,
+        8_192,
+        512,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(profile)),
+        (GenerationRole::Main, Ok(main)),
+    ]);
+    let (mut turn, store, _) =
+        compaction_turn_with_state(source, busy_state(&CompactionBusy::LiveAttempt));
+    futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
+        .expect("inherited attempt must not block compaction");
+    assert!(store.events().iter().any(|event| matches!(event.kind,
+        EventKind::AttemptSettled { outcome, .. } if outcome.stop() == StopReason::Aborted)));
+}
+
 #[test]
 fn compaction_busy_states_and_cancellation_are_not_silently_admitted() {
     for busy in [
@@ -1374,7 +1408,27 @@ fn compaction_busy_states_and_cancellation_are_not_silently_admitted() {
             (GenerationRole::Compaction, Ok(compact_profile)),
             (GenerationRole::Main, Ok(main_profile)),
         ]);
-        let (mut turn, _store, _cancel) = compaction_turn_with_state(source, busy_state(&busy));
+        // This is current-process work, appended after opening the journal.
+        // An inherited attempt instead follows crash recovery below.
+        let (mut turn, _store, _cancel) = if matches!(busy, CompactionBusy::LiveAttempt) {
+            let (turn, store, cancel) = compaction_turn(source);
+            let journal = turn.journal();
+            journal
+                .append(
+                    TurnId::new(),
+                    None,
+                    None,
+                    EventKind::GenerationStarted {
+                        attempt: AttemptRef::first(GenerationId::new()),
+                        role: GenerationRole::Main,
+                        snapshot: None,
+                    },
+                )
+                .unwrap();
+            (turn, store, cancel)
+        } else {
+            compaction_turn_with_state(source, busy_state(&busy))
+        };
         let result = futures::executor::block_on(turn.prepare_compaction(None, Vec::new()));
         assert!(matches!(
             (&result, &busy),

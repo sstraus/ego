@@ -97,6 +97,185 @@ mod turn {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 
+    // Catches: a process killed after GenerationStarted permanently blocks fresh turns.
+    #[test]
+    fn regression_case_resume_accepts_next_turn_without_replaying_interrupted_attempt() {
+        let start: DomainEvent =
+            serde_json::from_str(include_str!("fixtures/regression_case_start.json")).unwrap();
+        let old = match start.kind {
+            EventKind::GenerationStarted { attempt, .. } => attempt,
+            _ => unreachable!(),
+        };
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let (reason, ok, state) = run(&fx, SessionState::replay([start]), "new explicit request");
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert!(state.live_attempts.is_empty());
+        assert!(state.settled_attempts.contains_key(&old.attempt()));
+        assert_eq!(fx.generator.calls().len(), 1);
+        let events = fx.store.events();
+        let outcome = events
+            .iter()
+            .find_map(|event| match event.kind {
+                EventKind::AttemptSettled { attempt, outcome } if attempt == old => Some(outcome),
+                _ => None,
+            })
+            .expect("crashed attempt is durably interrupted");
+        assert_eq!(outcome.stop(), StopReason::Aborted);
+        assert!(!outcome.retry_is_safe());
+        assert_eq!(fx.sink.events().iter().filter(|event| matches!(event, PublicEvent::Error { message, .. } if message.contains("interrupted") && message.contains(&old.attempt().uuid().to_string()))).count(), 1);
+    }
+
+    // Catches: recovery replaces usage already observed before the crash with zero.
+    #[test]
+    fn regression_case_preserves_partial_usage_and_does_not_repeat_notice_on_reopen() {
+        let start: DomainEvent =
+            serde_json::from_str(include_str!("fixtures/regression_case_start.json")).unwrap();
+        let attempt = match start.kind {
+            EventKind::GenerationStarted { attempt, .. } => attempt,
+            _ => unreachable!(),
+        };
+        let mut state = SessionState::replay([start.clone()]);
+        let observed = Usage {
+            uncached_input_tokens: 17,
+            ..Usage::IDENTITY
+        };
+        let mut booking = start;
+        booking.env.seq = state.last_seq.next();
+        booking.env.id = EventId::new();
+        booking.kind = EventKind::UsageUpdated {
+            attempt: Some(attempt),
+            usage: observed,
+            cost_delta: CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
+        };
+        state.apply(&booking);
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let (_, _, state) = run(&fx, state, "next");
+        let settlement = fx
+            .store
+            .events()
+            .into_iter()
+            .find_map(|event| match event.kind {
+                EventKind::AttemptSettled {
+                    attempt: owner,
+                    outcome,
+                } if owner == attempt => Some(outcome),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            settlement.usage(),
+            ego_core::generator::attempt::UsageReport::Reported(observed)
+        );
+        assert_eq!(state.usage.uncached_input_tokens, 17);
+        assert!(!fx.store.events().iter().any(|event| matches!(event.kind, EventKind::UsageUpdated { attempt: Some(owner), .. } if owner == attempt)));
+        let second = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        assert!(run(&second, state, "another explicit request").1);
+        assert!(!second.sink.events().iter().any(|event| matches!(event, PublicEvent::Error { message, .. } if message.contains("interrupted"))));
+    }
+
+    // Catches: a failed recovery append dispatches a new request before durable settlement.
+    #[test]
+    fn regression_case_failed_settlement_keeps_attempt_live_and_sends_nothing() {
+        let start: DomainEvent =
+            serde_json::from_str(include_str!("fixtures/regression_case_start.json")).unwrap();
+        let state = SessionState::replay([start]);
+        let fx = Fixture::new(vec![]);
+        fx.store.fail_at(3);
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        );
+        let abandoned = block_on(turn.run("next")).expect_err("settlement append failed");
+        assert_eq!(abandoned.state.live_attempts.len(), 1);
+        assert!(fx.generator.calls().is_empty());
+        assert!(
+            !fx.store
+                .events()
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::UserPrompt { .. }))
+        );
+    }
+
+    // Catches: constructing a sibling turn coordinator interrupts a still-live request.
+    #[test]
+    fn regression_case_shared_journal_does_not_interrupt_current_process_attempts() {
+        let fx = Fixture::new(vec![]);
+        let mut journal = Journal::new(
+            SessionId::new(),
+            &fx.store,
+            &fx.clock,
+            &fx.sink,
+            Producer::Main,
+            SessionState::default(),
+        );
+        let attempt = ego_core::generator::attempt::AttemptRef::first(
+            ego_core::event::id::GenerationId::new(),
+        );
+        journal
+            .append(
+                TurnId::new(),
+                None,
+                None,
+                EventKind::GenerationStarted {
+                    attempt,
+                    role: GenerationRole::Main,
+                    snapshot: None,
+                },
+            )
+            .unwrap();
+        let shared = SharedJournal::new(journal);
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = CoreTurnLoop::from_shared_journal(
+            SessionId::new(),
+            shared,
+            &NO_ADMISSION_EVIDENCE,
+            CancelToken::new(),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(turn.run("must not interrupt sibling"))
+                .unwrap()
+                .exit_reason,
+            ExitReason::Provider
+        );
+        assert!(
+            turn.into_state()
+                .unwrap()
+                .live_attempts
+                .contains_key(&attempt.attempt())
+        );
+        assert!(fx.generator.calls().is_empty());
+    }
+
     fn detached_started_state(id: ego_core::event::id::DetachedExecId) -> SessionState {
         SessionState::replay([DomainEvent {
             env: Envelope {
@@ -10074,11 +10253,10 @@ mod turn {
         }
 
         /// regression case: accounting names definitely-unsent missing usage as
-        /// known zero, while possible delivery remains unknown. A replayed
-        /// live attempt refuses before accepting a new prompt or resolving a
-        /// model.
+        /// known zero, while possible delivery remains unknown. A reopened
+        /// journal interrupts inherited attempts before accepting a new prompt.
         #[test]
-        fn missing_usage_is_attributed_and_live_replay_is_refused_before_prompt() {
+        fn missing_usage_is_attributed_and_crashed_attempt_is_settled_before_prompt() {
             let run_case = |certainty| {
                 let trace = GenerationTrace::default();
                 let source = Arc::new(
@@ -10176,7 +10354,7 @@ mod turn {
             let _ = run_scripted(
                 &fx,
                 state,
-                "must refuse live replay",
+                "new request after interruption",
                 source,
                 TurnConfig {
                     cache: ego_core::generator::capabilities::CacheRetention::Short,
@@ -10187,14 +10365,20 @@ mod turn {
                     fallbacks: Vec::new(),
                 },
             );
-            assert!(trace.requests.lock().unwrap().is_empty());
-            assert!(trace.steps.lock().unwrap().is_empty());
-            assert!(
-                fx.store
-                    .events()
-                    .iter()
-                    .all(|event| !matches!(event.kind, EventKind::UserPrompt { .. }))
-            );
+            assert_eq!(trace.requests.lock().unwrap().len(), 1);
+            let events = fx.store.events();
+            let settled = events
+                .iter()
+                .position(|event| {
+                    matches!(event.kind,
+                EventKind::AttemptSettled { attempt: owner, .. } if owner == attempt)
+                })
+                .unwrap();
+            let prompt = events
+                .iter()
+                .position(|event| matches!(event.kind, EventKind::UserPrompt { .. }))
+                .unwrap();
+            assert!(settled < prompt);
         }
     }
 

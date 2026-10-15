@@ -452,3 +452,70 @@ fn known_http_400_does_not_wedge_the_next_acp_prompt_or_erase_delivery() {
     );
     host.finish();
 }
+
+/// Catches: a host crash leaves the ACP run uncertain and rejects every fresh prompt
+/// before the shared journal can settle the interrupted generation.
+#[test]
+fn regression_case_reloaded_acp_accepts_new_prompt_after_killed_generation() {
+    let places = Places::new();
+    let Reply::Paced { head, tail, .. } = paced("before crash", std::time::Duration::ZERO) else {
+        unreachable!("paced produces a split reply");
+    };
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::GatedPaced {
+                head,
+                tail,
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("new answer after crash")),
+        ],
+        ..Plan::default()
+    });
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    )
+    .expect("isolated ACP configuration");
+    let running = Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+        .subcommand("acp")
+        .spawn_conversing();
+    let pid = running.child.id();
+    let mut first = AcpHost::adopt(running);
+    first.initialize();
+    let session = first.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    first.send_request("session/prompt", prompt(&session));
+    loop {
+        let frame = first.read_frame();
+        if frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+            break;
+        }
+    }
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .expect("kill only the ego PID started by this test");
+    gate.release();
+    assert!(killed.success());
+    first.finish();
+
+    let mut second = host(&places, &stub);
+    second.initialize();
+    let loaded = second.request(
+        "session/load",
+        serde_json::json!({
+            "sessionId": session,
+            "cwd": places.workspace_path(),
+            "mcpServers": [],
+        }),
+    );
+    assert!(loaded["result"].is_object(), "{loaded}");
+    let answer = second.request("session/prompt", prompt(&session));
+    second.finish();
+    assert_eq!(
+        answer["result"]["stopReason"], "end_turn",
+        "a killed generation must not permanently wedge the ACP session: {answer}"
+    );
+    assert_eq!(stub.generations().len(), 2, "old request must not replay");
+}

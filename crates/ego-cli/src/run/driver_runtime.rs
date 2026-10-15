@@ -834,8 +834,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     || queue.queued > 0
                                     || queue.interrupt_pending
                                     || !state.unacknowledged_prompts().is_empty()
-                                    || state.pending_question().is_some()
-                                    || !state.live_attempts.is_empty();
+                                    || state.pending_question().is_some();
+                                // Reopened generation attempts are interrupted by the
+                                // compaction journal; they are not live terminal work.
                                 seat.set_compaction_availability(compaction_availability(
                                     pending_work,
                                 ));

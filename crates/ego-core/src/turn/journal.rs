@@ -60,6 +60,8 @@ pub struct Journal<'a> {
     /// The exact event whose append returned an error. Until its durable
     /// disposition is resolved, no different event may consume this sequence.
     uncertain_append: Option<DomainEvent>,
+    /// Only attempts inherited when opening this journal, never live sibling work.
+    interrupted_attempts: Vec<(EventId, crate::generator::attempt::AttemptRef)>,
 }
 
 /// A cloneable append authority for one borrow-scoped session journal.
@@ -244,6 +246,16 @@ impl<'s> SharedJournal<'s> {
             .map_err(Into::into)
     }
 
+    /// Settle attempts inherited from a previous process through the sole journal.
+    pub(crate) fn recover_interrupted_attempts(
+        &self,
+        turn: TurnId,
+    ) -> Result<(), SharedJournalError> {
+        self.lock()?
+            .recover_interrupted_attempts(turn)
+            .map_err(Into::into)
+    }
+
     /// Inspect current state without allowing a lock guard or reference to escape.
     pub fn inspect<T>(
         &self,
@@ -422,16 +434,76 @@ impl<'a> Journal<'a> {
         producer: Producer,
         state: SessionState,
     ) -> Self {
+        let mut interrupted_attempts: Vec<_> = state
+            .generations
+            .iter()
+            .filter(|(_, attempt)| state.live_attempts.contains_key(&attempt.attempt()))
+            .map(|(event, attempt)| (*event, *attempt))
+            .collect();
+        interrupted_attempts.sort_by_key(|(_, attempt)| *attempt);
         Self {
             session,
             store,
             clock,
             sink,
             producer,
+            interrupted_attempts,
             seq: state.last_seq,
             state,
             uncertain_append: None,
         }
+    }
+
+    fn recover_interrupted_attempts(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        use crate::cost::{CostDelta, UnknownCost};
+        use crate::generator::attempt::{DeliveryCertainty, Outcome, UsageReport};
+        use crate::generator::types::{ErrorKind, StopReason};
+        use crate::state::{ChargeAttribution, Usage};
+
+        while let Some(&(parent, attempt)) = self.interrupted_attempts.last() {
+            if !self.state.live_attempts.contains_key(&attempt.attempt()) {
+                self.interrupted_attempts.pop();
+                continue;
+            }
+            let mut usage = None;
+            for charge in &self.state.charges {
+                if matches!(charge.attribution, ChargeAttribution::Generation { attempt: owner, .. } if owner == attempt)
+                {
+                    usage.get_or_insert(Usage::IDENTITY).add(&charge.usage);
+                }
+            }
+            self.append(turn, None, Some(parent), EventKind::Error {
+                message: format!("Attempt {} was interrupted by the previous process ending. Its request may have reached the provider; it will not be replayed automatically. Only your next explicit request will run.", attempt.attempt().uuid()),
+                kind: ErrorKind::Unclassified,
+            })?;
+            if usage.is_none() {
+                self.append(
+                    turn,
+                    None,
+                    Some(parent),
+                    EventKind::UsageUpdated {
+                        usage: Usage::IDENTITY,
+                        cost_delta: CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
+                        attempt: Some(attempt),
+                    },
+                )?;
+            }
+            self.append(
+                turn,
+                None,
+                Some(parent),
+                EventKind::AttemptSettled {
+                    attempt,
+                    outcome: Outcome::new(
+                        StopReason::Aborted,
+                        DeliveryCertainty::PossiblySent,
+                        usage.map_or(UsageReport::Missing, UsageReport::Reported),
+                    ),
+                },
+            )?;
+            self.interrupted_attempts.pop();
+        }
+        Ok(())
     }
 
     /// Append one event to the log and reduce it.
