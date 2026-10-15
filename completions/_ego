@@ -55,6 +55,7 @@ _arguments "${_arguments_options[@]}" : \
 '--retry=[Additional delivery-safe attempts for each candidate]:RETRY:_default' \
 '*--fallback=[Ordered provider/model candidate used after a delivery-safe failure]:P/M:_default' \
 '--budget=[Hard cap\: '\''2.5\$'\'' or '\''400k'\'' tokens]:BUDGET:_default' \
+'--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
 '--timeout=[Wall clock, e.g. '\''90s'\'' or '\''10m'\'']:TIMEOUT:_default' \
 '*--mcp=[Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server]:NAME|@FILE:_default' \
@@ -64,7 +65,7 @@ _arguments "${_arguments_options[@]}" : \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
-'(--bare)--trust-workspace[Trust this interactive launch'\''s workspace without asking; remember the answer]' \
+'(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
@@ -106,6 +107,7 @@ _arguments "${_arguments_options[@]}" : \
 '--retry=[Additional delivery-safe attempts for each candidate]:RETRY:_default' \
 '*--fallback=[Ordered provider/model candidate used after a delivery-safe failure]:P/M:_default' \
 '--budget=[Hard cap\: '\''2.5\$'\'' or '\''400k'\'' tokens]:BUDGET:_default' \
+'--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
 '--timeout=[Wall clock, e.g. '\''90s'\'' or '\''10m'\'']:TIMEOUT:_default' \
 '*--mcp=[Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server]:NAME|@FILE:_default' \
@@ -115,7 +117,7 @@ _arguments "${_arguments_options[@]}" : \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
-'(--bare)--trust-workspace[Trust this interactive launch'\''s workspace without asking; remember the answer]' \
+'(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
@@ -158,6 +160,7 @@ _arguments "${_arguments_options[@]}" : \
 '--retry=[Additional delivery-safe attempts for each candidate]:RETRY:_default' \
 '*--fallback=[Ordered provider/model candidate used after a delivery-safe failure]:P/M:_default' \
 '--budget=[Hard cap\: '\''2.5\$'\'' or '\''400k'\'' tokens]:BUDGET:_default' \
+'--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
 '--timeout=[Wall clock, e.g. '\''90s'\'' or '\''10m'\'']:TIMEOUT:_default' \
 '*--mcp=[Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server]:NAME|@FILE:_default' \
@@ -167,7 +170,7 @@ _arguments "${_arguments_options[@]}" : \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
-'(--bare)--trust-workspace[Trust this interactive launch'\''s workspace without asking; remember the answer]' \
+'(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--plan[Shorthand for --mode plan]' \
 '--yolo[Shorthand for --mode yolo]' \
@@ -193,6 +196,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (compact)
 _arguments "${_arguments_options[@]}" : \
+'--budget=[Hard spend ceiling, as for run]:BUDGET:_default' \
+'--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
 '--request-id=[]:REQUEST_ID:_default' \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \

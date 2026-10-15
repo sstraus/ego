@@ -116,14 +116,8 @@ pub struct TableSource<'a> {
 
 /// Why a ceiling could not be given rates to rest on.
 ///
-/// Every arm is a *refusal*. There is deliberately no arm for "the table does
-/// not list this model": that is not a failure here but an absence, returned
-/// as `Ok(None)` so the gate can answer it with
-/// [`UnknownCost::NoPricingQuote`](ego_core::cost::UnknownCost::NoPricingQuote)
-/// — which `034`'s fourth criterion requires to mean only "you asked for a
-/// ceiling on a model I cannot price". A table that could not be fetched and a
-/// table that simply does not list your model send an operator to two
-/// different places.
+/// Every arm is a refusal. A missing row names the exact provider and model
+/// so the operator can distinguish an unlisted model from a failed fetch.
 #[derive(Debug)]
 pub enum NoRates {
     MissingRow {
@@ -149,7 +143,7 @@ pub enum NoRates {
     },
     /// A table was found and cannot be read for this model.
     ///
-    /// Not "unlisted", which is `Ok(None)`. This is the document being wrong:
+    /// Not an unlisted model. This is the document being wrong:
     /// bytes that are not a table, a rate that is not a number, or a model
     /// listed twice under two spellings with different prices.
     Table {

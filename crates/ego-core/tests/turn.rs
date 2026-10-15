@@ -6594,7 +6594,7 @@ mod turn {
         );
         assert_eq!(
             committed(&fx.gate.borrow()),
-            Some(usd("0.76536")),
+            Some(usd("0.0155925")),
             "an unknown cost charges the bound, never zero"
         );
     }
@@ -6788,10 +6788,7 @@ mod turn {
                 metering: metering(),
                 rates: Some(rates()),
             };
-            assert_eq!(
-                profile.output_ceiling(),
-                settings.output_ceiling.or(settings.context_ceiling)
-            );
+            assert_eq!(profile.output_ceiling(), settings.output_ceiling);
             profile
         }
 
@@ -7006,7 +7003,7 @@ mod turn {
                             AiEvent::Stop(StopReason::Stop),
                         ],
                         &trace,
-                        None,
+                        Some(4_096),
                         Some(4_096),
                         ThinkingLevel::Off,
                         false,
@@ -7529,7 +7526,7 @@ mod turn {
                             AiEvent::Stop(StopReason::Stop),
                         ],
                         &trace,
-                        None,
+                        Some(8_192),
                     )),
                     Ok(profile(
                         "openai/main",
@@ -8037,7 +8034,7 @@ mod turn {
                 }
             )));
             assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.06144")));
+            assert_eq!(committed(&gate), Some(usd("0.03205875")));
         }
 
         #[test]
@@ -8365,7 +8362,7 @@ mod turn {
                 )));
                 drop(turn);
                 assert_eq!(outstanding(&gate), Some(usd("0")));
-                assert_eq!(committed(&gate), Some(usd("0.06144")));
+                assert_eq!(committed(&gate), Some(usd("0.03205875")));
             }
         }
 
@@ -8474,7 +8471,7 @@ mod turn {
                 }
             )));
             assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.06144")));
+            assert_eq!(committed(&gate), Some(usd("0.03205875")));
             assert!(cache.0.lock().unwrap().is_empty());
         }
 
@@ -8590,7 +8587,7 @@ mod turn {
             )));
             drop(turn);
             assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.06144")));
+            assert_eq!(committed(&gate), Some(usd("0.03205875")));
         }
 
         /// The occupancy report names the window of the model that produced

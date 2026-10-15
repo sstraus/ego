@@ -275,6 +275,13 @@ mod budget {
             retention: CacheRetention::Long,
             stable_messages: 1,
         });
+        assert_eq!(
+            quote().upper_bound(&req, &standard_caps()),
+            Err(UnknownCost::UnpricedCategory {
+                category: TokenCategory::CacheWriteExtended,
+            }),
+            "long retention must fail closed without its reachable rate"
+        );
         let mut prices = quote();
         prices.cache_write_extended = Some(amount("0.000006"));
         let bound = prices.upper_bound(&req, &standard_caps()).unwrap();
@@ -381,19 +388,8 @@ mod budget {
         );
     }
 
-    /// The one input category that does *not* make the bound unknown when
-    /// unpriced, and the test exists because the rule above would otherwise
-    /// say it should.
-    ///
-    /// An extended write happens only because a request asked for one, and
-    /// no request ego can build is able to ask. So it is not in the mix the
-    /// bound covers. Were it included, no quote prices it and every model in
-    /// the tree would become unboundable — the gate would refuse fully
-    /// priced requests it exists to admit, which is a worse failure than the
-    /// one the rule guards against.
-    ///
-    /// This fails the day a request can select a retention, which is exactly
-    /// when the bound must start covering it.
+    /// Short retention cannot incur an extended write, so its missing rate
+    /// must not block otherwise priced requests.
     #[test]
     fn an_unpriced_extended_write_does_not_make_every_model_unboundable() {
         assert_eq!(

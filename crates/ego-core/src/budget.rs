@@ -202,31 +202,24 @@ impl PricingQuote {
     /// a category this quote cannot price is one whose cost we cannot
     /// bound, and `None` means unpriced, never free (see the type's doc).
     ///
-    /// **[`TokenCategory::CacheWriteExtended`] is deliberately not in the
-    /// list**, and this is the one place the rule above is not applied. An
-    /// extended write happens only because a request *asked* for one, and no
-    /// request ego can currently build is able to ask — so it is not a member
-    /// of the "unknown mix" this bounds, and pricing the window at a rate no
-    /// request can incur would not be conservative, merely wrong. Including
-    /// it is worse than wrong: no quote prices the category, so every model
-    /// would become unboundable and the gate would refuse fully priced
-    /// requests it is meant to admit. [`Self::price`] does consult it, since
-    /// a count that was actually reported must be priced or the figure is
-    /// unknown.
-    ///
-    /// The trigger to revisit is a request that can select a retention. On
-    /// that day this bound must cover it, conditionally on what the request
-    /// asked for rather than unconditionally.
-    fn dearest_input_rate(&self) -> Result<Amount, UnknownCost> {
-        [
+    /// Extended cache writes are reachable only when this request selects
+    /// long retention. Include that rate then, and fail closed if unpriced.
+    fn dearest_input_rate(&self, req: &GenRequest) -> Result<Amount, UnknownCost> {
+        let mut categories = vec![
             TokenCategory::UncachedInput,
             TokenCategory::CacheRead,
             TokenCategory::CacheWrite,
-        ]
-        .into_iter()
-        .try_fold(Amount::ZERO, |dearest, category| {
-            Ok(dearest.max(self.rate(category)?))
-        })
+        ];
+        if req.cache.as_ref().is_some_and(|cache| {
+            cache.retention == crate::generator::capabilities::CacheRetention::Long
+        }) {
+            categories.push(TokenCategory::CacheWriteExtended);
+        }
+        categories
+            .into_iter()
+            .try_fold(Amount::ZERO, |dearest, category| {
+                Ok(dearest.max(self.rate(category)?))
+            })
     }
 
     /// The most `req` could possibly cost against a model with `caps`.
@@ -249,7 +242,7 @@ impl PricingQuote {
         let input_bound = request_input_bound(req, context)?;
         let context = Amount::new(u128::from(input_bound), 0).map_err(|_| UnknownCost::Overflow)?;
         let input = self
-            .dearest_input_rate()?
+            .dearest_input_rate(req)?
             .checked_mul(&context)
             .ok_or(UnknownCost::Overflow)?;
         let output = self.line(TokenCategory::Output, output)?;
@@ -399,7 +392,7 @@ impl Metering {
                 None => Ok(None),
             },
             Metering::Subscription { .. } | Metering::Unmetered { .. } => {
-                ceilings(req, caps)?;
+                policy_ceilings(req, caps)?;
                 Ok(Some(Money::zero(settlement)))
             }
         }
@@ -504,6 +497,16 @@ fn ceilings(req: &GenRequest, caps: &ModelCapabilities) -> Result<(u64, u64), Un
     Ok((context, output))
 }
 
+// Non-currency policies need no output quantity to prove a zero monetary
+// reservation. Zero records an unstated output ceiling without inventing one.
+fn policy_ceilings(req: &GenRequest, caps: &ModelCapabilities) -> Result<(u64, u64), UnknownCost> {
+    let mut policy = req.clone();
+    if policy.max_output_tokens.is_none() && caps.max_output_tokens.is_none() {
+        policy.max_output_tokens = Some(0);
+    }
+    ceilings(&policy, caps)
+}
+
 /// Text is bounded by UTF-8 bytes, including serialized message framing and
 /// tool schemas. Images and opaque reasoning have no model-independent token
 /// bound here, so retain the context ceiling for those requests.
@@ -579,7 +582,10 @@ impl BudgetBinding {
         metering: &Metering,
         rates: Option<&PricingQuote>,
     ) -> Result<Self, UnknownCost> {
-        let (context_ceiling, output_ceiling) = ceilings(req, caps)?;
+        let (context_ceiling, output_ceiling) = match metering {
+            Metering::Currency { .. } => ceilings(req, caps)?,
+            _ => policy_ceilings(req, caps)?,
+        };
         Ok(Self {
             model: req.model.clone(),
             context_ceiling,

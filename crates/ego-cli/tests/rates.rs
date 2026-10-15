@@ -466,3 +466,55 @@ async fn rates_that_are_already_resolved_are_not_replaced_by_the_table() {
     assert_eq!(rates.source, RateSource::Operator);
     assert_eq!(wire.calls(), 0);
 }
+
+mod support;
+
+// Catches: the real fresh-generation path never calls the cached price source.
+#[test]
+fn real_run_reports_the_missing_cached_model_price_before_send() {
+    use ego_core::event::time::Clock;
+    let places = support::Places::new();
+    let stub = support::Stub::start(support::Plan::default());
+    PricingCache::new(&OsIo, places.home_path())
+        .publish(
+            b"{}",
+            ETAG,
+            ego_tools::clock::SystemClock.now(),
+            std::process::id(),
+            &|pid| pid == std::process::id(),
+        )
+        .unwrap();
+    let result = places
+        .ego(&stub)
+        .env("ANTHROPIC_API_KEY", "fixture-not-a-secret")
+        .args([
+            "--model",
+            "anthropic/claude-haiku-5-5",
+            "--sandbox",
+            "off",
+            "--budget",
+            "1$",
+            "--max-output-tokens",
+            "32",
+            "--no-tools",
+            "hello",
+        ])
+        .run();
+    let mut evidence = result.stderr.clone();
+    for entry in std::fs::read_dir(places.home_path().join("sessions"))
+        .into_iter()
+        .flatten()
+    {
+        evidence.push_str(
+            &std::fs::read_to_string(entry.unwrap().path().join("events.jsonl")).unwrap(),
+        );
+    }
+    assert!(
+        evidence.contains("provider=anthropic")
+            && evidence.contains("model=claude-haiku-5-5")
+            && evidence.contains("mode=chat"),
+        "{}\n{evidence}",
+        result.stderr
+    );
+    assert!(stub.generations().is_empty());
+}

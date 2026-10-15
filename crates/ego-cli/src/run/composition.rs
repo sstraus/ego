@@ -1424,7 +1424,8 @@ pub(super) async fn generation_preflight_inner(
             effective.ceilings.clone(),
             effective.auth.clone(),
         )
-        .with_output_limit(effective.max_output_tokens),
+        .with_output_limit(effective.max_output_tokens)
+        .with_offline(confinement.offline()),
     );
     let selection = source.selection();
     let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);

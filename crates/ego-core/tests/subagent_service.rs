@@ -2619,7 +2619,7 @@ fn foreground_cancel_and_background_drop_preserve_real_execution_ownership() {
 fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
     let harness = Harness::new(RunSettlement::Completed);
     let gate = SharedBudgetGate::new(BudgetGate::new(ego_core::cost::Money::new(
-        "0.04".parse().expect("amount"),
+        "0.025".parse().expect("amount"),
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     )));
     let authority = ExistingAuthorityAdmission::new();

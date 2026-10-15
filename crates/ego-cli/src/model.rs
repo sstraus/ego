@@ -396,6 +396,7 @@ pub struct CliGenerationModelSource {
     initial_identity: ModelRef,
     initial_thinking: Option<ThinkingLevel>,
     output_limit: Option<std::num::NonZeroU64>,
+    offline: bool,
     judge: Option<ModelRef>,
     ceilings: Ceilings,
     auth: std::collections::HashMap<String, AuthProviderLayer>,
@@ -415,6 +416,7 @@ impl CliGenerationModelSource {
             initial_identity: identity,
             initial_thinking: thinking,
             output_limit: None,
+            offline: false,
             judge,
             ceilings,
             auth,
@@ -424,6 +426,11 @@ impl CliGenerationModelSource {
 
     pub fn with_output_limit(mut self, limit: Option<std::num::NonZeroU64>) -> Self {
         self.output_limit = limit;
+        self
+    }
+
+    pub fn with_offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
         self
     }
 
@@ -537,10 +544,39 @@ impl CliGenerationModelSource {
         )
         .await
         .map_err(auth_generation_error)?;
-        let (resolved, credential) =
+        let (mut resolved, credential) =
             resolve(&identity.0, hosted, http, credentials.as_ref(), &self.auth)
                 .await
                 .map_err(generation_error)?;
+        let ledger = self.ceilings.money.map(|limit| {
+            crate::budget::gate(&self.ceilings, None, limit.currency)
+                .ledger()
+                .clone()
+        });
+        if let Some(ledger) = ledger.filter(|ledger| {
+            resolved.metering.ceiling_needs_rates(ledger) && resolved.rates.is_none()
+        }) {
+            use ego_core::event::time::Clock;
+            let home = crate::config::ego_home().ok_or_else(|| {
+                GenerationModelError::new(
+                    GenerationModelErrorClass::Usage,
+                    "a money ceiling needs EGO_HOME or HOME for the price cache",
+                )
+            })?;
+            resolved.rates = crate::budget::TableSource {
+                io: &ego_tools::store::OsIo,
+                ego_home: &home,
+                http,
+                offline: self.offline,
+                now: ego_tools::clock::SystemClock.now(),
+                max_age: ego_tools::pricing::MAX_AGE,
+            }
+            .rates(&resolved, &ledger)
+            .await
+            .map_err(|error| {
+                GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
+            })?;
+        }
         let thinking = if role == GenerationRole::Judge {
             judge_thinking(&resolved.capabilities)
         } else {
