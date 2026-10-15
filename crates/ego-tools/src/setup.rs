@@ -597,6 +597,72 @@ pub fn inventory_admitted(
             probes.push(Probe::Metadata { path, reason });
         }
     }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let configured = |key: &str| {
+            std::env::var_os(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        let pnpm = configured("PNPM_HOME")
+            .or_else(|| configured("XDG_DATA_HOME").map(|path| path.join("pnpm")))
+            .unwrap_or_else(|| home.join("Library/pnpm"));
+        let caches = configured("XDG_CACHE_HOME").unwrap_or_else(|| home.join("Library/Caches"));
+        let npm = configured("npm_config_cache")
+            .or_else(|| configured("NPM_CONFIG_CACHE"))
+            .unwrap_or_else(|| home.join(".npm"));
+        for (path, reason) in [
+            (
+                pnpm.join("store"),
+                "derived pnpm content store (operator PNPM_HOME/XDG_DATA_HOME/HOME); links stay protected",
+            ),
+            (
+                caches.join("pnpm"),
+                "derived pnpm cache (operator XDG_CACHE_HOME/HOME); dlx stays protected",
+            ),
+            (
+                npm.join("_cacache"),
+                "derived npm content cache (operator npm_config_cache/NPM_CONFIG_CACHE/HOME)",
+            ),
+            (
+                npm.join("_logs"),
+                "derived npm log cache (operator npm_config_cache/NPM_CONFIG_CACHE/HOME)",
+            ),
+        ] {
+            probes.push(Probe::Metadata {
+                path,
+                reason: reason.into(),
+            });
+        }
+        let config = home.join("Library/Application Support/mbx/config.toml");
+        probes.push(Probe::Metadata {
+            path: config.clone(),
+            reason: "operator mbx cache_dir source; bounded TOML only, no command".into(),
+        });
+        if let Ok(metadata) = reader.metadata(&config)
+            && let Ok(content) = reader.read(&metadata.canonical, 64 * 1024)
+            && !content.truncated
+            && let Ok(text) = std::str::from_utf8(&content.bytes)
+            && let Ok(document) = text.parse::<toml_edit::DocumentMut>()
+            && let Some(cache) = document.get("cache_dir").and_then(|value| value.as_str())
+        {
+            let path = cache
+                .strip_prefix("~/")
+                .map_or_else(|| PathBuf::from(cache), |suffix| home.join(suffix));
+            if path.is_absolute()
+                && !path
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+            {
+                probes.push(Probe::Metadata {
+                    path,
+                    reason: "derived mbx cache_dir from bounded operator TOML; presence only"
+                        .into(),
+                });
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    probes.push(Probe::Metadata { path: std::env::var_os("DEVELOPER_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/db/xcode_select_link")), reason: "operator/platform developer selection; inspect selector only, never xcode-select execution".into() });
     probes.truncate(64);
     probes
 }

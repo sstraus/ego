@@ -286,6 +286,17 @@ fn setup_adaptive_write_reach_subtracts_captured_floors() {
     assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
 }
 
+// Catches: setup omits the native developer selector and operator mbx provenance.
+#[test]
+fn setup_inventory_names_developer_and_mbx_selection_without_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let probes = ego_tools::setup::inventory(root.path());
+    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("mbx") && reason.contains("operator"))), "mbx catalogue source missing");
+    #[cfg(target_os = "macos")]
+    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("developer selection"))));
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
 // Catches: tool presence or write policy is mislabeled as a successful execution/effect.
 #[test]
 fn setup_tool_presence_and_write_intent_never_claim_effect_success() {
