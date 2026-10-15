@@ -3085,6 +3085,31 @@ fn find(output: &[u8], needle: &[u8]) -> usize {
         .unwrap_or_else(|| panic!("missing PTY marker {:?}", String::from_utf8_lossy(needle)))
 }
 
+fn until_draft_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    let mut pending = output.split_off(start);
+    until_prompt_after(receiver, &mut pending, 0);
+    output.extend(pending);
+}
+
+#[test]
+fn draft_ready_wait_rejects_typed_and_incomplete_repaints() {
+    // Captured from the failing real rb PTY transcript in regression case.
+    let empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
+    let typed = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b[37munsent draft\x1b[0m\x1b7\x1b8\x1b[?25h";
+    for transient in [typed.as_slice(), &empty[..empty.len() - 6]] {
+        let (sender, receiver) = mpsc::channel();
+        let mut output = empty.to_vec();
+        let start = output.len();
+        output.extend_from_slice(transient);
+        sender.send(empty.to_vec()).expect("completed empty frame");
+        until_draft_ready(&receiver, &mut output, start);
+        assert!(
+            support::ready_prompt_count(&output[start..]) > 0,
+            "draft readiness accepted a typed or incomplete frame"
+        );
+    }
+}
+
 #[test]
 fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     #[cfg(not(windows))]
@@ -3257,17 +3282,13 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     input.write_all(b"unsent draft").expect("type unsent draft");
     input.flush().expect("unsent draft flush");
     until_from(&reader, &mut output, unsent_draft_start, b"unsent draft");
-    // `rendered_prompt_count` counts every `"> "`, and the frame echoing the
-    // draft carries one. A re-render the reader thread was still holding would
-    // therefore answer the wait below without the stash having happened, and
-    // the EOF two lines down would then arrive at a line that still held text
-    // — where Ctrl-D is not EOF at all, and the farewell it is waited on never
-    // comes. The queue is emptied before the marker is taken.
+    // Exclude queued typed repaints before waiting for the completed empty
+    // frame produced by stashing, rather than accepting any "> " substring.
     drain_until_quiet(&reader, &mut output);
     let unsent_stash_start = output.len();
     input.write_all(b"\x13").expect("stash unsent draft");
     input.flush().expect("stash unsent draft flush");
-    until_post_trust_prompt(&reader, &mut output, unsent_stash_start);
+    until_draft_ready(&reader, &mut output, unsent_stash_start);
     let manual_restore_start = output.len();
     input
         .write_all(b"\x13")
@@ -3277,7 +3298,9 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     let manual_restash_start = output.len();
     input.write_all(b"\x13").expect("park restored draft again");
     input.flush().expect("manual restash flush");
-    until_post_trust_prompt(&reader, &mut output, manual_restash_start);
+    until_draft_ready(&reader, &mut output, manual_restash_start);
+    drain_until_quiet(&reader, &mut output);
+    let width_restore_start = output.len();
     pair.master
         .resize(PtySize {
             rows: 24,
@@ -3286,6 +3309,8 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
             pixel_height: 0,
         })
         .expect("restore terminal width");
+    // Resize starts another cursor query; EOF must follow its ready frame.
+    until_draft_ready(&reader, &mut output, width_restore_start);
     input.write_all(b"\x04").expect("EOF");
     input.flush().expect("EOF flush");
     until_normalized(&reader, &mut output, 0, "1 unsent draft");
@@ -5783,8 +5808,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
             );
             assert_eq!(
                 stub.generations().len(),
-                1,
-                "compact must send one checkpoint"
+                2,
+                "compact must send one checkpoint and one malformed-output correction"
             );
         } else {
             submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
@@ -5804,25 +5829,37 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     let generations = stub.generations();
     assert_eq!(
         generations.len(),
-        1,
-        "local actions must not submit chat prompts"
+        2,
+        "local actions must only generate the checkpoint and its one correction"
     );
     let messages = generations[0]["messages"]
         .as_array()
         .expect("checkpoint messages");
     assert!(
         messages.iter().any(|message| {
-            message["role"] == "system"
-                && message["content"].as_str().is_some_and(|content| {
-                    content.contains("Produce one self-contained context checkpoint")
-                })
+            message["role"] == "user" && message["content"] == ego_core::compact::COMPACTION_PROMPT
         }),
         "compact must request a checkpoint"
     );
-    assert!(
-        messages.iter().all(|message| message["role"] != "user"),
-        "slash commands must not become chat prompts"
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .count(),
+        1,
+        "the ego-owned checkpoint instruction is the only user-role content"
     );
+    let correction = generations[1]["messages"]
+        .as_array()
+        .expect("checkpoint correction messages");
+    assert_eq!(&correction[..messages.len()], messages.as_slice());
+    assert_eq!(correction.len(), messages.len() + 2);
+    assert_eq!(correction[messages.len()]["role"], "assistant");
+    let instruction = correction.last().expect("correction instruction");
+    assert_eq!(instruction["role"], "user");
+    assert!(instruction["content"].as_str().expect("correction text").starts_with(
+        "The checkpoint parser refused your previous output: checkpoint must start with # Objective"
+    ));
 }
 
 /// Drive one interactive session, optionally through one answered turn, quit it
