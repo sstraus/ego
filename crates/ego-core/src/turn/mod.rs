@@ -1145,6 +1145,8 @@ struct HookBindingState<'session> {
     mcp: Option<Arc<dyn crate::mcp::McpRuntimeBinding>>,
 }
 
+// Keep the session/invocation binding explicit at each generation owner.
+#[allow(clippy::too_many_arguments)]
 fn admit_generation_evidence(
     session: SessionId,
     invocation: RunInvocationId,
