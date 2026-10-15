@@ -697,8 +697,12 @@ pub struct ConfigArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigAction {
     Capabilities,
+    Snapshot {
+        target: UserConfigTarget,
+    },
     Batch {
         changes: Vec<ego_core::config::UserConfigMutation>,
+        expected: Option<String>,
     },
     RootsList {
         target: UserConfigTarget,
@@ -1566,10 +1570,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
 fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
     let action = match command.action {
         ConfigSubcommand::Capabilities => ConfigAction::Capabilities,
+        ConfigSubcommand::Snapshot { profile } => ConfigAction::Snapshot {
+            target: config_target(profile)?,
+        },
         ConfigSubcommand::Batch {
             profile,
             sets,
             unsets,
+            if_revision,
         } => {
             let target = config_target(profile)?;
             if sets.len() + unsets.len() == 0 || sets.len() + unsets.len() > 64 {
@@ -1604,7 +1612,10 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
                     key,
                 });
             }
-            ConfigAction::Batch { changes }
+            ConfigAction::Batch {
+                changes,
+                expected: if_revision,
+            }
         }
         ConfigSubcommand::Get { profile, json, key } => {
             let target = config_target(profile)?;

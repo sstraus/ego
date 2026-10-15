@@ -514,12 +514,19 @@ pub(super) enum RulesSubcommand {
 pub(super) enum ConfigSubcommand {
     /// Inspect managed owner transaction capabilities as JSON.
     Capabilities,
+    /// Read stored values and their opaque owner revision as JSON.
+    Snapshot {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
     /// Atomically publish a bounded set of typed managed edits.
     Batch {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
         #[arg(long = "set", value_name = "KEY=TOML_VALUE")]
         sets: Vec<String>,
+        #[arg(long, value_name = "REVISION")]
+        if_revision: Option<String>,
         #[arg(long = "unset", value_name = "KEY")]
         unsets: Vec<String>,
     },

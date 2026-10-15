@@ -14,6 +14,7 @@ use ego_core::config::{
 };
 use ego_core::permit::rule::{Rule, RuleId};
 use fd_lock::RwLock;
+use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
 
@@ -40,6 +41,104 @@ where
     I: std::ops::Deref + Send + Sync,
     I::Target: StoreIo,
 {
+    fn revision(&self, target: &UserConfigTarget, bytes: &[u8]) -> Result<String, UserConfigError> {
+        let key_path = self.path.with_extension("revision-key");
+        let key = match fs::read(&key_path) {
+            Ok(key) => key,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut key = [0_u8; 32];
+                getrandom::fill(&mut key)
+                    .map_err(|_| UserConfigError::new("config revision key generation failed"))?;
+                let mut file = create_private_file(&key_path).map_err(transaction_error)?;
+                file.write_all(&key).map_err(transaction_error)?;
+                file.sync_all().map_err(transaction_error)?;
+                key.to_vec()
+            }
+            Err(error) => return Err(transaction_error(error)),
+        };
+        if key.len() != 32 {
+            return Err(UserConfigError::new("invalid config revision key"));
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key size");
+        mac.update(b"ego-managed-config-v1\0");
+        match target {
+            UserConfigTarget::Base => mac.update(b"base\0"),
+            UserConfigTarget::Profile(name) => {
+                mac.update(b"profile\0");
+                mac.update(name.as_str().as_bytes());
+                mac.update(b"\0");
+            }
+        }
+        mac.update(bytes);
+        Ok(hex(&mac.finalize().into_bytes()))
+    }
+
+    fn managed_transaction(
+        &self,
+        changes: Vec<UserConfigMutation>,
+        expected: Option<&str>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        if changes.is_empty()
+            || changes.len() > 64
+            || changes.iter().any(|change| {
+                change.target() != changes[0].target()
+                    || !matches!(
+                        change,
+                        UserConfigMutation::ManagedSet { .. }
+                            | UserConfigMutation::ManagedUnset { .. }
+                    )
+            })
+        {
+            return Err(UserConfigError::new(
+                "managed batch requires 1..64 operations on one target",
+            ));
+        }
+        for change in &changes {
+            change.validate()?;
+        }
+        let mut lock = user_config_lock(&self.path)?;
+        let _guard = lock.write().map_err(transaction_error)?;
+        let (text, _) = read_user_config(&*self.io, &self.path)?;
+        if let Some(expected) = expected {
+            let latest = self.revision(&changes[0].target(), text.as_bytes())?;
+            if latest != expected {
+                return Err(UserConfigError::conflict());
+            }
+        }
+        let mut document = text
+            .parse::<DocumentMut>()
+            .map_err(|_| UserConfigError::new("invalid user config TOML"))?;
+        for change in changes {
+            let parsed =
+                parse_user_config_bytes(document.to_string().as_bytes(), "managed candidate")?;
+            apply(&mut document, &parsed, change)?;
+        }
+        let candidate = document.to_string();
+        parse_user_config_bytes(candidate.as_bytes(), "managed candidate")?;
+        let changed = candidate != text;
+        let publication = if !changed {
+            UserConfigPublication::NotPublished
+        } else {
+            match self
+                .io
+                .replace_atomic_publication(&self.path, candidate.as_bytes())
+                .map_err(transaction_error)?
+            {
+                AtomicReplacePublication::PublishedDurably => {
+                    UserConfigPublication::PublishedDurably
+                }
+                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                    UserConfigPublication::PublishedDurabilityUncertain { diagnostic }
+                }
+            }
+        };
+        Ok(UserConfigEditResult {
+            changed,
+            publication,
+            candidate_cleanup_warning: None,
+        })
+    }
+
     pub fn prepare_edit(&self) -> Result<Box<dyn UserConfigEditHandle>, UserConfigError> {
         <Self as UserConfigStore>::prepare_edit(self)
     }
@@ -216,59 +315,27 @@ where
         &self,
         changes: Vec<UserConfigMutation>,
     ) -> Result<UserConfigEditResult, UserConfigError> {
-        if changes.is_empty()
-            || changes.len() > 64
-            || changes.iter().any(|change| {
-                change.target() != changes[0].target()
-                    || !matches!(
-                        change,
-                        UserConfigMutation::ManagedSet { .. }
-                            | UserConfigMutation::ManagedUnset { .. }
-                    )
-            })
-        {
-            return Err(UserConfigError::new(
-                "managed batch requires 1..64 operations on one target",
-            ));
-        }
-        for change in &changes {
-            change.validate()?;
-        }
+        self.managed_transaction(changes, None)
+    }
+
+    fn managed_batch_conditional(
+        &self,
+        changes: Vec<UserConfigMutation>,
+        expected: &str,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        self.managed_transaction(changes, Some(expected))
+    }
+
+    fn revision_snapshot(
+        &self,
+        target: UserConfigTarget,
+    ) -> Result<(UserConfigSnapshot, String), UserConfigError> {
         let mut lock = user_config_lock(&self.path)?;
         let _guard = lock.write().map_err(transaction_error)?;
-        let (text, _) = read_user_config(&*self.io, &self.path)?;
-        let mut document = text
-            .parse::<DocumentMut>()
-            .map_err(|_| UserConfigError::new("invalid user config TOML"))?;
-        for change in changes {
-            let parsed =
-                parse_user_config_bytes(document.to_string().as_bytes(), "managed candidate")?;
-            apply(&mut document, &parsed, change)?;
-        }
-        let candidate = document.to_string();
-        parse_user_config_bytes(candidate.as_bytes(), "managed candidate")?;
-        let changed = candidate != text;
-        let publication = if !changed {
-            UserConfigPublication::NotPublished
-        } else {
-            match self
-                .io
-                .replace_atomic_publication(&self.path, candidate.as_bytes())
-                .map_err(transaction_error)?
-            {
-                AtomicReplacePublication::PublishedDurably => {
-                    UserConfigPublication::PublishedDurably
-                }
-                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
-                    UserConfigPublication::PublishedDurabilityUncertain { diagnostic }
-                }
-            }
-        };
-        Ok(UserConfigEditResult {
-            changed,
-            publication,
-            candidate_cleanup_warning: None,
-        })
+        let snapshot = self.snapshot(target.clone())?;
+        let bytes = read_user_config_bytes(&*self.io, &self.path)?;
+        let revision = self.revision(&target, &bytes)?;
+        Ok((snapshot, revision))
     }
 
     fn prepare_batch(

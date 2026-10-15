@@ -1383,6 +1383,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "globset",
+ "hmac 0.12.1",
  "ignore",
  "keyring",
  "landlock",

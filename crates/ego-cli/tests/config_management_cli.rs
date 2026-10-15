@@ -480,3 +480,6 @@ mod auth_exec_paths;
 
 #[path = "config_management_cli/batch.rs"]
 mod batch;
+
+#[path = "config_management_cli/conditional.rs"]
+mod conditional;

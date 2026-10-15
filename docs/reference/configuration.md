@@ -253,3 +253,26 @@ Batch stdout is one JSON object: `{"v":1,"changed":true,"publication":"durable"}
 `publication` is `not_published`, `durable`, or `durability_uncertain`. The last
 state means the new values are authoritative but the final durability barrier
 failed: read again, do not retry blindly. Failed validation publishes nothing.
+
+### Revision-conditional publication
+
+`ego config snapshot [--profile NAME]` returns the stored `ls --json` envelope
+with an additional opaque `revision` string. Values and revision are captured
+under the owner lock. Secret values remain redacted. The first snapshot creates
+a private random revision key beside the user configuration; it does not set any
+configuration values. Treat revision tokens as opaque and do not edit this key.
+
+`ego config batch [--profile NAME] --if-revision TOKEN --set KEY=TOML_VALUE ...`
+compares the latest revision and publishes under the same cross-process lock as
+single-key, roots, rules, MCP, setup, and editor publication. A revision binds the
+whole owner document and exact base/profile target; even an unrelated document
+edit invalidates it. Reads do not resolve inherited values. Existing `get` and
+`ls` output contracts are unchanged. A single conditional edit is a one-operation
+batch. `ego config capabilities` advertises `compare_and_swap: true`.
+
+A stale or wrong-target token returns exit 1 and JSON stdout
+`{"v":1,"code":"conflict","persisted":false,"next_action":"snapshot"}`.
+Read a fresh snapshot, recompute the change, and retry with its revision; never
+retry the stale token or fall back to an unconditional write. Successful writes
+use the batch receipt above; obtain the next revision with a fresh snapshot.
+Revisions use a private keyed digest and do not disclose secret configuration.
