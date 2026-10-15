@@ -183,6 +183,63 @@ fn the_offered_values_are_exactly_the_ones_core_says_are_available() {
     );
 }
 
+/// Catches: silently hiding auto without telling the host how to configure its judge.
+#[test]
+fn mode_description_explains_unavailable_auto_and_the_judge_command() {
+    let options = controls::options(&state());
+    let mode = option(&options, controls::MODE);
+    let description = mode.description.as_deref().expect("mode description");
+    assert!(description.contains("auto"), "{description}");
+    assert!(description.contains("[permissions] judge"), "{description}");
+    assert!(
+        description.contains("ego config set 'permissions.judge=\"openai-codex/gpt-6.1-sol\"'"),
+        "{description}"
+    );
+    assert!(!values(mode).contains(&"auto".to_owned()));
+}
+
+/// Catches: a configured judge still being described as unavailable or refused.
+#[test]
+fn offered_auto_is_selectable_without_an_unavailable_notice() {
+    let mut state = state();
+    state.mode.available.push(Mode::Auto);
+    let options = controls::options(&state);
+    let mode = option(&options, controls::MODE);
+    assert!(values(mode).contains(&"auto".to_owned()));
+    assert!(!mode.description.as_deref().unwrap().contains("unavailable"));
+    assert_eq!(
+        controls::change(&state, &request(controls::MODE, "auto")),
+        Ok(Some(SessionControlChange::Mode(Mode::Auto)))
+    );
+}
+
+/// Catches: unavailable auto returning an opaque error instead of the judge requirement.
+#[test]
+fn unavailable_auto_refusal_names_the_judge_and_preserves_the_offer() {
+    let state = state();
+    let refusal = controls::change(&state, &request(controls::MODE, "auto"))
+        .expect_err("unavailable auto must remain refused");
+    assert_eq!(refusal.code, Error::invalid_params().code);
+    assert!(refusal.message.contains("[permissions] judge"));
+    assert!(refusal.message.contains("max_mode"));
+    assert_eq!(state.mode.current, Some(Mode::Default));
+}
+
+/// Catches: a ceiling-hidden auto being presented as fixable by judge configuration alone.
+#[test]
+fn unavailable_auto_description_also_explains_profile_and_ceiling_limits() {
+    let mut state = state();
+    state.mode.available = vec![Mode::Plan];
+    state.mode.current = Some(Mode::Plan);
+    let options = controls::options(&state);
+    let mode = option(&options, controls::MODE);
+    let description = mode.description.as_deref().unwrap();
+    assert!(description.contains("--profile <name>"));
+    assert!(description.contains("max_mode"));
+    assert!(description.contains("Start a new session"));
+    assert_eq!(values(mode), vec!["plan"]);
+}
+
 #[test]
 fn a_value_the_host_was_offered_becomes_the_change_it_names() {
     let state = state();
