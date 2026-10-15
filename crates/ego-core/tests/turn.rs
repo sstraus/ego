@@ -9276,6 +9276,49 @@ mod turn {
             );
         }
 
+        /// regression case — catches: the interactive retry budget settles
+        /// known failure before a provider that recovers after 63 seconds.
+        #[test]
+        fn regression_case_recovers_after_the_interactive_retry_budget() {
+            let trace = GenerationTrace::default();
+            // Seven failures consume the initial attempt plus six retries.
+            // RecordedPause advances the backoff without wall-clock sleeps;
+            // the eighth request represents connectivity returning after the budget.
+            let mut profiles = (0..7)
+                .map(|_| {
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            profiles.push(Ok(profile(
+                "ollama/primary-model",
+                false,
+                vec![
+                    AiEvent::TextDelta {
+                        text: "recovered".to_owned(),
+                    },
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+                &trace,
+                Some(1_024),
+            )));
+            let source =
+                Arc::new(ScriptedGenerationSource::new(profiles).with_trace(trace.clone()));
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+            assert!(
+                outcome.ok,
+                "the pending turn must recover without another human prompt"
+            );
+            assert_eq!(trace.requests.lock().unwrap().len(), 8);
+        }
+
         /// regression case — catches: a provider-stated `Retry-After` ignored
         /// in favour of the local backoff, or obeyed past the ceiling.
         #[test]
