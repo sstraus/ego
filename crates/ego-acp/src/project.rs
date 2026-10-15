@@ -766,6 +766,7 @@ fn project_v1_with_root(
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
         | PublicEvent::ProviderRetry { .. }
+        | PublicEvent::ProviderRetrying { .. }
         | PublicEvent::TurnCompleted { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
@@ -948,6 +949,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
         | PublicEvent::ProviderRetry { .. }
+        | PublicEvent::ProviderRetrying { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
         | PublicEvent::Error { .. } => None,

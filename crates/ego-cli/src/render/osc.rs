@@ -250,6 +250,25 @@ impl Osc {
         )
     }
 
+    /// Bounded numeric snapshots for TUIC's provider-recovery overlay.
+    pub fn recovery(&self, attempt: u32, next_attempt_ms: Option<u64>) -> String {
+        let (phase, next) = match next_attempt_ms {
+            Some(next) => ("waiting", next.min(8_640_000_000_000_000).to_string()),
+            None => ("retrying", "null".to_owned()),
+        };
+        self.tuic(
+            "ego-recovery",
+            &format!(
+                "{{\"phase\":\"{phase}\",\"next_attempt_ms\":{next},\"attempt\":{}}}",
+                attempt.max(1)
+            ),
+        )
+    }
+
+    pub fn recovery_clear(&self) -> String {
+        self.tuic("ego-recovery", "clear")
+    }
+
     /// What ego is doing, for the pane's context bar.
     pub fn intent(&self, text: &str) -> String {
         self.tuic("intent", text)

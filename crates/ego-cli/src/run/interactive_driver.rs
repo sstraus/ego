@@ -428,12 +428,16 @@ pub(super) async fn run_process(
 
     let announce = Announce::new(out, capabilities, quiet);
     let opening_prompt = args.prompt.clone();
+    let signalling = Signalling {
+        inner: sink,
+        announce: &announce,
+    };
 
     let ended = run_with_registry(
         args,
         |_| {
             announce.opening(opening_prompt.as_deref());
-            sink
+            &signalling
         },
         cancel,
         evidence,
@@ -685,6 +689,7 @@ pub(super) struct Announce<'a> {
     osc: Osc,
     quiet: bool,
     started: std::time::Instant,
+    recovering: std::sync::Mutex<bool>,
 }
 
 /// How long a run has to take before finishing it is worth a desktop
@@ -703,6 +708,7 @@ impl<'a> Announce<'a> {
             osc: Osc::new(capabilities),
             quiet,
             started: std::time::Instant::now(),
+            recovering: std::sync::Mutex::new(false),
         }
     }
 
@@ -752,16 +758,46 @@ impl<'a> Announce<'a> {
     pub(super) fn signal(&self, event: &PublicEvent, state: &SessionState) -> String {
         use ego_core::public::ItemKind as Kind;
         match event {
+            PublicEvent::ProviderRetry {
+                attempt, delay_ms, ..
+            } => {
+                *self.recovering.lock().expect("recovery signal lock") = true;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let epoch_ms = u64::try_from(now.as_millis()).unwrap_or(u64::MAX);
+                self.osc
+                    .recovery(*attempt, Some(epoch_ms.saturating_add(*delay_ms)))
+            }
+            PublicEvent::ProviderRetrying { attempt, .. } => self.osc.recovery(*attempt, None),
+            PublicEvent::ItemStarted { .. } | PublicEvent::ItemDelta { .. } => {
+                self.clear_recovery()
+            }
             PublicEvent::ItemCompleted {
                 kind: Kind::UserMessage,
                 text: Some(prompt),
                 ..
             } => self.turn_started(prompt, state.title.as_deref()),
+            PublicEvent::ItemCompleted {
+                kind: Kind::AgentMessage | Kind::Reasoning | Kind::Tool,
+                ..
+            } => self.clear_recovery(),
             // A permission request is deliberately not a signal here: it is
             // raised before a judge or a stored rule may settle it, and the
             // terminal owner announces the wait when it puts the question.
-            PublicEvent::TurnCompleted { .. } => self.osc.state(State::Idle),
+            PublicEvent::TurnCompleted { .. } => {
+                [self.clear_recovery(), self.osc.state(State::Idle)].concat()
+            }
             _ => String::new(),
+        }
+    }
+
+    fn clear_recovery(&self) -> String {
+        let mut recovering = self.recovering.lock().expect("recovery signal lock");
+        if std::mem::take(&mut *recovering) {
+            self.osc.recovery_clear()
+        } else {
+            String::new()
         }
     }
 
@@ -804,6 +840,7 @@ impl<'a> Announce<'a> {
                 Progress::Failed
             }),
             notification,
+            self.clear_recovery(),
             self.osc.state(State::Idle),
             // Reduced to the fixed brand prefix rather than restored. Restoring
             // needs the previous title, which is only readable through a query
