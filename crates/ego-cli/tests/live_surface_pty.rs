@@ -5783,8 +5783,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
             );
             assert_eq!(
                 stub.generations().len(),
-                1,
-                "compact must send one checkpoint"
+                2,
+                "compact must send one checkpoint and one malformed-output correction"
             );
         } else {
             submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
@@ -5804,25 +5804,37 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     let generations = stub.generations();
     assert_eq!(
         generations.len(),
-        1,
-        "local actions must not submit chat prompts"
+        2,
+        "local actions must only generate the checkpoint and its one correction"
     );
     let messages = generations[0]["messages"]
         .as_array()
         .expect("checkpoint messages");
     assert!(
         messages.iter().any(|message| {
-            message["role"] == "system"
-                && message["content"].as_str().is_some_and(|content| {
-                    content.contains("Produce one self-contained context checkpoint")
-                })
+            message["role"] == "user" && message["content"] == ego_core::compact::COMPACTION_PROMPT
         }),
         "compact must request a checkpoint"
     );
-    assert!(
-        messages.iter().all(|message| message["role"] != "user"),
-        "slash commands must not become chat prompts"
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .count(),
+        1,
+        "the ego-owned checkpoint instruction is the only user-role content"
     );
+    let correction = generations[1]["messages"]
+        .as_array()
+        .expect("checkpoint correction messages");
+    assert_eq!(&correction[..messages.len()], messages.as_slice());
+    assert_eq!(correction.len(), messages.len() + 2);
+    assert_eq!(correction[messages.len()]["role"], "assistant");
+    let instruction = correction.last().expect("correction instruction");
+    assert_eq!(instruction["role"], "user");
+    assert!(instruction["content"].as_str().expect("correction text").starts_with(
+        "The checkpoint parser refused your previous output: checkpoint must start with # Objective"
+    ));
 }
 
 /// Drive one interactive session, optionally through one answered turn, quit it

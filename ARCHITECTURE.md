@@ -38,7 +38,7 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-52 variants in the current schema, and this list is exhaustive by contract.
+53 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
 52, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, skill, and clean-session compaction lifecycles.

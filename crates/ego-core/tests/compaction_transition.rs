@@ -4,8 +4,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ego_core::compact::{
-    CompactionError, CompactionFuture, CompactionPreparation, CompactionTargetError,
-    CompactionTargetFacts, CompactionTargetInspection, CompactionTargetPort,
+    COMPACTION_PROMPT_REVISION, CompactionError, CompactionFuture, CompactionPreparation,
+    CompactionTargetError, CompactionTargetFacts, CompactionTargetInspection, CompactionTargetPort,
     CompactionTransitionError, CompactionTransitionRequest, CompactionTransitionService,
     PreparedCompaction,
 };
@@ -153,7 +153,7 @@ fn facts(source: SessionId) -> CompactionTargetFacts {
     CompactionTargetFacts {
         source,
         source_seq: Seq::ZERO,
-        prompt_revision: 1,
+        prompt_revision: COMPACTION_PROMPT_REVISION,
     }
 }
 
