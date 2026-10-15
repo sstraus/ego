@@ -444,7 +444,7 @@ confined execs. The launcher was subsequently fixed.
                         (Codex's mechanism: -c 'sandbox.mode="workspace"')
     --profile NAME      layer [profile.NAME] from config (§7)
     --bare              no ambient discovery even in a trusted workspace
-    --trust-workspace   explicitly trust an interactive launch's workspace, without asking
+    --trust-workspace   explicitly trust this launch's workspace, without asking
 -q / --no-color
 ```
 
@@ -554,7 +554,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--system`, `--append-system` | **yes** | `--append-system` is part of §3's general session shape, so `ego acp` takes it too; `--system`, which replaces the prompt outright, is not |
 | `--instructions` | **yes** | part of §3's general session shape, so `ego acp` takes it too. It was **missing from §3's grammar** until 2026-09-20 and documented only in §4.5's prose |
 | `--bare` | **yes** | |
-| `--trust-workspace` | **yes** | interactive terminal launches only; conflicts with `--bare`; independent of `--yolo` |
+| `--trust-workspace` | **yes** | terminal and headless launches; conflicts with `--bare`; independent of `--yolo` |
 | `--session`, `--session-id` | **yes** | durable session choices; the parser places them in the §4.5 mutually exclusive session group |
 | `--ephemeral` | no | recognized only to refuse by name with usage error exit 2 before opening or creating a session or causing an effect; use the durable default, `--session`, or `--session-id` |
 | `--session-dir` | **yes** | |
@@ -758,8 +758,8 @@ a script that pipes `--help` must not get an empty stdout and a failure.
 **Ambient discovery is trust-gated.** Project-local config, `AGENTS.md`,
 hooks, skills and MCP servers load only after an explicit terminal trust
 answer or `--trust-workspace` admits the canonical workspace. Declining, Ctrl-C or EOF
-continues bare. Headless always runs untrusted and bare automatically (no
-dialog, no ambient code execution). The trust offer names absolute file paths
+continues bare. Headless runs without a dialog: an explicit `--trust-workspace` grant or a valid
+remembered answer admits project content; otherwise it runs untrusted and bare. The trust offer names absolute file paths
 and explains that yes loads project instructions, configuration, skills, hooks
 and MCP servers, while no continues without project files. `--bare` forces this and skips the trust
 question. The question is asked only where there is something to answer about:
@@ -785,7 +785,8 @@ an earlier refusal for that root. Executable changes require a new answer on
 later launches without the flag. This grants no tool permission or sandbox
 exception; `--yolo` alone never grants workspace trust. Without the flag,
 the remembered answer or interactive question still applies. `--bare`
-conflicts with the flag, and headless launches reject it. An empty workspace
+conflicts with the flag. Headless launches never ask or record a refusal when no
+valid answer exists. An empty workspace
 still has nothing to admit and stays untrusted.
 
 A standalone `@relative/path` line outside fenced or indented code loads an

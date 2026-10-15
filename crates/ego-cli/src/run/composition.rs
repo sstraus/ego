@@ -759,8 +759,8 @@ pub(super) fn rooted_settings(
     // may not be installed; `-C` is how a caller says otherwise.
     let root = cwd.clone();
 
-    // The caller can return `Trusted` only when it owns a human seat. A
-    // headless caller passes a closure that always returns `Untrusted`, so no
+    // Trust comes from an operator answer or a valid standing grant. A
+    // headless caller never asks, so no
     // terminal or stdin read is reachable from that path.
     let trust = trust_for(&root);
     let layers = config::layers(&root, args, trust)?;

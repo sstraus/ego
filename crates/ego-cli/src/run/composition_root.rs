@@ -741,7 +741,6 @@ pub(super) async fn execution_preflight(
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
-    validate_workspace_trust(args, driver).map_err(usage)?;
     let home = config::ego_home();
     let mut settings = settings(
         args,

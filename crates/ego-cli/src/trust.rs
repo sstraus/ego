@@ -78,6 +78,28 @@ pub(crate) fn resolve(
     explicit_grant: bool,
     ask: impl FnOnce(&str) -> Trust,
 ) -> Trust {
+    resolve_answer(root, home, diagnostics, explicit_grant, |context| {
+        Some(ask(context))
+    })
+}
+
+/// Headless launches may reuse an answer, but never manufacture a refusal.
+pub(crate) fn resolve_headless(
+    root: &Path,
+    home: Option<&Path>,
+    diagnostics: &dyn Diagnostics,
+    explicit_grant: bool,
+) -> Trust {
+    resolve_answer(root, home, diagnostics, explicit_grant, |_| None)
+}
+
+fn resolve_answer(
+    root: &Path,
+    home: Option<&Path>,
+    diagnostics: &dyn Diagnostics,
+    explicit_grant: bool,
+    ask: impl FnOnce(&str) -> Option<Trust>,
+) -> Trust {
     let Ok(root) = fs::canonicalize(root) else {
         diagnostics.note("the workspace path could not be resolved; trust was not granted");
         return Trust::Untrusted;
@@ -133,7 +155,10 @@ pub(crate) fn resolve(
     let decision = if explicit_grant {
         Trust::Trusted
     } else {
-        ask(&context)
+        let Some(answer) = ask(&context) else {
+            return Trust::Untrusted;
+        };
+        answer
     };
     if executable_surface(root) != surface {
         diagnostics.note("the workspace executable surface changed while trust was being answered; this answer was not applied");
@@ -1025,6 +1050,37 @@ mod tests {
                 },
             )
         }
+    }
+
+    // Catches: an absent headless answer records a refusal, or stale executable
+    // authority is reused after a project command changes.
+    #[test]
+    fn headless_absence_and_executable_changes_never_write_an_answer() {
+        let fixture = Fixture::new();
+        fixture.write("AGENTS.md", "# instructions");
+        let resolve = |grant| {
+            resolve_headless(
+                fixture.workspace.path(),
+                Some(fixture.home.path()),
+                &Silent,
+                grant,
+            )
+        };
+        assert_eq!(resolve(false), Trust::Untrusted);
+        assert!(!fixture.home.path().join("trust.json").exists());
+        assert_eq!(resolve(true), Trust::Trusted);
+        assert_eq!(resolve(false), Trust::Trusted);
+        fixture.write(
+            ".ego/config.toml",
+            "[mcp.servers.new]\ncommand = \"new-server\"\n",
+        );
+        let before = fs::read(fixture.home.path().join("trust.json")).unwrap();
+        assert_eq!(resolve(false), Trust::Untrusted);
+        assert_eq!(
+            fs::read(fixture.home.path().join("trust.json")).unwrap(),
+            before
+        );
+        assert_eq!(resolve(true), Trust::Trusted);
     }
 
     #[test]

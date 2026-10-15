@@ -921,8 +921,8 @@ fn only_an_interactive_non_bare_run_can_ask_for_trust() {
 
     assert_eq!(
         run_trust(&interactive_args(&[]), &Driver::Once, root, home, &Stderr),
-        Trust::Untrusted,
-        "headless has no seat to consult"
+        Trust::Trusted,
+        "headless reuses standing trust without consulting a seat"
     );
     assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
 }

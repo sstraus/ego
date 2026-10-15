@@ -684,7 +684,7 @@ pub(super) struct Flags {
     #[command(flatten)]
     pub(super) shape: Shape,
 
-    /// Trust this interactive launch's workspace without asking; remember the answer.
+    /// Trust this launch's workspace without asking; remember the answer.
     #[arg(long, conflicts_with = "bare")]
     pub(super) trust_workspace: bool,
 
