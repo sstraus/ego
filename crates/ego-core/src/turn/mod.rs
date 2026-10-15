@@ -2543,53 +2543,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Ok(driven) => driven,
             Err(cause) => return Err(self.abandon(turn, cause)),
         };
-        let (exit_reason, denied) = match driven {
-            DriveOutcome::Ended(reason, denied) => (reason, denied),
-            DriveOutcome::QuestionRequired => {
-                self.close_control();
-                return Ok(TurnOutcome {
-                    turn,
-                    ok: false,
-                    exit_reason: ExitReason::PermissionRequired,
-                    denied: None,
-                    skill: None,
-                    provider_failure: None,
-                    usage_error: None,
-                });
-            }
-        };
-        let usage_error = self.usage_error(exit_reason);
-        let ok = exit_reason == ExitReason::Completed;
-        if let Err(cause) = self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::TurnCompleted { ok, exit_reason },
-        ) {
-            return Err(self.abandon(turn, cause));
+        match self.finish_turn(turn, driven).await {
+            Ok(outcome) => Ok(outcome),
+            Err(cause) => Err(self.abandon(turn, cause)),
         }
-        if let Err(cause) = self.deactivate_skill_hooks(turn) {
-            return Err(self.abandon(turn, cause));
-        }
-        if let Err(cause) = self.close_and_drain_controls(turn).await {
-            return Err(self.abandon(turn, cause));
-        }
-        if let Err(cause) = self.record_pause_boundary(turn, exit_reason) {
-            return Err(self.abandon(turn, cause));
-        }
-        self.refresh_control_status();
-        Ok(TurnOutcome {
-            turn,
-            ok,
-            exit_reason,
-            denied,
-            skill: None,
-            usage_error,
-            provider_failure: self
-                .provider_failure
-                .take()
-                .filter(|_| exit_reason == ExitReason::Provider),
-        })
     }
 
     fn restore_skill_scope(&mut self, turn: TurnId) -> Result<(), StoreError> {
