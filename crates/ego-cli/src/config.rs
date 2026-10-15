@@ -127,6 +127,25 @@ async fn execute_inner(
         .transpose()?;
     let store = user_store()?;
     match &args.action {
+        ConfigAction::Capabilities => {
+            out.line(r#"{"v":1,"atomic_batch":true,"max_operations":64,"compare_and_swap":false}"#)
+        }
+        ConfigAction::Batch { changes } => {
+            let result = store
+                .managed_batch(changes.clone())
+                .map_err(store_failure)?;
+            let publication = match result.publication {
+                UserConfigPublication::NotPublished => "not_published",
+                UserConfigPublication::PublishedDurably => "durable",
+                UserConfigPublication::PublishedDurabilityUncertain { .. } => {
+                    "durability_uncertain"
+                }
+            };
+            out.line(
+                &serde_json::json!({"v":1,"changed":result.changed,"publication":publication})
+                    .to_string(),
+            );
+        }
         ConfigAction::Effective { .. } => {
             unreachable!("effective listing returns before stored-value management")
         }

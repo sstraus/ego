@@ -456,6 +456,14 @@ pub trait UserConfigStore: Send + Sync {
         mutation: UserConfigMutation,
     ) -> Result<UserConfigMutationResult, UserConfigError>;
 
+    /// Validate and publish 1..64 managed operations to one exact target.
+    fn managed_batch(
+        &self,
+        _changes: Vec<UserConfigMutation>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        Err(UserConfigError::new("managed batches are unavailable"))
+    }
+
     /// Preview without creating lock, directory, temporary file, or candidate.
     fn prepare_batch(
         &self,

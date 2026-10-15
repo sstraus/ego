@@ -238,3 +238,18 @@ prices are shipped. Monetary limits require enough known rates for admission.
 
 No implicit `.claude/settings.json` or `.claude/skills` alias exists. See
 [integrations](../integrations/README.md) for the corresponding εgo sources.
+
+### Atomic managed batches
+
+`ego config capabilities` returns versioned JSON with `atomic_batch: true` and
+`max_operations: 64`. `ego config batch [--profile NAME] --set KEY=TOML_VALUE ...
+--unset KEY ...` validates 1 to 64 managed operations before one atomic publication.
+The default target is the user base; `--profile` selects one exact user profile.
+Per-operation targets, duplicate keys, unknown keys, and invalid values are rejected.
+Unrelated keys, profiles, and comments are preserved. Clients must use this owner
+operation, not edit the owner's files or chain single-key writes.
+
+Batch stdout is one JSON object: `{"v":1,"changed":true,"publication":"durable"}`.
+`publication` is `not_published`, `durable`, or `durability_uncertain`. The last
+state means the new values are authoritative but the final durability barrier
+failed: read again, do not retry blindly. Failed validation publishes nothing.

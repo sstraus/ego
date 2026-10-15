@@ -212,6 +212,65 @@ where
         })
     }
 
+    fn managed_batch(
+        &self,
+        changes: Vec<UserConfigMutation>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        if changes.is_empty()
+            || changes.len() > 64
+            || changes.iter().any(|change| {
+                change.target() != changes[0].target()
+                    || !matches!(
+                        change,
+                        UserConfigMutation::ManagedSet { .. }
+                            | UserConfigMutation::ManagedUnset { .. }
+                    )
+            })
+        {
+            return Err(UserConfigError::new(
+                "managed batch requires 1..64 operations on one target",
+            ));
+        }
+        for change in &changes {
+            change.validate()?;
+        }
+        let mut lock = user_config_lock(&self.path)?;
+        let _guard = lock.write().map_err(transaction_error)?;
+        let (text, _) = read_user_config(&*self.io, &self.path)?;
+        let mut document = text
+            .parse::<DocumentMut>()
+            .map_err(|_| UserConfigError::new("invalid user config TOML"))?;
+        for change in changes {
+            let parsed =
+                parse_user_config_bytes(document.to_string().as_bytes(), "managed candidate")?;
+            apply(&mut document, &parsed, change)?;
+        }
+        let candidate = document.to_string();
+        parse_user_config_bytes(candidate.as_bytes(), "managed candidate")?;
+        let changed = candidate != text;
+        let publication = if !changed {
+            UserConfigPublication::NotPublished
+        } else {
+            match self
+                .io
+                .replace_atomic_publication(&self.path, candidate.as_bytes())
+                .map_err(transaction_error)?
+            {
+                AtomicReplacePublication::PublishedDurably => {
+                    UserConfigPublication::PublishedDurably
+                }
+                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                    UserConfigPublication::PublishedDurabilityUncertain { diagnostic }
+                }
+            }
+        };
+        Ok(UserConfigEditResult {
+            changed,
+            publication,
+            candidate_cleanup_warning: None,
+        })
+    }
+
     fn prepare_batch(
         &self,
         changes: Vec<UserConfigMutation>,

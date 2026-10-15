@@ -477,3 +477,6 @@ fn roots_commands_update_exact_user_target_without_erasing_other_settings() {
 
 #[path = "config_management_cli/auth_exec_paths.rs"]
 mod auth_exec_paths;
+
+#[path = "config_management_cli/batch.rs"]
+mod batch;

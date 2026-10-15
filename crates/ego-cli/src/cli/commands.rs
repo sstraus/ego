@@ -512,6 +512,18 @@ pub(super) enum RulesSubcommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum ConfigSubcommand {
+    /// Inspect managed owner transaction capabilities as JSON.
+    Capabilities,
+    /// Atomically publish a bounded set of typed managed edits.
+    Batch {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(long = "set", value_name = "KEY=TOML_VALUE")]
+        sets: Vec<String>,
+        #[arg(long = "unset", value_name = "KEY")]
+        unsets: Vec<String>,
+    },
+
     /// Read one exact stored value.
     Get {
         #[arg(long, value_name = "NAME")]
