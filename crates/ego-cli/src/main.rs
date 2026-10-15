@@ -229,6 +229,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 selected_session: None,
                 mcp_errors: Vec::new(),
             },
+            Ok(Invocation::Rm(args)) => run::rm(&args, &out).await,
             Ok(Invocation::Fork(args)) => run::fork(&args, &out).await,
             Ok(Invocation::Compact(args)) => {
                 run::compact(&args, &out, std::sync::Arc::clone(&evidence)).await

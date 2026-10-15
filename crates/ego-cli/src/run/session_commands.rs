@@ -553,3 +553,53 @@ fn render<T: serde::Serialize>(out: &Stdout, value: &T, what: &str) -> Result<()
         }),
     }
 }
+
+/// Confirm at the terminal, then publish the same tombstone ACP publishes.
+pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
+    use std::io::{IsTerminal, Write};
+    let result = async {
+        if !args.yes {
+            if !std::io::stdin().is_terminal() {
+                return Err(
+                    "deletion requires confirmation; pass --yes for non-interactive use".to_owned(),
+                );
+            }
+            eprint!("Delete session {}? [y/N] ", args.source);
+            std::io::stderr()
+                .flush()
+                .map_err(|error| error.to_string())?;
+            let mut answer = String::new();
+            std::io::stdin()
+                .read_line(&mut answer)
+                .map_err(|error| error.to_string())?;
+            if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+                return Err("deletion cancelled".to_owned());
+            }
+        }
+        let root = workspace(args.directory.as_ref()).map_err(|error| error.to_string())?;
+        let store_root = rooted_path(
+            &root,
+            session::store_root(args.session_dir.as_ref()).map_err(|error| error.to_string())?,
+        );
+        let store = Arc::new(session::jsonl(store_root, root));
+        let lifecycle = SessionLifecycle::new(store, Arc::new(NoLiveRuns), Arc::new(SystemClock));
+        let publication = lifecycle
+            .delete_with_force(args.source, args.force)
+            .await
+            .map_err(|error| error.to_string())?;
+        match publication {
+            LifecyclePublication::PublishedWithProjectionWarning { diagnostic }
+            | LifecyclePublication::PublishedDurabilityUncertain { diagnostic } => {
+                Stderr.note(&diagnostic)
+            }
+            _ => {}
+        }
+        out.line(&format!("deleted {}", args.source));
+        Ok(())
+    }
+    .await;
+    Ended::refused(match result {
+        Ok(()) => RunTermination::Done,
+        Err(message) => RunTermination::Failed { message },
+    })
+}

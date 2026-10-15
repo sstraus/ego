@@ -198,3 +198,25 @@ reasoning_carryover = "unsupported"
 cancel = "cooperative"
 cache = "none"
 transport = "sse"
+
+# Vendor-stated current aliases absent from models.dev. Never inherit API facts
+# into subscription providers. Read 2026-10-15: the page states function calling,
+# text/image input, text output and these limits, but no reasoning-effort set or
+# parallel-call guarantee. Image admission uses the OpenAI vision guide above.
+[stated."openai/chat-latest"]
+source = "https://developers.openai.com/api/docs/models/chat-latest"
+read = "2026-10-15"
+reasoning_efforts = "unknown"
+limit = { context = 400000, output = 128000 }
+modalities = { input = ["text", "image"], output = ["text"] }
+
+[stated."openai/chat-latest".wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[stated."openai/chat-latest".wire.image_input]
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100

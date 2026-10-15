@@ -397,6 +397,7 @@ pub enum LifecycleError {
     Active,
     LeaseHeld,
     EffectUncertain,
+    Held,
     Conflict,
     Goal(GoalRefusal),
     /// A resume was asked for a session that is not durably paused.
@@ -437,7 +438,9 @@ impl fmt::Display for LifecycleError {
             ),
             Self::Active => formatter.write_str("session has active work"),
             Self::LeaseHeld => formatter.write_str("session has a live lease"),
-            Self::EffectUncertain => formatter.write_str("session has an uncertain effect"),
+            Self::EffectUncertain => formatter
+                .write_str("session has an uncertain effect; deletion requires explicit force"),
+            Self::Held => formatter.write_str("session is held; release the hold before deleting"),
             Self::Conflict => formatter.write_str("session changed concurrently"),
             Self::Goal(error) => error.fmt(formatter),
             Self::InvalidText => formatter.write_str("invalid operator text"),
@@ -1285,10 +1288,50 @@ where
     }
 
     pub async fn delete(&self, id: SessionId) -> Result<LifecyclePublication, LifecycleError> {
-        let append = self.require_inactive(id).await?;
+        self.delete_with_force(id, false).await
+    }
+
+    /// Force acknowledges uncertain effects, never a live writer or a hold.
+    /// History remains intact for descendants and audit.
+    pub async fn delete_with_force(
+        &self,
+        id: SessionId,
+        force: bool,
+    ) -> Result<LifecyclePublication, LifecycleError> {
+        let append = self.metadata.store.acquire_inactive_lease(id)?;
         let state = self.metadata.state(id)?;
         if state.deleted {
             return Ok(LifecyclePublication::Published);
+        }
+        if self.metadata.hold(id)? != HoldState::Running {
+            return Err(LifecycleError::Held);
+        }
+        match self.runs.activity(id).await? {
+            SessionActivity::Active => return Err(LifecycleError::Active),
+            SessionActivity::LeaseHeld => return Err(LifecycleError::LeaseHeld),
+            SessionActivity::Uncertain if !force => return Err(LifecycleError::EffectUncertain),
+            _ => {}
+        }
+        let entries = self
+            .metadata
+            .store
+            .entries(&id)?
+            .ok_or(LifecycleError::UnknownSession)?;
+        let status = entries.iter().rev().find_map(|entry| match entry {
+            SessionEntry::RunTransaction(transaction) => Some(transaction.status()),
+            _ => None,
+        });
+        if !force
+            && matches!(
+                status,
+                Some(
+                    crate::run::RunStatus::Uncertain
+                        | crate::run::RunStatus::Running
+                        | crate::run::RunStatus::Cancelling
+                )
+            )
+        {
+            return Err(LifecycleError::EffectUncertain);
         }
         let expected = state.last_seq;
         let event = lifecycle_event(

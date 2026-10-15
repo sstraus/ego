@@ -55,6 +55,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
             panic!("`mcp-server` takes no Args: use the MCP server tests for it")
         }
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
+        Invocation::Rm(_) => panic!("`rm` takes no Args: use the rm tests for it"),
         Invocation::Fork(_) => panic!("`fork` takes no Args: use the fork tests for it"),
         Invocation::Compact(_) => panic!("`compact` takes no Args: use the compact tests for it"),
         Invocation::Export(_) => panic!("`export` takes no Args: use the export tests for it"),

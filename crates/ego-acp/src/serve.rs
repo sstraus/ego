@@ -861,7 +861,12 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
         capabilities.session_capabilities(
             v1::SessionCapabilities::new()
                 .list(v1::SessionListCapabilities::new())
-                .delete(v1::SessionDeleteCapabilities::new())
+                .delete(
+                    v1::SessionDeleteCapabilities::new().meta(serde_json::Map::from_iter([(
+                        "ego".to_owned(),
+                        serde_json::json!({"force": true}),
+                    )])),
+                )
                 .fork(
                     v1::SessionForkCapabilities::new().meta(serde_json::Map::from_iter([(
                         "ego".to_owned(),
@@ -2001,6 +2006,7 @@ trait LifecycleOperations: Send + Sync {
         message: Option<ItemId>,
     ) -> LifecycleFuture<'_, ego_core::session_lifecycle::CreatedSession>;
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()>;
+    fn delete_with_force(&self, id: SessionId, force: bool) -> LifecycleFuture<'_, ()>;
     /// Hide a session this server refused to open, durably and without its
     /// writer lease.
     fn quarantine(&self, id: SessionId) -> Result<(), LifecycleError>;
@@ -2090,6 +2096,13 @@ where
 
     fn delete(&self, id: SessionId) -> LifecycleFuture<'_, ()> {
         Box::pin(async move { SessionLifecycle::delete(self, id).await.map(|_| ()) })
+    }
+    fn delete_with_force(&self, id: SessionId, force: bool) -> LifecycleFuture<'_, ()> {
+        Box::pin(async move {
+            SessionLifecycle::delete_with_force(self, id, force)
+                .await
+                .map(|_| ())
+        })
     }
 
     fn quarantine(&self, id: SessionId) -> Result<(), LifecycleError> {
@@ -2728,6 +2741,7 @@ fn lifecycle_error(error: &LifecycleError) -> Error {
         LifecycleError::LeaseHeld | LifecycleError::Active | LifecycleError::Conflict => {
             ErrorCode::Other(SESSION_BUSY)
         }
+        LifecycleError::Held => ErrorCode::Other(SESSION_HELD),
         LifecycleError::EffectUncertain => {
             return Error::new(
                 ErrorCode::InternalError.into(),
@@ -3862,7 +3876,15 @@ where
                     if let Err(error) = unadmitted.refuse(id) {
                         return responder.respond_with_error(error);
                     }
-                    match lifecycle.delete(id).await {
+                    let force = match request.meta.as_ref().and_then(|meta| meta.get("ego")).and_then(|ego| ego.get("force")) {
+                        None => false,
+                        Some(serde_json::Value::Bool(force)) => *force,
+                        Some(_) => return responder.respond_with_error(Error::invalid_params().data("_meta.ego.force must be a boolean")),
+                    };
+                    if sessions.is_busy(&request.session_id) {
+                        return responder.respond_with_error(Error::new(SESSION_BUSY, "session has active work"));
+                    }
+                    match lifecycle.delete_with_force(id, force).await {
                         Ok(()) => {
                             if let Some(mcp) = sessions.close(&request.session_id) {
                                 mcp.close().await;
@@ -3871,6 +3893,7 @@ where
                             notices.unregister(&request.session_id);
                             responder.respond(v1::DeleteSessionResponse::new())
                         }
+                        Err(LifecycleError::EffectUncertain) => responder.respond_with_error(Error::new(-32012, "session has an uncertain effect; deletion requires _meta.ego.force=true")),
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),
                     }
                     })

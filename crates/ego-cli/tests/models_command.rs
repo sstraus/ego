@@ -979,3 +979,43 @@ fn openrouter_run_uses_the_user_row_to_accept_a_thinking_level() {
         result.stderr
     );
 }
+
+// Catches: a vendor-stated alias omitted by snapshot selection, API limits
+// copied from GPT-6 Astra, or unverified reasoning/subscription support advertised.
+#[test]
+fn chat_latest_lists_vendor_limits_without_invented_controls_or_subscription() {
+    let listed = Ego::nowhere()
+        .subcommand("models")
+        .args(["--provider", "openai", "--json"])
+        .run();
+    assert_eq!(listed.code, Some(0), "{}", listed.stderr);
+    assert!(listed.stderr.is_empty(), "{}", listed.stderr);
+    let snapshot: serde_json::Value = serde_json::from_str(&listed.stdout).unwrap();
+    let model = snapshot["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == "openai/chat-latest")
+        .expect("the current ChatGPT Instant alias is listed");
+    let caps = &model["capabilities"];
+    assert_eq!(caps["max_context_tokens"], 400_000);
+    assert_eq!(caps["max_output_tokens"], 128_000);
+    assert_eq!(caps["reasoning_efforts"], "unknown");
+    assert_eq!(caps["supports_parallel_tool_calls"], false);
+    assert_eq!(caps["image_input"]["kind"], "supported");
+    assert_eq!(model["provenance"]["authority"], "builtin");
+
+    let codex = Ego::nowhere()
+        .subcommand("models")
+        .args(["--provider", "openai-codex", "--json"])
+        .run();
+    assert_eq!(codex.code, Some(0), "{}", codex.stderr);
+    let snapshot: serde_json::Value = serde_json::from_str(&codex.stdout).unwrap();
+    assert!(
+        !snapshot["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["slug"] == "openai-codex/chat-latest")
+    );
+}

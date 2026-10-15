@@ -59,7 +59,7 @@ The production durable composition advertises:
   "promptCapabilities": {"image": true, "audio": false, "embeddedContext": false},
   "mcpCapabilities": {"http": true, "sse": false, "acp": true},
   "sessionCapabilities": {
-    "list": {}, "delete": {}, "resume": {}, "close": {},
+    "list": {}, "delete": {"_meta": {"ego": {"force": true}}}, "resume": {}, "close": {},
     "fork": {"_meta": {"ego": {"atMessage": true}}}
   },
   "_meta": {"ego": {
@@ -596,3 +596,24 @@ sessions require different launch-time instructions.
 Source evidence: regression case read with `wiz-run stories-cli.js show regression_case`
 from the main checkout; current parser at `crates/ego-acp/src/serve.rs:2146` and
 trust reader at `:3070`. Planned implementation and tests: **untested / absent**.
+
+### Session deletion
+
+`sessionCapabilities.delete` advertises the standard `session/delete` method.
+Its `_meta.ego.force: true` capability advertises explicit uncertain-run deletion:
+
+```json
+{"jsonrpc":"2.0","id":45,"method":"session/delete","params":{"sessionId":"S","_meta":{"ego":{"force":true}}}}
+```
+
+Omit `_meta.ego.force` (or use `false`) for normal deletion. It must be a
+boolean. Success returns `{}`. Deletion is a durable tombstone: the target
+leaves both CLI and ACP lists, but its history remains for descendant replay.
+Other sessions are unchanged. Repeated deletion succeeds.
+
+A live run or writer lease returns `-32010`; a held session returns `-32011`.
+Neither can be overridden with force. Release a hold before deletion. An
+uncertain run returns `-32012` unless force is explicitly true. Invalid IDs or
+force types return `-32602`; missing sessions return `-32002`; store or
+publication failures return `-32603`. Force acknowledges uncertainty; it does
+not claim the external effect was resolved.

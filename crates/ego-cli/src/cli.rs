@@ -74,6 +74,7 @@ pub enum Invocation {
     Usage(Box<UsageArgs>),
     /// `ego fork ID [--at ITEM_ID]` — branch at the tip or after a completed turn.
     Fork(Box<ForkArgs>),
+    Rm(Box<RmArgs>),
     /// `ego compact ID [--request-id UUID]` — publish one deterministic successor.
     Compact(Box<CompactArgs>),
     /// `ego export ID` — render one local or structurally sanitized transcript.
@@ -170,6 +171,7 @@ pub const BUILT: &[&str] = &[
     "resume",
     "continue",
     "fork",
+    "rm",
     "compact",
     "export",
     "ls",
@@ -253,6 +255,7 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("resume", ResumeCommand::command()))
         .subcommand(named("continue", ResumeCommand::command()))
         .subcommand(named("fork", ForkCommand::command()))
+        .subcommand(named("rm", RmCommand::command()))
         .subcommand(named("compact", CompactCommand::command()))
         .subcommand(named("export", ExportCommand::command()))
         .subcommand(named("ls", LsCommand::command()))
@@ -467,6 +470,16 @@ pub struct UsageArgs {
     pub directory: Option<PathBuf>,
     pub json: bool,
     pub all_roles: bool,
+}
+
+/// The target and explicit acknowledgements for session deletion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RmArgs {
+    pub source: SessionId,
+    pub yes: bool,
+    pub force: bool,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
 }
 
 /// The exact fork request and its shared store/workspace/output flags.
@@ -1165,6 +1178,7 @@ fn overview(program: &str) -> String {
         let about = match *name {
             "run" => "Run an agent from a prompt, headless",
             "resume" | "continue" => "Continue a session; no ID = latest in this workspace",
+            "rm" => "Delete a stored session",
             "fork" => "Fork a session at its tip or after a completed turn",
             "ls" => "List sessions (this workspace; --all for every one)",
             "usage" => "Report usage, context and cost for this workspace",
@@ -1397,6 +1411,23 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 json: parsed.json,
                 all_roles: parsed.all_roles,
             }))),
+        },
+        Some("rm") => match clap_or_answer::<RmCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let source = SessionId::from_str(&parsed.source)
+                    .map_err(|error| UsageError(format!("invalid session id: {error}")))?;
+                if source.uuid().is_nil() {
+                    return Err(UsageError("session id must not be nil".into()));
+                }
+                Ok(Invocation::Rm(Box::new(RmArgs {
+                    source,
+                    yes: parsed.yes,
+                    force: parsed.force,
+                    session_dir: parsed.places.session_dir,
+                    directory: parsed.places.directory,
+                })))
+            }
         },
         Some("fork") => match clap_or_answer::<ForkCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),

@@ -421,3 +421,20 @@ reasoning_efforts = { only = ["low", "medium", "high", "xhigh"] }
 cancel = "cooperative"
 cache = "none"
 transport = "sse"
+
+# https://developers.openai.com/api/docs/models/chat-latest read 2026-10-15: openai/chat-latest
+[model."openai/chat-latest".capabilities]
+schema_version = 5
+max_context_tokens = 400000
+max_output_tokens = 128000
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = "unknown"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[model."openai/chat-latest".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
