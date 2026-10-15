@@ -9141,6 +9141,161 @@ mod turn {
             block_on(turn.run("are you there?")).expect("the store accepted every append")
         }
 
+        struct RecoveryBoundaryClock {
+            now: Mutex<std::time::Instant>,
+        }
+
+        impl ego_core::turn::RetryPause for RecoveryBoundaryClock {
+            fn now(&self) -> std::time::Instant {
+                *self.now.lock().unwrap()
+            }
+            fn pause(&self, delay: std::time::Duration) -> BoxFuture<'static, ()> {
+                *self.now.lock().unwrap() += delay;
+                Box::pin(futures::future::ready(()))
+            }
+        }
+
+        struct ExpiringResolution {
+            inner: ScriptedGenerationSource,
+            clock: Arc<RecoveryBoundaryClock>,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        impl GenerationModelSource for ExpiringResolution {
+            fn resolve<'a>(
+                &'a self,
+                request: GenerationModelRequest,
+            ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+                if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    *self.clock.now.lock().unwrap() += std::time::Duration::from_secs(2);
+                }
+                self.inner.resolve(request)
+            }
+        }
+
+        fn run_recovery_boundary(
+            fx: &Fixture,
+            source: Arc<dyn GenerationModelSource>,
+            pause: Arc<RecoveryBoundaryClock>,
+            fallbacks: Vec<ModelRef>,
+        ) -> ego_core::turn::TurnOutcome {
+            let gate = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
+                    source,
+                    gate: gate.clone(),
+                    config: TurnConfig {
+                        cache: ego_core::generator::capabilities::CacheRetention::Short,
+                        system: None,
+                        identity: None,
+                        token_ceiling: None,
+                        retry: 0,
+                        fallbacks,
+                    },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
+                    retry_pause: pause,
+                },
+                tools,
+            )
+            .with_provider_recovery(Some(std::time::Duration::from_secs(2)));
+            block_on(turn.run("recover without starting a late request")).unwrap()
+        }
+
+        /// Catches: model resolution crosses the horizon but starts a paid request anyway.
+        #[test]
+        fn recovery_horizon_prevents_request_after_slow_model_resolution() {
+            let fx = Fixture::new(vec![]);
+            let trace = GenerationTrace::default();
+            let clock = Arc::new(RecoveryBoundaryClock {
+                now: Mutex::new(std::time::Instant::now()),
+            });
+            let source = Arc::new(ExpiringResolution {
+                inner: ScriptedGenerationSource::new([
+                    Ok(profile(
+                        "openai/main",
+                        false,
+                        overloaded(None),
+                        &trace,
+                        Some(1_024),
+                    )),
+                    Ok(profile(
+                        "openai/main",
+                        false,
+                        vec![AiEvent::Stop(StopReason::Stop)],
+                        &trace,
+                        Some(1_024),
+                    )),
+                ]),
+                clock: clock.clone(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let _ = run_recovery_boundary(&fx, source, clock, vec![]);
+            assert_eq!(
+                trace.requests.lock().unwrap().len(),
+                1,
+                "an expired recovery horizon must prevent dispatch after model resolution"
+            );
+        }
+
+        /// Catches: moving to a fallback resets an exhausted logical recovery horizon.
+        #[test]
+        fn recovery_horizon_is_not_reset_when_unsent_failure_moves_to_fallback() {
+            let fx = Fixture::new(vec![]);
+            let trace = GenerationTrace::default();
+            let clock = Arc::new(RecoveryBoundaryClock {
+                now: Mutex::new(std::time::Instant::now()),
+            });
+            let unsent = || {
+                vec![
+                    AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                    AiEvent::Error {
+                        message: "connection refused".into(),
+                        kind: ErrorKind::Transient,
+                    },
+                    AiEvent::Stop(StopReason::Error),
+                ]
+            };
+            let source = Arc::new(ScriptedGenerationSource::new([
+                Ok(profile("openai/main", false, unsent(), &trace, Some(1_024))),
+                Ok(profile("openai/main", false, unsent(), &trace, Some(1_024))),
+                Ok(profile(
+                    "openai/fallback",
+                    false,
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    &trace,
+                    Some(1_024),
+                )),
+            ]));
+            let _ =
+                run_recovery_boundary(&fx, source, clock, vec![ModelRef("openai/fallback".into())]);
+            assert_eq!(
+                trace.requests.lock().unwrap().len(),
+                2,
+                "fallback dispatch must not restart an exhausted recovery horizon"
+            );
+        }
+
         /// regression case — catches: every Usage failure is replaced by a capability summary.
         #[test]
         fn provider_http_400_usage_keeps_the_journal_cause() {
