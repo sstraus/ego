@@ -2045,3 +2045,9 @@ and returns only `{ "achieved": true|false, "reason": "evidence or unmet conditi
 on stdout. Its exact exec authority must be granted by ordinary policy; it uses
 the same confinement and cancellation scope, with a 60-second timeout. Command
 checks do not incur model cost. Model checks remain accounted generations.
+
+
+Usage report v2 is the current closed contract: its role lines are `main`,
+`judge`, `goal_check`, `compaction`, `subagent`, `hook`, and `total`.
+`goal_check` is required in v2 reports, including zero usage; no legacy-report
+decoder or compatibility default is provided.

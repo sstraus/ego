@@ -21,6 +21,9 @@ Run an agent from a prompt, headless.
 - `--ephemeral` — Refused: every run uses a durable session
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `--goal <GOAL>` — Set a checked session objective
+- `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
+- `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
@@ -69,6 +72,9 @@ Continue a session; no ID = latest in this workspace.
 - `--ephemeral` — Refused: every run uses a durable session
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `--goal <GOAL>` — Set a checked session objective
+- `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
+- `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
@@ -148,6 +154,9 @@ Continue a session; no ID = latest in this workspace.
 - `--ephemeral` — Refused: every run uses a durable session
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `--goal <GOAL>` — Set a checked session objective
+- `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
+- `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request

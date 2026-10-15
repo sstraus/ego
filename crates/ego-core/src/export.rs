@@ -816,16 +816,22 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::GoalSet
         }
-        EventKind::GoalCheckConfigured { .. } => ExportEvent::GoalCheckConfigured,
-        EventKind::GoalContinuation { .. } => {
+        EventKind::GoalCheckConfigured {
+            id: _,
+            continuation_budget: _,
+        } => ExportEvent::GoalCheckConfigured,
+        EventKind::GoalContinuation { id: _, text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalContinuation
         }
-        EventKind::GoalUpdated { .. } => {
+        EventKind::GoalUpdated {
+            id: _,
+            objective: _,
+        } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalUpdated
         }
-        EventKind::GoalCheckStopped { .. } => {
+        EventKind::GoalCheckStopped { id: _, reason: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalCheckStopped
         }

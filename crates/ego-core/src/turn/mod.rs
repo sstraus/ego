@@ -3280,7 +3280,40 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if self.cancel.is_cancelled() {
             return Err(failure("goal evaluator cancelled".into()));
         }
-        let raw = result.model_text().into_bytes();
+        use crate::permit::{StreamProvenance, ToolOutputEncoding, ToolOutputProvenance};
+        let mut stdout = result.content.iter().filter(|block| {
+            matches!(
+                block.provenance,
+                ToolOutputProvenance::Process {
+                    stream: StreamProvenance::Stdout,
+                    ..
+                }
+            )
+        });
+        let block = stdout
+            .next()
+            .ok_or_else(|| failure("goal command returned no stdout stream".into()))?;
+        if stdout.next().is_some() {
+            return Err(failure(
+                "goal command returned multiple stdout streams".into(),
+            ));
+        }
+        match block.provenance {
+            ToolOutputProvenance::Process {
+                truncated: true, ..
+            } => return Err(failure("goal command stdout is truncated".into())),
+            ToolOutputProvenance::Process {
+                encoding: ToolOutputEncoding::Base64,
+                ..
+            } => return Err(failure("goal command stdout is not UTF-8".into())),
+            _ => {}
+        }
+        if block.text.len() > crate::store::evidence::EVIDENCE_PAGE_BYTES {
+            return Err(failure("goal command stdout exceeds 32 KiB".into()));
+        }
+        // Process text is lossless UTF-8 only after the provenance checks;
+        // stderr is diagnostic output, never part of the verdict protocol.
+        let raw = block.text.as_bytes().to_vec();
         let evidence = effects
             .store_handler_evidence(&raw)
             .map_err(|error| failure(error.to_string()))?;

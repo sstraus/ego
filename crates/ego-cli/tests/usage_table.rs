@@ -39,7 +39,7 @@ fn seeded<const N: usize>(args: [&str; N]) -> support::Finished {
     places.ego(&stub).subcommand("usage").args(args).run()
 }
 
-const IDLE_ROLES: [&str; 4] = ["judge", "compaction", "subagent", "hook"];
+const IDLE_ROLES: [&str; 5] = ["judge", "goal_check", "compaction", "subagent", "hook"];
 
 #[test]
 fn usage_text_is_a_table_with_the_six_asked_for_columns_plus_role() {
@@ -119,7 +119,7 @@ fn all_roles_does_not_change_the_json_report() {
     let lines = plain["sessions"][0]["lines"]
         .as_object()
         .expect("report lines");
-    assert_eq!(lines.len(), 6, "every role line survives in JSON");
+    assert_eq!(lines.len(), 7, "every role line survives in JSON");
     assert_eq!(
         plain["sessions"], widened["sessions"],
         "the machine contract does not read a presentation flag"

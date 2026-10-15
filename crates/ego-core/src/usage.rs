@@ -15,7 +15,8 @@ use crate::session::SessionLineage;
 use crate::state::{Charge, ChargeAttribution, SessionState, Usage};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
-/// The externally serialized usage-report contract.
+/// The current closed v2 contract requires every role, including goal_check.
+/// Old report snapshots are not accepted through compatibility defaults.
 pub const USAGE_REPORT_VERSION: u32 = 2;
 
 /// A deterministic workspace or active-session usage report.

@@ -153,6 +153,8 @@ fn goal_execution_snapshots_profile_ceiling_and_reaches_blocked_and_achieved() {
     for (operation, expected) in [
         ("block=API unavailable", "active"),
         ("block=API unavailable", "active"),
+        ("block=API unavailable", "active"),
+        ("block=API unavailable", "active"),
         ("block=API unavailable", "blocked"),
     ] {
         let result = fixture.run_goal(operation, Some("json"));

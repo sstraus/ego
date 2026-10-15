@@ -643,7 +643,11 @@ mod regression_case {
         ] {
             assert!(serde_json::to_value(lifecycle).unwrap().is_string());
         }
-        for role in [GenerationRole::Subagent, GenerationRole::Hook] {
+        for role in [
+            GenerationRole::Subagent,
+            GenerationRole::Hook,
+            GenerationRole::GoalCheck,
+        ] {
             assert!(serde_json::to_value(role).unwrap().is_string());
         }
         assert_eq!(USAGE_REPORT_VERSION, 2);
@@ -655,6 +659,7 @@ mod regression_case {
             "totals": {
                 "main": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
                 "judge": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
+                "goal_check": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
                 "compaction": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
                 "subagent": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
                 "hook": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
@@ -665,8 +670,16 @@ mod regression_case {
         assert_eq!(report.v, 2);
         let encoded = serde_json::to_value(&report).unwrap();
         let totals = encoded.get("totals").unwrap().as_object().unwrap();
-        assert_eq!(totals.len(), 6);
-        for key in ["main", "judge", "compaction", "subagent", "hook", "total"] {
+        assert_eq!(totals.len(), 7);
+        for key in [
+            "main",
+            "judge",
+            "goal_check",
+            "compaction",
+            "subagent",
+            "hook",
+            "total",
+        ] {
             assert!(totals.contains_key(key), "missing usage line: {key}");
         }
         let serialized = serde_json::to_string(&report).unwrap();
@@ -674,7 +687,15 @@ mod regression_case {
         assert_json_key_order(&serialized, &["v", "as_of", "period", "sessions", "totals"]);
         assert_json_key_order(
             &serialized,
-            &["main", "judge", "compaction", "subagent", "hook", "total"],
+            &[
+                "main",
+                "judge",
+                "goal_check",
+                "compaction",
+                "subagent",
+                "hook",
+                "total",
+            ],
         );
     }
 

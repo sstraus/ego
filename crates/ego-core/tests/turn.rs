@@ -1776,7 +1776,10 @@ mod turn {
     fn goal_command_accepts_real_process_stdout_instead_of_model_projection() {
         // A real executor returns separate provenance-tagged stdout and stderr,
         // not the builtin string used by a model-facing tool result.
-        struct Evaluator;
+        struct Evaluator {
+            bytes: Vec<u8>,
+            limit: usize,
+        }
         impl ProcessExecutor for Evaluator {
             fn execute<'a>(
                 &'a self,
@@ -1792,7 +1795,8 @@ mod turn {
             ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
                 use ego_core::permit::{StreamProvenance, ToolContentBlock};
                 use ego_core::store::evidence::{EvidenceId, EvidenceRef};
-                let stdout = br#"{"achieved":true,"reason":"verification passed"}"#;
+                let stdout = self.bytes.clone();
+                let limit = self.limit;
                 let reference = EvidenceRef::new(
                     EvidenceId::parse(
                         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -1804,50 +1808,80 @@ mod turn {
                     Ok(ToolResult::new(vec![
                         ToolContentBlock::process(
                             StreamProvenance::Stdout,
-                            stdout,
-                            1024,
+                            &stdout,
+                            limit,
                             reference.clone(),
                         ),
-                        ToolContentBlock::process(StreamProvenance::Stderr, b"", 1024, reference),
+                        ToolContentBlock::process(
+                            StreamProvenance::Stderr,
+                            b"diagnostic, not JSON",
+                            1024,
+                            reference,
+                        ),
                     ]))
                 })
             }
         }
-        let mut fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
-        fx.set_mode(Mode::Yolo);
-        fx.with_process(Arc::new(Evaluator));
-        let evidence = SkillEvidence::new();
-        let tools = Tools::new(
-            &fx.registry,
-            ToolEffectPorts::new(
-                &fx.fs,
-                fx.process.as_ref(),
-                &evidence,
-                Arc::new(NoResolver),
-                Arc::new(NoHop),
-                Arc::new(NoDuplex),
+        for (bytes, limit, achieved, diagnostic) in [
+            (
+                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                1024,
+                true,
+                "",
             ),
-            CanonPath::new("/ws"),
-        );
-        let mut turn = TurnLoop::open(
-            session(
-                SessionState::default(),
-                &fx.store,
-                &fx.clock,
-                &fx.sink,
-                CancelToken::new(),
+            (
+                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                4,
+                false,
+                "truncated",
             ),
-            model_for(&fx, &fx.generator, &mut fx.gate.borrow_mut()),
-            tools,
-        )
-        .with_goal(Some("verification passes".into()), 1)
-        .with_goal_policy(Default::default(), Some(vec!["/ws/check".into()]));
-        block_on(turn.run("verify")).unwrap();
-        assert_eq!(
-            turn.state().goal.unwrap().state,
-            ego_core::goal::GoalState::Achieved,
-            "valid evaluator stdout must achieve the goal, without [stdout]/[stderr] protocol labels"
-        );
+            (vec![255, 254], 1024, false, "not UTF-8"),
+        ] {
+            let mut fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]])
+                .with_rules(&["exec(/ws/check)"], &[]);
+            fx.with_process(Arc::new(Evaluator { bytes, limit }));
+            let evidence = SkillEvidence::new();
+            let tools = Tools::new(
+                &fx.registry,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model_for(&fx, &fx.generator, &mut fx.gate.borrow_mut()),
+                tools,
+            )
+            .with_goal(Some("verification passes".into()), 1)
+            .with_goal_policy(Default::default(), Some(vec!["/ws/check".into()]));
+            block_on(turn.run("verify")).unwrap();
+            let goal = turn.state().goal.unwrap();
+            assert_eq!(
+                goal.state,
+                if achieved {
+                    ego_core::goal::GoalState::Achieved
+                } else {
+                    ego_core::goal::GoalState::Active
+                },
+                "{:?}",
+                goal.check_stop
+            );
+            if !achieved {
+                assert!(goal.check_stop.unwrap().contains(diagnostic));
+            }
+        }
     }
 
     /// Everything a `TurnLoop` borrows, kept alive in one place so a test can
@@ -2646,9 +2680,19 @@ mod turn {
             ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
                 *self.input.lock().unwrap() = input.to_vec();
                 Box::pin(async {
-                    Ok(ToolResult::builtin(
-                        r#"{"achieved":true,"reason":"artifact verified"}"#,
-                    ))
+                    let bytes = br#"{"achieved":true,"reason":"artifact verified"}"#;
+                    Ok(ToolResult::new(vec![
+                        ego_core::permit::ToolContentBlock::process(
+                            ego_core::permit::StreamProvenance::Stdout,
+                            bytes,
+                            1024,
+                            ego_core::store::evidence::EvidenceRef::new(
+                                ego_core::store::evidence::EvidenceId::parse("a".repeat(64))
+                                    .unwrap(),
+                                bytes.len() as u64,
+                            ),
+                        ),
+                    ]))
                 })
             }
         }

@@ -231,9 +231,9 @@ pub struct ToolTiming {
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
-/// SessionTitleChanged | SessionDeleted | SessionPauseRequested |
+/// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
 /// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
-/// GoalTransitioned | PromptQueued | PromptDeliveryExpedited |
+/// GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
