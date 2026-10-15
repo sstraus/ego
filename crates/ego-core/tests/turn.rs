@@ -1772,6 +1772,84 @@ mod turn {
         }
     }
 
+    #[test]
+    fn goal_command_accepts_real_process_stdout_instead_of_model_projection() {
+        // A real executor returns separate provenance-tagged stdout and stderr,
+        // not the builtin string used by a model-facing tool result.
+        struct Evaluator;
+        impl ProcessExecutor for Evaluator {
+            fn execute<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                panic!("the evaluator uses handler stdin")
+            }
+            fn execute_handler<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+                _input: &'a [u8],
+                _scope: ego_core::hook::EffectScope,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                use ego_core::permit::{StreamProvenance, ToolContentBlock};
+                use ego_core::store::evidence::{EvidenceId, EvidenceRef};
+                let stdout = br#"{"achieved":true,"reason":"verification passed"}"#;
+                let reference = EvidenceRef::new(
+                    EvidenceId::parse(
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .unwrap(),
+                    stdout.len() as u64,
+                );
+                Box::pin(async move {
+                    Ok(ToolResult::new(vec![
+                        ToolContentBlock::process(
+                            StreamProvenance::Stdout,
+                            stdout,
+                            1024,
+                            reference.clone(),
+                        ),
+                        ToolContentBlock::process(StreamProvenance::Stderr, b"", 1024, reference),
+                    ]))
+                })
+            }
+        }
+        let mut fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        fx.set_mode(Mode::Yolo);
+        fx.with_process(Arc::new(Evaluator));
+        let evidence = SkillEvidence::new();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut fx.gate.borrow_mut()),
+            tools,
+        )
+        .with_goal(Some("verification passes".into()), 1)
+        .with_goal_policy(Default::default(), Some(vec!["/ws/check".into()]));
+        block_on(turn.run("verify")).unwrap();
+        assert_eq!(
+            turn.state().goal.unwrap().state,
+            ego_core::goal::GoalState::Achieved,
+            "valid evaluator stdout must achieve the goal, without [stdout]/[stderr] protocol labels"
+        );
+    }
+
     /// Everything a `TurnLoop` borrows, kept alive in one place so a test can
     /// build a loop in one line without fighting the borrow checker.
     struct Fixture {
