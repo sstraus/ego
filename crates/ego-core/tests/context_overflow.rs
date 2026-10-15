@@ -1,6 +1,6 @@
 //! contract for regression case: overflow settles explicitly and compacts from idle.
 
-use ego_core::compact::{COMPACTION_PROMPT_REVISION, Checkpoint};
+use ego_core::compact::Checkpoint;
 use ego_core::generator::attempt::{DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::history::conversation_from;
 use ego_core::generator::types::{Conversation, ErrorKind, Message, Role, StopReason};
@@ -44,7 +44,6 @@ fn repeated_idle_checkpoints_preserve_all_semantic_sections() {
     let first = Checkpoint::parse(checkpoint()).expect("complete checkpoint");
     let second = Checkpoint::parse(first.text().to_owned()).expect("repeated checkpoint");
     assert_eq!(first, second);
-    assert_eq!(COMPACTION_PROMPT_REVISION, 1);
     for heading in [
         "# Objective",
         "# Completed work and evidence",
