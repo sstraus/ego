@@ -1538,7 +1538,10 @@ fn real_child_service() -> RealChildFixture {
 fn raw_skill_arguments_do_not_reject_natural_language_apostrophes() {
     for (body, expected) in [
         ("Explain $ARGUMENTS", "Explain don't change the API"),
-        ("Explain the task", "Explain the task\n\nARGUMENTS: don't change the API"),
+        (
+            "Explain the task",
+            "Explain the task\n\nARGUMENTS: don't change the API",
+        ),
     ] {
         let skill = spec_with_body("explain", DIGEST_A, true, true, body.as_bytes());
         let operation = SkillOperation::Invoke {
@@ -1547,7 +1550,9 @@ fn raw_skill_arguments_do_not_reject_natural_language_apostrophes() {
             bare: false,
         };
         assert_eq!(
-            skill.render(&operation).expect("raw prose is not shell syntax"),
+            skill
+                .render(&operation)
+                .expect("raw prose is not shell syntax"),
             expected,
         );
     }
