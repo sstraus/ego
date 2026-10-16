@@ -1691,6 +1691,7 @@ async fn report_session_usage(
     session_id: SessionId,
     clock: &SystemClock,
     context: ego_core::state::ContextWindow,
+    width: usize,
     diagnostics: &dyn Diagnostics,
 ) {
     let metadata = match crate::catalogue::listing(store, root, false) {
@@ -1711,7 +1712,7 @@ async fn report_session_usage(
         Ok(report) => {
             // `/usage` has no flags, so it
             // gets the compact default.
-            let rendered = crate::usage::render_text(&report, false, Some(context));
+            let rendered = crate::usage::render_interactive(&report, context, width);
             diagnostics.note(rendered.trim_end());
         }
         Err(error) => diagnostics.note(&format!("the usage report could not be built: {error}")),
@@ -2648,6 +2649,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 active.id(),
                 clock,
                 state.context,
+                seat.width(),
                 diagnostics,
             )
             .await;

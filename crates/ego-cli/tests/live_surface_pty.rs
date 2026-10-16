@@ -9252,3 +9252,59 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         assert!(successor.contains("Finish both sub-tasks"), "{successor}");
     }
 }
+
+/// Catches: a UUID-width usage table wraps cost onto detached continuation rows.
+#[test]
+fn interactive_usage_keeps_cost_with_its_session_row_at_80_columns() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+            ])
+            .env("TERM", "xterm-256color");
+        ego.file("AGENTS.md", "# usage layout fixture\n");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until(&reader, &mut output, b"Trust project files");
+        input.write_all(b"yes\r").expect("trust");
+        input.flush().expect("trust flush");
+        until_post_trust_prompt(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/usage\r").expect("usage");
+        input.flush().expect("usage flush");
+        until_normalized(&reader, &mut output, start, "workspace");
+        until_local_action_completed(&reader, &mut output, start, "usage", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).expect("capture directory");
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).expect("raw capture");
+            std::fs::write(format!("{root}/{columns}x{rows}.txt"), &visible)
+                .expect("screen capture");
+        }
+        input.write_all(b"/quit\r").expect("quit");
+        input.flush().expect("quit flush");
+        session.quit(input);
+        let header = visible
+            .lines()
+            .find(|line| line.contains("cache_hit") && line.contains("cost"))
+            .expect("accounting header");
+        assert!(
+            header.rsplit('\r').next().unwrap_or(header).chars().count() <= usize::from(columns),
+            "accounting labels must fit without terminal wrapping: {header:?}"
+        );
+        assert!(
+            visible
+                .lines()
+                .any(|line| line.contains("total") && line.contains("unknown")),
+            "cost must stay beside its role and tokens: {visible:?}"
+        );
+    }
+}
