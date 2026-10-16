@@ -226,9 +226,10 @@ mod tests {
         );
         for width in [80, 120, 200] {
             let output = Recorded::default();
+            let mut seq = Seq::ZERO;
             let events = [DomainEvent {
                 env: Envelope {
-                    seq: Seq::ZERO.next(),
+                    seq: seq.next(),
                     id: EventId::new(),
                     turn: TurnId::new(),
                     item: Some(ItemId::new()),
