@@ -106,6 +106,50 @@ fn admit_successor_context(
         })
 }
 
+type CompactionRuntime = (
+    Option<SystemPrompt>,
+    Vec<RegisteredTool>,
+    Option<crate::skill::PreparedSkillRescan>,
+);
+
+enum EpochStart {
+    Initial,
+    New,
+    Fork {
+        diagnostic: Option<String>,
+        projected: Option<Box<PublicEvent>>,
+    },
+    Compact {
+        diagnostic: Option<String>,
+        request: RequestId,
+        parent: Option<EventId>,
+    },
+}
+
+enum EpochTransition<'store> {
+    Resume {
+        meta: ego_core::store::session_store::SessionMeta,
+    },
+    Exit,
+    New {
+        target: ActiveSession<'store>,
+    },
+    Fork {
+        target: ActiveSession<'store>,
+        publication: ego_core::session::TargetPublication,
+        diagnostic: Option<String>,
+        projected: Option<PublicEvent>,
+    },
+    Compact {
+        target: ActiveSession<'store>,
+        publication: ego_core::session::TargetPublication,
+        diagnostic: Option<String>,
+        runtime: Option<CompactionRuntime>,
+        request: RequestId,
+        parent: Option<EventId>,
+    },
+}
+
 pub(super) struct DriverExecution<'host, 'store, S: EventSink> {
     pub(super) args: Args,
     pub(super) cancel: CancelToken,
@@ -549,50 +593,6 @@ pub(super) async fn drive_execution<S: EventSink>(
             }
             let interactive_metadata =
                 SessionMetadata::new(Arc::clone(jsonl_store), Arc::new(clock));
-            type CompactionRuntime = (
-                Option<SystemPrompt>,
-                Vec<RegisteredTool>,
-                Option<crate::skill::PreparedSkillRescan>,
-            );
-
-            enum EpochStart {
-                Initial,
-                New,
-                Fork {
-                    diagnostic: Option<String>,
-                    projected: Option<Box<PublicEvent>>,
-                },
-                Compact {
-                    diagnostic: Option<String>,
-                    request: RequestId,
-                    parent: Option<EventId>,
-                },
-            }
-
-            enum EpochTransition<'store> {
-                Resume {
-                    meta: ego_core::store::session_store::SessionMeta,
-                },
-                Exit,
-                New {
-                    target: ActiveSession<'store>,
-                },
-                Fork {
-                    target: ActiveSession<'store>,
-                    publication: ego_core::session::TargetPublication,
-                    diagnostic: Option<String>,
-                    projected: Option<PublicEvent>,
-                },
-                Compact {
-                    target: ActiveSession<'store>,
-                    publication: ego_core::session::TargetPublication,
-                    diagnostic: Option<String>,
-                    runtime: Option<CompactionRuntime>,
-                    request: RequestId,
-                    parent: Option<EventId>,
-                },
-            }
-
             let mut control = seat.take_control();
             let mut state = opening;
             let mut last = Ended {
@@ -711,92 +711,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                     last.session = active.id();
                     last.state = state.clone();
                     last.result = Value::String(String::new());
-                    let activation_failed = match &epoch_start {
-                        EpochStart::Initial => false,
-                        EpochStart::New => {
-                            sink.publish(
-                                &PublicEvent::SessionStarted {
-                                    v: PUBLIC_EVENT_VERSION,
-                                    session: active.id(),
-                                    capabilities: capabilities(
-                                        &registry,
-                                        config.system.is_some(),
-                                        compiled.is_some(),
-                                    ),
-                                    mcp_errors: mcp_errors.clone(),
-                                    hook_errors: Vec::new(),
-                                    instructions: config
-                                        .system
-                                        .as_ref()
-                                        .map(|prompt| prompt.sources.clone())
-                                        .unwrap_or_default(),
-                                },
-                                &state,
-                            );
-                            false
-                        }
-                        EpochStart::Fork {
-                            diagnostic,
-                            projected,
-                        } => {
-                            if let Some(diagnostic) = diagnostic {
-                                diagnostics.note(&format!(
-                                    "fork target {} is authoritative with a durability warning: {diagnostic}",
-                                    active.id()
-                                ));
-                            }
-                            sink.publish(
-                                &PublicEvent::SessionStarted {
-                                    v: PUBLIC_EVENT_VERSION,
-                                    session: active.id(),
-                                    capabilities: capabilities(
-                                        &registry,
-                                        config.system.is_some(),
-                                        compiled.is_some(),
-                                    ),
-                                    mcp_errors: mcp_errors.clone(),
-                                    hook_errors: Vec::new(),
-                                    instructions: config
-                                        .system
-                                        .as_ref()
-                                        .map(|prompt| prompt.sources.clone())
-                                        .unwrap_or_default(),
-                                },
-                                &state,
-                            );
-                            if let Some(event) = projected {
-                                sink.publish(event.as_ref(), &state);
-                            }
-                            !seat.activate_session(active.id())
-                        }
-                        EpochStart::Compact { diagnostic, .. } => {
-                            if let Some(diagnostic) = diagnostic {
-                                diagnostics.note(&format!(
-                                    "compaction target is authoritative with a durability warning: {diagnostic}"
-                                ));
-                            }
-                            sink.publish(
-                                &PublicEvent::SessionStarted {
-                                    v: PUBLIC_EVENT_VERSION,
-                                    session: active.id(),
-                                    capabilities: capabilities(
-                                        &registry,
-                                        config.system.is_some(),
-                                        compiled.is_some(),
-                                    ),
-                                    mcp_errors: mcp_errors.clone(),
-                                    hook_errors: Vec::new(),
-                                    instructions: config
-                                        .system
-                                        .as_ref()
-                                        .map(|prompt| prompt.sources.clone())
-                                        .unwrap_or_default(),
-                                },
-                                &state,
-                            );
-                            !seat.activate_session(active.id())
-                        }
-                    };
+                    let activation_failed = activate_epoch(
+                        &epoch_start,
+                        active.id(),
+                        seat.as_ref(),
+                        sink,
+                        &state,
+                        &registry,
+                        config.system.as_ref(),
+                        compiled.is_some(),
+                        &mcp_errors,
+                        diagnostics,
+                    );
                     if !activation_failed
                         && !matches!(&epoch_start, EpochStart::Initial)
                         && let Some(status) = status.as_ref()
@@ -882,6 +808,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 if let Some(residual) = &residual {
                                     perimeter = perimeter.with_residual_grants(&residual.grants());
                                 }
+
                                 match line {
                                     repl::Line::HostCommand(
                                         repl::HostCommand::RemovePasteImage,
@@ -892,119 +819,30 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::ClipboardPaste) => {
-                                        if pending_work {
-                                            seat.set_notice("image paste is unavailable while source work is pending".to_owned());
-                                            continue;
-                                        }
-                                        let kind = match seat.pasteboard_kind() {
-                                            Ok(kind) => kind,
-                                            Err(error) => {
-                                                seat.set_notice(format!(
-                                                    "pasteboard could not be inspected: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        match kind {
-                                            PasteboardKind::Image => {
-                                                let limits = match paste_image_limits(
-                                                    &source,
-                                                    &confinement,
-                                                    active.evidence(),
-                                                    run_deadline,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(limits) => limits,
-                                                    Err(error) => {
-                                                        seat.set_notice(error);
-                                                        continue;
-                                                    }
-                                                };
-                                                let cap = limits.max_bytes_per_image().map_or(
-                                                    ego_core::generator::types::MAX_IMAGE_BYTES,
-                                                    |limit| limit.get(),
-                                                );
-                                                let bytes = match seat.pasteboard_image(cap) {
-                                                    Ok(bytes) => bytes,
-                                                    Err(error) => {
-                                                        seat.set_notice(error);
-                                                        continue;
-                                                    }
-                                                };
-                                                let image = match Image::new(
-                                                    bytes,
-                                                    ego_core::generator::types::ImageMediaType::Png,
-                                                ) {
-                                                    Ok(image) => image,
-                                                    Err(error) => {
-                                                        seat.set_notice(format!(
-                                                            "pasteboard image is invalid: {error}"
-                                                        ));
-                                                        continue;
-                                                    }
-                                                };
-                                                staged_images.push(StagedPasteImage {
-                                                    label: "clipboard".to_owned(),
-                                                    source: StagedPasteSource::Inline(image),
-                                                });
-                                                seat.set_image_chips(paste_chips(&staged_images));
-                                            }
-                                            PasteboardKind::Text => match seat.pasteboard_text() {
-                                                Ok(text) => seat.insert_paste_text(text),
-                                                Err(error) => seat.set_notice(error),
-                                            },
-                                            PasteboardKind::Empty => seat.set_notice(
-                                                "pasteboard has no image or text".to_owned(),
-                                            ),
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::PastePath(path)) => {
-                                        if pending_work {
-                                            seat.set_notice("image paste is unavailable while source work is pending".to_owned());
-                                            continue;
-                                        }
-                                        let limits = match paste_image_limits(
+                                        stage_clipboard_image(
+                                            seat.as_ref(),
+                                            pending_work,
                                             &source,
                                             &confinement,
                                             active.evidence(),
                                             run_deadline,
+                                            &mut staged_images,
                                         )
-                                        .await
-                                        {
-                                            Ok(limits) => limits,
-                                            Err(error) => {
-                                                seat.set_notice(error);
-                                                continue;
-                                            }
-                                        };
-                                        let size = match std::fs::metadata(&path) {
-                                            Ok(metadata) => metadata.len(),
-                                            Err(error) => {
-                                                seat.set_notice(format!(
-                                                    "image paste could not inspect {path}: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let cap = limits.max_bytes_per_image().map_or(
-                                            ego_core::generator::types::MAX_IMAGE_BYTES,
-                                            |limit| limit.get(),
-                                        );
-                                        if size > cap {
-                                            seat.set_notice(format!("image paste is {size} bytes, above the {cap}-byte limit"));
-                                            continue;
-                                        }
-                                        let name = std::path::Path::new(&path)
-                                            .file_name()
-                                            .map(|name| name.to_string_lossy().into_owned())
-                                            .unwrap_or_else(|| path.clone());
-                                        staged_images.push(StagedPasteImage {
-                                            label: name,
-                                            source: StagedPasteSource::Path(path),
-                                        });
-                                        seat.set_image_chips(paste_chips(&staged_images));
+                                        .await;
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::PastePath(path)) => {
+                                        stage_image_path(
+                                            seat.as_ref(),
+                                            pending_work,
+                                            path,
+                                            &source,
+                                            &confinement,
+                                            active.evidence(),
+                                            run_deadline,
+                                            &mut staged_images,
+                                        )
+                                        .await;
                                         continue;
                                     }
                                     repl::Line::Submitted(text) => {
@@ -1270,94 +1108,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
-                                        let Some(owner) = policy_application.as_ref() else {
-                                            let notice =
-                                                "interactive policy controls are unavailable"
-                                                    .to_owned();
-                                            if let Some(status) = status.as_ref()
-                                                && status.human
-                                            {
-                                                status.seat.set_notice(notice);
-                                            } else {
-                                                diagnostics.note(&notice);
-                                            }
-                                            continue;
-                                        };
-                                        if let PolicyControlRequest::SetMode(mode) = &request {
-                                            let mode = *mode;
-                                            let notice = match owner
-                                                .apply(PolicyControlRequest::SetMode(mode))
-                                            {
-                                                Ok(PolicyControlOutcome::Mode { staging }) => {
-                                                    if staging.changed {
-                                                        format!(
-                                                            "mode `{mode}` staged for the next generation"
-                                                        )
-                                                    } else {
-                                                        format!("mode `{mode}` is already selected")
-                                                    }
-                                                }
-                                                Ok(_) => "policy control failed: the outcome did not match the mode request".to_owned(),
-                                                Err(error) => {
-                                                    format!("policy control failed: {error}")
-                                                }
-                                            };
-                                            if let Some(status) = status.as_ref()
-                                                && status.human
-                                            {
-                                                status.seat.set_notice(notice);
-                                            } else {
-                                                diagnostics.note(&notice);
-                                            }
-                                            continue;
-                                        }
-                                        let Some(output) = text_output else {
-                                            let notice =
-                                                "interactive permission output is unavailable"
-                                                    .to_owned();
-                                            if let Some(status) = status.as_ref()
-                                                && status.human
-                                            {
-                                                status.seat.set_notice(notice);
-                                            } else {
-                                                diagnostics.note(&notice);
-                                            }
-                                            continue;
-                                        };
-                                        let handled = handle_policy_request(
+                                        if handle_interactive_policy(
                                             request,
-                                            |request| owner.apply(request),
-                                            output,
-                                            |_preview| {
-                                                status
-                                                    .as_ref()
-                                                    .filter(|status| status.human)
-                                                    .map_or(
-                                                        repl::Confirmation::Declined,
-                                                        |status| status.seat.confirm_remember(),
-                                                    )
-                                            },
-                                        );
-                                        match handled {
-                                            Ok(Some(
-                                                repl::Line::Ended
-                                                | repl::Line::ExternalBreak(_),
-                                            )) => break 'epoch EpochTransition::Exit,
-                                            Ok(Some(_)) => diagnostics.note(
-                                                "permission confirmation returned a non-terminal line",
-                                            ),
-                                            Ok(None) => {}
-                                            Err(error) => {
-                                                let notice =
-                                                    format!("policy control failed: {error}");
-                                                if let Some(status) = status.as_ref()
-                                                    && status.human
-                                                {
-                                                    status.seat.set_notice(notice);
-                                                } else {
-                                                    diagnostics.note(&notice);
-                                                }
-                                            }
+                                            policy_application.as_deref(),
+                                            status.as_ref(),
+                                            text_output,
+                                            diagnostics,
+                                        ) {
+                                            break 'epoch EpochTransition::Exit;
                                         }
                                         continue;
                                     }
@@ -1415,128 +1173,24 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Config(
                                         arguments,
                                     )) => {
-                                        if arguments == "perimeter" {
-                                            diagnostics.note(&perimeter.text());
-                                        } else {
-                                            match crate::config::repl_set_args(&arguments) {
-                                                Ok(set) => match crate::config::repl_set(&set) {
-                                                    Ok(receipt) => {
-                                                        diagnostics.note(&receipt);
-                                                        diagnostics.note("Saved to user base configuration; applies to future sessions. Current session authority is unchanged.");
-                                                        if let Some(warning) =
-                                                            crate::config::saved_override(
-                                                                &set,
-                                                                &effective,
-                                                                skill_profile_layers
-                                                                    .as_deref()
-                                                                    .unwrap_or_default(),
-                                                            )
-                                                        {
-                                                            diagnostics.note(&warning);
-                                                        }
-                                                        diagnostics.note(
-                                                            &crate::config::repl_text(
-                                                                &effective,
-                                                                skill_profile_layers
-                                                                    .as_deref()
-                                                                    .unwrap_or_default(),
-                                                                &perimeter,
-                                                            ),
-                                                        );
-                                                    }
-                                                    Err(error) => diagnostics.note(&format!(
-                                                        "config set failed: {error:?}"
-                                                    )),
-                                                },
-                                                Err(error) => diagnostics.note(&error.to_string()),
-                                            }
-                                        }
+                                        run_interactive_config(
+                                            &arguments,
+                                            &effective,
+                                            skill_profile_layers.as_deref(),
+                                            &perimeter,
+                                            diagnostics,
+                                        )
+                                        .await;
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-                                        let setup_args = crate::cli::SetupArgs {
-                                            items: None,
-                                            judge: None,
-                                            prompt: (!prompt.is_empty()).then_some(prompt),
-                                            profile: None,
-                                            directory: Some(root.clone()),
-                                        };
-                                        let confirm = |question: String| {
-                                            status
-                                                .as_ref()
-                                                .filter(|status| status.human)
-                                                .is_some_and(|status| {
-                                                    matches!(
-                                                        status.seat.confirm_setup(question),
-                                                        repl::Confirmation::Confirmed
-                                                    )
-                                                })
-                                        };
-                                        let select = |findings: &[ego_core::setup::Finding]| {
-                                            use ego_core::question::{
-                                                QuestionAnswer, QuestionMode, QuestionOption,
-                                                QuestionOutcome, QuestionRequest,
-                                            };
-                                            let status =
-                                                status.as_ref().filter(|status| status.human)?;
-                                            let options = findings
-                                                .iter()
-                                                .map(|finding| {
-                                                    QuestionOption::new(
-                                                        finding.id.to_string(),
-                                                        ego_core::permit::terminal_safe(&format!(
-                                                            "{}: {} — {}",
-                                                            finding.id,
-                                                            finding.requested.display(),
-                                                            finding.evidence
-                                                        )),
-                                                    )
-                                                })
-                                                .collect::<Vec<_>>();
-                                            if options.is_empty() {
-                                                return Some(Vec::new());
-                                            }
-                                            let request = QuestionRequest::new(
-                                                "Select setup proposal items; only selected items enter the preview. Final confirmation still required.",
-                                                QuestionMode::Multiple,
-                                                options,
-                                                false,
-                                            );
-                                            match status.seat.select_setup(request) {
-                                                QuestionOutcome::Answered(
-                                                    QuestionAnswer::Multiple(ids),
-                                                ) => ids
-                                                    .into_iter()
-                                                    .map(|id| id.parse::<usize>().ok())
-                                                    .collect(),
-                                                _ => None,
-                                            }
-                                        };
-                                        let mut setup_cancel = status
-                                            .as_ref()
-                                            .map(|status| status.seat.setup_cancellation());
-                                        let terminal_cancel = async {
-                                            match setup_cancel.as_mut() {
-                                                Some(cancel) => cancel.cancelled().await,
-                                                None => std::future::pending::<()>().await,
-                                            }
-                                        };
-                                        let setup_result = tokio::select! {
-                                            biased;
-                                            _ = terminal_cancel => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
-                                            _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
-                                            result = crate::setup::observed_selection_host(
-                                                root.clone(),
-                                                &setup_args,
-                                                Some(&confirm),
-                                                Some(&select),
-                                            ) => result,
-                                        };
-                                        drop(setup_cancel);
-                                        match setup_result {
-                                            Ok(report) => diagnostics.note(&report),
-                                            Err(error) => diagnostics.note(&error.to_string()),
-                                        }
+                                        run_interactive_setup(
+                                            prompt,
+                                            &root,
+                                            status.as_ref(),
+                                            diagnostics,
+                                        )
+                                        .await;
                                         continue;
                                     }
                                     // The same snapshot `ego doctor` prints,
@@ -1591,124 +1245,21 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         | repl::HostCommand::History(_)
                                         | repl::HostCommand::Resume(_)),
                                     ) => {
-                                        if !seat.has_human() {
-                                            match crate::catalogue::listing(jsonl_store.as_ref(), &root, true) {
-                                                Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
-                                                Err(error) => diagnostics.note(&format!("the session catalogue could not be read: {error}")),
-                                            }
-                                            continue;
-                                        }
-                                        if pending_work {
-                                            diagnostics.note("a session cannot be selected while source work is pending");
-                                            continue;
-                                        }
-                                        let mut metas: Vec<_> =
-                                            match crate::catalogue::saved_sessions(
-                                                jsonl_store.as_ref(),
-                                            ) {
-                                                Ok(metas) => metas
-                                                    .into_iter()
-                                                    .filter(|meta| meta.id != active.id())
-                                                    .collect(),
-                                                Err(error) => {
-                                                    diagnostics.note(&format!("the session catalogue could not be read: {error}"));
-                                                    continue;
-                                                }
-                                            };
-                                        if let repl::HostCommand::History(query) = &command {
-                                            let history = jsonl_store.history();
-                                            let query = query.clone();
-                                            let hits =
-                                                match tokio::task::spawn_blocking(move || {
-                                                    history.matches(&query)
-                                                })
-                                                .await
-                                                {
-                                                    Ok(Ok(hits)) => hits,
-                                                    result => {
-                                                        diagnostics.note(&format!(
-                                                        "history could not be searched: {result:?}"
-                                                    ));
-                                                        continue;
-                                                    }
-                                                };
-                                            metas.retain(|meta| {
-                                                hits.iter().any(|hit| hit.id == meta.id)
-                                            });
-                                        }
-                                        let target = match &command {
-                                            repl::HostCommand::Resume(Some(id)) => match id.parse()
-                                            {
-                                                Ok(id) => Some(id),
-                                                Err(_) => {
-                                                    diagnostics.note("invalid session ID");
-                                                    continue;
-                                                }
-                                            },
-                                            repl::HostCommand::Resume(None) => metas
-                                                .iter()
-                                                .filter(|meta| meta.workspace_root == root)
-                                                .max_by_key(|meta| meta.updated)
-                                                .map(|meta| meta.id),
-                                            _ => seat.pick_session(metas.clone()),
-                                        };
-                                        let Some(target) = target else {
-                                            continue;
-                                        };
-                                        let Some(meta) =
-                                            metas.into_iter().find(|meta| meta.id == target)
-                                        else {
-                                            continue;
-                                        };
-                                        if !meta.workspace_root.is_dir() {
-                                            diagnostics
-                                                .note("the selected session root is unavailable");
-                                            continue;
-                                        }
-                                        let opened = match session::open(
-                                            jsonl_store.as_ref(),
-                                            &target,
+                                        if let Some(transition) = select_session_transition(
+                                            command,
+                                            seat.as_ref(),
+                                            pending_work,
+                                            jsonl_store,
+                                            &root,
+                                            active.id(),
                                             &clock,
-                                        ) {
-                                            Ok(opened) => opened,
-                                            Err(error) => {
-                                                diagnostics.note(&format!("the selected session could not be opened: {error}"));
-                                                continue;
-                                            }
-                                        };
-                                        let target_state = opened.state.clone();
-                                        // Interrupted work requires the full `ego resume` recovery path.
-                                        if target_state.turns.values().any(|turn| !turn.completed)
-                                            || !target_state.unacknowledged_prompts().is_empty()
-                                            || target_state.pending_question().is_some()
-                                            || !target_state.live_attempts.is_empty()
+                                            diagnostics,
+                                        )
+                                        .await
                                         {
-                                            diagnostics.note(&format!("session {target} has unfinished work; use ego resume {target}"));
-                                            continue;
+                                            break 'epoch transition;
                                         }
-                                        if meta.workspace_root != root {
-                                            drop(opened);
-                                            break 'epoch EpochTransition::Resume { meta };
-                                        }
-                                        let target_owner = match ActiveSession::durable(
-                                            opened,
-                                            target_state,
-                                            EVIDENCE_CAP,
-                                        ) {
-                                            Ok(owner) => owner,
-                                            Err(error) => {
-                                                diagnostics.note(&format!("the selected session could not be replayed: {error}"));
-                                                continue;
-                                            }
-                                        };
-                                        if !seat.activate_session(target) {
-                                            diagnostics.note("the terminal could not activate the selected session");
-                                            continue;
-                                        }
-                                        diagnostics.note(&format!("resumed session {target}"));
-                                        break 'epoch EpochTransition::New {
-                                            target: target_owner,
-                                        };
+                                        continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Usage,
@@ -1783,48 +1334,18 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::New,
                                     )) => {
-                                        if pending_work {
-                                            diagnostics.note(
-                                    "a new session cannot be selected while source work is pending",
-                                );
-                                            continue;
-                                        }
-                                        let target = SessionId::new();
-                                        let target_opened = match session::open(
-                                            jsonl_store.as_ref(),
-                                            &target,
+                                        if let Some(transition) = new_session_transition(
+                                            seat.as_ref(),
+                                            pending_work,
+                                            jsonl_store,
                                             &clock,
-                                        ) {
-                                            Ok(opened) => opened,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "the new session could not be opened: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let target_owner = match ActiveSession::durable(
-                                            target_opened,
-                                            SessionState::default(),
-                                            EVIDENCE_CAP,
-                                        ) {
-                                            Ok(owner) => owner,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                        "the new session evidence could not be opened: {error}"
-                                    ));
-                                                continue;
-                                            }
-                                        };
-                                        if !seat.activate_session(target) {
-                                            diagnostics.note(
-                                                "the terminal could not activate the new session",
-                                            );
-                                            continue;
+                                            diagnostics,
+                                        )
+                                        .await
+                                        {
+                                            break 'epoch transition;
                                         }
-                                        break 'epoch EpochTransition::New {
-                                            target: target_owner,
-                                        };
+                                        continue;
                                     }
                                     repl::Line::HostCommand(
                                         command @ (repl::HostCommand::Action(
@@ -1832,89 +1353,20 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         )
                                         | repl::HostCommand::Fork(_)),
                                     ) => {
-                                        if pending_work {
-                                            diagnostics.note("the session cannot switch forks while source work is pending");
-                                            continue;
-                                        }
-                                        let lifecycle =
-                                            ego_core::session_lifecycle::SessionLifecycle::new(
-                                                Arc::clone(jsonl_store),
-                                                Arc::new(super::session_commands::NoLiveRuns),
-                                                Arc::new(SystemClock),
-                                            );
-                                        let fork_at_message =
-                                            matches!(command, repl::HostCommand::Fork(_));
-                                        let prepared = match command {
-                                            repl::HostCommand::Fork(item) => {
-                                                lifecycle.prepare_fork_at(active.id(), item)
-                                            }
-                                            _ => ego_core::session::PreparedFork::new(
-                                                active.id(),
-                                                &state,
-                                                session::now(&clock),
-                                            )
-                                            .map_err(
-                                                ego_core::session_lifecycle::LifecycleError::from,
-                                            ),
-                                        };
-                                        let prepared = match prepared {
-                                            Ok(prepared) => prepared,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "the session cannot be forked: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let target = SessionId::new();
-                                        let publication = match lifecycle
-                                            .publish_prepared_fork(target, &prepared)
-                                        {
-                                            Ok(publication) => publication,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "the fork target was not published: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let target_opened = match session::open(
-                                            jsonl_store.as_ref(),
-                                            &target,
+                                        if let Some(transition) = fork_session_transition(
+                                            command,
+                                            pending_work,
+                                            jsonl_store,
+                                            active.id(),
+                                            &state,
                                             &clock,
-                                        ) {
-                                            Ok(opened) => opened,
-                                            Err(error) => {
-                                                diagnostics.note(&format!("the published fork target {target} could not be opened: {error}"));
-                                                continue;
-                                            }
-                                        };
-                                        // Only a tip fork preserves the measured source context.
-                                        // An earlier message has a different provider baseline.
-                                        let mut target_state =
-                                            SessionState::replay(prepared.seed().events().cloned());
-                                        if !fork_at_message {
-                                            target_state.context = state.context;
+                                            diagnostics,
+                                        )
+                                        .await
+                                        {
+                                            break 'epoch transition;
                                         }
-                                        let target_owner = match ActiveSession::durable(
-                                            target_opened,
-                                            target_state,
-                                            EVIDENCE_CAP,
-                                        ) {
-                                            Ok(owner) => owner,
-                                            Err(error) => {
-                                                diagnostics.note(&format!("the published fork target {target} could not be replayed: {error}"));
-                                                continue;
-                                            }
-                                        };
-                                        let diagnostic =
-                                            publication.diagnostic().map(str::to_string);
-                                        break 'epoch EpochTransition::Fork {
-                                            target: target_owner,
-                                            publication,
-                                            diagnostic,
-                                            projected: project_public(prepared.seed().event()),
-                                        };
+                                        continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Compact,
@@ -2175,6 +1627,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             )
                                             .await;
                                         drop(preparation);
+
                                         let receipt = match receipt {
                                             Ok(receipt) => receipt,
                                             Err(error) => {
@@ -2385,92 +1838,16 @@ pub(super) async fn drive_execution<S: EventSink>(
                             let mut loop_ = loop_
                                 .with_automatic_compaction()
                                 .with_interactive_control(&mut control);
-                            let driven = match resumed_turn {
-                                Some(RuntimeResume::Model(turn)) => {
-                                    let (termination, result) = turns
-                                        .drive_resumed(&mut loop_, turn, &turn_cancel, diagnostics)
-                                        .await;
-                                    Some((termination, result))
-                                }
-                                Some(RuntimeResume::Foreign {
-                                    question, answer, ..
-                                }) => {
-                                    let (termination, result) = turns
-                                        .drive_answered(
-                                            &mut loop_,
-                                            question,
-                                            answer,
-                                            &turn_cancel,
-                                            diagnostics,
-                                        )
-                                        .await;
-                                    Some((termination, result))
-                                }
-                                None => match asked {
-                                    Some(InteractiveTurnInput::Checkpoint) => Some(
-                                        turns
-                                            .drive_checkpoint(&mut loop_, &turn_cancel, diagnostics)
-                                            .await,
-                                    ),
-                                    Some(InteractiveTurnInput::Prompt(asked)) => {
-                                        let (termination, result) = turns
-                                            .drive_with_images(
-                                                &mut loop_,
-                                                &asked,
-                                                images,
-                                                &turn_cancel,
-                                                diagnostics,
-                                            )
-                                            .await;
-                                        Some((termination, result))
-                                    }
-                                    Some(InteractiveTurnInput::Skill(operation)) => {
-                                        let (termination, result) = turns
-                                            .drive_admitted_skill(
-                                                &mut loop_,
-                                                operation,
-                                                &turn_cancel,
-                                                diagnostics,
-                                            )
-                                            .await;
-                                        Some((termination, result))
-                                    }
-                                    None => match loop_.run_queued_turn().await {
-                                        Ok(Some(outcome)) => {
-                                            let termination = loop_
-                                                .state()
-                                                .pending_question()
-                                                .map(|pending| RunTermination::QuestionRequired {
-                                                    question: Box::new(
-                                                        QuestionReport::from_request(
-                                                            pending.item_id(),
-                                                            pending.target(),
-                                                            pending.request(),
-                                                        ),
-                                                    ),
-                                                })
-                                                .or_else(|| RunTermination::after_outcome(&outcome))
-                                                .unwrap_or(RunTermination::Done);
-                                            Some((
-                                                termination,
-                                                Value::String(last_assistant_message(
-                                                    &loop_.state(),
-                                                )),
-                                            ))
-                                        }
-                                        Ok(None) => None,
-                                        Err(abandoned) => Some((
-                                            RunTermination::Failed {
-                                                message: format!(
-                                                    "the session log could not be written: {}",
-                                                    abandoned.cause
-                                                ),
-                                            },
-                                            Value::String(last_assistant_message(&loop_.state())),
-                                        )),
-                                    },
-                                },
-                            };
+                            let driven = drive_interactive_input(
+                                &turns,
+                                &mut loop_,
+                                resumed_turn,
+                                asked,
+                                images,
+                                &turn_cancel,
+                                diagnostics,
+                            )
+                            .await;
                             last_generation_request = loop_.last_generation_request();
                             drop(loop_);
                             state = session_hooks.state.state();
@@ -2721,4 +2098,705 @@ pub(super) async fn drive_execution<S: EventSink>(
             }
         }
     }
+}
+
+async fn stage_clipboard_image(
+    seat: &dyn InteractiveSeat,
+    pending_work: bool,
+    source: &Arc<model::CliGenerationModelSource>,
+    confinement: &RunConfinement,
+    evidence: &SessionEvidenceStore,
+    run_deadline: Option<std::time::Instant>,
+    staged_images: &mut Vec<StagedPasteImage>,
+) {
+    if pending_work {
+        seat.set_notice("image paste is unavailable while source work is pending".to_owned());
+        return;
+    }
+    let kind = match seat.pasteboard_kind() {
+        Ok(kind) => kind,
+        Err(error) => {
+            seat.set_notice(format!("pasteboard could not be inspected: {error}"));
+            return;
+        }
+    };
+    match kind {
+        PasteboardKind::Image => {
+            let limits = match paste_image_limits(source, confinement, evidence, run_deadline).await
+            {
+                Ok(limits) => limits,
+                Err(error) => {
+                    seat.set_notice(error);
+                    return;
+                }
+            };
+            let cap = limits
+                .max_bytes_per_image()
+                .map_or(ego_core::generator::types::MAX_IMAGE_BYTES, |limit| {
+                    limit.get()
+                });
+            let bytes = match seat.pasteboard_image(cap) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    seat.set_notice(error);
+                    return;
+                }
+            };
+            let image = match Image::new(bytes, ego_core::generator::types::ImageMediaType::Png) {
+                Ok(image) => image,
+                Err(error) => {
+                    seat.set_notice(format!("pasteboard image is invalid: {error}"));
+                    return;
+                }
+            };
+            staged_images.push(StagedPasteImage {
+                label: "clipboard".to_owned(),
+                source: StagedPasteSource::Inline(image),
+            });
+            seat.set_image_chips(paste_chips(staged_images));
+        }
+        PasteboardKind::Text => match seat.pasteboard_text() {
+            Ok(text) => seat.insert_paste_text(text),
+            Err(error) => seat.set_notice(error),
+        },
+        PasteboardKind::Empty => seat.set_notice("pasteboard has no image or text".to_owned()),
+    }
+}
+
+async fn stage_image_path(
+    seat: &dyn InteractiveSeat,
+    pending_work: bool,
+    path: String,
+    source: &Arc<model::CliGenerationModelSource>,
+    confinement: &RunConfinement,
+    evidence: &SessionEvidenceStore,
+    run_deadline: Option<std::time::Instant>,
+    staged_images: &mut Vec<StagedPasteImage>,
+) {
+    if pending_work {
+        seat.set_notice("image paste is unavailable while source work is pending".to_owned());
+        return;
+    }
+    let limits = match paste_image_limits(source, confinement, evidence, run_deadline).await {
+        Ok(limits) => limits,
+        Err(error) => {
+            seat.set_notice(error);
+            return;
+        }
+    };
+    let size = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            seat.set_notice(format!("image paste could not inspect {path}: {error}"));
+            return;
+        }
+    };
+    let cap = limits
+        .max_bytes_per_image()
+        .map_or(ego_core::generator::types::MAX_IMAGE_BYTES, |limit| {
+            limit.get()
+        });
+    if size > cap {
+        seat.set_notice(format!(
+            "image paste is {size} bytes, above the {cap}-byte limit"
+        ));
+        return;
+    }
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    staged_images.push(StagedPasteImage {
+        label: name,
+        source: StagedPasteSource::Path(path),
+    });
+    seat.set_image_chips(paste_chips(staged_images));
+}
+
+async fn run_interactive_setup(
+    prompt: String,
+    root: &Path,
+    status: Option<&InteractiveStatus>,
+    diagnostics: &dyn Diagnostics,
+) {
+    let setup_args = crate::cli::SetupArgs {
+        items: None,
+        judge: None,
+        prompt: (!prompt.is_empty()).then_some(prompt),
+        profile: None,
+        directory: Some(root.to_path_buf()),
+    };
+    let confirm = |question: String| {
+        status
+            .as_ref()
+            .filter(|status| status.human)
+            .is_some_and(|status| {
+                matches!(
+                    status.seat.confirm_setup(question),
+                    repl::Confirmation::Confirmed
+                )
+            })
+    };
+    let select = |findings: &[ego_core::setup::Finding]| {
+        use ego_core::question::{
+            QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
+        };
+        let status = status.as_ref().filter(|status| status.human)?;
+        let options = findings
+            .iter()
+            .map(|finding| {
+                QuestionOption::new(
+                    finding.id.to_string(),
+                    ego_core::permit::terminal_safe(&format!(
+                        "{}: {} — {}",
+                        finding.id,
+                        finding.requested.display(),
+                        finding.evidence
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
+        if options.is_empty() {
+            return Some(Vec::new());
+        }
+        let request = QuestionRequest::new(
+            "Select setup proposal items; only selected items enter the preview. Final confirmation still required.",
+            QuestionMode::Multiple,
+            options,
+            false,
+        );
+        match status.seat.select_setup(request) {
+            QuestionOutcome::Answered(QuestionAnswer::Multiple(ids)) => {
+                ids.into_iter().map(|id| id.parse::<usize>().ok()).collect()
+            }
+            _ => None,
+        }
+    };
+    let mut setup_cancel = status
+        .as_ref()
+        .map(|status| status.seat.setup_cancellation());
+    let terminal_cancel = async {
+        match setup_cancel.as_mut() {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let setup_result = tokio::select! {
+        biased;
+        _ = terminal_cancel => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
+        _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
+        result = crate::setup::observed_selection_host(
+            root.to_path_buf(),
+            &setup_args,
+            Some(&confirm),
+            Some(&select),
+        ) => result,
+    };
+    drop(setup_cancel);
+    match setup_result {
+        Ok(report) => diagnostics.note(&report),
+        Err(error) => diagnostics.note(&error.to_string()),
+    }
+}
+
+async fn run_interactive_config(
+    arguments: &str,
+    effective: &Effective,
+    skill_profile_layers: Option<&[Sourced<ConfigLayer>]>,
+    perimeter: &crate::perimeter::Perimeter,
+    diagnostics: &dyn Diagnostics,
+) {
+    if arguments == "perimeter" {
+        diagnostics.note(&perimeter.text());
+    } else {
+        match crate::config::repl_set_args(arguments) {
+            Ok(set) => match crate::config::repl_set(&set) {
+                Ok(receipt) => {
+                    diagnostics.note(&receipt);
+                    diagnostics.note("Saved to user base configuration; applies to future sessions. Current session authority is unchanged.");
+                    if let Some(warning) = crate::config::saved_override(
+                        &set,
+                        effective,
+                        skill_profile_layers.unwrap_or_default(),
+                    ) {
+                        diagnostics.note(&warning);
+                    }
+                    diagnostics.note(&crate::config::repl_text(
+                        effective,
+                        skill_profile_layers.unwrap_or_default(),
+                        perimeter,
+                    ));
+                }
+                Err(error) => diagnostics.note(&format!("config set failed: {error:?}")),
+            },
+            Err(error) => diagnostics.note(&error.to_string()),
+        }
+    }
+}
+
+async fn select_session_transition<'store>(
+    command: repl::HostCommand,
+    seat: &dyn InteractiveSeat,
+    pending_work: bool,
+    store: &'store Arc<JsonlStore>,
+    root: &Path,
+    session_id: SessionId,
+    clock: &SystemClock,
+    diagnostics: &dyn Diagnostics,
+) -> Option<EpochTransition<'store>> {
+    if !seat.has_human() {
+        match crate::catalogue::listing(store.as_ref(), root, true) {
+            Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
+            Err(error) => {
+                diagnostics.note(&format!("the session catalogue could not be read: {error}"))
+            }
+        }
+        return None;
+    }
+    if pending_work {
+        diagnostics.note("a session cannot be selected while source work is pending");
+        return None;
+    }
+    let mut metas: Vec<_> = match crate::catalogue::saved_sessions(store.as_ref()) {
+        Ok(metas) => metas
+            .into_iter()
+            .filter(|meta| meta.id != session_id)
+            .collect(),
+        Err(error) => {
+            diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+            return None;
+        }
+    };
+    if let repl::HostCommand::History(query) = &command {
+        let history = store.history();
+        let query = query.clone();
+        let hits = match tokio::task::spawn_blocking(move || history.matches(&query)).await {
+            Ok(Ok(hits)) => hits,
+            result => {
+                diagnostics.note(&format!("history could not be searched: {result:?}"));
+                return None;
+            }
+        };
+        metas.retain(|meta| hits.iter().any(|hit| hit.id == meta.id));
+    }
+    let target = match &command {
+        repl::HostCommand::Resume(Some(id)) => match id.parse() {
+            Ok(id) => Some(id),
+            Err(_) => {
+                diagnostics.note("invalid session ID");
+                return None;
+            }
+        },
+        repl::HostCommand::Resume(None) => metas
+            .iter()
+            .filter(|meta| meta.workspace_root == root)
+            .max_by_key(|meta| meta.updated)
+            .map(|meta| meta.id),
+        _ => seat.pick_session(metas.clone()),
+    };
+    let Some(target) = target else {
+        return None;
+    };
+    let Some(meta) = metas.into_iter().find(|meta| meta.id == target) else {
+        return None;
+    };
+    if !meta.workspace_root.is_dir() {
+        diagnostics.note("the selected session root is unavailable");
+        return None;
+    }
+    let opened = match session::open(store.as_ref(), &target, clock) {
+        Ok(opened) => opened,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "the selected session could not be opened: {error}"
+            ));
+            return None;
+        }
+    };
+    let target_state = opened.state.clone();
+    // Interrupted work requires the full `ego resume` recovery path.
+    if target_state.turns.values().any(|turn| !turn.completed)
+        || !target_state.unacknowledged_prompts().is_empty()
+        || target_state.pending_question().is_some()
+        || !target_state.live_attempts.is_empty()
+    {
+        diagnostics.note(&format!(
+            "session {target} has unfinished work; use ego resume {target}"
+        ));
+        return None;
+    }
+    if meta.workspace_root != root {
+        drop(opened);
+        return Some(EpochTransition::Resume { meta });
+    }
+    let target_owner = match ActiveSession::durable(opened, target_state, EVIDENCE_CAP) {
+        Ok(owner) => owner,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "the selected session could not be replayed: {error}"
+            ));
+            return None;
+        }
+    };
+    if !seat.activate_session(target) {
+        diagnostics.note("the terminal could not activate the selected session");
+        return None;
+    }
+    diagnostics.note(&format!("resumed session {target}"));
+    return Some(EpochTransition::New {
+        target: target_owner,
+    });
+}
+
+async fn new_session_transition<'store>(
+    seat: &dyn InteractiveSeat,
+    pending_work: bool,
+    store: &'store Arc<JsonlStore>,
+    clock: &SystemClock,
+    diagnostics: &dyn Diagnostics,
+) -> Option<EpochTransition<'store>> {
+    if pending_work {
+        diagnostics.note("a new session cannot be selected while source work is pending");
+        return None;
+    }
+    let target = SessionId::new();
+    let target_opened = match session::open(store.as_ref(), &target, clock) {
+        Ok(opened) => opened,
+        Err(error) => {
+            diagnostics.note(&format!("the new session could not be opened: {error}"));
+            return None;
+        }
+    };
+    let target_owner =
+        match ActiveSession::durable(target_opened, SessionState::default(), EVIDENCE_CAP) {
+            Ok(owner) => owner,
+            Err(error) => {
+                diagnostics.note(&format!(
+                    "the new session evidence could not be opened: {error}"
+                ));
+                return None;
+            }
+        };
+    if !seat.activate_session(target) {
+        diagnostics.note("the terminal could not activate the new session");
+        return None;
+    }
+    return Some(EpochTransition::New {
+        target: target_owner,
+    });
+}
+
+async fn fork_session_transition<'store>(
+    command: repl::HostCommand,
+    pending_work: bool,
+    store: &'store Arc<JsonlStore>,
+    session_id: SessionId,
+    state: &SessionState,
+    clock: &SystemClock,
+    diagnostics: &dyn Diagnostics,
+) -> Option<EpochTransition<'store>> {
+    if pending_work {
+        diagnostics.note("the session cannot switch forks while source work is pending");
+        return None;
+    }
+    let lifecycle = ego_core::session_lifecycle::SessionLifecycle::new(
+        Arc::clone(store),
+        Arc::new(super::session_commands::NoLiveRuns),
+        Arc::new(SystemClock),
+    );
+    let fork_at_message = matches!(command, repl::HostCommand::Fork(_));
+    let prepared = match command {
+        repl::HostCommand::Fork(item) => lifecycle.prepare_fork_at(session_id, item),
+        _ => ego_core::session::PreparedFork::new(session_id, &state, session::now(clock))
+            .map_err(ego_core::session_lifecycle::LifecycleError::from),
+    };
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            diagnostics.note(&format!("the session cannot be forked: {error}"));
+            return None;
+        }
+    };
+    let target = SessionId::new();
+    let publication = match lifecycle.publish_prepared_fork(target, &prepared) {
+        Ok(publication) => publication,
+        Err(error) => {
+            diagnostics.note(&format!("the fork target was not published: {error}"));
+            return None;
+        }
+    };
+    let target_opened = match session::open(store.as_ref(), &target, clock) {
+        Ok(opened) => opened,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "the published fork target {target} could not be opened: {error}"
+            ));
+            return None;
+        }
+    };
+    // Only a tip fork preserves the measured source context.
+    // An earlier message has a different provider baseline.
+    let mut target_state = SessionState::replay(prepared.seed().events().cloned());
+    if !fork_at_message {
+        target_state.context = state.context;
+    }
+    let target_owner = match ActiveSession::durable(target_opened, target_state, EVIDENCE_CAP) {
+        Ok(owner) => owner,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "the published fork target {target} could not be replayed: {error}"
+            ));
+            return None;
+        }
+    };
+    let diagnostic = publication.diagnostic().map(str::to_string);
+    return Some(EpochTransition::Fork {
+        target: target_owner,
+        publication,
+        diagnostic,
+        projected: project_public(prepared.seed().event()),
+    });
+}
+
+async fn drive_interactive_input<'session: 'turn, 'turn>(
+    turns: &Turns<'_>,
+    loop_: &mut TurnLoop<'session, 'turn>,
+    resumed_turn: Option<RuntimeResume>,
+    asked: Option<InteractiveTurnInput>,
+    images: Vec<ImageRef>,
+    turn_cancel: &CancelToken,
+    diagnostics: &dyn Diagnostics,
+) -> Option<(RunTermination, Value)> {
+    match resumed_turn {
+        Some(RuntimeResume::Model(turn)) => {
+            let (termination, result) = turns
+                .drive_resumed(loop_, turn, turn_cancel, diagnostics)
+                .await;
+            Some((termination, result))
+        }
+        Some(RuntimeResume::Foreign {
+            question, answer, ..
+        }) => {
+            let (termination, result) = turns
+                .drive_answered(loop_, question, answer, turn_cancel, diagnostics)
+                .await;
+            Some((termination, result))
+        }
+        None => match asked {
+            Some(InteractiveTurnInput::Checkpoint) => Some(
+                turns
+                    .drive_checkpoint(loop_, turn_cancel, diagnostics)
+                    .await,
+            ),
+            Some(InteractiveTurnInput::Prompt(asked)) => {
+                let (termination, result) = turns
+                    .drive_with_images(loop_, &asked, images, turn_cancel, diagnostics)
+                    .await;
+                Some((termination, result))
+            }
+            Some(InteractiveTurnInput::Skill(operation)) => {
+                let (termination, result) = turns
+                    .drive_admitted_skill(loop_, operation, turn_cancel, diagnostics)
+                    .await;
+                Some((termination, result))
+            }
+            None => match loop_.run_queued_turn().await {
+                Ok(Some(outcome)) => {
+                    let termination = loop_
+                        .state()
+                        .pending_question()
+                        .map(|pending| RunTermination::QuestionRequired {
+                            question: Box::new(QuestionReport::from_request(
+                                pending.item_id(),
+                                pending.target(),
+                                pending.request(),
+                            )),
+                        })
+                        .or_else(|| RunTermination::after_outcome(&outcome))
+                        .unwrap_or(RunTermination::Done);
+                    Some((
+                        termination,
+                        Value::String(last_assistant_message(&loop_.state())),
+                    ))
+                }
+                Ok(None) => None,
+                Err(abandoned) => Some((
+                    RunTermination::Failed {
+                        message: format!(
+                            "the session log could not be written: {}",
+                            abandoned.cause
+                        ),
+                    },
+                    Value::String(last_assistant_message(&loop_.state())),
+                )),
+            },
+        },
+    }
+}
+
+fn activate_epoch(
+    epoch_start: &EpochStart,
+    session_id: SessionId,
+    seat: &dyn InteractiveSeat,
+    sink: &dyn EventSink,
+    state: &SessionState,
+    registry: &[RegisteredTool],
+    system: Option<&SystemPrompt>,
+    has_schema: bool,
+    mcp_errors: &[String],
+    diagnostics: &dyn Diagnostics,
+) -> bool {
+    match epoch_start {
+        EpochStart::Initial => false,
+        EpochStart::New => {
+            sink.publish(
+                &PublicEvent::SessionStarted {
+                    v: PUBLIC_EVENT_VERSION,
+                    session: session_id,
+                    capabilities: capabilities(registry, system.is_some(), has_schema),
+                    mcp_errors: mcp_errors.to_vec(),
+                    hook_errors: Vec::new(),
+                    instructions: system
+                        .map(|prompt| prompt.sources.clone())
+                        .unwrap_or_default(),
+                },
+                state,
+            );
+            false
+        }
+        EpochStart::Fork {
+            diagnostic,
+            projected,
+        } => {
+            if let Some(diagnostic) = diagnostic {
+                diagnostics.note(&format!(
+                    "fork target {} is authoritative with a durability warning: {diagnostic}",
+                    session_id
+                ));
+            }
+            sink.publish(
+                &PublicEvent::SessionStarted {
+                    v: PUBLIC_EVENT_VERSION,
+                    session: session_id,
+                    capabilities: capabilities(registry, system.is_some(), has_schema),
+                    mcp_errors: mcp_errors.to_vec(),
+                    hook_errors: Vec::new(),
+                    instructions: system
+                        .map(|prompt| prompt.sources.clone())
+                        .unwrap_or_default(),
+                },
+                state,
+            );
+            if let Some(event) = projected {
+                sink.publish(event.as_ref(), state);
+            }
+            !seat.activate_session(session_id)
+        }
+        EpochStart::Compact { diagnostic, .. } => {
+            if let Some(diagnostic) = diagnostic {
+                diagnostics.note(&format!(
+                    "compaction target is authoritative with a durability warning: {diagnostic}"
+                ));
+            }
+            sink.publish(
+                &PublicEvent::SessionStarted {
+                    v: PUBLIC_EVENT_VERSION,
+                    session: session_id,
+                    capabilities: capabilities(registry, system.is_some(), has_schema),
+                    mcp_errors: mcp_errors.to_vec(),
+                    hook_errors: Vec::new(),
+                    instructions: system
+                        .map(|prompt| prompt.sources.clone())
+                        .unwrap_or_default(),
+                },
+                state,
+            );
+            !seat.activate_session(session_id)
+        }
+    }
+}
+
+fn handle_interactive_policy(
+    request: PolicyControlRequest,
+    policy_application: Option<&PolicyApplicationOwner>,
+    status: Option<&InteractiveStatus>,
+    text_output: Option<&dyn TextOutput>,
+    diagnostics: &dyn Diagnostics,
+) -> bool {
+    let Some(owner) = policy_application else {
+        let notice = "interactive policy controls are unavailable".to_owned();
+        if let Some(status) = status
+            && status.human
+        {
+            status.seat.set_notice(notice);
+        } else {
+            diagnostics.note(&notice);
+        }
+        return false;
+    };
+    if let PolicyControlRequest::SetMode(mode) = &request {
+        let mode = *mode;
+        let notice = match owner.apply(PolicyControlRequest::SetMode(mode)) {
+            Ok(PolicyControlOutcome::Mode { staging }) => {
+                if staging.changed {
+                    format!("mode `{mode}` staged for the next generation")
+                } else {
+                    format!("mode `{mode}` is already selected")
+                }
+            }
+            Ok(_) => "policy control failed: the outcome did not match the mode request".to_owned(),
+            Err(error) => {
+                format!("policy control failed: {error}")
+            }
+        };
+        if let Some(status) = status
+            && status.human
+        {
+            status.seat.set_notice(notice);
+        } else {
+            diagnostics.note(&notice);
+        }
+        return false;
+    }
+    let Some(output) = text_output else {
+        let notice = "interactive permission output is unavailable".to_owned();
+        if let Some(status) = status
+            && status.human
+        {
+            status.seat.set_notice(notice);
+        } else {
+            diagnostics.note(&notice);
+        }
+        return false;
+    };
+    let handled = handle_policy_request(
+        request,
+        |request| owner.apply(request),
+        output,
+        |_preview| {
+            status
+                .as_ref()
+                .filter(|status| status.human)
+                .map_or(repl::Confirmation::Declined, |status| {
+                    status.seat.confirm_remember()
+                })
+        },
+    );
+    match handled {
+        Ok(Some(repl::Line::Ended | repl::Line::ExternalBreak(_))) => return true,
+        Ok(Some(_)) => diagnostics.note("permission confirmation returned a non-terminal line"),
+        Ok(None) => {}
+        Err(error) => {
+            let notice = format!("policy control failed: {error}");
+            if let Some(status) = status
+                && status.human
+            {
+                status.seat.set_notice(notice);
+            } else {
+                diagnostics.note(&notice);
+            }
+        }
+    }
+
+    false
 }
