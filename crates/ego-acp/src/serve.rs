@@ -2094,6 +2094,7 @@ trait LifecycleOperations: Send + Sync {
     fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError>;
     fn profiles(&self, id: SessionId) -> Result<SessionProfiles, LifecycleError>;
     fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError>;
+    fn plan(&self, id: SessionId) -> Result<ego_core::plan::Plan, LifecycleError>;
     fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
     fn resume<'a>(
@@ -2156,6 +2157,10 @@ where
 
     fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError> {
         SessionLifecycle::goal(self, id)
+    }
+
+    fn plan(&self, id: SessionId) -> Result<ego_core::plan::Plan, LifecycleError> {
+        SessionLifecycle::plan(self, id)
     }
 
     fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError> {
