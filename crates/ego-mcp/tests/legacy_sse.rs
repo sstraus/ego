@@ -20,7 +20,7 @@ type Seen = (String, String, Value);
 struct Replay {
     fixture: Value,
     seen: Mutex<Vec<Seen>>,
-    events: Mutex<Option<mpsc::UnboundedSender<Result<Vec<u8>, McpError>>>>,
+    events: Mutex<Option<mpsc::UnboundedSender<Result<Vec<u8>, ego_core::permit::TransportError>>>>,
     settlements: Mutex<Vec<McpHttpEnd>>,
     endpoint: Option<String>,
     stall_endpoint: bool,
