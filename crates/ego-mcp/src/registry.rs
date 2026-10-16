@@ -3184,10 +3184,11 @@ fn context_command_descriptor(
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for argument in arguments {
-        properties.insert(
-            argument.name.clone(),
-            serde_json::json!({"type":"string", "description":argument.description}),
-        );
+        let mut property = serde_json::json!({"type":"string"});
+        if let Some(description) = &argument.description {
+            property["description"] = serde_json::Value::String(description.clone());
+        }
+        properties.insert(argument.name.clone(), property);
         if argument.required == Some(true) {
             required.push(argument.name.clone());
         }
