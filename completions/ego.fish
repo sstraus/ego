@@ -29,6 +29,7 @@ complete -c ego -n "__fish_ego_needs_command" -f -a "run" -d 'Run an agent from 
 complete -c ego -n "__fish_ego_needs_command" -f -a "resume" -d 'Continue a session; no ID = latest in this workspace.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "continue" -d 'Continue a session; no ID = latest in this workspace.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "fork" -d 'Fork a session at its tip or after the completed turn containing a message.'
+complete -c ego -n "__fish_ego_needs_command" -f -a "rm" -d 'Delete a stored session (history is retained for descendants).'
 complete -c ego -n "__fish_ego_needs_command" -f -a "compact" -d 'Compact a session into its deterministic successor.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "export" -d 'Export a session locally or as a structurally sanitized bundle.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "ls" -d 'List sessions (this workspace; --all for every one).'
@@ -202,6 +203,11 @@ complete -c ego -n "__fish_ego_using_subcommand fork" -l output -d 'text|json|js
 json\t''
 jsonl\t''"
 complete -c ego -n "__fish_ego_using_subcommand fork" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand rm" -l session-dir -d 'Override the store location' -r -F
+complete -c ego -n "__fish_ego_using_subcommand rm" -s C -d 'Run as if started in DIR' -r -F
+complete -c ego -n "__fish_ego_using_subcommand rm" -l yes
+complete -c ego -n "__fish_ego_using_subcommand rm" -l force
+complete -c ego -n "__fish_ego_using_subcommand rm" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand compact" -l budget -d 'Hard spend ceiling, as for run' -r
 complete -c ego -n "__fish_ego_using_subcommand compact" -l max-output-tokens -d 'Maximum generated tokens per request' -r
 complete -c ego -n "__fish_ego_using_subcommand compact" -l request-id -r

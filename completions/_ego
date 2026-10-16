@@ -212,6 +212,17 @@ _arguments "${_arguments_options[@]}" : \
 ':source:_default' \
 && ret=0
 ;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+'--session-dir=[Override the store location]:SESSION_DIR:_files' \
+'-C+[Run as if started in DIR]:DIR:_files' \
+'--yes[]' \
+'--force[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':source:_default' \
+&& ret=0
+;;
 (compact)
 _arguments "${_arguments_options[@]}" : \
 '--budget=[Hard spend ceiling, as for run]:BUDGET:_default' \
@@ -689,6 +700,7 @@ _ego_commands() {
 'resume:Continue a session; no ID = latest in this workspace.' \
 'continue:Continue a session; no ID = latest in this workspace.' \
 'fork:Fork a session at its tip or after the completed turn containing a message.' \
+'rm:Delete a stored session (history is retained for descendants).' \
 'compact:Compact a session into its deterministic successor.' \
 'export:Export a session locally or as a structurally sanitized bundle.' \
 'ls:List sessions (this workspace; --all for every one).' \
@@ -901,6 +913,11 @@ _ego__subcmd__orchestrator__subcmd__brief_commands() {
 _ego__subcmd__resume_commands() {
     local commands; commands=()
     _describe -t commands 'ego resume commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__rm_commands] )) ||
+_ego__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego rm commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__roots_commands] )) ||
 _ego__subcmd__roots_commands() {

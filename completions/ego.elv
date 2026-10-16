@@ -24,6 +24,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand resume 'Continue a session; no ID = latest in this workspace.'
             cand continue 'Continue a session; no ID = latest in this workspace.'
             cand fork 'Fork a session at its tip or after the completed turn containing a message.'
+            cand rm 'Delete a stored session (history is retained for descendants).'
             cand compact 'Compact a session into its deterministic successor.'
             cand export 'Export a session locally or as a structurally sanitized bundle.'
             cand ls 'List sessions (this workspace; --all for every one).'
@@ -211,6 +212,14 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
             cand --output 'text|json|jsonl'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;rm'= {
+            cand --session-dir 'Override the store location'
+            cand -C 'Run as if started in DIR'
+            cand --yes 'yes'
+            cand --force 'force'
             cand -h 'Print help'
             cand --help 'Print help'
         }

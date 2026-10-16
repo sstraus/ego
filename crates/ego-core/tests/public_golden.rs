@@ -41,6 +41,19 @@ mod common;
 // substring, the same trick `tests/reducer.rs` uses for `reducer`: cargo's
 // test filter matches on the full test path, not the source file name.
 mod public_golden {
+    /// Regenerate deliberately with `EGO_UPDATE_ARTIFACTS=1`, as for the CLI
+    /// reference snapshots. Normal runs always compare committed bytes.
+    fn header_snapshot(name: &str, actual: &str, committed: &str) {
+        if std::env::var_os("EGO_UPDATE_ARTIFACTS").is_some() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/golden")
+                .join(name);
+            std::fs::write(path, format!("{actual}\n")).expect("the golden is writable");
+            return;
+        }
+        assert_eq!(actual, committed.trim_end());
+    }
+
     use super::*;
 
     #[test]
@@ -552,9 +565,10 @@ mod public_golden {
             instructions: Vec::new(),
         };
         let actual = serde_json::to_string(&event).unwrap();
-        assert_eq!(
-            actual,
-            include_str!("golden/session_started.json").trim_end()
+        header_snapshot(
+            "session_started.json",
+            &actual,
+            include_str!("golden/session_started.json"),
         );
     }
 
@@ -574,9 +588,10 @@ mod public_golden {
             instructions: Vec::new(),
         };
         let actual = serde_json::to_string(&event).unwrap();
-        assert_eq!(
-            actual,
-            include_str!("golden/session_started_with_errors.json").trim_end()
+        header_snapshot(
+            "session_started_with_errors.json",
+            &actual,
+            include_str!("golden/session_started_with_errors.json"),
         );
     }
 
@@ -613,9 +628,10 @@ mod public_golden {
             ],
         };
         let actual = serde_json::to_string(&event).unwrap();
-        assert_eq!(
-            actual,
-            include_str!("golden/session_started_with_instructions.json").trim_end()
+        header_snapshot(
+            "session_started_with_instructions.json",
+            &actual,
+            include_str!("golden/session_started_with_instructions.json"),
         );
     }
 
