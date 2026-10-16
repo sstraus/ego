@@ -348,12 +348,13 @@ impl Turns<'_> {
             loop_.set_turn_allowance(self.max_turns.map(|max| max.saturating_sub(taken)));
             let outcome = match next {
                 TurnStart::Checkpoint => {
-                    self.one_running(loop_.continue_checkpoint(), cancel).await
+                    self.one_running(Box::pin(loop_.continue_checkpoint()), cancel)
+                        .await
                 }
                 TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
                 TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
                 TurnStart::Presented(question) => {
-                    self.one_running(loop_.present_foreign_question(question), cancel)
+                    self.one_running(Box::pin(loop_.present_foreign_question(question)), cancel)
                         .await
                 }
                 TurnStart::Answered { question, answer } => {
@@ -469,7 +470,7 @@ impl Turns<'_> {
         images: Vec<ImageRef>,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(loop_.run_with_images(prompt, images), cancel)
+        self.one_running(Box::pin(loop_.run_with_images(prompt, images)), cancel)
             .await
     }
 
@@ -479,7 +480,8 @@ impl Turns<'_> {
         turn: ego_core::event::id::TurnId,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(loop_.resume_turn(turn), cancel).await
+        self.one_running(Box::pin(loop_.resume_turn(turn)), cancel)
+            .await
     }
 
     async fn one_answered<'session: 'turn, 'turn>(
@@ -489,7 +491,7 @@ impl Turns<'_> {
         answer: QuestionAnswer,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(loop_.resume_question(question, answer), cancel)
+        self.one_running(Box::pin(loop_.resume_question(question, answer)), cancel)
             .await
     }
 
