@@ -630,9 +630,15 @@ fn validate_recorded_answer(
             .validate_answers(&answers)
             .map_err(|_| authority("invalid complete elicitation answer map"));
     }
-    let schema: Value = serde_json::from_slice(record.correlation_schema())?;
+    let legacy_round = record.question_round().map_err(continuation)?;
+    let Some(member) = legacy_round.requests.values().next() else {
+        return Err(continuation(ContinuationError::InvalidRecord));
+    };
+    let ego_core::question::ElicitationKind::Form { schema } = &member.kind else {
+        return Err(continuation(ContinuationError::InvalidRecord));
+    };
     let answer: Value = serde_json::from_slice(raw_answer)?;
-    let validator = compile_schema(&schema)?;
+    let validator = compile_schema(schema)?;
     validate_answer(&validator, &answer)
 }
 

@@ -791,3 +791,76 @@ fn residual_judge_decision_exports_its_outcome_without_path_or_reason() {
     assert_eq!(record["event"]["outcome"], "granted");
     assert_eq!(record["event"]["recommended"], "session");
 }
+
+#[test]
+fn round_private_destinations_and_member_outcomes_never_enter_structural_exports() {
+    // Catches: a nested round bypasses the export's prose and tool-material redaction.
+    use ego_core::question::{
+        ElicitationAnswers, ElicitationKind, ElicitationMember, ElicitationRound, QuestionAnswer,
+        QuestionMode, QuestionOutcome, QuestionRequest, QuestionTarget,
+    };
+    let session = SessionId::new();
+    let mut seq = Seq::ZERO;
+    let responses = BTreeMap::from([(
+        "PRIVATE-KEY".to_owned(),
+        serde_json::json!({"completed":true}),
+    )]);
+    let request = QuestionRequest::new(
+        "MCP input required",
+        QuestionMode::Round(ElicitationRound {
+            expires_at_ms: Some(10000),
+            requests: BTreeMap::from([(
+                "PRIVATE-KEY".to_owned(),
+                ElicitationMember {
+                    prompt: "PRIVATE-MEMBER-PROMPT".to_owned(),
+                    kind: ElicitationKind::Url {
+                        url: "https://example.test/PRIVATE-URL?PRIVATE-QUERY=secret".to_owned(),
+                        elicitation_id: "PRIVATE-ELICITATION-ID".to_owned(),
+                    },
+                },
+            )]),
+            completed: responses.clone(),
+        }),
+        vec![],
+        false,
+    );
+    let entries = vec![
+        event(
+            &mut seq,
+            EventKind::QuestionRequested {
+                request,
+                target: QuestionTarget::ForeignContinuation {
+                    tool_call: ItemId::new(),
+                    continuation_id: "local-operation".to_owned(),
+                },
+            },
+        ),
+        event(
+            &mut seq,
+            EventKind::QuestionMemberSettled {
+                key: "PRIVATE-KEY".to_owned(),
+                answer: serde_json::json!({"completed":true}),
+            },
+        ),
+        event(
+            &mut seq,
+            EventKind::QuestionSettled {
+                outcome: QuestionOutcome::Answered(QuestionAnswer::Round(ElicitationAnswers {
+                    confirmed: true,
+                    responses,
+                })),
+            },
+        ),
+    ];
+    let fixture = ExportFixture {
+        source: session,
+        lineages: BTreeMap::from([(session, None)]),
+        entries: BTreeMap::from([(session, Ok(entries))]),
+        blobs: HashMap::new(),
+    };
+    let exported = Exporter::new(&fixture).sanitized(session).unwrap();
+    let encoded = serde_json::to_string(&exported).unwrap();
+    assert!(!encoded.contains("PRIVATE-"));
+    assert!(!encoded.contains("example.test"));
+    assert!(encoded.contains("question_member_settled"));
+}

@@ -1611,6 +1611,12 @@ fn member_persistence_survives_restart_before_final_retry_consent() {
             };
             assert_eq!(restored, round);
             assert!(restored.next_member().is_none());
+            let (conversation, _) =
+                ego_core::generator::history::conversation_from(&replay).unwrap();
+            let model_context = serde_json::to_string(conversation.messages()).unwrap();
+            assert!(!model_context.contains("private=secret"));
+            assert!(!model_context.contains("verify-42"));
+            assert!(!model_context.contains("Complete on the page"));
         },
     );
 }
