@@ -344,24 +344,24 @@ fn header(call: &Finished<'_>, args: &Value, width: usize) -> Line {
     line.truncate_to(width)
 }
 
-/// The output lines of an exec, without the stream headers and, for a failed
-/// call, without the trailing exit diagnostic.
+/// The output lines of an exec, retaining stderr identity and excluding only
+/// the process exit diagnostic already carried by the header.
 fn output_lines(call: &Finished<'_>) -> Vec<String> {
-    let mut lines: Vec<&str> = call
-        .result
-        .lines()
-        .filter(|line| !matches!(*line, "[stdout]" | "[stderr]"))
-        .collect();
-    if !call.ok
-        && let Some(index) = lines.iter().rposition(|line| !line.trim().is_empty())
-    {
-        lines.remove(index);
+    let mut stderr = false;
+    let mut lines = Vec::new();
+    for line in call.result.lines() {
+        match line {
+            "[stdout]" => stderr = false,
+            "[stderr]" => stderr = true,
+            _ if line.trim().is_empty() => {}
+            _ if !call.ok && line.starts_with(EXIT_PREFIX) => {}
+            _ => {
+                let text = printable(line);
+                lines.push(if stderr { format!("stderr: {text}") } else { text });
+            }
+        }
     }
     lines
-        .into_iter()
-        .filter(|line| !line.trim().is_empty())
-        .map(printable)
-        .collect()
 }
 
 fn dim(text: String) -> Line {
@@ -535,7 +535,7 @@ mod tests {
         );
         let rows: Vec<_> = record.rows.lines().collect();
         assert_eq!(rows[0], "✗ $ sh -c 'exit 3' · exit 3 · 1.5s");
-        assert_eq!(rows[1..], ["  boom"]);
+        assert_eq!(rows[1..], ["  stderr: boom"]);
     }
 
     #[test]
