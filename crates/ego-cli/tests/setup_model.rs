@@ -38,6 +38,7 @@ fn setup_budget(
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ego"));
     command
         .env_clear()
+        .envs(support::coverage_environment())
         .env("EGO_HOME", home.path())
         .env("HOME", home.path())
         .env("PATH", support::fixture_path())
@@ -125,6 +126,7 @@ fn setup_provider_sigint_returns_cancelled_without_store_writes() {
     std::fs::write(home.path().join("config.toml"), config).unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ego"))
         .env_clear()
+        .envs(support::coverage_environment())
         .env("EGO_HOME", home.path())
         .env("HOME", home.path())
         .env("PATH", support::fixture_path())
@@ -220,6 +222,7 @@ fn setup_openai_valid_closed_response_selects_probes() {
     .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ego"))
         .env_clear()
+        .envs(support::coverage_environment())
         .env("EGO_HOME", home.path())
         .env("HOME", home.path())
         .env("PATH", support::fixture_path())

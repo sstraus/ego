@@ -6,17 +6,19 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use support::{AcpHost, Ego, Places, Plan, Reply, Stub, text, tool_call};
 
-const CONFIG: &str = "model = 'ollama/qwen3'\nthinking = 'off'\nmode = 'auto'\nsandbox = 'adaptive'\n[permissions]\njudge = 'ollama/qwen3'\nallow = ['exec(*)']\n";
+const CONFIG: &str = "model = 'ollama/qwen3'\nthinking = 'off'\nmode = 'auto'\nsandbox = 'adaptive'\nroots = []\n[permissions]\njudge = 'ollama/qwen3'\nallow = ['exec(*)']\n";
 
-fn setup(places: &Places) -> (PathBuf, PathBuf) {
+fn setup(places: &Places) -> (PathBuf, tempfile::TempDir) {
     std::fs::write(places.home_path().join("config.toml"), CONFIG).unwrap();
-    let reports = places.home_path().join("reports");
-    let scratch = places.home_path().join("temporary");
+    // HOME and temporary writes must not overlap the protected EGO_HOME.
+    let home = tempfile::tempdir().unwrap();
+    let reports = home.path().join("reports");
+    let scratch = home.path().join("temporary");
     std::fs::create_dir(&reports).unwrap();
     std::fs::create_dir(&scratch).unwrap();
     (
         std::fs::canonicalize(reports).unwrap().join("export.txt"),
-        scratch,
+        home,
     )
 }
 
@@ -98,7 +100,7 @@ fn assert_shared_judge(places: &Places, stub: &Stub, target: &Path) {
 )]
 fn cli_residual_judge_grant_reaches_the_next_explicit_exec() {
     let places = Places::new();
-    let (target, scratch) = setup(&places);
+    let (target, home) = setup(&places);
     let stub = Stub::start(Plan {
         completions: vec![
             exec("first"),
@@ -109,7 +111,8 @@ fn cli_residual_judge_grant_reaches_the_next_explicit_exec() {
         ..Plan::default()
     });
     let result = Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
-        .env("TMPDIR", scratch.to_str().unwrap())
+        .env("HOME", home.path().to_str().unwrap())
+        .env("TMPDIR", home.path().join("temporary").to_str().unwrap())
         .args([
             "--output",
             "json",
@@ -130,7 +133,7 @@ fn cli_residual_judge_grant_reaches_the_next_explicit_exec() {
 )]
 fn acp_residual_judge_grant_survives_into_the_next_session_run() {
     let places = Places::new();
-    let (target, scratch) = setup(&places);
+    let (target, home) = setup(&places);
     let stub = Stub::start(Plan {
         completions: vec![
             exec("first"),
@@ -144,7 +147,8 @@ fn acp_residual_judge_grant_survives_into_the_next_session_run() {
     let mut host = AcpHost::adopt(
         Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
             .subcommand("acp")
-            .env("TMPDIR", scratch.to_str().unwrap())
+            .env("HOME", home.path().to_str().unwrap())
+            .env("TMPDIR", home.path().join("temporary").to_str().unwrap())
             .spawn_conversing(),
     );
     host.initialize();
@@ -168,7 +172,8 @@ fn acp_residual_judge_grant_survives_into_the_next_session_run() {
             assert_eq!(stub.generations().len(), 3);
         }
     }
-    assert!(host.finish().is_empty());
+    let stderr = host.finish();
+    assert!(stderr.is_empty(), "{stderr}");
     assert_eq!(stub.generations().len(), 5);
     assert_shared_judge(&places, &stub, &target);
 }
