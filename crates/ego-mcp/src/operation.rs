@@ -207,10 +207,14 @@ impl McpContinuationOwner {
         }
         let policy_snapshot = context.policy_snapshot();
         let policy_digest = policy_snapshot.digest();
-        let schema = serde_json::to_vec(required.schema())
+        let binding = match &required.question_request().mode {
+            ego_core::question::QuestionMode::Round(round) => serde_json::to_value(round)?,
+            _ => required.schema().clone(),
+        };
+        let schema = serde_json::to_vec(&binding)
             .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
         let id = continuation_id(&envelope, &required, &schema);
-        let record = resume
+        let mut record = resume
             .into_record(
                 id.clone(),
                 policy_digest.clone(),
@@ -220,6 +224,9 @@ impl McpContinuationOwner {
                 envelope.transport_fingerprint(),
             )
             .map_err(continuation)?;
+        if let ego_core::question::QuestionMode::Round(round) = &required.question_request().mode {
+            record = record.with_round(round.clone()).map_err(continuation)?;
+        }
         if record.capture() != context.capture()
             || record.fingerprints().capture() != context.capture()
             || record.subject().server() != envelope.subject().server()
@@ -262,7 +269,12 @@ impl McpContinuationOwner {
         {
             return Err(self.terminalize_pending_failure(&id, &policy_digest, primary));
         }
-        ForeignInputRequired::new(id.clone(), required.question_request().clone()).map_err(|_| {
+        let mut question = required.question_request().clone();
+        question.prompt = format!(
+            "MCP server {} requires input before retrying the original operation",
+            envelope.subject().server()
+        );
+        ForeignInputRequired::new(id.clone(), question).map_err(|_| {
             self.terminalize_pending_failure(
                 &id,
                 &policy_digest,
@@ -533,6 +545,21 @@ impl<'session, 'turn> McpForeignQuestionPort<'session, 'turn> {
 }
 
 impl ForeignQuestionPort for McpForeignQuestionPort<'_, '_> {
+    fn cancel(&self, continuation_id: &str) -> Result<(), String> {
+        let record = self
+            .owner
+            .journal
+            .load(continuation_id)
+            .map_err(|error| error.to_string())?;
+        self.owner
+            .journal
+            .fail_pending(continuation_id)
+            .map_err(|error| error.to_string())?;
+        self.owner
+            .cleanup_terminal(continuation_id, record.generation_policy_digest());
+        Ok(())
+    }
+
     fn resume<'a>(
         &'a self,
         continuation_id: &'a str,
@@ -582,6 +609,12 @@ fn validate_recorded_answer(
     record: &ContinuationRecord,
     raw_answer: &[u8],
 ) -> Result<(), McpError> {
+    if let Some(round) = record.round() {
+        let answers = serde_json::from_slice(raw_answer)?;
+        return round
+            .validate_answers(&answers)
+            .map_err(|_| authority("invalid complete elicitation answer map"));
+    }
     let schema: Value = serde_json::from_slice(record.correlation_schema())?;
     let answer: Value = serde_json::from_slice(raw_answer)?;
     let validator = compile_schema(&schema)?;
@@ -595,6 +628,13 @@ pub struct McpResumeAdmission {
 
 impl McpResumeAdmission {
     pub fn validate(opened: OpenedContinuation) -> Result<Self, McpError> {
+        if let Some(round) = opened.round() {
+            let answers = serde_json::from_slice(opened.accepted_answer())?;
+            round
+                .validate_answers(&answers)
+                .map_err(|_| authority("invalid complete elicitation answer map"))?;
+            return Ok(Self { opened });
+        }
         let schema: Value = serde_json::from_slice(opened.correlation_schema())?;
         let answer: Value = serde_json::from_slice(opened.accepted_answer())?;
         let validator = compile_schema(&schema)?;

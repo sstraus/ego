@@ -18,7 +18,7 @@ use crate::store::{AtomicReplacePublication, OsIo, StoreIo};
 
 const JOURNAL_FILE: &str = "continuations.jsonl";
 const LOCK_FILE: &str = "continuations.lock";
-const RECORD_VERSION: u32 = 2;
+const RECORD_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -296,7 +296,7 @@ fn decode_committed(
             return Err(corrupt());
         }
         let probe: VersionProbe = serde_json::from_slice(line).map_err(|_| corrupt())?;
-        if probe.version != RECORD_VERSION {
+        if !matches!(probe.version, 2 | RECORD_VERSION) {
             return Err(ContinuationError::Corrupt(
                 "unsupported journal version".to_owned(),
             ));

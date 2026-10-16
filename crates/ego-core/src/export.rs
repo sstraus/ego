@@ -283,6 +283,7 @@ pub enum ExportEvent {
     QuestionSettled {
         outcome: ExportQuestionOutcome,
     },
+    QuestionMemberSettled,
     PermissionRequested,
     PermissionAmended,
     PermissionDecided {
@@ -969,15 +970,27 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1 + (request.options.len() as u64 * 2);
             ExportEvent::QuestionRequested {
                 target: target.clone(),
-                mode: request.mode.clone(),
+                mode: match &request.mode {
+                    QuestionMode::Round(_) => {
+                        QuestionMode::Round(crate::question::ElicitationRound {
+                            requests: Default::default(),
+                            completed: Default::default(),
+                        })
+                    }
+                    mode => mode.clone(),
+                },
                 option_count: request.options.len() as u64,
                 free_text: request.free_text,
             }
         }
+        EventKind::QuestionMemberSettled { .. } => ExportEvent::QuestionMemberSettled,
         EventKind::QuestionSettled { outcome } => {
             let outcome = match outcome {
                 QuestionOutcome::Answered(answer) => {
                     redactions.opaque_prose += match answer {
+                        crate::question::QuestionAnswer::Round(answers) => {
+                            answers.responses.len() as u64
+                        }
                         crate::question::QuestionAnswer::Multiple(values) => values.len() as u64,
                         crate::question::QuestionAnswer::Single(_)
                         | crate::question::QuestionAnswer::FreeText(_) => 1,
@@ -987,7 +1000,9 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 }
                 QuestionOutcome::Declined => ExportQuestionOutcome::Declined,
                 QuestionOutcome::Cancelled => ExportQuestionOutcome::Cancelled,
-                QuestionOutcome::Unavailable => ExportQuestionOutcome::Unavailable,
+                QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => {
+                    ExportQuestionOutcome::Unavailable
+                }
             };
             ExportEvent::QuestionSettled { outcome }
         }

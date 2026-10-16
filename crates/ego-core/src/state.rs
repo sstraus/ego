@@ -1433,7 +1433,9 @@ impl SessionState {
             QuestionOutcome::Answered(answer) => (true, answer.model_text()),
             QuestionOutcome::Declined => (false, "question declined".to_string()),
             QuestionOutcome::Cancelled => (false, "question cancelled".to_string()),
-            QuestionOutcome::Unavailable => return Err(QuestionError::NoPendingQuestion),
+            QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => {
+                return Err(QuestionError::NoPendingQuestion);
+            }
         };
         Ok(QuestionContinuation {
             question,
@@ -2030,6 +2032,8 @@ impl SessionState {
                     return;
                 };
                 if request.validate().is_err()
+                    || (matches!(request.mode, crate::question::QuestionMode::Round(_))
+                        && matches!(target, QuestionTarget::ModelTool { .. }))
                     || target.validate().is_err()
                     || self.pending_question.is_some()
                     || self.settled_questions.contains_key(&item)
@@ -2045,6 +2049,17 @@ impl SessionState {
                     target: target.clone(),
                     request: request.clone(),
                 });
+            }
+            EventKind::QuestionMemberSettled { key, answer } => {
+                if let Some(pending) = self.pending_question.as_mut()
+                    && ev.env.item == Some(pending.item)
+                    && ev.env.turn == pending.turn
+                    && ev.env.parent == Some(pending.request_event)
+                    && matches!(pending.target, QuestionTarget::ForeignContinuation { .. })
+                    && let crate::question::QuestionMode::Round(round) = &mut pending.request.mode
+                {
+                    let _ = round.complete_member(key, answer.clone());
+                }
             }
             EventKind::QuestionSettled { outcome } => {
                 let Some(item) = ev.env.item else {
@@ -2063,7 +2078,9 @@ impl SessionState {
                         QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
                         // `Unavailable` is a host result, never a settlement:
                         // it is exactly the state in which the request stays pending.
-                        QuestionOutcome::Unavailable => false,
+                        QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => {
+                            false
+                        }
                     };
                 if valid && let Some(pending) = self.pending_question.take() {
                     if let Some(question) = self.items.get_mut(&item) {

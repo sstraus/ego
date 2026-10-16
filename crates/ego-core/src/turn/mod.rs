@@ -6427,7 +6427,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             None => QuestionOutcome::Unavailable,
         };
 
-        if outcome == QuestionOutcome::Unavailable {
+        if matches!(
+            outcome,
+            QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. }
+        ) {
             return Ok(ToolOutcome::QuestionRequired);
         }
         if let QuestionOutcome::Answered(answer) = &outcome
@@ -6479,7 +6482,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut required = required;
         loop {
             let question = ItemId::new();
-            let request = required.question_request().clone();
+            let mut request = required.question_request().clone();
             let continuation_id = required.continuation_id().to_owned();
             let request_event = self.journal.append(
                 turn,
@@ -6500,37 +6503,62 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
                 return Ok(ToolOutcome::QuestionRequired);
             };
-            let elicited = await_controlled(
-                &self.journal,
-                &self.cancel,
-                &mut self.control,
-                turn,
-                elicitor.elicit(question, request.clone()),
-                InterruptDisposition::Return,
-                None,
-            )
-            .await;
-            let outcome = match elicited {
-                Controlled::Completed(Ok(outcome)) => outcome,
-                Controlled::Completed(Err(error)) => {
-                    tracing::error!(%error, %question, "foreign question elicitation failed");
+            let outcome = loop {
+                let elicited = await_controlled(
+                    &self.journal,
+                    &self.cancel,
+                    &mut self.control,
+                    turn,
+                    elicitor.elicit(question, request.clone()),
+                    InterruptDisposition::Return,
+                    None,
+                )
+                .await;
+                let outcome = match elicited {
+                    Controlled::Completed(Ok(outcome)) => outcome,
+                    Controlled::Completed(Err(error)) => {
+                        tracing::error!(%error, %question, "foreign question elicitation failed");
+                        self.journal.append(
+                            turn,
+                            None,
+                            Some(request_event),
+                            EventKind::Error {
+                                message: error.to_string(),
+                                kind: ErrorKind::Unclassified,
+                            },
+                        )?;
+                        return Ok(ToolOutcome::Ended(ExitReason::Internal));
+                    }
+                    Controlled::Interrupted => {
+                        port.cancel(&continuation_id)
+                            .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
+                        return Ok(ToolOutcome::Ended(ExitReason::Cancelled(
+                            self.cancel.cause().unwrap_or(CancelCause::User),
+                        )));
+                    }
+                    Controlled::Failed(cause) => return Err(cause),
+                };
+                if let QuestionOutcome::MemberCompleted { key, answer } = outcome {
+                    let crate::question::QuestionMode::Round(round) = &mut request.mode else {
+                        return Err(StoreError::Io(std::io::Error::other(
+                            "member outcome for a non-round question",
+                        )));
+                    };
+                    // Validate before publication; update the host view only after a durable append.
+                    let mut updated = round.clone();
+                    updated
+                        .complete_member(&key, answer.clone())
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
                     self.journal.append(
                         turn,
-                        None,
+                        Some(question),
                         Some(request_event),
-                        EventKind::Error {
-                            message: error.to_string(),
-                            kind: ErrorKind::Unclassified,
-                        },
+                        EventKind::QuestionMemberSettled { key, answer },
                     )?;
-                    return Ok(ToolOutcome::Ended(ExitReason::Internal));
+                    *round = updated;
+                    continue;
                 }
-                Controlled::Interrupted => {
-                    return Ok(ToolOutcome::Ended(ExitReason::Cancelled(
-                        self.cancel.cause().unwrap_or(CancelCause::User),
-                    )));
-                }
-                Controlled::Failed(cause) => return Err(cause),
+                break outcome;
             };
             if outcome == QuestionOutcome::Unavailable {
                 return Ok(ToolOutcome::QuestionRequired);
@@ -6538,6 +6566,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             let answer = match outcome {
                 QuestionOutcome::Answered(answer) => answer,
                 outcome => {
+                    port.cancel(&continuation_id)
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
                     let exit_reason = if outcome == QuestionOutcome::Cancelled {
                         ExitReason::Cancelled(CancelCause::User)
                     } else {

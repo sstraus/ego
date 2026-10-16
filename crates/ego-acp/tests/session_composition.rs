@@ -29,6 +29,9 @@ impl EventSinkFactory for SinkFactory {
 struct RejectingPort;
 
 impl ForeignQuestionPort for RejectingPort {
+    fn cancel(&self, _id: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn resume<'a>(
         &'a self,
         _continuation_id: &'a str,

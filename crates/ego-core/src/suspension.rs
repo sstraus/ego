@@ -309,12 +309,17 @@ impl ResumeSealer {
 
 fn prepare_resume_until(
     authorized: &Authorized,
+    used_rounds: u8,
     floor: ResumeFloor,
     expires_at: Timestamp,
     keys: &dyn ResumeKeySource,
 ) -> Result<PreparedResume, ContinuationError> {
     let (payload, subject, fingerprints, original_parameters) =
         resume_payload(authorized, floor, expires_at)?;
+    let mut decoded: ResumePayload =
+        serde_json::from_slice(&payload).map_err(|_| ContinuationError::InvalidGrant)?;
+    decoded.used_rounds = used_rounds;
+    let payload = serde_json::to_vec(&decoded).map_err(|_| ContinuationError::InvalidGrant)?;
     let grant = seal_payload(payload, keys)?;
     Ok(PreparedResume {
         grant,
@@ -440,6 +445,12 @@ struct ResumePayload {
     fingerprints: ResumeFingerprints,
     floor: ResumeFloor,
     expires_at: Timestamp,
+    #[serde(default, skip_serializing_if = "is_zero_round")]
+    used_rounds: u8,
+}
+
+fn is_zero_round(value: &u8) -> bool {
+    *value == 0
 }
 
 /// Integrity-protected authority retained for one exact resumed operation.
@@ -470,6 +481,11 @@ impl PreparedResume {
         correlation_schema: Vec<u8>,
         transport_fingerprint: impl Into<String>,
     ) -> Result<ContinuationRecord, ContinuationError> {
+        let payload: ResumePayload = serde_json::from_slice(&self.grant.payload)
+            .map_err(|_| ContinuationError::InvalidGrant)?;
+        if payload.used_rounds >= crate::question::MAX_ELICITATION_ROUNDS {
+            return Err(ContinuationError::InvalidTransition);
+        }
         let transport_fingerprint = transport_fingerprint.into();
         if transport_fingerprint != self.fingerprints.transport() {
             return Err(ContinuationError::AuthorityMismatch);
@@ -532,6 +548,7 @@ fn resume_payload_bytes(
         fingerprints,
         floor,
         expires_at,
+        used_rounds: 0,
     })
     .map_err(|_| ContinuationError::InvalidGrant)
 }
@@ -663,6 +680,8 @@ pub struct ContinuationRecord {
     accepted_answer: Option<Vec<u8>>,
     expires_at: Timestamp,
     state: ContinuationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round: Option<crate::question::ElicitationRound>,
 }
 
 impl ContinuationRecord {
@@ -690,6 +709,7 @@ impl ContinuationRecord {
             correlation_schema: Vec::new(),
             transport_fingerprint: None,
             accepted_answer: None,
+            round: None,
             expires_at,
             state: ContinuationState::Pending,
         })
@@ -719,6 +739,40 @@ impl ContinuationRecord {
         self.correlation_schema = correlation_schema;
         self.transport_fingerprint = Some(transport_fingerprint);
         Ok(self)
+    }
+
+    pub fn with_round(
+        mut self,
+        round: crate::question::ElicitationRound,
+    ) -> Result<Self, ContinuationError> {
+        round
+            .validate()
+            .map_err(|_| ContinuationError::InvalidRecord)?;
+        self.round = Some(round);
+        Ok(self)
+    }
+
+    pub fn round(&self) -> Option<&crate::question::ElicitationRound> {
+        self.round.as_ref()
+    }
+
+    /// Legacy bytes remain unchanged; their host meaning is one form member.
+    pub fn question_round(&self) -> Result<crate::question::ElicitationRound, ContinuationError> {
+        if let Some(round) = &self.round {
+            return Ok(round.clone());
+        }
+        let schema = serde_json::from_slice(&self.correlation_schema)
+            .map_err(|_| ContinuationError::InvalidRecord)?;
+        Ok(crate::question::ElicitationRound {
+            requests: std::collections::BTreeMap::from([(
+                self.correlation_key.clone(),
+                crate::question::ElicitationMember {
+                    prompt: "MCP server requires structured input".to_owned(),
+                    kind: crate::question::ElicitationKind::Form { schema },
+                },
+            )]),
+            completed: Default::default(),
+        })
     }
 
     pub fn id(&self) -> &str {
@@ -780,6 +834,7 @@ impl ContinuationRecord {
                 .expect("accepted protocol state was checked"),
             accepted_answer: self.accepted_answer.expect("accepted answer was checked"),
             expires_at: self.expires_at,
+            round: self.round,
         })
     }
 
@@ -873,6 +928,7 @@ pub struct AcceptedContinuation {
     transport_fingerprint: String,
     accepted_answer: Vec<u8>,
     expires_at: Timestamp,
+    round: Option<crate::question::ElicitationRound>,
 }
 
 impl AcceptedContinuation {
@@ -913,6 +969,9 @@ impl AcceptedContinuation {
         {
             return Err(ContinuationError::AuthorityMismatch);
         }
+        let used_rounds = serde_json::from_slice::<ResumePayload>(&self.grant.payload)
+            .map_err(|_| ContinuationError::InvalidGrant)?
+            .used_rounds;
         let authorized = open_resume(
             self.grant,
             reconstructed_call,
@@ -931,6 +990,8 @@ impl AcceptedContinuation {
             correlation_schema: self.correlation_schema,
             accepted_answer: self.accepted_answer,
             expires_at: self.expires_at,
+            round: self.round,
+            used_rounds,
         })
     }
 }
@@ -945,9 +1006,15 @@ pub struct OpenedContinuation {
     correlation_schema: Vec<u8>,
     accepted_answer: Vec<u8>,
     expires_at: Timestamp,
+    round: Option<crate::question::ElicitationRound>,
+    used_rounds: u8,
 }
 
 impl OpenedContinuation {
+    pub fn round(&self) -> Option<&crate::question::ElicitationRound> {
+        self.round.as_ref()
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -992,10 +1059,16 @@ impl OpenedContinuation {
             .map_err(|_| ContinuationError::InvalidAnswer)?;
         let request_state =
             String::from_utf8(self.request_state).map_err(|_| ContinuationError::InvalidRecord)?;
-        parameters.insert(
-            "inputResponses".to_owned(),
-            serde_json::Value::Object(serde_json::Map::from_iter([(self.correlation_key, answer)])),
-        );
+        let responses = if let Some(round) = self.round {
+            let answers =
+                serde_json::from_value(answer).map_err(|_| ContinuationError::InvalidAnswer)?;
+            round
+                .input_responses(&answers)
+                .map_err(|_| ContinuationError::InvalidAnswer)?
+        } else {
+            serde_json::Value::Object(serde_json::Map::from_iter([(self.correlation_key, answer)]))
+        };
+        parameters.insert("inputResponses".to_owned(), responses);
         parameters.insert(
             "requestState".to_owned(),
             serde_json::Value::String(request_state),
@@ -1018,7 +1091,15 @@ impl OpenedContinuation {
             return Err(ContinuationError::Expired);
         }
         let expires_at = self.expires_at;
-        let successor = prepare_resume_until(&self.authorized, floor, expires_at, keys)?;
+        let used_rounds = self
+            .used_rounds
+            .checked_add(1)
+            .ok_or(ContinuationError::InvalidTransition)?;
+        if used_rounds > crate::question::MAX_ELICITATION_ROUNDS {
+            return Err(ContinuationError::InvalidTransition);
+        }
+        let successor =
+            prepare_resume_until(&self.authorized, used_rounds, floor, expires_at, keys)?;
         let authorized = self.into_retry_authorized()?;
         Ok((authorized, successor))
     }

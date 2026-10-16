@@ -63,7 +63,13 @@ impl QuestionReport {
             id,
             target: target.clone(),
             prompt: request.prompt.clone(),
-            mode: request.mode.clone(),
+            mode: match &request.mode {
+                QuestionMode::Round(_) => QuestionMode::Round(crate::question::ElicitationRound {
+                    requests: Default::default(),
+                    completed: Default::default(),
+                }),
+                mode => mode.clone(),
+            },
             options: request.options.clone(),
             free_text: request.free_text,
         }
@@ -575,8 +581,11 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
                     .expect("a validated question report always serializes"),
             ),
         }),
+        EventKind::QuestionMemberSettled { .. } => None,
         EventKind::QuestionSettled {
-            outcome: crate::question::QuestionOutcome::Unavailable,
+            outcome:
+                crate::question::QuestionOutcome::Unavailable
+                | crate::question::QuestionOutcome::MemberCompleted { .. },
         } => None,
         EventKind::QuestionSettled { outcome } => Some(PublicEvent::ItemCompleted {
             turn,

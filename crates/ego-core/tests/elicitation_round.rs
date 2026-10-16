@@ -36,16 +36,26 @@ fn durable_round_rejects_missing_or_replaced_correlation_before_retry() {
     ] {
         assert!(QuestionAnswer::from_json(&request, &answer.to_string()).is_err());
     }
-    let answer = QuestionAnswer::from_json(&request, &json!({
-        "confirmed":true,"responses":{"profile":{"name":"Ada"},"verify":{"completed":true}}
-    }).to_string()).expect("complete explicitly confirmed round");
+    let answer = QuestionAnswer::from_json(
+        &request,
+        &json!({
+            "confirmed":true,"responses":{"profile":{"name":"Ada"},"verify":{"completed":true}}
+        })
+        .to_string(),
+    )
+    .expect("complete explicitly confirmed round");
     assert!(!answer.model_text().contains("private"));
 }
 
 #[test]
 fn unsafe_url_is_refused_before_a_round_becomes_durable() {
     // Catches: a server supplies a credential-bearing or executable URL.
-    for url in ["javascript:alert(1)", "https://user:password@example.test/", "http://example.test/", "https://example.test/\n"] {
+    for url in [
+        "javascript:alert(1)",
+        "https://user:password@example.test/",
+        "http://example.test/",
+        "https://example.test/\n",
+    ] {
         let mut value = round();
         value["mode"]["round"]["requests"]["verify"]["kind"]["url"]["url"] = json!(url);
         let request: QuestionRequest = serde_json::from_value(value).expect("typed round");
@@ -59,7 +69,9 @@ fn ninth_member_is_refused_before_presentation() {
     let mut value = round();
     let member = value["mode"]["round"]["requests"]["profile"].clone();
     let requests = value["mode"]["round"]["requests"].as_object_mut().unwrap();
-    for index in 0..7 { requests.insert(format!("extra-{index}"), member.clone()); }
+    for index in 0..7 {
+        requests.insert(format!("extra-{index}"), member.clone());
+    }
     let request: QuestionRequest = serde_json::from_value(value).expect("typed round");
     assert!(request.validate().is_err());
 }

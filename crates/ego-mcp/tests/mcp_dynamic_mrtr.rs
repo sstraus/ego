@@ -283,31 +283,22 @@ fn rmcp_form_elicitation_retains_message_schema_and_continuation_authority() {
     .expect("one accepted form elicitation");
     let question = mapped.question_request();
 
-    assert_eq!(mapped.correlation_key(), "human-answer");
     assert_eq!(mapped.request_state(), b"opaque-continuation");
-    assert_eq!(question.prompt, "Confirm the deployment target");
+    let QuestionMode::Round(round) = &question.mode else {
+        panic!("current MCP requests use durable rounds")
+    };
+    let member = &round.requests["human-answer"];
+    assert_eq!(member.prompt, "Confirm the deployment target");
     assert_eq!(
-        question.mode,
-        QuestionMode::Form {
+        member.kind,
+        ego_core::question::ElicitationKind::Form {
             schema: json!({
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string", "enum": ["staging", "production"]}
-                },
-                "required": ["target"]
+                "type":"object", "properties":{"target":{"type":"string","enum":["staging","production"]}},
+                "required":["target"]
             })
         }
     );
+    assert!(round.completed.is_empty());
     assert!(question.options.is_empty());
     assert!(!question.free_text);
-    assert_eq!(
-        mapped.schema(),
-        &json!({
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "enum": ["staging", "production"]}
-            },
-            "required": ["target"]
-        })
-    );
 }

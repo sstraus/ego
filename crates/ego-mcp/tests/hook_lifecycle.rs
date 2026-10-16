@@ -264,12 +264,31 @@ fn tool_causality(runtime: &SessionHookRuntime<'_>) -> HookCausality {
         .expect("MCP fixture has a tool item causality")
 }
 
+fn canonical_answer(required: &ForeignInputRequired, raw: &str) -> String {
+    if let ego_core::question::QuestionMode::Round(round) = &required.question_request().mode {
+        assert_eq!(
+            round.requests.len(),
+            1,
+            "this fixture supplies one form answer"
+        );
+        let key = round.requests.keys().next().unwrap();
+        serde_json::to_string(&ego_core::question::ElicitationAnswers {
+            confirmed: true,
+            responses: BTreeMap::from([(key.clone(), serde_json::from_str(raw).unwrap())]),
+        })
+        .unwrap()
+    } else {
+        raw.to_owned()
+    }
+}
+
 fn settled_continuation_causality(
     runtime: &SessionHookRuntime<'_>,
     required: &ego_core::mcp::ForeignInputRequired,
     canonical_json: &str,
 ) -> HookCausality {
-    let answer = QuestionAnswer::from_json(required.question_request(), canonical_json)
+    let canonical_json = canonical_answer(required, canonical_json);
+    let answer = QuestionAnswer::from_json(required.question_request(), &canonical_json)
         .expect("fixture answer matches the durable MCP question schema");
     let (tool_call, turn, tool_started) = runtime
         .hook_state()
@@ -1415,7 +1434,7 @@ async fn restarted_owner_loads_policy_before_binding_exact_capture_and_accepting
     let execution = restarted
         .accept_answer(
             &id,
-            br#"{"choice":"yes"}"#,
+            canonical_answer(&required, r#"{"choice":"yes"}"#).as_bytes(),
             runtime,
             causality,
             prepared_resume().1,
@@ -1942,7 +1961,7 @@ async fn pending_digest_mismatch_is_refused_before_acceptance_or_effects() {
     let result = owner
         .accept_answer(
             &id,
-            br#"{"choice":"yes"}"#,
+            canonical_answer(&required, r#"{"choice":"yes"}"#).as_bytes(),
             runtime,
             causality,
             floor,
@@ -2173,7 +2192,7 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     let retried = owner
         .accept_answer(
             &id,
-            br#"{"choice":"yes"}"#,
+            canonical_answer(&foreign, r#"{"choice":"yes"}"#).as_bytes(),
             runtime,
             causality,
             floor,
@@ -2276,7 +2295,7 @@ async fn completed_effect_settlement_failure_retains_both_authorities_and_delive
     let result = owner
         .accept_answer(
             &id,
-            br#"{"choice":"yes"}"#,
+            canonical_answer(&required, r#"{"choice":"yes"}"#).as_bytes(),
             runtime,
             causality,
             floor,
@@ -2368,7 +2387,7 @@ async fn effect_failure_settlement_failure_retains_both_authorities_and_delivery
         let result = owner
             .accept_answer(
                 &id,
-                br#"{"choice":"yes"}"#,
+                canonical_answer(&required, r#"{"choice":"yes"}"#).as_bytes(),
                 runtime,
                 causality,
                 floor,
@@ -2486,7 +2505,7 @@ async fn effect_failure_delivery_selects_durable_terminal_state_before_cleanup()
         let result = owner
             .accept_answer(
                 &id,
-                br#"{"choice":"yes"}"#,
+                canonical_answer(&required, r#"{"choice":"yes"}"#).as_bytes(),
                 runtime,
                 causality,
                 floor,
@@ -2592,7 +2611,7 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     let first = ForeignQuestionPort::resume(
         &adapter,
         &initial_id,
-        r#"{"choice":"yes"}"#,
+        canonical_answer(&initial, r#"{"choice":"yes"}"#).as_str(),
         initial_causality,
     )
     .await
@@ -2640,7 +2659,7 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     let second = ForeignQuestionPort::resume(
         &adapter,
         successor.continuation_id(),
-        r#"{"choice":"yes"}"#,
+        canonical_answer(&successor, r#"{"choice":"yes"}"#).as_str(),
         successor_causality,
     )
     .await
@@ -2837,7 +2856,7 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
             owner
                 .accept_answer(
                     foreign.continuation_id(),
-                    br#"{"choice":"yes"}"#,
+                    canonical_answer(&foreign, r#"{"choice":"yes"}"#).as_bytes(),
                     runtime,
                     causality,
                     floor,
@@ -3374,7 +3393,7 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
     owner
         .accept_answer(
             second.continuation_id(),
-            br#"{"choice":"two"}"#,
+            canonical_answer(&second, r#"{"choice":"two"}"#).as_bytes(),
             second_runtime,
             second_causality,
             floor.clone(),
@@ -3385,7 +3404,7 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
     owner
         .accept_answer(
             &first_id,
-            br#"{"choice":"one"}"#,
+            canonical_answer(&first, r#"{"choice":"one"}"#).as_bytes(),
             first_runtime,
             first_causality,
             floor,
@@ -3443,7 +3462,7 @@ async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_cap
     let result = ForeignQuestionPort::resume(
         &adapter,
         required.continuation_id(),
-        r#"{"choice":"yes"}"#,
+        canonical_answer(&required, r#"{"choice":"yes"}"#).as_str(),
         causality,
     )
     .await
@@ -3507,7 +3526,7 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
     let result = owner
         .accept_answer(
             required.continuation_id(),
-            br#"{"choice":"yes"}"#,
+            canonical_answer(&required, r#"{"choice":"yes"}"#).as_bytes(),
             runtime,
             causality,
             floor,

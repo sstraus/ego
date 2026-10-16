@@ -438,6 +438,11 @@ pub enum EventKind {
     /// The terminal human-input outcome, correlated by the same envelope item
     /// as [`QuestionRequested`](Self::QuestionRequested).
     QuestionSettled { outcome: QuestionOutcome },
+    /// A correlated round member was completed; this does not authorize a retry.
+    QuestionMemberSettled {
+        key: String,
+        answer: serde_json::Value,
+    },
     /// A sensitive action needs a permission decision.
     ///
     /// Structured rather than a rendered `description`, because the question
@@ -827,6 +832,7 @@ impl EventKind {
             EventKind::DetachedExecSettled { .. } => "detached_exec_settled",
             EventKind::QuestionRequested { .. } => "question_requested",
             EventKind::QuestionSettled { .. } => "question_settled",
+            EventKind::QuestionMemberSettled { .. } => "question_member_settled",
             EventKind::PermissionRequested { .. } => "permission_requested",
             EventKind::PermissionAmended { .. } => "permission_amended",
             EventKind::PermissionDecided { .. } => "permission_decided",

@@ -505,6 +505,9 @@ fn session_start_and_end_are_exact_once_and_reuse_durable_envelopes() {
 struct RejectingForeignPort;
 
 impl ForeignQuestionPort for RejectingForeignPort {
+    fn cancel(&self, _id: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn resume<'a>(
         &'a self,
         _continuation_id: &'a str,
