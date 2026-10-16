@@ -610,6 +610,28 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 
 The model can also call `task` with a printable `name` and a `prompt` to run a depth-one, in-process child. The child inherits the parent mode, sandbox, offline posture and workspace ceilings, shares its budget and cancellation scope, and has no `task` tool. Task-only provider batches run concurrently. A batch that mixes `task` with other tool calls is refused with failed tool feedback for every call; no child or sibling tool runs. Child tool rows are nested under their names; permission prompts identify the child through the existing human seat. Only the final answer, bounded to the existing 64 KiB tool-result limit, enters the parent context. Child usage is booked once to the parent; child conversation state is held in memory and is not resumable.
 
+`task` also accepts `agent`, the filename stem of a named definition. Ego discovers
+`*.md` files in the trusted workspace's `.ego/agents`, then `$EGO_HOME/agents`
+(`~/.ego/agents` by default), then `/etc/ego/agents`. An untrusted workspace does
+not contribute project definitions. The first definition of a name wins; files
+are read-only inputs, not installed commands. The task descriptor lists available
+names in both terminal and ACP runs. Symlinked definitions and catalogue roots
+are refused.
+
+Named definitions use the versioned agent-file envelope and prompt body. Optional
+`model` selects the child's model without changing the parent. Optional `tools`
+is an exact tool-name ceiling, intersected with the inherited registry; `[]`
+disables all tools. `mode` is clamped to the parent mode and `deny` adds permission
+rules. `allow` and output `schema` are refused for named tasks. Variables must be
+fully resolved without task-time input. `sandbox`, when set, must match the
+parent's captured backend: an in-process child cannot replace its sandbox.
+Optional `roots` must contain exactly the absolute, canonical parent workspace;
+a conflicting root or relocation is refused before child generation. Extra
+profile roots are removed for that child. The existing sandbox, offline posture,
+shared budget, cancellation, result bounds and depth-one limit remain in force.
+`tools` and `roots` are named-task ceilings, not supported by explicit `--file`.
+
+
 The table distinguishes implemented flags, intentional refusals, frozen M5
 target spellings, and the excluded verbose placeholder. The defect would be §3
 reading, to someone who has not run the binary, as though all of it worked.
@@ -1025,8 +1047,10 @@ chmod +x review.ego
 ./review.ego --var severity=major | jq '.result.findings'
 ```
 
-Version 1 is closed to `version`, `model`, `mode`, `sandbox`, `allow`,
-`schema`, and `vars`; unknown fields and versions refuse. Those operational
+Version 1 executable files accept `version`, `model`, `mode`, `sandbox`,
+`allow`, `deny`, `schema`, and `vars`; unknown fields and versions refuse.
+Named task definitions also accept the `tools` and `roots` ceilings described
+in section 3.1; executable `--file` input refuses those two fields. Those operational
 keys mirror their CLI flags one-to-one — the file *is* a saved command line
 plus a prompt, not an untyped map of every present or future flag. The one
 strict bounded YAML envelope is shared with skills; the complete format,

@@ -17,6 +17,8 @@ pub(crate) struct AgentFile {
     supplied_vars: Vec<String>,
     layer_toml: String,
     schema: Option<String>,
+    pub(crate) tools: Option<Vec<String>>,
+    pub(crate) roots: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for AgentFile {
@@ -60,10 +62,27 @@ struct Fields {
     allow: Vec<String>,
     schema: Option<String>,
     vars: Vec<String>,
+    tools: Option<Vec<String>>,
+    roots: Option<Vec<String>>,
+    deny: Vec<String>,
 }
 
 /// Open, bound, parse, and substitute one executable agent file.
 pub(crate) fn load(requested_path: &Path, supplied: &[String]) -> Result<AgentFile, UsageError> {
+    let file = load_definition(requested_path, supplied)?;
+    if file.tools.is_some() || file.roots.is_some() {
+        return Err(file_error(
+            file.path(),
+            "tools and roots ceilings are only supported by named task definitions",
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn load_definition(
+    requested_path: &Path,
+    supplied: &[String],
+) -> Result<AgentFile, UsageError> {
     let path = std::fs::canonicalize(requested_path).map_err(|error| {
         UsageError(format!(
             "agent file {} could not be resolved: {error}",
@@ -126,6 +145,14 @@ pub(crate) fn load(requested_path: &Path, supplied: &[String]) -> Result<AgentFi
             .collect::<Vec<_>>();
         toml.push_str(&format!("permissions.allow = [{}]\n", rules.join(", ")));
     }
+    if !fields.deny.is_empty() {
+        let rules = fields
+            .deny
+            .iter()
+            .map(|rule| quote(rule))
+            .collect::<Vec<_>>();
+        toml.push_str(&format!("permissions.deny = [{}]\n", rules.join(", ")));
+    }
     ConfigLayer::parse(Source::AgentFile, &toml)
         .map_err(|error| file_error(&path, format!("contains invalid configuration: {error}")))?;
     let schema = fields.schema.map(|schema| relative_resource(&path, schema));
@@ -136,6 +163,8 @@ pub(crate) fn load(requested_path: &Path, supplied: &[String]) -> Result<AgentFi
         supplied_vars: supplied.to_vec(),
         layer_toml: toml,
         schema,
+        tools: fields.tools,
+        roots: fields.roots,
     })
 }
 
@@ -152,12 +181,23 @@ fn fields(path: &Path, header: &str) -> Result<Fields, UsageError> {
     for key in entries.keys() {
         if !matches!(
             key.as_str(),
-            "model" | "mode" | "sandbox" | "allow" | "schema" | "vars"
+            "model" | "mode" | "sandbox" | "allow" | "deny" | "tools" | "roots" | "schema" | "vars"
         ) {
             return Err(file_error(path, format!("contains unknown field `{key}`")));
         }
     }
+    let tools = entries
+        .contains_key("tools")
+        .then(|| take_strings(path, &mut entries, "tools"))
+        .transpose()?;
+    let roots = entries
+        .contains_key("roots")
+        .then(|| take_strings(path, &mut entries, "roots"))
+        .transpose()?;
     Ok(Fields {
+        tools,
+        roots,
+        deny: take_strings(path, &mut entries, "deny")?,
         model: take_string(path, &mut entries, "model")?,
         mode: take_string(path, &mut entries, "mode")?,
         sandbox: take_string(path, &mut entries, "sandbox")?,

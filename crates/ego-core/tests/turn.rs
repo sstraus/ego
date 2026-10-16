@@ -12753,6 +12753,16 @@ mod turn {
             cancel: CancelToken,
             ceiling: Option<u64>,
         ) -> (ExitReason, SessionState) {
+            run_named_tasks(fx, generator, cancel, ceiling, Vec::new())
+        }
+
+        fn run_named_tasks<G: Generator + 'static>(
+            fx: &Fixture,
+            generator: &Arc<G>,
+            cancel: CancelToken,
+            ceiling: Option<u64>,
+            agents: Vec<ego_core::turn::NamedAgent>,
+        ) -> (ExitReason, SessionState) {
             let mut registry: Vec<_> = fx
                 .registry
                 .iter()
@@ -12776,6 +12786,7 @@ mod turn {
                     .to_vec()])),
                 CanonPath::new("/ws"),
             );
+            let tools = tools.with_named_agents(agents);
             let mut settings = config();
             settings.parallel_tool_calls = true;
             let mut runtime = model_with(
@@ -12844,6 +12855,212 @@ mod turn {
                     .values()
                     .all(|i| i.tool_name.as_deref() != Some("fake_write")),
                 "child transcript leaked into parent"
+            );
+        }
+
+        fn reviewer() -> ego_core::turn::NamedAgent {
+            ego_core::turn::NamedAgent {
+                name: "reviewer".into(),
+                prompt: "Review, never modify.".into(),
+                model: None,
+                tools: Some(BTreeSet::new()),
+                mode: Some(Mode::Plan),
+                deny: Vec::new(),
+                sandbox: Some(Confinement::Workspace),
+                roots: None,
+            }
+        }
+
+        #[test]
+        fn named_task_intersects_tools_and_injects_definition_without_child_delegation() {
+            // Catches: named tool ceilings only changing the prompt, not executable tools.
+            let fx = Fixture::new(vec![]).with_write_tool();
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "denied",
+                        "fake_write",
+                        json!({"path":"/ws/stolen", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let mut definition = reviewer();
+            definition.model = Some(ModelRef("test/reviewer".into()));
+            let (exit, _) =
+                run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+            assert_eq!(exit, ExitReason::Completed);
+            let calls = generator.calls();
+            assert_eq!(calls[1].model, "test/reviewer");
+            assert_eq!(calls.last().unwrap().model, calls[0].model);
+            assert_ne!(calls[0].model, calls[1].model);
+            let task = calls[0]
+                .tools
+                .iter()
+                .find(|tool| tool.name == "task")
+                .unwrap();
+            assert_eq!(
+                task.parameters["properties"]["agent"]["enum"],
+                json!(["reviewer"])
+            );
+            assert!(calls[1].tools.is_empty());
+            assert!(format!("{:?}", calls[1].messages).contains("Review, never modify."));
+            assert!(fx.fs.read(&CanonPath::new("/ws/stolen")).is_err());
+        }
+
+        #[test]
+        fn named_task_mode_is_a_ceiling_not_a_replacement_for_parent_authority() {
+            // Catches: a named yolo overriding parent plan, or a named plan being ignored.
+            for (parent, requested) in [(Mode::Plan, Mode::Yolo), (Mode::Yolo, Mode::Plan)] {
+                let mut fx = Fixture::new(vec![]).with_write_tool();
+                fx.set_mode(parent);
+                let mut definition = reviewer();
+                definition.tools = None;
+                definition.mode = Some(requested);
+                let generator = Arc::new(FakeGenerator::new([
+                    vec![
+                        call(
+                            "task1",
+                            "task",
+                            json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![
+                        call(
+                            "denied",
+                            "fake_write",
+                            json!({"path":"/ws/stolen", "contents":"bad"}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ]));
+                let (exit, state) =
+                    run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+                assert_eq!(exit, ExitReason::Completed);
+                assert_eq!(
+                    state
+                        .items
+                        .values()
+                        .find(|item| item.tool_name.as_deref() == Some("task"))
+                        .unwrap()
+                        .ok,
+                    Some(false)
+                );
+                assert!(fx.fs.read(&CanonPath::new("/ws/stolen")).is_err());
+            }
+        }
+
+        #[test]
+        fn named_task_deny_rule_cannot_be_overridden_by_parent_yolo_mode() {
+            // Catches: named denies being parsed but omitted from the child's captured policy.
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            fx.set_mode(Mode::Yolo);
+            let mut definition = reviewer();
+            definition.tools = None;
+            definition.mode = Some(Mode::Yolo);
+            definition.deny = vec![Rule::load("write(**)").unwrap()];
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "denied",
+                        "fake_write",
+                        json!({"path":"/ws/stolen", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, _) =
+                run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+            assert_eq!(exit, ExitReason::Completed);
+            assert!(fx.fs.read(&CanonPath::new("/ws/stolen")).is_err());
+        }
+
+        #[test]
+        fn named_task_conflicting_roots_or_sandbox_refuse_before_child_generation() {
+            // Catches: a definition relocating the workspace or replacing its sandbox backend.
+            for conflicting_root in [true, false] {
+                let fx = Fixture::new(vec![]);
+                let mut definition = reviewer();
+                if conflicting_root {
+                    definition.roots = Some(vec![CanonPath::new("/outside")]);
+                } else {
+                    definition.sandbox = Some(Confinement::Off);
+                }
+                let generator = Arc::new(FakeGenerator::new([
+                    vec![
+                        call(
+                            "task1",
+                            "task",
+                            json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ]));
+                let (exit, state) =
+                    run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+                assert_eq!(exit, ExitReason::Completed);
+                assert_eq!(generator.calls().len(), 2);
+                assert_eq!(
+                    state
+                        .items
+                        .values()
+                        .find(|item| item.tool_name.as_deref() == Some("task"))
+                        .unwrap()
+                        .ok,
+                    Some(false)
+                );
+            }
+        }
+
+        #[test]
+        fn unknown_named_task_is_not_silently_run_with_parent_authority() {
+            // Catches: an unknown name falling back to an unrestricted ordinary child.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"audit", "agent":"missing", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, state) =
+                run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![reviewer()]);
+            assert_eq!(exit, ExitReason::Completed);
+            assert_eq!(generator.calls().len(), 2);
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|item| item.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
             );
         }
 

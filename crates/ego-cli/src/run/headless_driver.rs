@@ -271,6 +271,10 @@ pub(super) async fn drive_headless_turn(
         }
         None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
+    let tools = tools.with_named_agents(
+        crate::named_agents::discover(cwd, hook_trust)
+            .map_err(|error| RunTermination::UsageError { message: error.0 })?,
+    );
     let tools = match mcp_runtime.as_ref().and_then(|mcp| mcp.resume_sealer()) {
         Some(resume) => tools.with_resume(resume),
         None => tools,
