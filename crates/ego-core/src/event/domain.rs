@@ -238,7 +238,7 @@ pub struct ToolTiming {
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
-/// DetachedExecSettled | QuestionRequested | QuestionSettled |
+/// DetachedExecSettled | QuestionRequested | QuestionSettled | QuestionMemberSettled |
 /// PermissionRequested | PermissionAmended | PermissionDecided |
 /// GenerationStarted | FallbackDecision | ExecutionObserved |
 /// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |

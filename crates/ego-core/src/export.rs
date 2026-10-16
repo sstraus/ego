@@ -941,7 +941,9 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 free_text: request.free_text,
             }
         }
-        EventKind::QuestionMemberSettled { .. } => ExportEvent::QuestionMemberSettled,
+        EventKind::QuestionMemberSettled { key: _, answer: _ } => {
+            ExportEvent::QuestionMemberSettled
+        }
         EventKind::QuestionSettled { outcome } => project_question_outcome(outcome, redactions),
         EventKind::PermissionRequested {
             tool: _,
@@ -1581,7 +1583,7 @@ fn project_question_outcome(outcome: &QuestionOutcome, redactions: &mut Redactio
         }
         QuestionOutcome::Declined => ExportQuestionOutcome::Declined,
         QuestionOutcome::Cancelled => ExportQuestionOutcome::Cancelled,
-        QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => {
+        QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { key: _, answer: _ } => {
             ExportQuestionOutcome::Unavailable
         }
     };

@@ -649,9 +649,8 @@ fn with_foreign_turn<R>(
         generator,
         elicitor,
         foreign_port,
-        trace,
+        (trace, trace_store),
         fail_at,
-        trace_store,
         test,
     )
 }
@@ -661,11 +660,11 @@ fn with_foreign_turn_request<R>(
     generator: Arc<FakeGenerator>,
     elicitor: Arc<dyn Elicitor>,
     foreign_port: Arc<RecordingForeignQuestionPort>,
-    trace: Option<Arc<Mutex<Vec<&'static str>>>>,
+    store_trace: (Option<Arc<Mutex<Vec<&'static str>>>>, bool),
     fail_at: Option<usize>,
-    trace_store: bool,
     test: impl for<'a> FnOnce(TurnLoop<'a, 'a>, &'a MemoryStore) -> R,
 ) -> R {
+    let (trace, trace_store) = store_trace;
     let store = if trace_store {
         trace
             .clone()
@@ -1579,9 +1578,8 @@ fn member_persistence_survives_restart_before_final_retry_consent() {
         foreign_input_generator(),
         elicitor.clone(),
         foreign.clone(),
+        (None, false),
         None,
-        None,
-        false,
         |mut turn, store| {
             futures::executor::block_on(turn.run("invoke MCP")).unwrap();
             assert!(
@@ -1648,9 +1646,8 @@ fn crash_after_question_settlement_requires_explicit_same_answer_before_retry() 
         foreign_input_generator(),
         Arc::new(RecordingElicitor::answered(answer.clone())),
         foreign.clone(),
+        (None, false),
         None,
-        None,
-        false,
         |mut turn, store| {
             assert!(futures::executor::block_on(turn.run("invoke MCP")).is_err());
             let state = turn.state();
@@ -1740,9 +1737,8 @@ fn crashes_at_each_question_persistence_boundary_do_not_retry_or_repeat_complete
                 foreign_input_generator(),
                 elicitor,
                 foreign.clone(),
+                (None, false),
                 None,
-                None,
-                false,
                 |mut turn, store| {
                     *store.fail_append.lock().unwrap() = Some((kind, published));
                     assert!(futures::executor::block_on(turn.run("invoke MCP")).is_err());
