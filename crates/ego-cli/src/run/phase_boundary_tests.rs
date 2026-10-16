@@ -4,8 +4,7 @@ use ego_core::control::{ControlError, ControlSelect, SessionControlState, Sessio
 use ego_core::event::domain::DomainEvent;
 use std::collections::VecDeque;
 
-#[path = "../../tests/support/mod.rs"]
-mod support;
+use super::test_support as support;
 use support::{Plan, Reply, Stub, text, tool_call};
 
 const CHILD: &str = "EGO_REGRESSION_PHASE_CHILD";
