@@ -299,3 +299,88 @@ fn followup_setup_rows_have_one_number_and_bounded_home_paths() {
         }
     }
 }
+
+/// Catches: a wrapped setup receipt leaves the old picker heading suffix on screen.
+#[test]
+fn setup_picker_heading_rows_have_no_external_notice_overdraw() {
+    let stub = Stub::start(Plan::default());
+    let places = support::Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "sandbox='off'\nroots=[]\n",
+    )
+    .unwrap();
+    let ego = places
+        .ego(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--yolo",
+            "--trust-workspace",
+        ])
+        .env("TERM", "xterm-256color");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
+    let mut output = Vec::new();
+    until_prompt_from(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"/setup inspect task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Up/Down moves");
+    until_normalized(&reader, &mut output, start, "not this session selection.");
+    drain_until_quiet(&reader, &mut output);
+    let mut terminal = vt100::Parser::new(24, 80, 0);
+    terminal.process(&output);
+    // Read physical cells: Screen::contents joins soft-wrapped receipt rows,
+    // which would hide the exact row footprint this regression protects.
+    let visible = (0..24)
+        .map(|row| {
+            (0..80)
+                .filter_map(|column| terminal.screen().cell(row, column))
+                .filter(|cell| !cell.is_wide_continuation())
+                .map(|cell| match cell.contents() {
+                    "" => " ",
+                    text => text,
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(format!("{root}/80x24.ansi"), &output).unwrap();
+        std::fs::write(format!("{root}/80x24.txt"), visible.join("\n")).unwrap();
+    }
+    input.write_all(b"\x1b").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let first_option = visible
+        .iter()
+        .position(|row| row.contains("[ ] 1. "))
+        .expect("first setup item");
+    assert!(first_option >= 3, "heading footprint missing: {visible:?}");
+    assert_eq!(
+        visible[first_option - 3..first_option]
+            .iter()
+            .map(|row| row.trim())
+            .collect::<Vec<_>>(),
+        [
+            "configuration, not this session selection.",
+            "Select setup proposal items; only selected items enter the preview.",
+            "Final confirmation still required; Esc cancels without changes.",
+        ],
+        "every visible heading row must contain only its intended text: {visible:?}",
+    );
+    assert_eq!(
+        std::fs::read_to_string(places.home_path().join("config.toml")).unwrap(),
+        "sandbox='off'\nroots=[]\n"
+    );
+    assert!(stub.generations().is_empty());
+}
