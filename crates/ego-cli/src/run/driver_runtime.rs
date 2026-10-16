@@ -297,111 +297,6 @@ pub(super) async fn drive_execution<S: EventSink>(
         deadline: run_deadline,
     };
 
-    // One turn-local coordinator over the session's single shared journal.
-    //
-    // Rebuilt per turn rather than held across the session, and that is
-    // `CancelToken`'s doing rather than a preference: the token is latching
-    // (`ego-core/src/turn/mod.rs:89`, "the first cause wins") and lives inside
-    // `Session`, so a `Ctrl+C` on turn one would leave every later turn to
-    // abort before its first check. A fresh loop takes a fresh token. It costs
-    // nothing — every field below is a borrow or a clone of something already
-    // assembled; generation authority itself is deliberately resolved
-    // again inside each attempt.
-    // A macro and not a closure: the loop borrows from this function's locals,
-    // and a closure cannot name the lifetimes of a `TurnLoop<'_, '_>` it returns.
-    macro_rules! build {
-        ($active:expr, $cancel:expr, $ports:expr, $observation:expr, $probe_evidence:expr, $hooks:expr, $journal:expr, $skill_owner:expr) => {{
-            let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&$ports)))
-                as Arc<dyn ego_ai::http::Http>;
-            let runtime = GenerationRuntime {
-                source: source.bind(http, $cancel.clone(), run_deadline),
-                policy_source: Arc::clone(&policy_source),
-                gate: gate.clone(),
-                config: config.clone(),
-                admission: Arc::clone(&evidence),
-                invocation,
-                retry_pause: Arc::new(TokioRetryPause),
-            };
-            let effect_ports = ToolEffectPorts::new(
-                &fs,
-                $ports.process(),
-                $active.evidence(),
-                $ports.resolver_handle(),
-                $ports.one_hop_handle(),
-                $ports.duplex_handle(),
-            )
-            .with_secret_values(ego_tools::secrets::from_env())
-            .with_cancel($cancel.clone());
-            let tools = match admitted_tools.as_ref() {
-                Some(source) => Tools::from_registry_with_source(
-                    &registry,
-                    Arc::clone(source),
-                    effect_ports,
-                    CanonPath::new(&cwd),
-                )
-                .map_err(|error| RunTermination::Failed {
-                    message: format!("the admitted MCP tool catalogue is invalid: {error}"),
-                })?,
-                None => Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd)),
-            };
-            let tools = match McpRuntimeBinding::resume_sealer(mcp_runtime.as_ref()) {
-                Some(resume) => tools.with_resume(resume),
-                None => tools,
-            };
-            let tools = match skill_resource_roots.as_ref() {
-                Some(roots) => tools.with_skill_resource_roots(roots.clone()),
-                None => tools,
-            };
-            let loop_ = TurnLoop::from_shared_journal(
-                $active.id(),
-                ($journal).clone(),
-                $active.run_evidence(),
-                $cancel.clone(),
-                runtime,
-                tools,
-            )
-            .map_err(|error| RunTermination::Failed {
-                message: error.to_string(),
-            })?
-            .with_context_policy(args.context_clear, args.context_interval)
-            .with_goal(args.goal.clone(), args.goal_turns)
-            .with_goal_policy(effective.ceilings.clone(), args.goal_check_command.clone())
-            .with_hook_binding(
-                ($hooks).state.clone(),
-                Arc::clone(&($hooks).binding),
-                ($hooks).mcp.as_ref().map(Arc::clone),
-            )
-            .map_err(|error| RunTermination::Failed {
-                message: error.to_string(),
-            })?;
-            let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
-            let loop_ = loop_
-                .with_provider_recovery(
-                    args.provider_recovery
-                        .then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
-                )
-                .with_skill_invocation_port(skill_owner);
-            let loop_ = match $active.replayed() {
-                Some(replayed) => loop_.with_replayed_context(replayed),
-                None => loop_,
-            };
-            let loop_ = match elicitor.as_ref() {
-                Some(elicitor) => loop_.with_elicitor(Arc::clone(elicitor)),
-                None => loop_,
-            };
-            let loop_ = if judge_available {
-                loop_.with_judge(JudgeContext {
-                    confinement: confinement.clone(),
-                    exec_caps: $observation.capabilities(),
-                })
-            } else {
-                loop_
-            };
-            super::composition::with_permission_analysis(loop_, skill_trust)
-                .with_execution_observation($observation, $probe_evidence)
-        }};
-    }
-
     macro_rules! open_session_hooks {
         ($active:expr, $state:expr, $hook_ports:ident, $policy:expr) => {{
             let hook_effects = ToolEffectPorts::new(
@@ -925,35 +820,21 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Skills(
                                         repl::actions::SkillSurfaceAction::List,
                                     )) => {
-                                        match skills.as_ref() {
-                                            Some(catalogue) => match catalogue.capture() {
-                                                Ok(capture) => {
-                                                    diagnostics.note(&capture.render_list())
-                                                }
-                                                Err(error) => diagnostics.note(&format!(
-                                                    "the skill catalogue could not be captured: {error}"
-                                                )),
-                                            },
-                                            None => diagnostics
-                                                .note("the skill catalogue is unavailable"),
-                                        }
+                                        render_skill_catalogue(
+                                            skills.as_deref(),
+                                            false,
+                                            diagnostics,
+                                        );
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Skills(
                                         repl::actions::SkillSurfaceAction::Diagnose,
                                     )) => {
-                                        match skills.as_ref() {
-                                            Some(catalogue) => match catalogue.capture() {
-                                                Ok(capture) => {
-                                                    diagnostics.note(&capture.render_diagnostics())
-                                                }
-                                                Err(error) => diagnostics.note(&format!(
-                                                    "the skill catalogue could not be captured: {error}"
-                                                )),
-                                            },
-                                            None => diagnostics
-                                                .note("the skill catalogue is unavailable"),
-                                        }
+                                        render_skill_catalogue(
+                                            skills.as_deref(),
+                                            true,
+                                            diagnostics,
+                                        );
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Skills(
@@ -1037,72 +918,22 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Hooks) => {
-                                        match session_hooks.state.catalogue_snapshot() {
-                                            Ok(catalogue) => match hooks::render(&catalogue, false) {
-                                                Ok(rendered) if rendered.is_empty() => diagnostics
-                                                    .note(&crate::output::empty_listing(
-                                                        hooks::EMPTY_HOOKS,
-                                                        "ego config edit",
-                                                    )),
-                                                Ok(rendered) => diagnostics.note(&rendered),
-                                                Err(error) => diagnostics.note(&format!(
-                                                    "the hook catalogue could not be rendered: {error}"
-                                                )),
-                                            },
-                                            Err(error) => diagnostics.note(&format!(
-                                                "the hook catalogue could not be captured: {error}"
-                                            )),
-                                        }
+                                        render_session_hooks(&session_hooks.state, diagnostics);
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::ModelSwitch(
                                         request,
                                     )) => {
-                                        let Some(owner) = model_switch_owner.clone() else {
-                                            diagnostics
-                                    .note("the active session has no model-switch lifecycle owner");
-                                            continue;
-                                        };
-                                        seat.busy();
-                                        let receipt = format!(
-                                            "Model: {}{}",
-                                            request.target().0,
-                                            if request.is_persistent() {
-                                                ""
-                                            } else {
-                                                " (this session only)"
-                                            }
-                                        );
-                                        let applied = owner.apply(request).await;
-                                        let publication = match &applied {
-                                            Ok(publication) => publication.as_ref(),
-                                            Err(error) => error.publication(),
-                                        };
-                                        if let Some(
-                                            UserConfigPublication::PublishedDurabilityUncertain {
-                                                diagnostic,
-                                            },
-                                        ) = publication
-                                        {
-                                            diagnostics.note(&format!(
-                                    "model defaults are authoritative with a durability warning: {diagnostic}"
-                                ));
-                                        }
-                                        match applied {
-                                            Ok(_) => diagnostics.note(&receipt),
-                                            Err(error) => diagnostics
-                                                .note(&format!("model switch failed: {error}")),
-                                        }
-                                        if let Some(status) = status.as_ref()
-                                            && status.human
-                                        {
-                                            match selection.snapshot() {
-                                    Ok(selected) => status.seat.refresh_status(&state, selected),
-                                    Err(error) => diagnostics.note(&format!(
-                                        "the model-switch status selection could not be refreshed: {error}"
-                                    )),
-                                }
-                                        }
+                                        switch_session_model(
+                                            request,
+                                            model_switch_owner.clone(),
+                                            seat.as_ref(),
+                                            status.as_ref(),
+                                            &selection,
+                                            &state,
+                                            diagnostics,
+                                        )
+                                        .await;
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
@@ -1261,46 +1092,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Usage,
                                     )) => {
-                                        let metadata = match crate::catalogue::listing(
+                                        report_session_usage(
                                             jsonl_store.as_ref(),
                                             &root,
-                                            false,
-                                        ) {
-                                            Ok(metadata) => metadata,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                            "the session catalogue could not be read: {error}"
-                                        ));
-                                                continue;
-                                            }
-                                        };
-                                        let Some(meta) = metadata
-                                            .into_iter()
-                                            .find(|meta| meta.id == active.id())
-                                        else {
-                                            diagnostics.note(
-                                    "the active session is absent from its durable catalogue",
-                                );
-                                            continue;
-                                        };
-                                        match UsageReportService::new(jsonl_store.as_ref(), &clock)
-                                            .report(std::slice::from_ref(&meta), UsagePeriod::All)
-                                            .await
-                                        {
-                                            Ok(report) => {
-                                                // `/usage` has no flags, so it
-                                                // gets the compact default.
-                                                let rendered = crate::usage::render_text(
-                                                    &report,
-                                                    false,
-                                                    Some(state.context),
-                                                );
-                                                diagnostics.note(rendered.trim_end());
-                                            }
-                                            Err(error) => diagnostics.note(&format!(
-                                                "the usage report could not be built: {error}"
-                                            )),
-                                        }
+                                            active.id(),
+                                            &clock,
+                                            state.context,
+                                            diagnostics,
+                                        )
+                                        .await;
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::Action(
@@ -1807,16 +1607,33 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 .iter()
                                 .filter_map(|(id, snapshot)| snapshot.is_some().then_some(*id))
                                 .collect::<std::collections::HashSet<_>>();
-                            let loop_ = build!(
-                                active,
-                                &turn_cancel,
-                                ports,
-                                observation,
-                                probe_evidence,
-                                session_hooks,
-                                session_journal,
-                                skill_owner
-                            );
+                            let loop_ = build_interactive_turn(
+                                InteractiveTurnBuild {
+                                    args: &args,
+                                    effective: &effective,
+                                    source: &source,
+                                    policy_source: &policy_source,
+                                    gate: &gate,
+                                    config: &config,
+                                    evidence: &evidence,
+                                    invocation,
+                                    run_deadline,
+                                    registry: &registry,
+                                    admitted_tools: &admitted_tools,
+                                    cwd: &cwd,
+                                    mcp_runtime: mcp_runtime.as_ref(),
+                                    skill_resource_roots: &skill_resource_roots,
+                                    elicitor: &elicitor,
+                                    judge_available,
+                                    confinement: &confinement,
+                                    skill_trust,
+                                    active: &active,
+                                    hooks: &session_hooks,
+                                    journal: &session_journal,
+                                    skill_owner: skill_owner.clone(),
+                                },
+                                (&ports, &turn_cancel, observation, probe_evidence),
+                            )?;
                             let loop_ = match resumed_turn.as_ref() {
                                 Some(RuntimeResume::Foreign { policy, .. }) => loop_
                                     .with_hook_policy(Arc::clone(policy))
@@ -2808,4 +2625,275 @@ fn handle_interactive_policy(
     }
 
     false
+}
+
+fn render_skill_catalogue(
+    catalogue: Option<&crate::skill::SkillCatalogue>,
+    diagnose: bool,
+    diagnostics: &dyn Diagnostics,
+) {
+    let Some(catalogue) = catalogue else {
+        diagnostics.note("the skill catalogue is unavailable");
+        return;
+    };
+    match catalogue.capture() {
+        Ok(capture) => diagnostics.note(&if diagnose {
+            capture.render_diagnostics()
+        } else {
+            capture.render_list()
+        }),
+        Err(error) => diagnostics.note(&format!(
+            "the skill catalogue could not be captured: {error}"
+        )),
+    }
+}
+
+fn render_session_hooks(hook_state: &SessionHookState<'_>, diagnostics: &dyn Diagnostics) {
+    match hook_state.catalogue_snapshot() {
+        Ok(catalogue) => match hooks::render(&catalogue, false) {
+            Ok(rendered) if rendered.is_empty() => diagnostics.note(&crate::output::empty_listing(
+                hooks::EMPTY_HOOKS,
+                "ego config edit",
+            )),
+            Ok(rendered) => diagnostics.note(&rendered),
+            Err(error) => diagnostics.note(&format!(
+                "the hook catalogue could not be rendered: {error}"
+            )),
+        },
+        Err(error) => diagnostics.note(&format!(
+            "the hook catalogue could not be captured: {error}"
+        )),
+    }
+}
+
+async fn switch_session_model(
+    request: ModelSwitchRequest,
+    model_switch_owner: Option<RunModelSwitchOwner<'_>>,
+    seat: &dyn InteractiveSeat,
+    status: Option<&InteractiveStatus>,
+    selection: &model::GenerationSelection,
+    state: &SessionState,
+    diagnostics: &dyn Diagnostics,
+) {
+    let Some(owner) = model_switch_owner else {
+        diagnostics.note("the active session has no model-switch lifecycle owner");
+        return;
+    };
+    seat.busy();
+    let receipt = format!(
+        "Model: {}{}",
+        request.target().0,
+        if request.is_persistent() {
+            ""
+        } else {
+            " (this session only)"
+        }
+    );
+    let applied = owner.apply(request).await;
+    let publication = match &applied {
+        Ok(publication) => publication.as_ref(),
+        Err(error) => error.publication(),
+    };
+    if let Some(UserConfigPublication::PublishedDurabilityUncertain { diagnostic }) = publication {
+        diagnostics.note(&format!(
+            "model defaults are authoritative with a durability warning: {diagnostic}"
+        ));
+    }
+    match applied {
+        Ok(_) => diagnostics.note(&receipt),
+        Err(error) => diagnostics.note(&format!("model switch failed: {error}")),
+    }
+    if let Some(status) = status
+        && status.human
+    {
+        match selection.snapshot() {
+            Ok(selected) => status.seat.refresh_status(state, selected),
+            Err(error) => diagnostics.note(&format!(
+                "the model-switch status selection could not be refreshed: {error}"
+            )),
+        }
+    }
+}
+
+async fn report_session_usage(
+    store: &JsonlStore,
+    root: &Path,
+    session_id: SessionId,
+    clock: &SystemClock,
+    context: ego_core::state::ContextWindow,
+    diagnostics: &dyn Diagnostics,
+) {
+    let metadata = match crate::catalogue::listing(store, root, false) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+            return;
+        }
+    };
+    let Some(meta) = metadata.into_iter().find(|meta| meta.id == session_id) else {
+        diagnostics.note("the active session is absent from its durable catalogue");
+        return;
+    };
+    match UsageReportService::new(store, clock)
+        .report(std::slice::from_ref(&meta), UsagePeriod::All)
+        .await
+    {
+        Ok(report) => {
+            // `/usage` has no flags, so it
+            // gets the compact default.
+            let rendered = crate::usage::render_text(&report, false, Some(context));
+            diagnostics.note(rendered.trim_end());
+        }
+        Err(error) => diagnostics.note(&format!("the usage report could not be built: {error}")),
+    }
+}
+
+struct InteractiveTurnBuild<'a, 'session> {
+    args: &'a Args,
+    effective: &'a Effective,
+    source: &'a Arc<model::CliGenerationModelSource>,
+    policy_source: &'a Arc<dyn GenerationPolicySource>,
+    gate: &'a SharedBudgetGate,
+    config: &'a TurnConfig,
+    evidence: &'a Arc<EvidenceAdmissionService>,
+    invocation: RunInvocationId,
+    run_deadline: Option<std::time::Instant>,
+    registry: &'a [RegisteredTool],
+    admitted_tools: &'a Option<Arc<dyn AdmittedToolSource>>,
+    cwd: &'a Path,
+    mcp_runtime: &'a dyn McpRuntimeBinding,
+    skill_resource_roots: &'a Option<ego_core::skill::SkillResourceRoots>,
+    elicitor: &'a Option<Arc<dyn Elicitor>>,
+    judge_available: bool,
+    confinement: &'a RunConfinement,
+    skill_trust: Trust,
+    active: &'session ActiveSession<'session>,
+    hooks: &'a SessionHookComposition<'session>,
+    journal: &'a SharedJournal<'session>,
+    skill_owner: Arc<dyn SkillInvocationPort + 'session>,
+}
+
+fn build_interactive_turn<'session: 'turn, 'turn>(
+    input: InteractiveTurnBuild<'turn, 'session>,
+    effects: (
+        &'turn Arc<RunEffectPorts>,
+        &'turn CancelToken,
+        ExecObservation,
+        Option<ego_core::store::evidence::EvidenceRef>,
+    ),
+) -> Result<TurnLoop<'session, 'turn>, RunTermination> {
+    let InteractiveTurnBuild {
+        args,
+        effective,
+        source,
+        policy_source,
+        gate,
+        config,
+        evidence,
+        invocation,
+        run_deadline,
+        registry,
+        admitted_tools,
+        cwd,
+        mcp_runtime,
+        skill_resource_roots,
+        elicitor,
+        judge_available,
+        confinement,
+        skill_trust,
+        active,
+        hooks,
+        journal,
+        skill_owner,
+    } = input;
+    let (ports, cancel, observation, probe_evidence) = effects;
+    let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
+    let runtime = GenerationRuntime {
+        source: source.bind(http, cancel.clone(), run_deadline),
+        policy_source: Arc::clone(&policy_source),
+        gate: gate.clone(),
+        config: config.clone(),
+        admission: Arc::clone(&evidence),
+        invocation,
+        retry_pause: Arc::new(TokioRetryPause),
+    };
+    let effect_ports = ToolEffectPorts::new(
+        &OsFs,
+        ports.process(),
+        active.evidence(),
+        ports.resolver_handle(),
+        ports.one_hop_handle(),
+        ports.duplex_handle(),
+    )
+    .with_secret_values(ego_tools::secrets::from_env())
+    .with_cancel(cancel.clone());
+    let tools = match admitted_tools.as_ref() {
+        Some(source) => Tools::from_registry_with_source(
+            &registry,
+            Arc::clone(source),
+            effect_ports,
+            CanonPath::new(&cwd),
+        )
+        .map_err(|error| RunTermination::Failed {
+            message: format!("the admitted MCP tool catalogue is invalid: {error}"),
+        })?,
+        None => Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd)),
+    };
+    let tools = match McpRuntimeBinding::resume_sealer(mcp_runtime) {
+        Some(resume) => tools.with_resume(resume),
+        None => tools,
+    };
+    let tools = match skill_resource_roots.as_ref() {
+        Some(roots) => tools.with_skill_resource_roots(roots.clone()),
+        None => tools,
+    };
+    let loop_ = TurnLoop::from_shared_journal(
+        active.id(),
+        journal.clone(),
+        active.run_evidence(),
+        cancel.clone(),
+        runtime,
+        tools,
+    )
+    .map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?
+    .with_context_policy(args.context_clear, args.context_interval)
+    .with_goal(args.goal.clone(), args.goal_turns)
+    .with_goal_policy(effective.ceilings.clone(), args.goal_check_command.clone())
+    .with_hook_binding(
+        hooks.state.clone(),
+        Arc::clone(&hooks.binding),
+        hooks.mcp.as_ref().map(Arc::clone),
+    )
+    .map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?;
+
+    let loop_ = loop_
+        .with_provider_recovery(
+            args.provider_recovery
+                .then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
+        )
+        .with_skill_invocation_portskill_owner;
+    let loop_ = match active.replayed() {
+        Some(replayed) => loop_.with_replayed_context(replayed),
+        None => loop_,
+    };
+    let loop_ = match elicitor.as_ref() {
+        Some(elicitor) => loop_.with_elicitor(Arc::clone(elicitor)),
+        None => loop_,
+    };
+    let loop_ = if judge_available {
+        loop_.with_judge(JudgeContext {
+            confinement: confinement.clone(),
+            exec_caps: observation.capabilities(),
+        })
+    } else {
+        loop_
+    };
+    Ok(
+        super::composition::with_permission_analysis(loop_, skill_trust)
+            .with_execution_observation(observation, probe_evidence),
+    )
 }
