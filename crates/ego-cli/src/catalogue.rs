@@ -278,3 +278,57 @@ pub(crate) fn saved_sessions(
     by_recency(&mut metas);
     Ok(metas)
 }
+
+#[cfg(test)]
+mod unreadable_tests {
+    use super::*;
+    use ego_core::event::id::Seq;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::codec::encode_record;
+    use ego_tools::store::{JsonlStore, OsIo};
+    use serde_json::json;
+
+    fn append_payload(root: &Path, id: SessionId, payload: serde_json::Value) {
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(id.to_string()).join("events.jsonl"))
+            .unwrap();
+        let mut record = encode_record(Seq::ZERO.next(), &payload).unwrap();
+        record.push(b'\n');
+        log.write_all(&record).unwrap();
+    }
+
+    #[test]
+    fn unreadable_catalogue_entry_does_not_hide_readable_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let readable = SessionId::new();
+        let unreadable = SessionId::new();
+        for id in [readable, unreadable] {
+            store.publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1)).unwrap();
+        }
+        append_payload(dir.path(), unreadable, json!({"kind": "future_writer_entry"}));
+        let metas = saved_sessions(&store).expect("one unreadable log must not abort the catalogue");
+        assert_eq!(metas.iter().map(|meta| meta.id).collect::<Vec<_>>(), vec![readable]);
+    }
+
+    #[test]
+    fn unreadable_real_record_shape_names_the_session_instead_of_an_anonymous_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let id: SessionId = "00000000-0000-7000-8000-000000020001".parse().unwrap();
+        store.publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1)).unwrap();
+        // Structure-only fixture of the copied store's seq 1, not session content.
+        // Nulls deliberately do not invent replacement values for private fields.
+        append_payload(dir.path(), id, json!({"kind": "evidence", "evidence": {
+            "kind": "run_context", "ceilings": null, "config": null,
+            "config_digest": null, "ego_version": null, "execution": null,
+            "instructions": null, "invocation": null, "mcp": null,
+            "origin": null, "policy_digest": null, "run_id": null,
+            "session": null, "version": null
+        }}));
+        let reason = store.lifecycle_meta(id).unwrap_err().to_string();
+        assert!(reason.contains(&id.to_string()), "unreadable session must be named: {reason}");
+    }
+}
