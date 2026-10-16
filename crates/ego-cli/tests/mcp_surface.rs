@@ -401,7 +401,7 @@ fn oauth_login_prints_copyable_url_and_reports_denial_without_touching_credentia
             let size = socket.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
             let body = if request.contains("oauth-protected-resource") {
-                serde_json::json!({"resource":server_origin,"authorization_servers":[server_origin]})
+                serde_json::json!({"resource":format!("{server_origin}/mcp"),"authorization_servers":[server_origin]})
             } else {
                 serde_json::json!({"issuer":server_origin,"authorization_endpoint":format!("{server_origin}/authorize"),"token_endpoint":format!("{server_origin}/token")})
             }.to_string();

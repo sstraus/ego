@@ -242,7 +242,7 @@ fn login_request() -> McpLoginRequest {
 fn refresh_key(account: &str) -> CredentialKey {
     CredentialKey::new(
         "https://issuer.example.test/".to_owned(),
-        CredentialTarget::ProtectedResource("https://mcp.example.test/".to_owned()),
+        CredentialTarget::ProtectedResource("https://mcp.example.test/mcp".to_owned()),
         Some(account.to_owned()),
     )
     .expect("refresh credential key")
@@ -292,11 +292,11 @@ fn refresh_discovery_responses(token_response: &str) -> Vec<McpHttpResponse> {
     vec![
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
         ),
         McpHttpResponse::json(200, token_response.as_bytes()),
     ]
@@ -307,11 +307,11 @@ fn login_uses_cimd_pkce_metadata_and_issuer_resource_bound_token_identity() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
         ),
         McpHttpResponse::json(
             200,
@@ -373,7 +373,7 @@ fn login_uses_cimd_pkce_metadata_and_issuer_resource_bound_token_identity() {
             })
     );
     assert_eq!(result.issuer().as_str(), "https://issuer.example.test/");
-    assert_eq!(result.resource().as_str(), "https://mcp.example.test/");
+    assert_eq!(result.resource().as_str(), "https://mcp.example.test/mcp");
 
     let calls = http.calls.lock().expect("OAuth calls");
     assert_eq!(calls.len(), 3);
@@ -416,7 +416,7 @@ fn login_uses_cimd_pkce_metadata_and_issuer_resource_bound_token_identity() {
     assert_eq!(key.issuer(), "https://issuer.example.test/");
     assert!(matches!(
         key.target(),
-        CredentialTarget::ProtectedResource(resource) if resource == "https://mcp.example.test/"
+        CredentialTarget::ProtectedResource(resource) if resource == "https://mcp.example.test/mcp"
     ));
     assert_eq!(key.account(), Some("account-a"));
     assert_ne!(stored, b"opaque-accessopaque-refresh");
@@ -531,7 +531,7 @@ fn refresh_rotates_access_and_refresh_tokens_without_changing_credential_identit
     .expect("refresh");
     assert_eq!(result.credential_key(), &key);
     assert_eq!(result.issuer().as_str(), "https://issuer.example.test/");
-    assert_eq!(result.resource().as_str(), "https://mcp.example.test/");
+    assert_eq!(result.resource().as_str(), "https://mcp.example.test/mcp");
     assert_eq!(result.scopes(), &["tools:execute", "tools:read"]);
     let calls = http.calls.lock().expect("OAuth calls");
     assert_eq!(calls.len(), 3);
@@ -603,37 +603,37 @@ fn refresh_rejects_identity_or_scope_mismatch_without_mutating_the_old_credentia
     for (name, metadata, token) in [
         (
             "issuer",
-            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://other.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://other.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
             r#"{"access_token":"new-access","token_type":"Bearer","scope":"tools:read tools:execute","sub":"account-a"}"#,
         ),
         (
             "resource",
-            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://other.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://other.example.test","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
             r#"{"access_token":"new-access","token_type":"Bearer","scope":"tools:read tools:execute","sub":"account-a"}"#,
         ),
         (
             "audience",
-            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://other.example.test","client_id_metadata_document_supported":true}"#,
+            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://other.example.test","client_id_metadata_document_supported":true}"#,
             r#"{"access_token":"new-access","token_type":"Bearer","scope":"tools:read tools:execute","sub":"account-a"}"#,
         ),
         (
             "CIMD",
-            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":false}"#,
+            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":false}"#,
             r#"{"access_token":"new-access","token_type":"Bearer","scope":"tools:read tools:execute","sub":"account-a"}"#,
         ),
         (
             "token endpoint",
-            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://other.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://other.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
             r#"{"access_token":"new-access","token_type":"Bearer","scope":"tools:read tools:execute","sub":"account-a"}"#,
         ),
         (
             "account",
-            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
             r#"{"access_token":"new-access","token_type":"Bearer","scope":"tools:read tools:execute","sub":"other-account"}"#,
         ),
         (
             "scope",
-            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            r#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
             r#"{"access_token":"new-access","token_type":"Bearer","scope":"tools:read","sub":"account-a"}"#,
         ),
     ] {
@@ -648,7 +648,7 @@ fn refresh_rejects_identity_or_scope_mismatch_without_mutating_the_old_credentia
         let responses = vec![
             McpHttpResponse::json(
                 200,
-                br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
+                br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
             ),
             McpHttpResponse::json(200, metadata.as_bytes()),
             McpHttpResponse::json(200, token.as_bytes()),
@@ -771,11 +771,11 @@ fn refresh_invalid_grant_does_not_retry_delete_or_corrupt_the_existing_credentia
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:read","tools:execute"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
         ),
         McpHttpResponse::json(400, br#"{"error":"invalid_grant"}"#),
     ]);
@@ -845,11 +845,11 @@ fn login_rejects_a_token_that_does_not_step_up_to_the_required_scope() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:execute"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:execute"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
         ),
         McpHttpResponse::json(
             200,
@@ -876,11 +876,11 @@ fn assert_callback_tamper_is_rejected(tamper: CallbackTamper) {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:execute"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:execute"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
         ),
     ]);
     let interaction = Arc::new(TamperedInteraction { tamper });
@@ -911,11 +911,11 @@ fn login_fails_closed_when_the_authorization_code_is_rejected() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:execute"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"],"scopes_supported":["tools:execute"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test","client_id_metadata_document_supported":true}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp","client_id_metadata_document_supported":true}"#,
         ),
         McpHttpResponse::json(400, br#"{"error":"invalid_grant"}"#),
     ]);
@@ -943,35 +943,11 @@ fn issuer_resource_or_audience_mismatch_and_scope_step_up_fail_closed() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://other.example.test","resource":"https://mcp.example.test","audience":"https://mcp.example.test"}"#,
-        ),
-    ]);
-    let interaction = Arc::new(RecordingInteraction {
-        captured: Mutex::new(None),
-    });
-    let credentials = Arc::new(RecordingCredentials::new());
-    assert!(
-        futures::executor::block_on(login(
-            login_request(),
-            Arc::clone(&http) as Arc<dyn McpHttpEffects>,
-            Arc::clone(&interaction) as Arc<dyn McpOAuthInteraction>,
-            Arc::clone(&credentials) as Arc<dyn CredentialStore>,
-        ))
-        .is_err()
-    );
-
-    let http = OAuthHttp::with_responses([
-        McpHttpResponse::json(
-            200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#,
-        ),
-        McpHttpResponse::json(
-            200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://other.example.test","audience":"https://mcp.example.test"}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://other.example.test","resource":"https://mcp.example.test/mcp","audience":"https://mcp.example.test/mcp"}"#,
         ),
     ]);
     let interaction = Arc::new(RecordingInteraction {
@@ -991,11 +967,35 @@ fn issuer_resource_or_audience_mismatch_and_scope_step_up_fail_closed() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
-            br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#,
         ),
         McpHttpResponse::json(
             200,
-            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test","audience":"https://other.example.test"}"#,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://other.example.test","audience":"https://mcp.example.test/mcp"}"#,
+        ),
+    ]);
+    let interaction = Arc::new(RecordingInteraction {
+        captured: Mutex::new(None),
+    });
+    let credentials = Arc::new(RecordingCredentials::new());
+    assert!(
+        futures::executor::block_on(login(
+            login_request(),
+            Arc::clone(&http) as Arc<dyn McpHttpEffects>,
+            Arc::clone(&interaction) as Arc<dyn McpOAuthInteraction>,
+            Arc::clone(&credentials) as Arc<dyn CredentialStore>,
+        ))
+        .is_err()
+    );
+
+    let http = OAuthHttp::with_responses([
+        McpHttpResponse::json(
+            200,
+            br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#,
+        ),
+        McpHttpResponse::json(
+            200,
+            br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","resource":"https://mcp.example.test/mcp","audience":"https://other.example.test"}"#,
         ),
     ]);
     let interaction = Arc::new(RecordingInteraction {
@@ -1047,7 +1047,7 @@ fn issuer_resource_or_audience_mismatch_and_scope_step_up_fail_closed() {
 #[test]
 fn registered_client_does_not_require_cimd_or_silently_register() {
     let http = OAuthHttp::with_responses([
-        McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#),
+        McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
         McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test"}"#),
         McpHttpResponse::json(200, br#"{"access_token":"registered-access","refresh_token":"registered-refresh","token_type":"Bearer","scope":""}"#),
     ]);
@@ -1085,7 +1085,7 @@ fn explicit_dcr_persists_client_identity_and_rejects_cross_issuer_registration()
         "https://attacker.example.test/register",
     ] {
         let responses = [
-            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#),
+            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
             McpHttpResponse::json(200, format!(r#"{{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","registration_endpoint":"{endpoint}"}}"#)),
             McpHttpResponse::json(201, br#"{"client_id":"dynamic-client","token_endpoint_auth_method":"none","redirect_uris":["http://127.0.0.1:9999/callback"]}"#),
             McpHttpResponse::json(200, br#"{"access_token":"dynamic-access","refresh_token":"dynamic-refresh","token_type":"Bearer","scope":""}"#),
@@ -1202,7 +1202,7 @@ impl McpOAuthInteraction for InvalidCallback {
 fn duplicate_or_denied_callbacks_never_exchange_or_publish_credentials() {
     for scenario in ["duplicate", "denied", "duplicate-state"] {
         let http = OAuthHttp::with_responses([
-            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#),
+            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
             McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","client_id_metadata_document_supported":true}"#),
         ]);
         let credentials = Arc::new(RecordingCredentials::new());
@@ -1224,6 +1224,109 @@ fn duplicate_or_denied_callbacks_never_exchange_or_publish_credentials() {
             *credentials.puts.lock().unwrap(),
             0,
             "{scenario} published credentials"
+        );
+    }
+}
+
+struct FixtureInteraction;
+impl McpOAuthInteraction for FixtureInteraction {
+    fn authorize<'a>(
+        &'a self,
+        interaction: McpAuthorizationInteraction,
+    ) -> McpFuture<'a, Result<McpOAuthCallback, McpError>> {
+        let mut callback = interaction.redirect_uri().clone();
+        callback
+            .query_pairs_mut()
+            .append_pair("code", "fixture-code")
+            .append_pair("state", interaction.state());
+        Box::pin(async move { McpOAuthCallback::from_callback_url(callback) })
+    }
+}
+
+#[test]
+fn public_contracts_preserve_resource_path_and_explicit_public_client_policy() {
+    // Catches origin-only audience substitution and confidential-only downgrade.
+    for (name, bytes, public) in [
+        ("linear", include_str!("fixtures/oauth/linear.json"), true),
+        ("asana", include_str!("fixtures/oauth/asana.json"), false),
+    ] {
+        let fixture: serde_json::Value = serde_json::from_str(bytes).unwrap();
+        let resource = fixture["resource_url"].as_str().unwrap();
+        let config = McpHttpConfig::new(
+            resource.parse::<url::Url>().unwrap(),
+            McpHttpAuth::Oauth,
+            false,
+        )
+        .unwrap();
+        let response =
+            |key: &str| McpHttpResponse::json(200, &serde_json::to_vec(&fixture[key]).unwrap());
+        let mut responses = vec![
+            response("protected_resource"),
+            response("authorization_server"),
+        ];
+        if public {
+            responses.push(McpHttpResponse::json(200, br#"{"access_token":"fixture-access","refresh_token":"fixture-refresh","token_type":"Bearer"}"#));
+        }
+        let http = OAuthHttp::with_responses(responses);
+        let store = Arc::new(RecordingCredentials::new());
+        let metadata = || {
+            McpClientMetadata::registered(
+                "published-client".into(),
+                "http://127.0.0.1:9999/callback".parse().unwrap(),
+            )
+            .unwrap()
+        };
+        let request = McpLoginRequest::new(
+            name.parse().unwrap(),
+            config.clone(),
+            metadata().redirect_uri().clone(),
+            metadata(),
+            Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap();
+        let result = futures::executor::block_on(login(
+            request,
+            http.clone(),
+            Arc::new(FixtureInteraction),
+            store.clone(),
+        ));
+        if public {
+            let result = result.unwrap();
+            assert_eq!(result.resource().as_str(), resource);
+            let refresh_http = OAuthHttp::with_responses([
+                response("protected_resource"),
+                response("authorization_server"),
+                McpHttpResponse::json(
+                    200,
+                    br#"{"access_token":"fixture-next","token_type":"Bearer"}"#,
+                ),
+            ]);
+            let request = ego_mcp::McpTokenRefreshRequest::new(
+                name.parse().unwrap(),
+                config.clone(),
+                metadata(),
+                result.credential_key().clone(),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap();
+            futures::executor::block_on(ego_mcp::refresh_token(request, refresh_http, store))
+                .unwrap();
+        } else {
+            assert!(result.err().unwrap().to_string().contains("public-client"));
+            assert_eq!(*store.puts.lock().unwrap(), 0);
+        }
+        let calls = http.calls.lock().unwrap();
+        assert_eq!(
+            calls[0].4,
+            url::Url::parse(fixture["protected_resource_url"].as_str().unwrap())
+                .unwrap()
+                .path()
+        );
+        assert_eq!(
+            calls[1].4,
+            url::Url::parse(fixture["authorization_server_url"].as_str().unwrap())
+                .unwrap()
+                .path()
         );
     }
 }

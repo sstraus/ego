@@ -2142,3 +2142,10 @@ Use the same registration choice as login; `--dcr --refresh` restores the stored
 DCR identity and does not register a second client. The issuer and optional
 account identify the exact stored credential. Refresh does not open an
 authorization interaction, and a failed refresh leaves the old credential intact.
+
+OAuth login writes tokens only through the native credential store and writes a
+private non-secret resource/account locator under `EGO_HOME/mcp`. Runtime uses
+this locator after restart. Expired access tokens refresh before MCP dispatch.
+HTTP 401 triggers refresh without replaying the operation; retry the operation
+when requested. Missing or revoked credentials require a new explicit login.
+Servers that advertise only confidential-client authentication are not supported.

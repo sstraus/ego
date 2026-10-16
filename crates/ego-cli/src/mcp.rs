@@ -123,27 +123,20 @@ async fn login(action: &McpAction, out: &Stdout) -> Result<(), RunTermination> {
         .truncate(false)
         .open(root.join("oauth-refresh.lock"))
         .map_err(|_| failed("MCP credential lock unavailable".into()))?;
-    let mut lock = fd_lock::RwLock::new(file);
-    let _refresh_guard = if *refresh {
-        Some(lock.try_write().map_err(|_| {
+    if *refresh {
+        file.try_lock().map_err(|_| {
             failed("another MCP OAuth refresh is active; retry after it completes".into())
-        })?)
-    } else {
-        None
-    };
+        })?;
+    }
     if *refresh {
         let mut resource = http.url.as_url().clone();
-        resource.set_path("/");
         resource.set_query(None);
         resource.set_fragment(None);
-        let mut issuer: url::Url = issuer
+        let issuer: url::Url = issuer
             .as_deref()
             .ok_or_else(|| usage(UsageError("refresh requires --issuer".into())))?
             .parse()
             .map_err(|_| usage(UsageError("invalid refresh issuer".into())))?;
-        issuer.set_path("/");
-        issuer.set_query(None);
-        issuer.set_fragment(None);
         let key = ego_core::credentials::CredentialKey::new(
             issuer.to_string(),
             ego_core::credentials::CredentialTarget::ProtectedResource(resource.to_string()),
@@ -181,6 +174,8 @@ async fn login(action: &McpAction, out: &Stdout) -> Result<(), RunTermination> {
     .await
     .map_err(|_| failed("MCP OAuth login timed out".into()))?
     .map_err(|error| failed(error.to_string()))?;
+    ego_tools::mcp::persist_oauth_locator(&root, name, result.credential_key())
+        .map_err(|error| failed(error.to_string()))?;
     out.line(&format!(
         "MCP server `{name}` authorized for {}",
         result.resource()

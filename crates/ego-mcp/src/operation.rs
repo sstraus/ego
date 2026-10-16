@@ -1150,7 +1150,10 @@ async fn execute_http(
         route,
         envelope.clone(),
         expected_wire_params,
-        admission_headers(admission.as_ref())?,
+        admission
+            .authorization_headers(None, Instant::now() + factory.limits.timeout)
+            .await?,
+        admission.oauth_session().cloned(),
     ));
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
     let mut client =
@@ -1295,7 +1298,10 @@ async fn execute_http_hook(
         route,
         envelope,
         expected_wire_params,
-        admission_headers(admission.as_ref())?,
+        admission
+            .authorization_headers(None, Instant::now() + factory.limits.timeout)
+            .await?,
+        admission.oauth_session().cloned(),
     ));
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
     let mut client = McpClient::connect_http(
@@ -1776,6 +1782,7 @@ struct SplitMcpHttpEffects {
     envelope: ego_core::permit::McpPreparedEnvelope,
     expected_wire_params: Value,
     headers: Arc<[HttpHeader]>,
+    oauth: Option<Arc<crate::oauth::McpOAuthSession>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1794,6 +1801,7 @@ impl SplitMcpHttpEffects {
         envelope: ego_core::permit::McpPreparedEnvelope,
         expected_wire_params: Value,
         headers: Vec<HttpHeader>,
+        oauth: Option<Arc<crate::oauth::McpOAuthSession>>,
     ) -> Self {
         Self {
             claim,
@@ -1809,6 +1817,7 @@ impl SplitMcpHttpEffects {
             envelope,
             expected_wire_params,
             headers: headers.into(),
+            oauth,
         }
     }
 
@@ -2013,7 +2022,9 @@ impl McpHttpEffects for SplitMcpHttpEffects {
                 }
             }
         }
-        let exchange = self.claim.exchange(parts.request, parts.deadline);
+        let deadline = parts.deadline;
+        let oauth = self.oauth.clone();
+        let exchange = self.claim.exchange(parts.request, deadline);
         let state = Arc::clone(&self.state);
         Box::pin(async move {
             let response = exchange.await;
@@ -2039,7 +2050,13 @@ impl McpHttpEffects for SplitMcpHttpEffects {
                     }
                 }
             }
-            one_hop_response(response.map_err(McpError::from)?)
+            let response = one_hop_response(response.map_err(McpError::from)?)?;
+            if response.status() == 401
+                && let Some(oauth) = oauth
+            {
+                return Err(oauth.unauthorized(deadline).await);
+            }
+            Ok(response)
         })
     }
 
@@ -2188,23 +2205,6 @@ fn cancellation_from_duplex(
         }
         DuplexEnd::Interrupted => CancellationClassification::Uncertain,
     }
-}
-
-fn admission_headers(admission: &McpServerAdmission) -> Result<Vec<HttpHeader>, McpError> {
-    admission
-        .http_headers()
-        .ok_or_else(|| authority("HTTP MCP admission has no header material"))?
-        .iter()
-        .map(|binding| {
-            HttpHeader::secret(
-                binding.name(),
-                ego_core::credentials::SecretMaterial::new(
-                    binding.value().expose_secret_bytes().to_vec(),
-                ),
-            )
-            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
-        })
-        .collect()
 }
 
 fn server_name(value: &str) -> Result<McpServerName, McpError> {

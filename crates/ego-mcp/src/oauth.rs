@@ -240,6 +240,7 @@ pub struct McpCredentialBundle {
     token_type: String,
     scopes: Vec<String>,
     client_id: Option<String>,
+    expires_at: Option<u64>,
 }
 
 impl std::fmt::Debug for McpCredentialBundle {
@@ -292,6 +293,7 @@ impl McpCredentialBundle {
             token_type: wire.token_type,
             scopes: wire.scopes,
             client_id: wire.client_id,
+            expires_at: wire.expires_at,
         })
     }
 
@@ -309,6 +311,7 @@ impl McpCredentialBundle {
             token_type: self.token_type.clone(),
             scopes: self.scopes.clone(),
             client_id: self.client_id.clone(),
+            expires_at: self.expires_at,
         };
         let mut bytes = TOKEN_BUNDLE_PREFIX.to_vec();
         bytes.extend_from_slice(&serde_json::to_vec(&wire)?);
@@ -319,6 +322,8 @@ impl McpCredentialBundle {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CredentialBundleWire {
+    #[serde(default)]
+    expires_at: Option<u64>,
     #[serde(default)]
     client_id: Option<String>,
     access_token: String,
@@ -356,6 +361,8 @@ struct ProtectedResourceMetadata {
 
 #[derive(Deserialize)]
 struct AuthorizationServerMetadata {
+    #[serde(default)]
+    token_endpoint_auth_methods_supported: Option<Vec<String>>,
     authorization_endpoint: Url,
     token_endpoint: Url,
     issuer: Url,
@@ -371,6 +378,8 @@ struct AuthorizationServerMetadata {
 
 #[derive(Deserialize)]
 struct TokenResponse {
+    #[serde(default)]
+    expires_in: Option<u64>,
     access_token: String,
     refresh_token: Option<String>,
     token_type: String,
@@ -398,7 +407,7 @@ impl McpTokenRefreshRequest {
         config
             .validate()
             .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
-        let configured_resource = normalized_origin(config.url.as_url())?.to_string();
+        let configured_resource = validated_identity(config.url.as_url())?.to_string();
         if config.auth != McpHttpAuth::Oauth
             || deadline <= Instant::now()
             || !matches!(
@@ -474,19 +483,21 @@ async fn discover_oauth(
     )
     .await?;
     let protected: ProtectedResourceMetadata = decode_json_response(response).await?;
-    let resource = normalized_origin(&protected.resource)?;
-    let configured_resource = normalized_origin(&initial_url)?;
+    let resource = validated_identity(&protected.resource)?;
+    let configured_resource = validated_identity(&initial_url)?;
     if resource != configured_resource || protected.authorization_servers.len() != 1 {
         return Err(McpError::new(
             McpFailure::Authorization,
             "invalid protected resource binding",
         ));
     }
-    let issuer = normalized_origin(&protected.authorization_servers[0])?;
+    let issuer = validated_identity(&protected.authorization_servers[0])?;
     let profile = initial_profile.admitting(server, &issuer)?;
-    let as_discovery = issuer
-        .join(".well-known/oauth-authorization-server")
-        .map_err(|error| McpError::new(McpFailure::Authorization, error.to_string()))?;
+    let mut as_discovery = normalized_origin(&issuer)?;
+    as_discovery.set_path(&format!(
+        "/.well-known/oauth-authorization-server{}",
+        issuer.path().trim_end_matches('/')
+    ));
     let response = execute(
         &profile,
         server,
@@ -498,17 +509,17 @@ async fn discover_oauth(
     )
     .await?;
     let metadata: AuthorizationServerMetadata = decode_json_response(response).await?;
-    if normalized_origin(&metadata.issuer)? != issuer
+    if validated_identity(&metadata.issuer)? != issuer
         || metadata
             .resource
             .as_ref()
-            .is_some_and(|value| normalized_origin(value).ok().as_ref() != Some(&resource))
+            .is_some_and(|value| validated_identity(value).ok().as_ref() != Some(&resource))
         || metadata
             .audience
             .as_ref()
-            .is_some_and(|value| normalized_origin(value).ok().as_ref() != Some(&resource))
-        || normalized_origin(&metadata.authorization_endpoint)? != issuer
-        || normalized_origin(&metadata.token_endpoint)? != issuer
+            .is_some_and(|value| validated_identity(value).ok().as_ref() != Some(&resource))
+        || normalized_origin(&metadata.authorization_endpoint)? != normalized_origin(&issuer)?
+        || normalized_origin(&metadata.token_endpoint)? != normalized_origin(&issuer)?
     {
         return Err(McpError::new(
             McpFailure::Authorization,
@@ -540,6 +551,7 @@ pub async fn login(
         metadata,
     } = discovery;
 
+    validate_public_client(&metadata)?;
     let client_id = match &request.client_metadata.registration {
         Registration::Cimd if !metadata.client_id_metadata_document_supported => {
             return Err(McpError::new(
@@ -551,7 +563,7 @@ pub async fn login(
             let endpoint = metadata.registration_endpoint.as_ref().ok_or_else(|| {
                 McpError::new(McpFailure::Authorization, "issuer does not advertise DCR")
             })?;
-            if normalized_origin(endpoint)? != issuer {
+            if normalized_origin(endpoint)? != normalized_origin(&issuer)? {
                 return Err(McpError::new(
                     McpFailure::Authorization,
                     "DCR endpoint issuer mismatch",
@@ -727,6 +739,7 @@ pub async fn login(
         token_type: token.token_type,
         scopes: granted,
         client_id: Some(client_id),
+        expires_at: token_expiry(token.expires_in)?,
     };
     let key = CredentialKey::new(
         issuer.to_string(),
@@ -818,6 +831,7 @@ pub async fn refresh_token(
             "issuer does not support CIMD",
         ));
     }
+    validate_public_client(&discovery.metadata)?;
     let required_scopes = previous.scopes.clone();
 
     let token_profile = discovery
@@ -887,6 +901,7 @@ pub async fn refresh_token(
         token_type: token.token_type,
         scopes: granted.clone(),
         client_id: Some(client_id.to_owned()),
+        expires_at: token_expiry(token.expires_in)?,
     };
     credentials
         .put(&request.credential_key, bundle.encode()?)
@@ -1058,4 +1073,514 @@ fn base64url(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+fn validated_identity(url: &Url) -> Result<Url, McpError> {
+    normalized_origin(url)?;
+    if url.query().is_some() {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "OAuth identity has a query",
+        ));
+    }
+    Ok(url.clone())
+}
+
+fn unix_now() -> Result<u64, McpError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .map_err(|_| McpError::new(McpFailure::Credential, "OAuth clock unavailable"))
+}
+
+fn token_expiry(seconds: Option<u64>) -> Result<Option<u64>, McpError> {
+    seconds
+        .map(|seconds| {
+            unix_now()?
+                .checked_add(seconds)
+                .ok_or_else(|| McpError::new(McpFailure::Authorization, "OAuth expiry overflow"))
+        })
+        .transpose()
+}
+
+/// Adapter-owned exclusive refresh transaction; held through durable token publication.
+pub trait McpOAuthRefreshLease: Send {}
+pub trait McpOAuthRefreshLock: Send + Sync {
+    fn acquire(&self) -> Result<Box<dyn McpOAuthRefreshLease>, McpError>;
+}
+
+/// Live credential authority; identities can be persisted, token bytes cannot.
+pub struct McpOAuthSession {
+    server: McpServerName,
+    config: McpHttpConfig,
+    key: CredentialKey,
+    credentials: Arc<dyn CredentialStore>,
+    state: tokio::sync::Mutex<Option<Arc<dyn McpHttpEffects>>>,
+    refresh_lock: Option<Arc<dyn McpOAuthRefreshLock>>,
+}
+
+impl std::fmt::Debug for McpOAuthSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOAuthSession")
+            .field("server", &self.server)
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpOAuthSession {
+    pub fn new(
+        server: McpServerName,
+        config: McpHttpConfig,
+        key: CredentialKey,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Result<Self, McpError> {
+        if !matches!(key.target(), CredentialTarget::ProtectedResource(resource) if resource == config.url.as_url().as_str())
+        {
+            return Err(McpError::new(
+                McpFailure::Credential,
+                "OAuth locator resource mismatch",
+            ));
+        }
+        Ok(Self {
+            server,
+            config,
+            key,
+            credentials,
+            state: tokio::sync::Mutex::new(None),
+            refresh_lock: None,
+        })
+    }
+
+    pub(crate) fn matches(&self, name: &McpServerName, config: &McpHttpConfig) -> bool {
+        &self.server == name && &self.config == config
+    }
+
+    pub fn with_refresh_lock(mut self, lock: Arc<dyn McpOAuthRefreshLock>) -> Self {
+        self.refresh_lock = Some(lock);
+        self
+    }
+
+    fn hint(&self) -> McpError {
+        McpError::new(
+            McpFailure::Credential,
+            format!(
+                "MCP credential unavailable or revoked; run ego mcp login {} with an explicit registration strategy",
+                self.server
+            ),
+        )
+    }
+
+    fn load(&self) -> Result<McpCredentialBundle, McpError> {
+        self.credentials
+            .get(&self.key)
+            .map_err(|_| self.hint())?
+            .ok_or_else(|| self.hint())
+            .and_then(McpCredentialBundle::decode)
+    }
+
+    async fn refresh(
+        &self,
+        effects: Arc<dyn McpHttpEffects>,
+        deadline: Instant,
+    ) -> Result<(), McpError> {
+        let _lease = self
+            .refresh_lock
+            .as_ref()
+            .map(|lock| lock.acquire())
+            .transpose()?;
+        let bundle = self.load()?;
+        let id = bundle.client_id.ok_or_else(|| self.hint())?;
+        let metadata = McpClientMetadata::registered(
+            id,
+            "http://127.0.0.1/callback".parse().expect("static URL"),
+        )?;
+        let request = McpTokenRefreshRequest::new(
+            self.server.clone(),
+            self.config.clone(),
+            metadata,
+            self.key.clone(),
+            deadline,
+        )?;
+        refresh_token(request, effects, Arc::clone(&self.credentials))
+            .await
+            .map_err(|_| self.hint())?;
+        Ok(())
+    }
+
+    pub(crate) async fn headers(
+        &self,
+        effects: Option<Arc<dyn McpHttpEffects>>,
+        deadline: Instant,
+    ) -> Result<Vec<ego_core::permit::HttpHeader>, McpError> {
+        let mut state = self.state.lock().await;
+        if let Some(effects) = effects {
+            *state = Some(effects);
+        }
+        let bundle = self.load()?;
+        if bundle
+            .expires_at
+            .is_some_and(|expiry| expiry <= unix_now().unwrap_or(u64::MAX).saturating_add(30))
+        {
+            self.refresh(state.clone().ok_or_else(|| self.hint())?, deadline)
+                .await?;
+        }
+        let bundle = self.load()?;
+        let mut value = SecretMaterial::new(b"Bearer ".to_vec());
+        value.extend_from_slice(bundle.access_token.expose_secret_bytes());
+        Ok(vec![
+            ego_core::permit::HttpHeader::secret("authorization", value)
+                .map_err(|_| self.hint())?,
+        ])
+    }
+
+    pub(crate) async fn unauthorized(&self, deadline: Instant) -> McpError {
+        // A selected operation's one-shot authority is never replayed. Refresh
+        // the next attempt instead, even if this 401 was returned for tools/call.
+        let state = self.state.lock().await;
+        match state.clone() {
+            Some(effects) if self.refresh(Arc::clone(&effects), deadline).await.is_ok() => {
+                McpError::new(
+                    McpFailure::Authorization,
+                    "MCP credential refreshed after HTTP 401; retry the operation",
+                )
+            }
+            _ => self.hint(),
+        }
+    }
+}
+
+pub(crate) struct AuthorizedMcpHttpEffects {
+    pub admission: Arc<crate::McpServerAdmission>,
+    pub inner: Arc<dyn McpHttpEffects>,
+}
+
+impl McpHttpEffects for AuthorizedMcpHttpEffects {
+    fn execute(
+        &self,
+        call: crate::PreparedMcpHttpCall,
+    ) -> McpFuture<'static, Result<McpHttpResponse, McpError>> {
+        let admission = Arc::clone(&self.admission);
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let deadline = call.deadline();
+            let headers = admission
+                .authorization_headers(Some(Arc::clone(&inner)), deadline)
+                .await?;
+            let response = inner.execute(call.with_headers(&headers)?).await?;
+            if response.status() == 401
+                && let Some(session) = admission.oauth_session()
+            {
+                return Err(session.unauthorized(deadline).await);
+            }
+            Ok(response)
+        })
+    }
+    fn cancel(
+        &self,
+        id: crate::McpRequestId,
+    ) -> McpFuture<'static, Result<crate::McpHttpSettlement, McpError>> {
+        self.inner.cancel(id)
+    }
+    fn timeout(
+        &self,
+        id: crate::McpRequestId,
+    ) -> McpFuture<'static, Result<crate::McpHttpSettlement, McpError>> {
+        self.inner.timeout(id)
+    }
+    fn settle(
+        &self,
+        id: crate::McpRequestId,
+    ) -> McpFuture<'static, Result<crate::McpHttpSettlement, McpError>> {
+        self.inner.settle(id)
+    }
+}
+
+fn validate_public_client(metadata: &AuthorizationServerMetadata) -> Result<(), McpError> {
+    if metadata
+        .token_endpoint_auth_methods_supported
+        .as_ref()
+        .is_some_and(|methods| !methods.iter().any(|method| method == "none"))
+    {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "issuer does not advertise public-client token authentication",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use crate::{McpHttpEnd, McpHttpSettlement, McpRequestId, PreparedMcpHttpCall};
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Store(Mutex<HashMap<CredentialKey, Vec<u8>>>);
+    impl CredentialStore for Store {
+        fn get(
+            &self,
+            key: &CredentialKey,
+        ) -> Result<Option<SecretMaterial>, ego_core::credentials::CredentialStoreError> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .map(SecretMaterial::new))
+        }
+        fn put(
+            &self,
+            key: &CredentialKey,
+            value: SecretMaterial,
+        ) -> Result<(), ego_core::credentials::CredentialStoreError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.clone(), value.expose_secret_bytes().to_vec());
+            Ok(())
+        }
+        fn delete(
+            &self,
+            key: &CredentialKey,
+        ) -> Result<
+            ego_core::credentials::CredentialRemoval,
+            ego_core::credentials::CredentialStoreError,
+        > {
+            self.0.lock().unwrap().remove(key);
+            Ok(ego_core::credentials::CredentialRemoval::Removed)
+        }
+    }
+    struct Http {
+        responses: Mutex<VecDeque<McpHttpResponse>>,
+        authorization: Mutex<Vec<Vec<u8>>>,
+    }
+    impl McpHttpEffects for Http {
+        fn execute(
+            &self,
+            call: PreparedMcpHttpCall,
+        ) -> McpFuture<'static, Result<McpHttpResponse, McpError>> {
+            for header in call.request().headers() {
+                if header.name() == "authorization" {
+                    self.authorization
+                        .lock()
+                        .unwrap()
+                        .push(header.value().to_vec());
+                }
+            }
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("bounded response contract");
+            Box::pin(async move { Ok(response) })
+        }
+        fn cancel(
+            &self,
+            id: McpRequestId,
+        ) -> McpFuture<'static, Result<McpHttpSettlement, McpError>> {
+            settle(id, McpHttpEnd::Cancelled)
+        }
+        fn timeout(
+            &self,
+            id: McpRequestId,
+        ) -> McpFuture<'static, Result<McpHttpSettlement, McpError>> {
+            settle(id, McpHttpEnd::TimedOut)
+        }
+        fn settle(
+            &self,
+            id: McpRequestId,
+        ) -> McpFuture<'static, Result<McpHttpSettlement, McpError>> {
+            settle(id, McpHttpEnd::Completed)
+        }
+    }
+    fn settle(
+        id: McpRequestId,
+        end: McpHttpEnd,
+    ) -> McpFuture<'static, Result<McpHttpSettlement, McpError>> {
+        Box::pin(
+            async move { McpHttpSettlement::new(id, end, crate::DeliveryCertainty::PossiblySent) },
+        )
+    }
+    fn setup(
+        expiry: Option<u64>,
+        responses: Vec<McpHttpResponse>,
+    ) -> (Arc<McpOAuthSession>, Arc<Store>, Arc<Http>) {
+        let config = McpHttpConfig::new(
+            "https://mcp.linear.app/mcp".parse::<Url>().unwrap(),
+            McpHttpAuth::Oauth,
+            false,
+        )
+        .unwrap();
+        let key = CredentialKey::new(
+            "https://mcp.linear.app/".into(),
+            CredentialTarget::ProtectedResource("https://mcp.linear.app/mcp".into()),
+            None,
+        )
+        .unwrap();
+        let store = Arc::new(Store::default());
+        let bundle = McpCredentialBundle {
+            access_token: "old-access".into(),
+            refresh_token: Some("refresh".into()),
+            token_type: "Bearer".into(),
+            scopes: vec!["read".into(), "write".into()],
+            client_id: Some("operator-client".into()),
+            expires_at: expiry,
+        };
+        store.put(&key, bundle.encode().unwrap()).unwrap();
+        let session = Arc::new(
+            McpOAuthSession::new("linear".parse().unwrap(), config, key, store.clone()).unwrap(),
+        );
+        (
+            session,
+            store,
+            Arc::new(Http {
+                responses: Mutex::new(responses.into()),
+                authorization: Mutex::new(Vec::new()),
+            }),
+        )
+    }
+    fn refresh_responses(status: u16) -> Vec<McpHttpResponse> {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/oauth/linear.json")).unwrap();
+        vec![
+            McpHttpResponse::json(
+                200,
+                serde_json::to_vec(&fixture["protected_resource"]).unwrap(),
+            ),
+            McpHttpResponse::json(
+                200,
+                serde_json::to_vec(&fixture["authorization_server"]).unwrap(),
+            ),
+            McpHttpResponse::json(
+                status,
+                br#"{"access_token":"new-access","token_type":"Bearer","expires_in":3600}"#,
+            ),
+        ]
+    }
+    #[tokio::test]
+    async fn stored_oauth_credential_authenticates_current_protocol_discovery() {
+        // Catches management admission ignoring retained authorization material.
+        let (session, _, http) = setup(None, vec![McpHttpResponse::json(200,
+            br#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"remote","version":"1"}}}}"#)]);
+        let admission = Arc::new(
+            crate::McpServerAdmission::new(
+                session.server.clone(),
+                ego_core::config::McpServerConfig::Http(session.config.clone()),
+                crate::McpTransportMaterial::oauth(session.clone()),
+            )
+            .unwrap(),
+        );
+        let effects = Arc::new(AuthorizedMcpHttpEffects {
+            admission,
+            inner: http.clone(),
+        });
+        let options = crate::McpClientOptions::new(
+            1024 * 1024,
+            Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        let mut client = crate::McpClient::connect_http(
+            session.server.clone(),
+            session.config.clone(),
+            options,
+            effects,
+        )
+        .unwrap();
+        client.discover().await.unwrap();
+        client.settle().await.unwrap();
+        assert_eq!(
+            *http.authorization.lock().unwrap(),
+            vec![b"Bearer old-access".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_credential_refreshes_once_before_runtime_header_attachment() {
+        // Catches attaching stale bytes and concurrent refresh-token reuse.
+        let (session, _, http) = setup(Some(0), refresh_responses(200));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let (first, second) = tokio::join!(
+            session.headers(Some(http.clone()), deadline),
+            session.headers(Some(http.clone()), deadline)
+        );
+        assert_eq!(first.unwrap()[0].value(), b"Bearer new-access");
+        assert_eq!(second.unwrap()[0].value(), b"Bearer new-access");
+        assert!(http.responses.lock().unwrap().is_empty());
+        assert!(
+            http.authorization.lock().unwrap().is_empty(),
+            "tokens never attach to metadata/token calls"
+        );
+    }
+    #[tokio::test]
+    async fn runtime_401_refreshes_without_replaying_selected_side_effect() {
+        // Catches reusing spent selected authority after an unauthorized response.
+        let mut responses = vec![McpHttpResponse::json(401, b"{}")];
+        responses.extend(refresh_responses(200));
+        let (session, _, http) = setup(None, responses);
+        let admission = Arc::new(
+            crate::McpServerAdmission::new(
+                session.server.clone(),
+                ego_core::config::McpServerConfig::Http(session.config.clone()),
+                crate::McpTransportMaterial::oauth(session.clone()),
+            )
+            .unwrap(),
+        );
+        let effects = AuthorizedMcpHttpEffects {
+            admission,
+            inner: http.clone(),
+        };
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let url = session.config.url.as_url();
+        let profile = AdmittedMcpHttpProfile::initial(&session.server, url).unwrap();
+        let call = profile
+            .prepare(
+                &session.server,
+                McpHttpPurpose::Protocol,
+                url,
+                oauth_request(url, "POST", b"{}".to_vec()).unwrap(),
+                deadline,
+            )
+            .unwrap();
+        let error = effects.execute(call).await.err().unwrap();
+        assert!(error.to_string().contains("retry the operation"));
+        assert_eq!(
+            *http.authorization.lock().unwrap(),
+            vec![b"Bearer old-access".to_vec()]
+        );
+        assert_eq!(
+            session.headers(None, deadline).await.unwrap()[0].value(),
+            b"Bearer new-access"
+        );
+    }
+    #[tokio::test]
+    async fn missing_and_revoked_credentials_offer_login_without_overwriting_store() {
+        // Catches publishing failed refresh output or hiding the recovery command.
+        let (session, store, http) = setup(Some(0), refresh_responses(400));
+        let original = store.0.lock().unwrap().clone();
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        assert!(
+            session
+                .headers(Some(http), deadline)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("ego mcp login linear")
+        );
+        assert_eq!(*store.0.lock().unwrap(), original);
+        store.0.lock().unwrap().clear();
+        assert!(
+            session
+                .headers(None, deadline)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("ego mcp login linear")
+        );
+    }
 }

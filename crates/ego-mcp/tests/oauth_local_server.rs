@@ -156,6 +156,27 @@ fn local_authorization_server_verifies_registered_pkce_and_refresh_on_wire() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let server_origin = origin.clone();
+    // Replay the recorded public Linear discovery shape at a local AS. Only
+    // deployment addresses change; registration and advertised policy stay.
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/oauth/linear.json")).unwrap();
+    let mut protected = fixture["protected_resource"].clone();
+    protected["resource"] = serde_json::json!(format!("{origin}/mcp"));
+    protected["authorization_servers"] = serde_json::json!([origin]);
+    let mut metadata = fixture["authorization_server"].clone();
+    for key in [
+        "issuer",
+        "authorization_endpoint",
+        "token_endpoint",
+        "registration_endpoint",
+        "revocation_endpoint",
+        "resource",
+        "resource_metadata",
+    ] {
+        if let Some(value) = metadata[key].as_str() {
+            metadata[key] = serde_json::json!(value.replace("https://mcp.linear.app", &origin));
+        }
+    }
     let server = std::thread::spawn(move || {
         let mut challenge = String::new();
         for _ in 0..7 {
@@ -163,15 +184,9 @@ fn local_authorization_server_verifies_registered_pkce_and_refresh_on_wire() {
             let (request, body) = read_request(&mut socket);
             let path = request.split_whitespace().nth(1).unwrap();
             if path.starts_with("/.well-known/oauth-protected-resource") {
-                respond(
-                    &mut socket,
-                    serde_json::json!({"resource":server_origin,"authorization_servers":[server_origin],"scopes_supported":["tools:read"]}),
-                );
+                respond(&mut socket, protected.clone());
             } else if path == "/.well-known/oauth-authorization-server" {
-                respond(
-                    &mut socket,
-                    serde_json::json!({"issuer":server_origin,"authorization_endpoint":format!("{server_origin}/authorize"),"token_endpoint":format!("{server_origin}/token")}),
-                );
+                respond(&mut socket, metadata.clone());
             } else if path.starts_with("/authorize?") {
                 let url: Url = format!("{server_origin}{path}").parse().unwrap();
                 let fields: HashMap<_, _> = url.query_pairs().into_owned().collect();
@@ -214,7 +229,7 @@ fn local_authorization_server_verifies_registered_pkce_and_refresh_on_wire() {
                 }
                 respond(
                     &mut socket,
-                    serde_json::json!({"access_token":"local-access","refresh_token":"local-refresh","token_type":"Bearer","scope":"tools:read"}),
+                    serde_json::json!({"access_token":"local-access","refresh_token":"local-refresh","token_type":"Bearer","scope":"read write"}),
                 );
             }
         }

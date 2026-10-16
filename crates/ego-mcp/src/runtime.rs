@@ -162,6 +162,15 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 .map_err(|error| invalid_candidate(error.to_string()));
             }
             let server_admission = request.admission();
+            if server_admission.oauth_session().is_some() {
+                server_admission
+                    .authorization_headers(
+                        Some(Arc::clone(&runtime.http_management)),
+                        options.deadline(),
+                    )
+                    .await
+                    .map_err(|_| McpCandidateError::CredentialRequired)?;
+            }
             let retained_acp = matches!(request.config(), McpServerConfig::Acp { .. });
             let mut acp_session = None;
             let result = async {
@@ -170,7 +179,10 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                         request.name().clone(),
                         config.clone(),
                         options,
-                        Arc::clone(&runtime.http_management),
+                        Arc::new(crate::oauth::AuthorizedMcpHttpEffects {
+                            admission: Arc::clone(&server_admission),
+                            inner: Arc::clone(&runtime.http_management),
+                        }),
                     ),
                     McpServerConfig::Stdio(config) => {
                         stdio_spawn_spec(server_admission.as_ref(), config, runtime.timeout)
@@ -207,7 +219,18 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                     client.inventory().await
                 }
                 .await;
-                let inventory = inventory.map_err(|error| invalid_candidate(error.to_string()))?;
+                let inventory = inventory.map_err(|error| {
+                    if server_admission.oauth_session().is_some()
+                        && matches!(
+                            error.failure(),
+                            crate::McpFailure::Credential | crate::McpFailure::Authorization
+                        )
+                    {
+                        McpCandidateError::CredentialRequired
+                    } else {
+                        invalid_candidate(error.to_string())
+                    }
+                })?;
                 if let Some((connection_id, effects)) = &acp_session {
                     for uri in ["tuic://workspace", "tuic://inbox"] {
                         if !inventory

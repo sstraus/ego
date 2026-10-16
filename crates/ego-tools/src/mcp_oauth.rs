@@ -139,3 +139,157 @@ mod tests {
         );
     }
 }
+
+/// Non-secret selection record. Tokens stay in the injected credential store.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OAuthLocator {
+    resource: String,
+    issuer: String,
+    account: Option<String>,
+}
+
+pub fn persist_oauth_locator(
+    root: &std::path::Path,
+    name: &ego_core::config::McpServerName,
+    key: &ego_core::credentials::CredentialKey,
+) -> Result<(), ego_mcp::McpError> {
+    use crate::store::StoreIo;
+    let ego_core::credentials::CredentialTarget::ProtectedResource(resource) = key.target() else {
+        return Err(locator_error());
+    };
+    std::fs::create_dir_all(root).map_err(|_| locator_error())?;
+    crate::privacy::harden_private_path(root, crate::privacy::PrivatePathKind::Directory)
+        .map_err(|_| locator_error())?;
+    let locator = OAuthLocator {
+        resource: resource.clone(),
+        issuer: key.issuer().into(),
+        account: key.account().map(str::to_owned),
+    };
+    let bytes = serde_json::to_vec(&locator).map_err(|_| locator_error())?;
+    crate::store::OsIo
+        .replace_atomic_private(&locator_path(root, name), &bytes)
+        .map_err(|_| locator_error())
+}
+
+fn locator_path(
+    root: &std::path::Path,
+    name: &ego_core::config::McpServerName,
+) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    root.join(format!(
+        "oauth-{:x}.json",
+        Sha256::digest(name.as_str().as_bytes())
+    ))
+}
+
+fn locator_error() -> ego_mcp::McpError {
+    ego_mcp::McpError::new(
+        ego_mcp::McpFailure::Credential,
+        "MCP OAuth locator unavailable; run ego mcp login NAME",
+    )
+}
+
+pub fn oauth_session(
+    root: &std::path::Path,
+    name: &ego_core::config::McpServerName,
+    config: &ego_core::config::McpHttpConfig,
+    credentials: std::sync::Arc<dyn ego_core::credentials::CredentialStore>,
+) -> Result<std::sync::Arc<ego_mcp::McpOAuthSession>, ego_mcp::McpError> {
+    let bytes = std::fs::read(locator_path(root, name)).map_err(|_| locator_error())?;
+    if bytes.len() > 16 * 1024 {
+        return Err(locator_error());
+    }
+    let locator: OAuthLocator = serde_json::from_slice(&bytes).map_err(|_| locator_error())?;
+    let key = ego_core::credentials::CredentialKey::new(
+        locator.issuer,
+        ego_core::credentials::CredentialTarget::ProtectedResource(locator.resource),
+        locator.account,
+    )
+    .map_err(|_| locator_error())?;
+    ego_mcp::McpOAuthSession::new(name.clone(), config.clone(), key, credentials).map(|session| {
+        std::sync::Arc::new(
+            session.with_refresh_lock(std::sync::Arc::new(OAuthRefreshLock(
+                root.join("oauth-refresh.lock"),
+            ))),
+        )
+    })
+}
+
+struct OAuthRefreshLock(std::path::PathBuf);
+struct OAuthRefreshLease(std::fs::File);
+impl ego_mcp::McpOAuthRefreshLease for OAuthRefreshLease {}
+impl Drop for OAuthRefreshLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+impl ego_mcp::McpOAuthRefreshLock for OAuthRefreshLock {
+    fn acquire(&self) -> Result<Box<dyn ego_mcp::McpOAuthRefreshLease>, ego_mcp::McpError> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&self.0)
+            .map_err(|_| locator_error())?;
+        file.try_lock().map_err(|_| {
+            ego_mcp::McpError::new(
+                ego_mcp::McpFailure::Credential,
+                "another MCP OAuth refresh is active; retry after it completes",
+            )
+        })?;
+        Ok(Box::new(OAuthRefreshLease(file)))
+    }
+}
+
+#[cfg(test)]
+mod locator_tests {
+    use super::*;
+    use ego_core::credentials::{CredentialKey, CredentialTarget};
+    use std::sync::Arc;
+
+    #[test]
+    fn restart_locator_retains_exact_resource_and_rejects_server_substitution() {
+        // Catches restart losing the account/issuer and same-origin token leakage.
+        let root = tempfile::tempdir().unwrap();
+        let name = "linear".parse().unwrap();
+        let key = CredentialKey::new(
+            "https://mcp.linear.app/".into(),
+            CredentialTarget::ProtectedResource("https://mcp.linear.app/mcp".into()),
+            Some("account".into()),
+        )
+        .unwrap();
+        persist_oauth_locator(root.path(), &name, &key).unwrap();
+        let bytes = std::fs::read(locator_path(root.path(), &name)).unwrap();
+        let locator: OAuthLocator = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(locator.account.as_deref(), Some("account"));
+        assert_eq!(locator.issuer, key.issuer());
+        let config = |path| {
+            ego_core::config::McpHttpConfig::new(
+                format!("https://mcp.linear.app/{path}")
+                    .parse::<url::Url>()
+                    .unwrap(),
+                ego_core::config::McpHttpAuth::Oauth,
+                false,
+            )
+            .unwrap()
+        };
+        // Construction never reads the native store. This adapter is not used.
+        let credentials = Arc::new(crate::credentials::OsCredentialStore::default());
+        assert!(oauth_session(root.path(), &name, &config("mcp"), credentials.clone()).is_ok());
+        assert!(oauth_session(root.path(), &name, &config("other"), credentials).is_err());
+    }
+
+    #[test]
+    fn refresh_lock_excludes_concurrent_cli_and_runtime_transactions() {
+        // Catches independent lock domains permitting rotated-token reuse.
+        use ego_mcp::McpOAuthRefreshLock;
+        let root = tempfile::tempdir().unwrap();
+        let lock = OAuthRefreshLock(root.path().join("oauth-refresh.lock"));
+        let first = lock.acquire().unwrap();
+        assert!(lock.acquire().is_err());
+        drop(first);
+        assert!(lock.acquire().is_ok());
+    }
+}
