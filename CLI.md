@@ -1532,7 +1532,13 @@ or retained-tail item is replayed. The checkpoint is context, not a
 user-authored prompt or higher-authority instruction.
 
 The source session remains complete and resumable. The target records the
-source session and source sequence. A tool-use or truncated response, empty or
+source session and source sequence. Event parents stay within their session:
+`PreCompact` belongs to the source, while `PostCompact` starts a root occurrence
+in the clean target. Both hooks retain the compaction request identity; target
+lineage records the source boundary, not an event-parent edge into its log.
+This also applies after automatic goal continuations. Metadata operations and
+cold resume validate the target without replaying the source conversation.
+A tool-use or truncated response, empty or
 invalid checkpoint, provider/budget/cancellation failure, target-baseline
 capability or encoding failure, or pre-publication target-store failure creates
 no usable target and leaves the operator in the source session. At compaction
