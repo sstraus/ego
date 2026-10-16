@@ -752,7 +752,10 @@ impl<'a> CliSkillInvocationOwner<'a> {
         })))
     }
 
-    pub(super) async fn await_execution(task: ChildExecutionTask) -> Result<(), SkillError> {
+    async fn await_execution(task: Option<ChildExecutionTask>) -> Result<(), SkillError> {
+        let Some(task) = task else {
+            return Ok(());
+        };
         task.await
             .map_err(|error| SkillError::new(format!("child execution task failed: {error}")))?
             .map(|_| ())
@@ -801,22 +804,26 @@ impl<'a> CliSkillInvocationOwner<'a> {
             turn,
             execution,
         } = background;
-        let cancelled = if cancel_children {
-            service
-                .cancel_owned(id)
-                .await
-                .map_err(|error| SkillError::new(error.to_string()))
-        } else {
-            Ok(())
-        };
-        let executed = match execution {
-            Some(task) => Self::await_execution(task).await,
-            None => Ok(()),
-        };
+        let cancelled = Self::cancel_background_skill(&service, id, cancel_children).await;
+        let executed = Self::await_execution(execution).await;
         // Complete every phase before selecting the first error.
         let collected =
             Self::collect_background_skill(&service, id, &invocation, turn, hooks).await;
         cancelled.and(executed).and(collected)
+    }
+
+    async fn cancel_background_skill(
+        service: &ChildRunService,
+        id: SubagentInvocationId,
+        cancel_children: bool,
+    ) -> Result<(), SkillError> {
+        if !cancel_children {
+            return Ok(());
+        }
+        service
+            .cancel_owned(id)
+            .await
+            .map_err(|error| SkillError::new(error.to_string()))
     }
 
     async fn collect_background_skill(
