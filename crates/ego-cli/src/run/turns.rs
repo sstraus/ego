@@ -58,13 +58,10 @@ pub(super) fn run_trust(
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
 ) -> Trust {
-    let selected = args.instructions.as_ref().map(|path| {
-        if path.is_absolute() {
-            path.clone()
-        } else {
-            root.join(path)
-        }
-    });
+    let selected = args
+        .instructions
+        .as_ref()
+        .and_then(|path| explicit(path, root).ok());
     if args.bare {
         return Trust::Untrusted;
     }
