@@ -306,7 +306,8 @@ mod unreadable_tests {
             .append(true)
             .open(root.join(id.to_string()).join("events.jsonl"))
             .unwrap();
-        let mut record = encode_record(Seq::ZERO.next(), &payload).unwrap();
+        let mut position = Seq::ZERO;
+        let mut record = encode_record(position.next(), &payload).unwrap();
         record.push(b'\n');
         log.write_all(&record).unwrap();
     }
@@ -403,7 +404,7 @@ mod unreadable_tests {
         std::fs::write(torn, bytes).unwrap();
         let mut header = Header::new(ids[2], Timestamp::from_millis(1), "/workspace".into());
         header.v += 1;
-        let mut bytes = encode_header(&header).unwrap();
+        let mut bytes = encode_header(&header);
         bytes.push(b'\n');
         std::fs::write(
             dir.path().join(ids[2].to_string()).join("events.jsonl"),
