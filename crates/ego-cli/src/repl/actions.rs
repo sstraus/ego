@@ -819,6 +819,42 @@ impl ActionRegistry {
             origin,
         }
     }
+    fn classify_skills(&self, raw_arguments: &str) -> Dispatch {
+        if self.resolve_slash("skills") != Some(ActionId::Skills)
+            || self.availability(ActionId::Skills) != Availability::Enabled
+        {
+            return Dispatch::Refused {
+                reason: "the skill catalogue is unavailable",
+            };
+        }
+        let capture = match self.skill_capture() {
+            Ok(Some(capture)) => capture,
+            Ok(None) | Err(_) => {
+                return Dispatch::Refused {
+                    reason: "the skill catalogue is unavailable",
+                };
+            }
+        };
+        match raw_arguments {
+            "" | "list" => Dispatch::Skills(SkillSurfaceAction::List),
+            "diagnose" => Dispatch::Skills(SkillSurfaceAction::Diagnose),
+            "rescan" => Dispatch::Skills(SkillSurfaceAction::Rescan),
+            arguments => match parse_skill_invoke(arguments) {
+                Some((skill_name, raw_arguments)) => {
+                    match admitted_skill_operation(&capture, skill_name, raw_arguments) {
+                        Some(operation) => Dispatch::Skill(operation),
+                        None => Dispatch::Refused {
+                            reason: "the requested skill is not admitted for direct invocation",
+                        },
+                    }
+                }
+                None => Dispatch::Refused {
+                    reason: "usage: /skills [list|diagnose|rescan|invoke <name> [arguments]]",
+                },
+            },
+        }
+    }
+
     pub fn classify(&self, submission: Submission) -> Dispatch {
         if submission.origin == InputOrigin::Typed
             && let Some(command) = submission.text.strip_prefix('/')
@@ -866,39 +902,7 @@ impl ActionRegistry {
                 return parse_goal_action(raw_arguments);
             }
             if name == "skills" {
-                if self.resolve_slash(name) != Some(ActionId::Skills)
-                    || self.availability(ActionId::Skills) != Availability::Enabled
-                {
-                    return Dispatch::Refused {
-                        reason: "the skill catalogue is unavailable",
-                    };
-                }
-                let capture = match self.skill_capture() {
-                    Ok(Some(capture)) => capture,
-                    Ok(None) | Err(_) => {
-                        return Dispatch::Refused {
-                            reason: "the skill catalogue is unavailable",
-                        };
-                    }
-                };
-                return match raw_arguments {
-                    "" | "list" => Dispatch::Skills(SkillSurfaceAction::List),
-                    "diagnose" => Dispatch::Skills(SkillSurfaceAction::Diagnose),
-                    "rescan" => Dispatch::Skills(SkillSurfaceAction::Rescan),
-                    arguments => match parse_skill_invoke(arguments) {
-                        Some((skill_name, raw_arguments)) => {
-                            match admitted_skill_operation(&capture, skill_name, raw_arguments) {
-                                Some(operation) => Dispatch::Skill(operation),
-                                None => Dispatch::Refused {
-                                    reason: "the requested skill is not admitted for direct invocation",
-                                },
-                            }
-                        }
-                        None => Dispatch::Refused {
-                            reason: "usage: /skills [list|diagnose|rescan|invoke <name> [arguments]]",
-                        },
-                    },
-                };
+                return self.classify_skills(raw_arguments);
             }
             if name == "fork"
                 && self.resolve_slash(name) == Some(ActionId::Fork)
