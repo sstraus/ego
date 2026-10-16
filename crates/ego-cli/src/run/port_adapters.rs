@@ -795,27 +795,28 @@ impl<'a> CliSkillInvocationOwner<'a> {
         hooks: &SessionHookRuntime<'_>,
         cancel_children: bool,
     ) -> Result<(), SkillError> {
-        let mut first_error = None;
         let BackgroundSkill {
             service,
             invocation,
             turn,
             execution,
         } = background;
-        if cancel_children && let Err(error) = service.cancel_owned(id).await {
-            first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
-        }
-        if let Some(task) = execution
-            && let Err(error) = Self::await_execution(task).await
-        {
-            first_error.get_or_insert(error);
-        }
-        if let Err(error) =
-            Self::collect_background_skill(&service, id, &invocation, turn, hooks).await
-        {
-            first_error.get_or_insert(error);
-        }
-        first_error.map_or(Ok(()), Err)
+        let cancelled = if cancel_children {
+            service
+                .cancel_owned(id)
+                .await
+                .map_err(|error| SkillError::new(error.to_string()))
+        } else {
+            Ok(())
+        };
+        let executed = match execution {
+            Some(task) => Self::await_execution(task).await,
+            None => Ok(()),
+        };
+        // Complete every phase before selecting the first error.
+        let collected =
+            Self::collect_background_skill(&service, id, &invocation, turn, hooks).await;
+        cancelled.and(executed).and(collected)
     }
 
     async fn collect_background_skill(
