@@ -253,6 +253,54 @@ mod tests {
         }
     }
 
+    // Catches: live and resumed semantic blocks touch instead of sharing one blank row.
+    #[cfg(unix)]
+    #[test]
+    fn rendered_turn_block_boundaries() {
+        use crate::output::InteractiveOutput;
+        use crate::repl::SurfaceOutput;
+        use ego_core::turn::CancelToken;
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+        for width in [80, 120, 200] {
+            let (sender, receiver) = crossbeam::channel::unbounded();
+            let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+            output.line("> first");
+            output.answer("Prose\n");
+            output.tool_row("✓ read first\n  tail one\n  tail two", String::new());
+            output.tool_row("✗ read second", String::new());
+            output.answer("Done\n");
+            output.line("> second");
+            output.answer("• item one\n• item two\n\n  code one\n  code two\n");
+            output.finish();
+            let live = receiver.try_iter().collect::<String>();
+            let expected = "> first\n\nProse\n\n✓ read first\n  tail one\n  tail two\n\n✗ read second\n\nDone\n\n> second\n\n• item one\n• item two\n\n  code one\n  code two";
+            let pair = NativePtySystem::default().openpty(PtySize {
+                rows: 40, cols: width as u16, pixel_width: 0, pixel_height: 0,
+            }).unwrap();
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.args(["-c", "printf '%s' \"$1\"", "rhythm-capture", &live]);
+            let mut child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
+            let mut bytes = Vec::new();
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let mut buffer = [0; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                    Err(error) if error.raw_os_error() == Some(5) => break,
+                    Err(error) => panic!("PTY read: {error}"),
+                }
+            }
+            assert!(child.wait().unwrap().success());
+            let mut terminal = vt100::Parser::new(40, width as u16, 0);
+            terminal.process(&bytes);
+            assert_eq!(terminal.screen().contents(), expected, "width={width}");
+            println!("rhythm live width={width} grid={:?}", terminal.screen().contents());
+        }
+    }
+
     #[derive(Default)]
     struct Recorded(Mutex<String>);
     impl Diagnostics for Recorded {
