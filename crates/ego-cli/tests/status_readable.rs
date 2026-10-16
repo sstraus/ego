@@ -327,14 +327,39 @@ fn rendered_status_explains_unmeasured_context() {
             let mut terminal = vt100::Parser::new(4, width as u16, 0);
             terminal.process(shown.as_bytes());
             assert_eq!(terminal.screen().contents(), expected, "width={width}");
-            println!("status width={width} grid={:?}", terminal.screen().contents());
+            println!(
+                "status width={width} grid={:?}",
+                terminal.screen().contents()
+            );
         }
         for width in 1..25 {
             let shown = row(&facts, &names, width);
-            assert!(shown.is_empty() || shown == expected, "width={width}: {shown}");
+            assert!(
+                shown.is_empty() || shown == expected,
+                "width={width}: {shown}"
+            );
         }
     }
     // A resumed log without any occupancy event has no measurement to invent.
     let resumed = SessionState::replay(Vec::<DomainEvent>::new());
     assert_eq!(row(&resumed, &names, 80), "ctx unmeasured");
+    // Compaction creates a checkpoint-seeded session, not a zero occupancy event.
+    let compacted = SessionState::replay([DomainEvent {
+        env: Envelope {
+            seq: Seq::ZERO,
+            id: EventId::new(),
+            turn: TurnId::new(),
+            item: Some(ego_core::event::id::ItemId::new()),
+            parent: None,
+            ts: Timestamp::from_millis(1),
+            producer: Producer::Main,
+        },
+        kind: EventKind::CompactionSeeded {
+            source: SessionId::new(),
+            source_seq: Seq::ZERO,
+            prompt_revision: 1,
+            checkpoint: "Retained facts".into(),
+        },
+    }]);
+    assert_eq!(row(&compacted, &names, 80), "ctx unmeasured");
 }
