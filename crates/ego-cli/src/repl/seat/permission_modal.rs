@@ -21,34 +21,64 @@ const RULE_CAP: usize = 60;
 pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> String {
     let width = width.max(1);
     let mut rows = vec![String::new()];
-    let prefix = request.child_name().map_or_else(String::new, |name| format!("Child {}: ", safe(name)));
-    let operations = request.ops().iter().map(|op| {
-        let description = describe_operation(op);
-        let (verb, target) = description.split_once(' ').unwrap_or((&description, ""));
-        format!("{verb} {}", keep_target(target, width.saturating_sub(prefix.len() + verb.len() + 9)))
-    }).collect::<Vec<_>>().join("; ");
+    let prefix = request
+        .child_name()
+        .map_or_else(String::new, |name| format!("Child {}: ", safe(name)));
+    let operations = request
+        .ops()
+        .iter()
+        .map(|op| {
+            let description = describe_operation(op);
+            let (verb, target) = description.split_once(' ').unwrap_or((&description, ""));
+            let room = width.saturating_sub(prefix.len() + verb.len() + 9);
+            let target = if matches!(op, Op::Spawn { .. }) {
+                crate::render::line::Line::plain(target)
+                    .truncate_to(room)
+                    .text()
+            } else {
+                keep_target(target, room)
+            };
+            format!("{verb} {target}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     rows.push(format!("{prefix}Allow {operations}?"));
     rows.extend(headline_rows(request).into_iter().skip(1));
     rows.push(if remembered_rules(request).is_some() {
         "[y] yes   [a] yes, remember rule (details: d)".into()
-    } else { "[y] yes".into() });
+    } else {
+        "[y] yes".into()
+    });
     rows.push("[n] no, say what to do instead   [e] edit   [d] details ".into());
-    rows.into_iter().flat_map(|row| {
-        if row.is_empty() { vec![String::new()] } else {
-            crate::render::line::Line::plain(row).wrap(width).into_iter().map(|line| line.text()).collect()
-        }
-    }).collect::<Vec<_>>().join("\n")
+    rows.into_iter()
+        .flat_map(|row| {
+            if row.is_empty() {
+                vec![String::new()]
+            } else {
+                crate::render::line::Line::plain(row)
+                    .wrap(width)
+                    .into_iter()
+                    .map(|line| line.text())
+                    .collect()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Keep the operation target's suffix, measured in display cells, not bytes.
 fn keep_target(text: &str, width: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     use unicode_width::UnicodeWidthStr;
-    if text.width() <= width { return text.to_owned(); }
+    if text.width() <= width {
+        return text.to_owned();
+    }
     let mut kept = Vec::new();
     let mut cells = 1;
     for grapheme in text.graphemes(true).rev() {
-        if cells + grapheme.width() > width { break; }
+        if cells + grapheme.width() > width {
+            break;
+        }
         cells += grapheme.width();
         kept.push(grapheme);
     }
@@ -321,15 +351,31 @@ mod tests {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
         use std::io::Read;
         for target in ["review-example.txt", "界面-example.txt"] {
-            let path = CanonPath::new(format!("/workspace/{}/{target}", "long-directory/".repeat(12)));
-            let request = PermissionRequest::new("write", vec![Op::Write {
-                path: path.clone(), change: Change::Whole(b"hello".to_vec()),
-            }], Escalation::NoRuleCovers { op: OpName::Write, path: path.clone() });
+            let path = CanonPath::new(format!(
+                "/workspace/{}/{target}",
+                "long-directory/".repeat(12)
+            ));
+            let request = PermissionRequest::new(
+                "write",
+                vec![Op::Write {
+                    path: path.clone(),
+                    change: Change::Whole(b"hello".to_vec()),
+                }],
+                Escalation::NoRuleCovers {
+                    op: OpName::Write,
+                    path: path.clone(),
+                },
+            );
             for width in [80, 120, 200] {
                 let prompt = compact_prompt(&request, width);
-                let pair = NativePtySystem::default().openpty(PtySize {
-                    rows: 24, cols: width as u16, pixel_width: 0, pixel_height: 0,
-                }).unwrap();
+                let pair = NativePtySystem::default()
+                    .openpty(PtySize {
+                        rows: 24,
+                        cols: width as u16,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .unwrap();
                 let mut command = CommandBuilder::new("/bin/sh");
                 command.args(["-c", "printf '%s' \"$1\"", "permission-capture", &prompt]);
                 let mut child = pair.slave.spawn_command(command).unwrap();
@@ -349,16 +395,70 @@ mod tests {
                 let mut terminal = vt100::Parser::new(24, width as u16, 0);
                 terminal.process(&bytes);
                 let grid = terminal.screen().contents();
-                assert!(grid.lines().any(|row| row.starts_with("Allow write ") && row.ends_with(&format!("{target}?"))), "{width}: {grid}");
+                assert!(
+                    grid.lines().any(|row| row.starts_with("Allow write ")
+                        && row.ends_with(&format!("{target}?"))),
+                    "{width}: {grid}"
+                );
                 for key in ["[y]", "[n]", "[e]", "[d]"] {
                     assert!(grid.contains(key), "{grid}");
                 }
-                assert!(prompt.lines().all(|row| unicode_width::UnicodeWidthStr::width(row) <= width));
+                assert!(
+                    prompt
+                        .lines()
+                        .all(|row| unicode_width::UnicodeWidthStr::width(row) <= width)
+                );
                 let detail = details_prompt(&request, crate::render::Capabilities::plain());
                 assert!(detail.contains(&path.to_string()));
                 println!("permission width={width} grid={grid:?}");
             }
         }
+    }
+
+    // Catches: long exec arguments hide the executable or alter the settled decision.
+    #[test]
+    fn permission_width_preserves_exec_and_settled_decisions() {
+        use ego_core::config::Mode;
+        use ego_core::permit::{CanonPath, EnvPolicy, Escalation, OpName, SpawnSpec};
+        let argument = "long argument ".repeat(40);
+        let spec = SpawnSpec::new(
+            vec!["/bin/echo".into(), argument.clone().into()],
+            None,
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let request = PermissionRequest::new(
+            "exec",
+            vec![Op::Spawn { spec }],
+            Escalation::ModeAsks {
+                mode: Mode::Default,
+                op: OpName::Spawn,
+                path: CanonPath::new("/workspace"),
+            },
+        );
+        for width in [80, 120, 200] {
+            let prompt = compact_prompt(&request, width);
+            assert!(prompt.contains("Allow run /bin/echo"), "{prompt}");
+            for key in ["[y]", "[n]", "[e]", "[d]"] {
+                assert!(prompt.contains(key));
+            }
+            assert!(
+                prompt
+                    .lines()
+                    .all(|line| unicode_width::UnicodeWidthStr::width(line) <= width)
+            );
+        }
+        let details = details_prompt(&request, crate::render::Capabilities::plain());
+        assert!(details.contains(&argument));
+        assert!(
+            settled_receipt(&request, &PermissionDecision::Allow, None)
+                .starts_with("Allowed run /bin/echo")
+        );
+        assert!(
+            settled_receipt(&request, &PermissionDecision::Deny, None)
+                .starts_with("Denied run /bin/echo")
+        );
     }
 
     fn risk(class: RiskClass, reasons: Vec<RiskReason>) -> RiskAssessment {
