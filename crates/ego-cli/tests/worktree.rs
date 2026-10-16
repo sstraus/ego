@@ -188,9 +188,7 @@ fn submodule_source_keeps_its_own_common_directory() {
         ],
     );
     git(&root, &["commit", "-qm", "submodule"]);
-    let (checkout, text) = repository
-        .create(&root.join("module"), "feat/child")
-        .unwrap();
+    let (checkout, text) = create(&repository, &root.join("module"), "feat/child").unwrap();
     let receipt: Receipt = serde_json::from_str(&text).unwrap();
     assert_eq!(receipt.common_dir, root.join(".git/modules/module"));
     assert_eq!(
