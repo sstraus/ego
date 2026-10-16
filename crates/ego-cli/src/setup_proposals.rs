@@ -246,6 +246,64 @@ fn action_resolution(effective: &Effective, workspace: &CanonPath, call: Prepare
     }
 }
 
+fn preserves_reach_policy(
+    effective: &Effective,
+    after: &Effective,
+    execution: bool,
+    change_exec: bool,
+) -> bool {
+    !(after.permissions != effective.permissions
+        || after.mode != effective.mode
+        || after.sandbox != effective.sandbox
+        || after.network != effective.network
+        || (!execution && !change_exec && after.exec_paths != effective.exec_paths)
+        || !effective
+            .exec_paths
+            .iter()
+            .all(|path| after.exec_paths.contains(path)))
+        && effective.roots.iter().all(|root| {
+            after.roots.iter().any(|new| {
+                new.path == root.path
+                    && (new.access == root.access || new.access == RootAccess::ReadWrite)
+            })
+        })
+}
+
+fn preserves_action_policy(
+    effective: &Effective,
+    after: &Effective,
+    workspace: &CanonPath,
+    path: &Path,
+    no_reach_items: bool,
+    call: PreparedCall,
+) -> bool {
+    !(after.mode != effective.mode
+        || after.sandbox != effective.sandbox
+        || after.network != effective.network
+        || after.judge != effective.judge
+        || after.roots != effective.roots && no_reach_items
+        || !effective.permissions.deny.iter().all(|entry| {
+            after
+                .permissions
+                .deny
+                .iter()
+                .any(|new| new.rule() == entry.rule())
+        })
+        || !effective.permissions.allow.iter().all(|entry| {
+            after
+                .permissions
+                .allow
+                .iter()
+                .any(|new| new.rule() == entry.rule())
+        })
+        || !exec_admitted(after, workspace, &CanonPath::new(path))
+        || !effective
+            .exec_paths
+            .iter()
+            .all(|path| after.exec_paths.contains(path))
+        || action_resolution(after, workspace, call) != 1)
+}
+
 /// No model-selected TOML, rule wildcard, mode, sandbox, trust or network change.
 /// Workspace writes are policy-only; other backend/consumer gaps remain explicit.
 pub(crate) fn preview(
@@ -422,24 +480,7 @@ pub(crate) fn preview(
             continue;
         };
         // Higher layers, explicit deny, floors and ceilings cannot be lifted.
-        if after.permissions != effective.permissions
-            || after.mode != effective.mode
-            || after.sandbox != effective.sandbox
-            || after.network != effective.network
-            || (!execution && !change_exec && after.exec_paths != effective.exec_paths)
-            || !effective
-                .exec_paths
-                .iter()
-                .all(|path| after.exec_paths.contains(path))
-        {
-            continue;
-        }
-        if !effective.roots.iter().all(|root| {
-            after.roots.iter().any(|new| {
-                new.path == root.path
-                    && (new.access == root.access || new.access == RootAccess::ReadWrite)
-            })
-        }) {
+        if !preserves_reach_policy(effective, &after, execution, change_exec) {
             continue;
         }
         if !(if execution {
@@ -554,32 +595,7 @@ pub(crate) fn preview(
         let Ok(after) = resolve_candidate(layers, batch.candidate(), workspace) else {
             continue;
         };
-        if after.mode != effective.mode
-            || after.sandbox != effective.sandbox
-            || after.network != effective.network
-            || after.judge != effective.judge
-            || after.roots != effective.roots && items.is_empty()
-            || !effective.permissions.deny.iter().all(|entry| {
-                after
-                    .permissions
-                    .deny
-                    .iter()
-                    .any(|new| new.rule() == entry.rule())
-            })
-            || !effective.permissions.allow.iter().all(|entry| {
-                after
-                    .permissions
-                    .allow
-                    .iter()
-                    .any(|new| new.rule() == entry.rule())
-            })
-            || !exec_admitted(&after, workspace, &CanonPath::new(path))
-            || !effective
-                .exec_paths
-                .iter()
-                .all(|path| after.exec_paths.contains(path))
-            || action_resolution(&after, workspace, call) != 1
-        {
+        if !preserves_action_policy(effective, &after, workspace, path, items.is_empty(), call) {
             continue;
         }
         let identity = action_identity(probe)?;
