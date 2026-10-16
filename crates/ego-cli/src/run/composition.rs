@@ -141,7 +141,7 @@ pub(super) fn instructions(
             Some(path) => Some(explicit(path, cwd)?),
             None => None,
         };
-        let selection = Selection::of(effective.posture, named);
+        let selection = Selection::of(effective.posture, named.clone());
         let discovery_root = if matches!(selection, Selection::Disabled) {
             root.to_path_buf()
         } else if let Some(home) = std::env::var_os("HOME") {
@@ -170,7 +170,7 @@ pub(super) fn instructions(
         let surface = if matches!(selection, Selection::Disabled) {
             ego_core::config::ExecutableSurface::default()
         } else {
-            crate::trust::executable_surface(root)
+            crate::trust::executable_surface_selected(root, named.as_deref())
         };
         let approved = !matches!(selection, Selection::Disabled)
             && crate::trust::remembered_decision(

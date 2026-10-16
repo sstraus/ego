@@ -58,13 +58,24 @@ pub(super) fn run_trust(
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
 ) -> Trust {
-    match driver {
-        Driver::Once if !args.bare => {
-            crate::trust::resolve_headless(root, home, diagnostics, args.trust_workspace)
+    let selected = args.instructions.as_ref().map(|path| {
+        if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
         }
-        Driver::Once => Trust::Untrusted,
-        Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => {
-            crate::trust::resolve(root, home, diagnostics, args.trust_workspace, |context| {
+    });
+    if args.bare {
+        return Trust::Untrusted;
+    }
+    crate::trust::resolve_selected(
+        root,
+        home,
+        diagnostics,
+        args.trust_workspace,
+        selected.as_deref(),
+        |context| match driver {
+            Driver::Interactive { seat, .. } if seat.has_human() => {
                 let question_context = if args.quiet {
                     context.to_string()
                 } else {
@@ -74,11 +85,11 @@ pub(super) fn run_trust(
                         args.model.as_deref().unwrap_or("model pending")
                     )
                 };
-                seat.trust(root, &question_context)
-            })
-        }
-        Driver::Interactive { .. } => Trust::Untrusted,
-    }
+                Some(seat.trust(root, &question_context))
+            }
+            _ => None,
+        },
+    )
 }
 
 /// The seat, as the run loop needs it.
