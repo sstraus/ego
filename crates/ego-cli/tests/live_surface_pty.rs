@@ -9369,3 +9369,51 @@ fn typed_clear_reports_its_scope() {
         );
     }
 }
+
+/// Catches: the default tools summary is followed by per-tool diagnostic notices.
+#[test]
+fn followup_tools_default_has_no_per_tool_notices() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let places = support::Places::new();
+        places.file("AGENTS.md", "# tools fixture\n");
+        let ego = places
+            .ego(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--yolo",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/tools\r").unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        let notices = visible
+            .lines()
+            .filter(|line| line.contains("εgo: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.len(),
+            1,
+            "only the summary notice is allowed: {visible}"
+        );
+        assert!(
+            notices[0].contains("/tools details for the full list"),
+            "{visible}"
+        );
+        assert!(stub.generations().is_empty());
+    }
+}

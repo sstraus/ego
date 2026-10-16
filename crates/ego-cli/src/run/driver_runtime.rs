@@ -2610,8 +2610,10 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 "tools: {} admitted; /tools details for the full list",
                 tools.len()
             ));
-            for name in tools.iter().take(if details { usize::MAX } else { 6 }) {
-                diagnostics.note(name);
+            if details {
+                for name in &tools {
+                    diagnostics.note(name);
+                }
             }
             Ok(CommandOutcome::Continue)
         }
