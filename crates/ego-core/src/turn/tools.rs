@@ -94,6 +94,7 @@ pub(crate) enum PreparedToolCall {
         objective: String,
     },
     Task(super::task::TaskRequest),
+    Plan(crate::plan::PlanUpdate),
     Effect {
         tool: std::sync::Arc<dyn Tool>,
         call: PreparedCall,
@@ -428,6 +429,7 @@ impl<'a> Tools<'a> {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
                 RegisteredTool::Context
                 | RegisteredTool::Goal
+                | RegisteredTool::Plan
                 | RegisteredTool::Effect(_)
                 | RegisteredTool::HumanInput(_)
                 | RegisteredTool::Task
@@ -623,6 +625,9 @@ impl<'a> Tools<'a> {
             RegisteredTool::Context => {
                 crate::context::ContextRequest::parse(params).map(PreparedToolCall::Context)
             }
+            RegisteredTool::Plan => serde_json::from_value(params)
+                .map(PreparedToolCall::Plan)
+                .map_err(|error| error.to_string()),
             RegisteredTool::Goal => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]

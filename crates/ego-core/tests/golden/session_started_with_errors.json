@@ -1,1 +1,1 @@
-{"type":"session_started","v":14,"session":"00000000-0000-0000-0000-000000000001","capabilities":["mcp"],"mcp_errors":["server 'foo' failed to start"],"hook_errors":["hook 'pre-commit' malformed"]}
+{"type":"session_started","v":15,"session":"00000000-0000-0000-0000-000000000001","capabilities":["mcp"],"mcp_errors":["server 'foo' failed to start"],"hook_errors":["hook 'pre-commit' malformed"]}

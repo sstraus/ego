@@ -269,6 +269,8 @@ pub struct ToolTiming {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
+    /// An authoritative plan replacement or step progress transition.
+    PlanUpdated { update: crate::plan::PlanUpdate },
     /// Operator-facing metadata. The session identity and lineage do not change.
     SessionTitleChanged { title: Option<String> },
     /// Durable soft deletion. Storage remains available to lineage replay.
@@ -821,6 +823,7 @@ impl EventKind {
             EventKind::GoalAllowanceInherited { .. } => "goal_allowance_inherited",
             EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
             EventKind::GoalUpdated { .. } => "goal_updated",
+            EventKind::PlanUpdated { .. } => "plan_updated",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
