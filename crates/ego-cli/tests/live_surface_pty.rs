@@ -2603,7 +2603,25 @@ fn until_from(
 
 #[cfg(not(windows))]
 fn rendered_prompt_count(output: &[u8]) -> usize {
-    support::ready_prompt_count_with_status(output)
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+    output
+        .windows(HIDE_CURSOR.len())
+        .enumerate()
+        .filter(|(_, window)| *window == HIDE_CURSOR)
+        .filter(|(start, _)| {
+            let frame = &output[*start..];
+            let Some(end) = frame
+                .windows(SHOW_CURSOR.len())
+                .position(|window| window == SHOW_CURSOR)
+            else {
+                return false;
+            };
+            let frame = &frame[..end + SHOW_CURSOR.len()];
+            !normalized(frame).contains("Esc to interrupt")
+                && support::ready_prompt_count_with_status(frame) > 0
+        })
+        .count()
 }
 
 #[cfg(windows)]
