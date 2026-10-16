@@ -64,7 +64,7 @@ fn notice_contract(notice: &str, width: u16, busy: bool) {
         "yolo",
     ]);
     ego.file("AGENTS.md", "# background notice fixture\n");
-    let (session, mut input, reader) = PtySession::start(&ego, 24, width, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, width, Some((24, width)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -110,6 +110,14 @@ fn notice_contract(notice: &str, width: u16, busy: bool) {
         .filter(|row| row.contains("background task done"))
         .collect();
     assert_eq!(matching.len(), 1, "one notice row: {capture}");
+    assert!(
+        unicode_width::UnicodeWidthStr::width(matching[0].as_str()) < usize::from(width),
+        "notice fits in terminal cells: {capture}"
+    );
+    assert!(
+        capture.contains("ego "),
+        "notice did not flood prior transcript: {capture}"
+    );
     assert!(
         !matching[0].trim_start().starts_with('>'),
         "notice is not composer input: {capture}"
