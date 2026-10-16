@@ -39,7 +39,7 @@ pub(crate) fn replay(
 }
 
 fn message(output: &dyn TextOutput, text: &str, capabilities: Capabilities) {
-    let mut answer = Answer::new(capabilities);
+    let mut answer = Answer::new(capabilities.with_current_width());
     let mut rendered = answer.push(text);
     rendered.push_str(&answer.finish());
     output.begin_block();

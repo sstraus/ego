@@ -1,3 +1,5 @@
+#[path = "live_surface_pty/answer_wrap.rs"]
+mod answer_wrap;
 #[path = "live_surface_pty/background_notice.rs"]
 mod background_notice;
 #[path = "live_surface_pty/blank_prompt.rs"]

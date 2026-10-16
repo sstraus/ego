@@ -45,7 +45,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line> {
             }
             Event::SoftBreak | Event::HardBreak if paragraph => {
                 let next_host = host_marker_line(&source[range.end..]);
-                if renderer.host_line || next_host {
+                if renderer.host_line || next_host || source[range.end..].starts_with("💬 ") {
                     renderer.flush();
                 } else {
                     renderer.event(event);
@@ -193,7 +193,14 @@ impl Renderer {
             return;
         }
         let marker = self.marker.take();
-        for (position, mut row) in taken.wrap(body).into_iter().enumerate() {
+        // TUIC keeps hard-wrapped answer rows in the answer region when they
+        // carry a hanging indent. The overlay itself consumes no cells.
+        let rows = if taken.text().starts_with("💬 ") {
+            taken.wrap_hanging(body, super::line::cells("💬 "))
+        } else {
+            taken.wrap(body)
+        };
+        for (position, mut row) in rows.into_iter().enumerate() {
             let mut line = prefix.clone();
             match (&marker, position) {
                 // The marker goes on the first row; continuation rows carry
@@ -596,6 +603,24 @@ mod tests {
             text("not intent: one\ncontinuation", 80),
             ["not intent: one continuation"]
         );
+    }
+
+    // Catches: adjacent answer markers merge or their styled tails overflow.
+    #[test]
+    fn marked_answers_keep_boundaries_and_word_wrapped_styled_tails() {
+        let source = format!(
+            "💬 **{}**\n💬 second answer",
+            "accented perché l’eseguibile ".repeat(10)
+        );
+        let rows = text(&source, 80);
+        let second = rows
+            .iter()
+            .position(|row| row == "💬 second answer")
+            .unwrap();
+        assert!(second > 1);
+        assert!(rows[1..second].iter().all(|row| row.starts_with("   ")));
+        assert!(rows.iter().all(|row| super::super::line::cells(row) <= 80));
+        assert!(bytes(&source, 80).contains("\x1b[1m"));
     }
 
     /// The two rules the capture settles. Not preferences: a paragraph where
