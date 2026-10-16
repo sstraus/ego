@@ -2461,6 +2461,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         self.resume_turn(continuation.turn).await
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
     async fn resume_foreign_question(
         &mut self,
         settlement: ForeignQuestionSettlement,
