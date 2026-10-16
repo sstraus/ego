@@ -70,7 +70,7 @@ impl Sender {
             )?,
             header("content-type", b"application/json".to_vec())?,
         ];
-        let request = HttpRequest::new(method, path_and_query(&self.url), headers, body)
+        let request = HttpRequest::new(method, &path_and_query(&self.url), headers, body)
             .map_err(|_| protocol("invalid legacy SSE HTTP request"))?;
         let call = self.profile.prepare(
             &self.server,
