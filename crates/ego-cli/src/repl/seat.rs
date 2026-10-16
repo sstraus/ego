@@ -423,6 +423,7 @@ struct SurfaceStatus {
     cursor_selectors: bool,
     mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
+    diagnostics: Option<std::sync::Weak<dyn crate::output::Diagnostics>>,
 }
 
 impl SurfaceStatus {
@@ -472,6 +473,7 @@ impl Default for SurfaceStatus {
             cursor_selectors: false,
             mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
+            diagnostics: None,
         }
     }
 }
@@ -1293,6 +1295,17 @@ impl Seat {
         ExitCounts {
             drafts: status.drafts,
             accepted: status.queue.pending_steers + status.queue.queued,
+        }
+    }
+
+    /// Let local output actions run without waiting for the turn coordinator.
+    /// A weak reference avoids a cycle through the output's shared surface status.
+    pub(crate) fn install_diagnostics(
+        &self,
+        diagnostics: std::sync::Weak<dyn crate::output::Diagnostics>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status.lock().expect("surface status lock").diagnostics = Some(diagnostics);
         }
     }
 

@@ -787,7 +787,15 @@ pub(super) fn apply_surface_effect(
             );
         }
         SurfaceActionEffect::Expand => {
-            return Some(Line::HostCommand(HostCommand::Action(ActionId::Expand)));
+            let diagnostics = status
+                .lock()
+                .expect("surface status lock")
+                .diagnostics
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade);
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.expand_last_tool();
+            }
         }
         SurfaceActionEffect::Help => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Help)));
