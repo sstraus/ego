@@ -989,6 +989,55 @@ async fn stage_image_path(
     seat.set_image_chips(paste_chips(staged_images));
 }
 
+fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String {
+    let label = match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_string(),
+        Some(relative) => format!("~/{}", relative.display()),
+        None => path.display().to_string(),
+    };
+    let label = ego_core::permit::terminal_safe(&label);
+    if crate::render::line::Line::plain(&label).width() <= width {
+        return label;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    // Keep complete words/path segments, even when a single segment is wider
+    // than the row. The full path remains in the setup report.
+    let boundary = label
+        .char_indices()
+        .filter(|(_, ch)| ch.is_whitespace() || *ch == '/' || *ch == '\\')
+        .map(|(index, ch)| index + ch.len_utf8())
+        .take_while(|end| crate::render::line::Line::plain(&label[..*end]).width() < width)
+        .last()
+        .unwrap_or(0);
+    format!("{}…", label[..boundary].trim_end())
+}
+
+#[cfg(test)]
+mod setup_picker_label_tests {
+    use super::*;
+
+    /// Catches: shortening a home path hides a sibling prefix or breaks a segment.
+    #[test]
+    fn home_labels_preserve_path_boundaries_and_terminal_cells() {
+        let home = Some(Path::new("/home/operator"));
+        for (path, width, expected) in [
+            ("/home/operator/.cargo/registry", 70, "~/.cargo/registry"),
+            ("/home/operator", 70, "~"),
+            ("/home/operator-other/file", 70, "/home/operator-other/file"),
+            ("/home/operator/.cargo/registry", 12, "~/.cargo/…"),
+            ("/home/operator/indivisiblesegment", 8, "~/…"),
+            ("/workspace/日本語/segment", 19, "/workspace/日本語/…"),
+            ("indivisiblesegment", 8, "…"),
+        ] {
+            let label = setup_picker_label(Path::new(path), home, width);
+            assert_eq!(label, expected);
+            assert!(crate::render::line::Line::plain(label).width() <= width);
+        }
+    }
+}
+
 async fn run_interactive_setup(
     prompt: String,
     selection: &model::GenerationSelection,
@@ -1026,16 +1075,16 @@ async fn run_interactive_setup(
             QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
         };
         let status = status.as_ref().filter(|status| status.human)?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        // The selector owns the ordinal. Reserve its widest prefix and one
+        // terminal cell so the terminal never wraps an item itself.
+        let label_width = status.seat.width().saturating_sub(10);
         let options = findings
             .iter()
             .map(|finding| {
                 QuestionOption::new(
                     finding.id.to_string(),
-                    ego_core::permit::terminal_safe(&format!(
-                        "{}: {}",
-                        finding.id,
-                        finding.requested.display()
-                    )),
+                    setup_picker_label(&finding.requested, home.as_deref(), label_width),
                 )
             })
             .collect::<Vec<_>>();
@@ -1043,7 +1092,7 @@ async fn run_interactive_setup(
             return Some(Vec::new());
         }
         let request = QuestionRequest::new(
-            "Select setup proposal items; only selected items enter the preview. Final confirmation still required.",
+            "Select setup proposal items; only selected items enter the preview.\nFinal confirmation still required; Esc cancels without changes.",
             QuestionMode::Multiple,
             options,
             false,

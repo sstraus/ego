@@ -228,3 +228,74 @@ fn interactive_setup_explains_session_model_vs_interpreter_model() {
         assert!(capture.contains("deterministic inventory"), "{capture}");
     }
 }
+
+/// Catches: setup repeats finding IDs beside row numbers and overflows with absolute home paths.
+#[test]
+fn followup_setup_rows_have_one_number_and_bounded_home_paths() {
+    let mut captures = Vec::new();
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let places = support::Places::new();
+        std::fs::write(
+            places.home_path().join("config.toml"),
+            "sandbox='off'\nroots=[]\n",
+        )
+        .unwrap();
+        let ego = places
+            .ego(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--yolo",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/setup inspect task\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Up/Down moves");
+        drain_until_quiet(&reader, &mut output);
+        captures.push((
+            columns,
+            normalized(&output[start..]),
+            places.home_path().display().to_string(),
+        ));
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+        until_prompt_from(&reader, &mut output, start);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        assert_eq!(
+            std::fs::read_to_string(places.home_path().join("config.toml")).unwrap(),
+            "sandbox='off'\nroots=[]\n"
+        );
+        assert!(stub.generations().is_empty());
+    }
+    for (columns, capture, home) in captures {
+        let rows = capture
+            .lines()
+            .filter(|line| line.contains("[ ]"))
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty(), "{capture}");
+        for row in rows {
+            let label = row.split_once(". ").expect("row number").1;
+            assert!(
+                !label.chars().next().unwrap().is_ascii_digit(),
+                "duplicate ID: {row}"
+            );
+            assert!(!label.contains(&home), "absolute home path: {row}");
+            assert!(
+                row.trim_start_matches('\r').chars().count() < usize::from(columns),
+                "row overflows terminal: {row}"
+            );
+        }
+    }
+}
