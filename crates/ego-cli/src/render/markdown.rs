@@ -31,10 +31,43 @@ use super::table::{Align, Table};
 /// pipe, so a redirected run produces the same bytes from any window.
 pub fn render(source: &str, width: usize) -> Vec<Line> {
     let mut renderer = Renderer::new(width);
-    for event in Parser::new_ext(source, options()) {
-        renderer.event(event);
+    let mut paragraph = false;
+    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+        let top_level = renderer.lists.is_empty()
+            && renderer.quote == 0
+            && renderer.code.is_none()
+            && renderer.table.is_none();
+        match event {
+            Event::Start(Tag::Paragraph) if top_level => {
+                paragraph = true;
+                renderer.event(event);
+                renderer.host_line = host_marker_line(&source[range.start..]);
+            }
+            Event::SoftBreak | Event::HardBreak if paragraph => {
+                let next_host = host_marker_line(&source[range.end..]);
+                if renderer.host_line || next_host {
+                    renderer.flush();
+                } else {
+                    renderer.event(event);
+                }
+                renderer.host_line = next_host;
+            }
+            Event::End(TagEnd::Paragraph) => {
+                renderer.event(event);
+                paragraph = false;
+            }
+            _ => renderer.event(event),
+        }
     }
     renderer.finish()
+}
+
+/// Host protocol markers are column-zero source lines, not Markdown containers.
+fn host_marker_line(source: &str) -> bool {
+    let line = source.lines().next().unwrap_or_default();
+    line.starts_with("intent: ")
+        || line.starts_with("suggest: ")
+        || (line.starts_with("TUICommander v") && line.ends_with(" is connected."))
 }
 
 /// The dialect ego reads, in one place.
@@ -81,6 +114,8 @@ struct Renderer {
     /// The list marker owed to the first row of the item being built. Held
     /// out of `current` so it is not measured twice — see [`Renderer::flush`].
     marker: Option<Line>,
+    /// Host markers must reach the terminal as one logical line so it owns wrapping.
+    host_line: bool,
 }
 
 #[derive(Default)]
@@ -106,6 +141,7 @@ impl Renderer {
             table: None,
             link: None,
             marker: None,
+            host_line: false,
         }
     }
 
@@ -152,6 +188,10 @@ impl Renderer {
             .saturating_sub(self.indent + prefix.width())
             .max(8);
         let taken = std::mem::take(&mut self.current);
+        if std::mem::take(&mut self.host_line) {
+            self.out.push(taken);
+            return;
+        }
         let marker = self.marker.take();
         for (position, mut row) in taken.wrap(body).into_iter().enumerate() {
             let mut line = prefix.clone();
@@ -501,6 +541,61 @@ mod tests {
 
     fn bytes(source: &str, width: usize) -> String {
         crate::render::block(&render(source, width), Depth::TrueColor)
+    }
+
+    // Catches: CommonMark merges adjacent host protocol lines into one paragraph row.
+    #[test]
+    fn rendered_host_markers_keep_line_boundaries() {
+        for width in [80, 120, 200] {
+            assert_eq!(
+                text(
+                    "TUICommander v1.8.0 is connected.\nintent: Checking output (Output check)\nordinary prose\ncontinues here\nsuggest: [ A | B | C ]",
+                    width
+                ),
+                [
+                    "TUICommander v1.8.0 is connected.",
+                    "intent: Checking output (Output check)",
+                    "ordinary prose continues here",
+                    "suggest: [ A | B | C ]"
+                ]
+            );
+        }
+    }
+
+    // Catches: explicit renderer newlines prevent the host joining a marker's soft-wrapped tail.
+    #[test]
+    fn rendered_host_marker_lines_soft_wrap() {
+        for width in [80, 120, 200] {
+            for prefix in ["intent: ", "suggest: [ "] {
+                let source = format!("{prefix}{}", "long marker text ".repeat(30));
+                assert_eq!(text(&source, width), [source.trim_end()]);
+            }
+        }
+    }
+
+    // Catches: marker recognition changes Markdown inside containers or treats marker-like prose as protocol.
+    #[test]
+    fn host_markers_do_not_change_commonmark_containers_or_breaks() {
+        assert_eq!(
+            text("one\ntwo  \nthree\n\nfour", 80),
+            ["one two", "three", "", "four"]
+        );
+        assert_eq!(
+            text("- intent: one\n  continuation\n- two", 80),
+            ["• intent: one continuation", "• two"]
+        );
+        assert_eq!(
+            text("> intent: one\n> continuation", 80),
+            ["▌ intent: one continuation"]
+        );
+        assert_eq!(
+            text("```\nintent: one\ncontinuation\n```", 80),
+            ["  intent: one", "  continuation"]
+        );
+        assert_eq!(
+            text("not intent: one\ncontinuation", 80),
+            ["not intent: one continuation"]
+        );
     }
 
     /// The two rules the capture settles. Not preferences: a paragraph where

@@ -217,6 +217,41 @@ mod tests {
         );
     }
 
+    // Catches: replay merges persisted marker lines or hard-wraps their tails.
+    #[test]
+    fn rendered_host_markers_survive_replay() {
+        let text = format!(
+            "TUICommander v1.8.0 is connected.\nintent: {} (Replay check)\nsuggest: [ A | B | C ]",
+            "long replay marker ".repeat(30)
+        );
+        for width in [80, 120, 200] {
+            let output = Recorded::default();
+            let events = [DomainEvent {
+                env: Envelope {
+                    seq: Seq::ZERO.next(),
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: Some(ItemId::new()),
+                    parent: None,
+                    ts: Timestamp::from_millis(1),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::AssistantMessage { text: text.clone() },
+            }];
+            render(
+                &events,
+                &output,
+                Capabilities {
+                    width,
+                    depth: super::super::Depth::TrueColor,
+                    osc: super::super::OscProfile::Standard,
+                    ..Capabilities::plain()
+                },
+            );
+            assert_eq!(*output.0.lock().unwrap(), format!("{text}\n"));
+        }
+    }
+
     #[derive(Default)]
     struct Recorded(Mutex<String>);
     impl Diagnostics for Recorded {
