@@ -263,19 +263,7 @@ mod tests {
         use ego_core::turn::CancelToken;
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
         use std::io::Read;
-        for width in [80, 120, 200] {
-            let (sender, receiver) = crossbeam::channel::unbounded();
-            let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
-            output.line("> first");
-            output.answer("Prose\n");
-            output.tool_row("✓ read first\n  tail one\n  tail two", String::new());
-            output.tool_row("✗ read second", String::new());
-            output.answer("Done\n");
-            output.line("> second");
-            output.answer("• item one\n• item two\n\n  code one\n  code two\n");
-            output.finish();
-            let live = receiver.try_iter().collect::<String>();
-            let expected = "> first\n\nProse\n\n✓ read first\n  tail one\n  tail two\n\n✗ read second\n\nDone\n\n> second\n\n• item one\n• item two\n\n  code one\n  code two";
+        fn capture(text: &str, width: usize) -> String {
             let pair = NativePtySystem::default()
                 .openpty(PtySize {
                     rows: 40,
@@ -285,7 +273,7 @@ mod tests {
                 })
                 .unwrap();
             let mut command = CommandBuilder::new("/bin/sh");
-            command.args(["-c", "printf '%s' \"$1\"", "rhythm-capture", &live]);
+            command.args(["-c", "printf '%s' \"$1\"", "rhythm-capture", text]);
             let mut child = pair.slave.spawn_command(command).unwrap();
             drop(pair.slave);
             let mut bytes = Vec::new();
@@ -302,11 +290,24 @@ mod tests {
             assert!(child.wait().unwrap().success());
             let mut terminal = vt100::Parser::new(40, width as u16, 0);
             terminal.process(&bytes);
-            assert_eq!(terminal.screen().contents(), expected, "width={width}");
-            println!(
-                "rhythm live width={width} grid={:?}",
-                terminal.screen().contents()
-            );
+            terminal.screen().contents()
+        }
+        for width in [80, 120, 200] {
+            let (sender, receiver) = crossbeam::channel::unbounded();
+            let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+            output.line("> first");
+            output.answer("Prose\n");
+            output.tool_row("✓ read first\n  tail one\n  tail two", String::new());
+            output.tool_row("✗ read second", String::new());
+            output.answer("Done\n");
+            output.line("> second");
+            output.answer("• item one\n• item two\n\n  code one\n  code two\n");
+            output.finish();
+            let live = receiver.try_iter().collect::<String>();
+            let expected = "> first\n\nProse\n\n✓ read first\n  tail one\n  tail two\n\n✗ read second\n\nDone\n\n> second\n\n• item one\n• item two\n\n  code one\n  code two";
+            let grid = capture(&live, width);
+            assert_eq!(grid, expected, "width={width}");
+            println!("rhythm live width={width} grid={grid:?}");
 
             let (sender, receiver) = crossbeam::channel::unbounded();
             let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
@@ -377,16 +378,12 @@ mod tests {
             );
             output.finish();
             let replayed = receiver.try_iter().collect::<String>();
-            let mut terminal = vt100::Parser::new(40, width as u16, 0);
-            terminal.process(replayed.replace('\n', "\r\n").as_bytes());
+            let grid = capture(&replayed, width);
             assert_eq!(
-                terminal.screen().contents(),
+                grid,
                 "> first\n\nProse\n\n✓ read first · 1 line · duration unavailable\n\nDone\n\n> second\n\nFinal"
             );
-            println!(
-                "rhythm replay width={width} grid={:?}",
-                terminal.screen().contents()
-            );
+            println!("rhythm replay width={width} grid={grid:?}");
         }
     }
 
