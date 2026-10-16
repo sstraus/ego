@@ -271,8 +271,10 @@ Compact a session into its deterministic successor.
 
 Export a session locally or as a structurally sanitized bundle.
 
+- `--after <SEQ>` — Only emit transcript events after this session-local sequence
 - `-C <DIR>` — Run as if started in DIR
 - `--file <PATH>` — (undocumented)
+- `--follow` — Follow committed local transcript events until stopped
 - `--format <FORMAT>` — (undocumented)
 - `-h, --help` — Print help
 - `--sanitize` — (undocumented)

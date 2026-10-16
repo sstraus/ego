@@ -4,6 +4,8 @@
 //! See `ARCHITECTURE.md` §1 (four serialisations, one semantic model) and
 //! `CLI.md` §4.2. A new internal event never becomes public automatically.
 
+pub mod transcript;
+
 use serde::{Deserialize, Serialize};
 
 use crate::budget::{Ledger, Metering};

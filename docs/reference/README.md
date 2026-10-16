@@ -12,7 +12,7 @@ name does not prove a provider credential or confinement backend is available.
 | `ego ls` | List this workspace's sessions; `--all` spans the store |
 | `ego fork SOURCE` | Branch at the tip or after a completed message with `--at ITEM_ID` |
 | `ego compact SOURCE` | Create a checkpoint successor; `--request-id UUID` provides retry identity |
-| `ego export SOURCE` | Write local or structurally sanitized `md`, `json`, or `jsonl` |
+| `ego export SOURCE` | Write local `md`, `json`, `jsonl`, or [followable transcript](transcript.md); `--sanitize` writes a structural bundle |
 | `ego usage` | Report context, tokens, roles, and monetary state |
 | `ego models` | Inspect model facts, source, freshness, and availability |
 | `ego auth login\|logout\|status` | Manage a provider's subscription credential |

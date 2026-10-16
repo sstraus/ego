@@ -241,11 +241,13 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (export)
 _arguments "${_arguments_options[@]}" : \
-'--format=[]:FORMAT:(md json jsonl)' \
+'--format=[]:FORMAT:(md json jsonl transcript)' \
+'--after=[Only emit transcript events after this session-local sequence]:SEQ:_default' \
 '--file=[]:PATH:_files' \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--sanitize[]' \
+'--follow[Follow committed local transcript events until stopped]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':source:_default' \
