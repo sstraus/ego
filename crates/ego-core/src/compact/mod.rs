@@ -651,6 +651,7 @@ mod transition_contract_tests {
             source_seq: Seq::ZERO,
             checkpoint: checkpoint(),
             baseline: GenRequest {
+                web_search: None,
                 cache: None,
                 model: "model/compaction".to_owned(),
                 messages: Conversation::new(vec![Message::text(Role::User, "checkpoint")])

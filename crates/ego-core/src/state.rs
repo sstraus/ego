@@ -51,6 +51,9 @@ use crate::store::blob::BlobRef;
 /// (`SessionState::usage`): the same shape, folded by `add`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Provider-billed searches, separate from all token categories.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub web_search_requests: u64,
     /// Input tokens billed at the full rate — not served from cache.
     ///
     /// **The partition direction is this type's, not a wire's**, and the
@@ -126,6 +129,10 @@ pub struct Usage {
     pub reasoning_tokens: Option<u64>,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl Usage {
     /// A usage of nothing: every category counted, all of them zero.
     ///
@@ -161,6 +168,7 @@ impl Usage {
         cache_write_tokens: 0,
         cache_write_extended_tokens: 0,
         output_tokens: 0,
+        web_search_requests: 0,
         reasoning_tokens: Some(0),
     };
 
@@ -192,6 +200,9 @@ impl Usage {
     /// hostile log (this is data read back from disk, not just a
     /// theoretical edge).
     pub fn add(&mut self, delta: &Usage) {
+        self.web_search_requests = self
+            .web_search_requests
+            .saturating_add(delta.web_search_requests);
         self.uncached_input_tokens = self
             .uncached_input_tokens
             .saturating_add(delta.uncached_input_tokens);
@@ -438,6 +449,8 @@ pub struct ItemState {
     /// is why a reasoning item with text alone is not replayed.
     #[serde(default)]
     pub reasoning_state: Option<ReasoningState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_content: Option<ReasoningState>,
     pub completed: bool,
     pub ok: Option<bool>,
     /// The generation this item came out of, when the log says which.
@@ -474,6 +487,7 @@ impl ItemState {
             tool_result: None,
             tool_timing: None,
             reasoning_state: None,
+            provider_content: None,
             completed: false,
             ok: None,
             generation: None,
@@ -2019,6 +2033,17 @@ impl SessionState {
             // block that somehow reported twice reported a correction, not a
             // continuation. Concatenating two opaque blobs would produce a
             // third that no provider minted.
+            EventKind::ProviderContent { state, visible } => {
+                let kind = if *visible {
+                    ItemKind::Assistant
+                } else {
+                    ItemKind::Reasoning
+                };
+                if let Some(item) = self.item_mut(ev, kind) {
+                    item.provider_content = Some(state.clone());
+                    item.completed = true;
+                }
+            }
             EventKind::ReasoningState { state } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::Reasoning) {
                     item.reasoning_state = Some(state.clone());

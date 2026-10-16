@@ -119,6 +119,14 @@ fn conversation_from_inner(
     let mut next = 0;
     while let Some(item) = items.get(next).copied() {
         next += 1;
+        if let Some(state) = item.provider_content.clone() {
+            push(
+                &mut messages,
+                Role::Assistant,
+                ContentBlock::ProviderContent { state },
+            );
+            continue;
+        }
         match item.kind {
             ItemKind::GoalContinuation => {
                 push(&mut messages, Role::System, text_block(&item.text));

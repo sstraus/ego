@@ -636,6 +636,7 @@ mod reducer {
                         cache_write_tokens: u64::MAX,
                         cache_write_extended_tokens: u64::MAX,
                         output_tokens: u64::MAX,
+                        web_search_requests: 0,
                         reasoning_tokens: Some(u64::MAX),
                     },
                     cost_delta: CostDelta::Unknown(
@@ -1853,6 +1854,7 @@ mod reducer {
             cache_write_tokens: 60,
             cache_write_extended_tokens: 30,
             output_tokens: 45,
+            web_search_requests: 0,
             reasoning_tokens: Some(40),
         };
 
@@ -1880,6 +1882,7 @@ mod reducer {
         );
 
         let reported = Usage {
+            web_search_requests: 0,
             reasoning_tokens: Some(40),
             ..Usage::IDENTITY
         };
@@ -1892,6 +1895,7 @@ mod reducer {
         );
 
         let mut from_unknown = Usage {
+            web_search_requests: 0,
             reasoning_tokens: None,
             ..Usage::IDENTITY
         };

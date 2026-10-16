@@ -13,6 +13,7 @@ use serde_json::Value;
 
 fn request(model: &str, root: SessionId, live: &str) -> GenRequest {
     GenRequest {
+        web_search: None,
         model: model.to_owned(),
         cache: Some(PromptCache {
             session_id: root,

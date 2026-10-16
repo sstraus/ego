@@ -110,6 +110,8 @@ struct Sealed(());
 /// that genuinely does not charge for something reports `Some(zero)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PricingQuote {
+    /// Exact price per provider-side web search, when quoted.
+    pub web_search: Option<Amount>,
     /// Which pricing table this came from, recorded on every cost it
     /// produces so a past figure stays attributable.
     pub revision: PricingRevision,
@@ -138,6 +140,7 @@ impl PricingQuote {
             TokenCategory::CacheWrite => self.cache_write,
             TokenCategory::CacheWriteExtended => self.cache_write_extended,
             TokenCategory::Output => self.output,
+            TokenCategory::WebSearch => self.web_search,
         };
         rate.ok_or(UnknownCost::UnpricedCategory { category })
     }
@@ -158,6 +161,7 @@ impl PricingQuote {
     /// uncached generation exactly.
     pub fn price(&self, usage: &Usage) -> CostDelta {
         let lines = [
+            (TokenCategory::WebSearch, usage.web_search_requests),
             (TokenCategory::UncachedInput, usage.uncached_input_tokens),
             (TokenCategory::CacheRead, usage.cache_read_tokens),
             (TokenCategory::CacheWrite, usage.cache_write_tokens),
@@ -239,14 +243,28 @@ impl PricingQuote {
         caps: &ModelCapabilities,
     ) -> Result<Money, UnknownCost> {
         let (context, output) = ceilings(req, caps)?;
-        let input_bound = request_input_bound(req, context)?;
+        let input_bound = match req.web_search {
+            // Each search can re-enter the model with a full context.
+            Some(search) => context
+                .checked_mul(u64::from(search.max_requests.get()) + 1)
+                .ok_or(UnknownCost::Overflow)?,
+            None => request_input_bound(req, context)?,
+        };
         let context = Amount::new(u128::from(input_bound), 0).map_err(|_| UnknownCost::Overflow)?;
         let input = self
             .dearest_input_rate(req)?
             .checked_mul(&context)
             .ok_or(UnknownCost::Overflow)?;
         let output = self.line(TokenCategory::Output, output)?;
-        let total = input.checked_add(&output).ok_or(UnknownCost::Overflow)?;
+        let mut total = input.checked_add(&output).ok_or(UnknownCost::Overflow)?;
+        if let Some(search) = req.web_search {
+            total = total
+                .checked_add(&self.line(
+                    TokenCategory::WebSearch,
+                    u64::from(search.max_requests.get()),
+                )?)
+                .ok_or(UnknownCost::Overflow)?;
+        }
         Ok(Money::new(total, self.currency))
     }
 }
@@ -520,7 +538,9 @@ fn request_input_bound(req: &GenRequest, context: u64) -> Result<u64, UnknownCos
         message.content.iter().any(|block| {
             matches!(
                 block,
-                ContentBlock::Image { .. } | ContentBlock::Reasoning { .. }
+                ContentBlock::Image { .. }
+                    | ContentBlock::Reasoning { .. }
+                    | ContentBlock::ProviderContent { .. }
             )
         })
     }) {

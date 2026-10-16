@@ -97,6 +97,89 @@ mod turn {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 
+    // Catches: pause_turn completes early, loses opaque blocks, or duplicates rendered citations in replay.
+    #[test]
+    fn hosted_search_continuation_replays_private_blocks_and_projects_sources() {
+        let opaque = ReasoningState {
+            dialect: "test-provider".into(),
+            blob: "{  \"encrypted_content\": \"unchanged\"  }".into(),
+        };
+        let answer = ReasoningState {
+            dialect: "test-provider".into(),
+            blob: "{\"provider_answer\":\"original\"}".into(),
+        };
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::WebSearch {
+                    call_id: "server-1".into(),
+                    query: "query".into(),
+                },
+                AiEvent::ProviderContent {
+                    state: opaque.clone(),
+                    visible: false,
+                },
+                AiEvent::TextDelta {
+                    text: "cited answer".into(),
+                },
+                AiEvent::Citation {
+                    url: "https://example.com/source".into(),
+                    title: "Source".into(),
+                },
+                AiEvent::ProviderContent {
+                    state: answer.clone(),
+                    visible: true,
+                },
+                AiEvent::Stop(StopReason::Continue),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "finished".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let (reason, ok, state) = run(&fx, SessionState::default(), "search");
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 2);
+        let carried: Vec<_> = calls[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ProviderContent { state } => Some(state.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(carried, vec![opaque, answer]);
+        let rendered: String = state
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::Assistant)
+            .map(|item| item.text.as_str())
+            .collect();
+        assert!(rendered.contains("[Source](https://example.com/source)"));
+        assert!(fx.sink.events().iter().any(|event| matches!(event, PublicEvent::ItemDelta { text, .. } if text.contains("[Source](https://example.com/source)"))));
+        assert!(
+            fx.sink
+                .events()
+                .iter()
+                .all(|event| !serde_json::to_string(event)
+                    .unwrap()
+                    .contains("encrypted_content")),
+            "opaque provider state must not escape through the public/ACP event boundary"
+        );
+        assert!(!calls[1].messages.messages().iter().flat_map(|message| &message.content).any(|block| matches!(block, ContentBlock::Text { text } if text.contains("[Source]"))));
+        assert!(
+            fx.store
+                .events()
+                .iter()
+                .all(|event| !matches!(event.kind, EventKind::ToolCallStarted { .. }))
+        );
+    }
+
     // Catches: a process killed after GenerationStarted permanently blocks fresh turns.
     #[test]
     fn regression_case_resume_accepts_next_turn_without_replaying_interrupted_attempt() {
@@ -1440,6 +1523,7 @@ mod turn {
     fn quote() -> PricingQuote {
         let rate = |d: &str| Some(d.parse::<Amount>().expect("a valid test rate"));
         PricingQuote {
+            web_search: None,
             revision: PricingRevision("test-2026-08".to_string()),
             currency: CurrencyCode::new("USD").expect("USD is a valid code"),
             uncached_input: rate("0.000003"),
@@ -3005,6 +3089,7 @@ mod turn {
             cache_write_tokens: cache_write,
             cache_write_extended_tokens: 0,
             output_tokens: output,
+            web_search_requests: 0,
             reasoning_tokens: None,
         }
     }

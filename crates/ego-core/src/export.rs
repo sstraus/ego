@@ -896,7 +896,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.hidden_reasoning += 1;
             ExportEvent::ReasoningDelta
         }
-        EventKind::ReasoningState { state: _ } => {
+        EventKind::ReasoningState { state: _ } | EventKind::ProviderContent { .. } => {
             redactions.hidden_reasoning += 1;
             ExportEvent::ReasoningState
         }

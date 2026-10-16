@@ -80,6 +80,7 @@ fn supplied_capabilities() -> ego_core::generator::capabilities::ModelCapabiliti
 
 fn request(model: &str, tools: Vec<ToolDescriptor>) -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: model.to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "say ok")])

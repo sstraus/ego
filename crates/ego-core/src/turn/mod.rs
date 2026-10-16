@@ -983,6 +983,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
             ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
         })?;
         let request = GenRequest {
+            web_search: None,
             cache: None,
             model: profile.request_model.clone(),
             messages,
@@ -1122,7 +1123,10 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                 AiEvent::Error { message, .. } => {
                     provider_error.get_or_insert(message);
                 }
-                AiEvent::ReasoningDelta { .. }
+                AiEvent::ProviderContent { .. }
+                | AiEvent::WebSearch { .. }
+                | AiEvent::Citation { .. }
+                | AiEvent::ReasoningDelta { .. }
                 | AiEvent::ReasoningState(_)
                 | AiEvent::DeliveryObserved(_)
                 | AiEvent::ProviderFailure { .. }
@@ -1912,6 +1916,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let request = live_request.unwrap_or_else(|| {
             let stable_messages = source_messages.messages().len().saturating_sub(1);
             GenRequest {
+                web_search: None,
                 cache: Some(crate::generator::types::PromptCache {
                     session_id: self.session_id,
                     lineage_root: self.lineage_root,
@@ -1981,6 +1986,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             checkpoint_frame(checkpoint.text()),
         ));
         let baseline = GenRequest {
+            web_search: None,
             cache: None,
             model: main.request_model.clone(),
             messages: Conversation::new(target_messages).map_err(CompactionError::History)?,
@@ -3670,6 +3676,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         error_kind,
                     } => (capture, generation, terminal, reason, pending, error_kind),
                 };
+            if reason == StopReason::Continue {
+                self.close_unstarted_siblings(turn, &pending)?;
+                continue;
+            }
             let policy = capture.policy();
             let policy_snapshot = capture.snapshot();
 
@@ -3682,6 +3692,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 self.close_unstarted_siblings(turn, &pending)?;
                 let exit = match reason {
                     StopReason::Stop | StopReason::ToolUse => ExitReason::Completed,
+                    StopReason::Continue => {
+                        unreachable!("provider continuation handled before completion")
+                    }
                     StopReason::Length => ExitReason::Budget,
                     // Not `Cancelled`: our own cancellation was already
                     // answered above and at `drained.cancelled`, so an
@@ -4666,6 +4679,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             identity.as_deref(),
         )?;
         let mut request = GenRequest {
+            web_search: (profile.generator.supports_web_search()
+                && descriptors.iter().any(|tool| tool.name == "web_search"))
+            .then_some(crate::generator::types::HostedSearch {
+                max_requests: std::num::NonZeroU32::new(5).expect("five is nonzero"),
+            }),
             cache: Some(crate::generator::types::PromptCache {
                 session_id: self.session_id,
                 lineage_root: self.lineage_root,
@@ -5356,6 +5374,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut message: Option<ItemId> = None;
         let mut reasoning: Option<ItemId> = None;
         let mut assembled = String::new();
+        let mut message_text = String::new();
         let mut failure = None;
         let mut cancelled = false;
         let mut corrupt: Option<String> = None;
@@ -5427,16 +5446,94 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     break;
                 }
             };
+            let event = match event {
+                AiEvent::Citation { url, title } => {
+                    let title = title.replace(['\n', '\r', '[', ']', '\\'], " ");
+                    let text = match url::Url::parse(&url) {
+                        Ok(url)
+                            if matches!(url.scheme(), "http" | "https")
+                                && url.host_str().is_some()
+                                && url.username().is_empty()
+                                && url.password().is_none() =>
+                        {
+                            format!(
+                                "\n[{title}]({})",
+                                url.as_str().replace('(', "%28").replace(')', "%29")
+                            )
+                        }
+                        _ => format!("\nSource: {title} (invalid source URL)"),
+                    };
+                    AiEvent::TextDelta { text }
+                }
+                AiEvent::WebSearch { call_id: _, query } => AiEvent::ReasoningDelta {
+                    text: format!("Searching the web: {query}\n"),
+                },
+                event => event,
+            };
             emitted_output |= matches!(
                 event,
-                AiEvent::TextDelta { .. }
+                AiEvent::ProviderContent { .. }
+                    | AiEvent::TextDelta { .. }
                     | AiEvent::ReasoningDelta { .. }
                     | AiEvent::ReasoningState(_)
                     | AiEvent::ToolCall { .. }
             );
             let appended = match event {
+                AiEvent::WebSearch { .. } | AiEvent::Citation { .. } => {
+                    unreachable!("projected above")
+                }
+                AiEvent::ProviderContent { state, visible } => {
+                    if visibility == GenerationVisibility::CompactionPrivate {
+                        Ok(())
+                    } else {
+                        let item = if visible {
+                            message.take().unwrap_or_default()
+                        } else {
+                            reasoning.take().unwrap_or_default()
+                        };
+                        let close = if visible {
+                            self.journal
+                                .append(
+                                    turn,
+                                    Some(item),
+                                    None,
+                                    EventKind::AssistantMessage {
+                                        text: std::mem::take(&mut message_text),
+                                    },
+                                )
+                                .map(|_| ())
+                        } else {
+                            // The next visible block must not append to text preceding this server block.
+                            if let Some(previous) = message.take() {
+                                self.journal
+                                    .append(
+                                        turn,
+                                        Some(previous),
+                                        None,
+                                        EventKind::AssistantMessage {
+                                            text: std::mem::take(&mut message_text),
+                                        },
+                                    )
+                                    .map(|_| ())
+                            } else {
+                                Ok(())
+                            }
+                        };
+                        close.and_then(|_| {
+                            self.journal
+                                .append(
+                                    turn,
+                                    Some(item),
+                                    None,
+                                    EventKind::ProviderContent { state, visible },
+                                )
+                                .map(|_| ())
+                        })
+                    }
+                }
                 AiEvent::TextDelta { text } => {
                     assembled.push_str(&text);
+                    message_text.push_str(&text);
                     if visibility == GenerationVisibility::CompactionPrivate {
                         Ok(())
                     } else {
@@ -5672,7 +5769,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 Some(item),
                 None,
                 EventKind::AssistantMessage {
-                    text: assembled.clone(),
+                    text: message_text.clone(),
                 },
             )
         {
