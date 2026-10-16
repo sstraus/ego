@@ -1,5 +1,41 @@
 use super::*;
+use crate::render::{Capabilities, Depth, Style};
 use unicode_width::UnicodeWidthStr;
+
+#[derive(Clone, Copy)]
+pub(super) enum PickerRole {
+    Question,
+    Selected,
+    Label,
+    Description,
+    Hint,
+}
+
+/// One role table for question, model/reasoning and session picker frames.
+pub(super) fn picker_row(text: impl Into<String>, role: PickerRole, depth: Depth) -> String {
+    let style = match role {
+        PickerRole::Question | PickerRole::Label => Style::PLAIN,
+        PickerRole::Selected => Style::PLAIN.reverse().bold(),
+        PickerRole::Description | PickerRole::Hint => Style::PLAIN.dim(),
+    };
+    crate::render::Line::styled(text, style).render(depth)
+}
+
+pub(super) fn picker_capabilities(status: &SharedStatus) -> Capabilities {
+    let status = status.lock().expect("surface status lock");
+    let mut caps = status.permission_capabilities.with_current_width();
+    caps.width = picker_width(
+        status.width,
+        if caps.on_screen() {
+            Some(caps.width)
+        } else {
+            crossterm::terminal::size()
+                .ok()
+                .map(|(cols, _)| usize::from(cols))
+        },
+    );
+    caps
+}
 
 pub(super) fn run_model_picker(
     editor: &mut Reedline,
@@ -31,18 +67,19 @@ pub(super) fn run_model_picker(
         .map(|(column, row)| usize::from(row) + usize::from(column > 0));
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
-        let status_width = status.lock().expect("surface status lock").width;
+        let caps = picker_capabilities(status);
         let terminal = crossterm::terminal::size().ok();
-        let width = picker_width(status_width, terminal.map(|(width, _)| usize::from(width)));
+        let width = caps.width;
         let height = picker_height(
             terminal.map_or(24, |(_, height)| usize::from(height)),
             start_row,
         );
         let prompt = Question::new(
-            model_picker_prompt(&view, width, height),
+            model_picker_prompt(&view, width, height, caps.depth),
             Arc::clone(status),
         );
         let line = answer(false, editor.read_line(&prompt));
+        let _ = editor.erase_last_prompt();
         let inputs = match &line {
             Line::HostCommand(HostCommand::ModelPicker(_)) => {
                 std::mem::take(&mut status.lock().expect("surface status lock").picker_keys)
@@ -89,14 +126,9 @@ pub(super) fn run_model_picker(
     result
 }
 
-/// The columns a picker draws in. The status width is only recorded once the
-/// session is set up, so a picker that opens before that (the first-run one)
-/// reads the terminal instead of drawing in the 40-column floor.
+/// Live geometry wins; the recorded status width is only a fallback.
 fn picker_width(status_width: usize, terminal: Option<usize>) -> usize {
-    match status_width {
-        0 => terminal.unwrap_or(0),
-        width => width,
-    }
+    terminal.unwrap_or(status_width)
 }
 
 /// Rows a frame needs to show its headings, three choices and a hint.
@@ -138,7 +170,12 @@ fn model_picker_input(command: &str) -> Option<PickerInput> {
 /// Model rows a terminal must still show before the typing hint is dropped.
 const MIN_VISIBLE_MODELS: usize = 3;
 
-fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> String {
+fn model_picker_prompt(
+    view: &ModelPickerView,
+    width: usize,
+    height: usize,
+    depth: Depth,
+) -> String {
     let width = width.max(40);
     let mut rows = Vec::new();
     match view.focus {
@@ -160,17 +197,21 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
                 instructions = wrap_instruction(compact, width);
             }
             let visible_rows = height.saturating_sub(2 + instructions.len()).max(1);
-            let (models, start, end) = model_window(view, width, visible_rows);
+            let (models, start, end) = model_window(view, width, visible_rows, depth);
             let title = format!(
                 "Select model ({}-{end} of {})",
                 if end == 0 { 0 } else { start + 1 },
                 view.models.len()
             );
-            rows.push(if view.filter.is_empty() {
-                title
-            } else {
-                truncate_cells(&format!("{title} · filter: {}", view.filter), width)
-            });
+            rows.push(picker_row(
+                if view.filter.is_empty() {
+                    title
+                } else {
+                    truncate_cells(&format!("{title} · filter: {}", view.filter), width)
+                },
+                PickerRole::Question,
+                depth,
+            ));
             if view.models.is_empty() {
                 rows.push(truncate_cells(
                     &format!("No model matches \"{}\"; Backspace edits.", view.filter),
@@ -178,7 +219,11 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
                 ));
             }
             rows.extend(models);
-            rows.extend(instructions);
+            rows.extend(
+                instructions
+                    .into_iter()
+                    .map(|row| picker_row(row, PickerRole::Hint, depth)),
+            );
         }
         PickerFocus::Reasoning => {
             let heading = wrap_instruction(
@@ -206,7 +251,11 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
                 .iter()
                 .position(|reasoning| view.current_id.as_deref() == Some(reasoning.as_str()));
             let (start, end) = window_bounds(view.reasoning.len(), visible_rows, selected);
-            rows.extend(heading);
+            rows.extend(
+                heading
+                    .into_iter()
+                    .map(|row| picker_row(row, PickerRole::Question, depth)),
+            );
             rows.extend(view.reasoning[start..end].iter().enumerate().map(
                 |(offset, reasoning)| {
                     let index = start + offset;
@@ -220,10 +269,22 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
                     } else {
                         ""
                     };
-                    format!("{marker} {}. {reasoning:?}{current}", index + 1)
+                    picker_row(
+                        format!("{marker} {}. {reasoning:?}{current}", index + 1),
+                        if marker == ">" {
+                            PickerRole::Selected
+                        } else {
+                            PickerRole::Label
+                        },
+                        depth,
+                    )
                 },
             ));
-            rows.extend(instructions);
+            rows.extend(
+                instructions
+                    .into_iter()
+                    .map(|row| picker_row(row, PickerRole::Hint, depth)),
+            );
         }
     }
     rows.join("\n")
@@ -248,6 +309,7 @@ fn model_window(
     view: &ModelPickerView,
     width: usize,
     visible: usize,
+    depth: Depth,
 ) -> (Vec<String>, usize, usize) {
     let mut lines = Vec::new();
     let mut groups = Vec::new();
@@ -289,12 +351,17 @@ fn model_window(
             ""
         };
         let text = model_row(marker, index + 1, &id, suffix, width);
-        lines.push(if group.is_some() {
-            crate::render::Line::styled(text, crate::render::Style::PLAIN.dim())
-                .render(crate::render::Depth::TrueColor)
-        } else {
-            text
-        });
+        lines.push(picker_row(
+            text,
+            if marker == ">" {
+                PickerRole::Selected
+            } else if group.is_some() {
+                PickerRole::Description
+            } else {
+                PickerRole::Label
+            },
+            depth,
+        ));
         groups.push(heading.clone());
         indices.push(Some(index));
     }
@@ -382,11 +449,47 @@ fn wrap_instruction(instruction: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::model_picker::ModelPickerRow;
+    use crate::render::{Capabilities, Depth, Style};
     use crate::run::InteractiveSeat;
     use ego_ai::catalogue::{ModelAvailability, ModelAvailabilityCause, ModelSlug};
     use ego_core::generator::capabilities::ReasoningEffortSupport;
     use ego_core::generator::types::ThinkingLevel;
     use unicode_width::UnicodeWidthStr;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum PickerRole {
+        Question,
+        Selected,
+        Label,
+        Description,
+        Hint,
+    }
+
+    /// One role table for question, model/reasoning and session picker frames.
+    pub(super) fn picker_row(text: impl Into<String>, role: PickerRole, depth: Depth) -> String {
+        let style = match role {
+            PickerRole::Question | PickerRole::Label => Style::PLAIN,
+            PickerRole::Selected => Style::PLAIN.reverse().bold(),
+            PickerRole::Description | PickerRole::Hint => Style::PLAIN.dim(),
+        };
+        crate::render::Line::styled(text, style).render(depth)
+    }
+
+    pub(super) fn picker_capabilities(status: &SharedStatus) -> Capabilities {
+        let status = status.lock().expect("surface status lock");
+        let mut caps = status.permission_capabilities.with_current_width();
+        caps.width = picker_width(
+            status.width,
+            if caps.on_screen() {
+                Some(caps.width)
+            } else {
+                crossterm::terminal::size()
+                    .ok()
+                    .map(|(cols, _)| usize::from(cols))
+            },
+        );
+        caps
+    }
 
     fn view() -> ModelPickerView {
         ModelPickerView {
@@ -419,8 +522,25 @@ mod tests {
         }
     }
 
+    fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> String {
+        super::model_picker_prompt(view, width, height, Depth::TrueColor)
+    }
+
     fn plain_picker(rendered: &str) -> String {
-        rendered.replace("\x1b[2m", "").replace("\x1b[0m", "")
+        let mut plain = String::new();
+        let mut escape = false;
+        for ch in rendered.chars() {
+            if ch == '\x1b' {
+                escape = true;
+            } else if escape {
+                if ch == 'm' {
+                    escape = false;
+                }
+            } else {
+                plain.push(ch);
+            }
+        }
+        plain
     }
 
     // Catches: scrolled model rows depend on a legend for a bare pipe and symbol.
@@ -514,7 +634,7 @@ mod tests {
     #[test]
     fn a_picker_before_session_setup_draws_in_the_terminal_width() {
         assert_eq!(picker_width(0, Some(120)), 120);
-        assert_eq!(picker_width(100, Some(120)), 100);
+        assert_eq!(picker_width(100, Some(120)), 120);
         assert_eq!(picker_width(0, None), 0);
     }
 
@@ -561,7 +681,11 @@ mod tests {
         view.reasoning = vec![ThinkingLevel::Off];
         for width in [80, 60, 40] {
             let rendered = model_picker_prompt(&view, width, 24);
-            assert!(rendered.lines().all(|line| line.width() <= width));
+            assert!(
+                plain_picker(&rendered)
+                    .lines()
+                    .all(|line| line.width() <= width)
+            );
             assert!(rendered.contains("anthropic/claude-haiku-4-5"));
         }
     }

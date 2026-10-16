@@ -16,6 +16,8 @@ mod image_refusal;
 mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
+#[path = "live_surface_pty/picker_roles.rs"]
+mod picker_roles;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/raw_columns.rs"]
