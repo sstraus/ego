@@ -44,6 +44,7 @@ use crate::agent_file::{self, AgentFile};
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
+    Worktree(WorktreeAction),
     Orchestrator(Box<OrchestratorArgs>),
     /// `ego config get|set|unset|ls|edit` — typed user configuration management.
     Config(Box<ConfigArgs>),
@@ -189,6 +190,7 @@ pub const BUILT: &[&str] = &[
     "rules",
     "mcp-server",
     "orchestrator",
+    "worktree",
 ];
 
 /// A command `CLI.md` §2 documents that this build does not implement, and the
@@ -273,6 +275,25 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("rules", RulesCommand::command()))
         .subcommand(named("mcp-server", McpServerCommand::command()))
         .subcommand(named("orchestrator", OrchestratorCommand::command()))
+        .subcommand(named("worktree", WorktreeCommand::command()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum WorktreeAction {
+    /// Inspect a durable local worktree receipt without starting a model.
+    Show { receipt: uuid::Uuid },
+    /// Remove only a clean worktree whose commits are integrated; retain its branch.
+    Cleanup { receipt: uuid::Uuid },
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego worktree",
+    about = "Inspect or clean up a retained local worktree."
+)]
+struct WorktreeCommand {
+    #[command(subcommand)]
+    action: WorktreeAction,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -800,6 +821,7 @@ pub enum RulesAction {
 /// The parsed command line of `ego run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
+    pub worktree: Option<String>,
     /// Launch-owned read grant; never accepted from a configuration layer.
     pub read_only_dir: Option<PathBuf>,
     pub prompt: Option<String>,
@@ -1223,6 +1245,7 @@ fn overview(program: &str) -> String {
             "doctor" => "Print a read-only redacted health snapshot",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "orchestrator" => "Inspect native orchestration without model generation",
+            "worktree" => "Inspect or safely remove a retained local worktree",
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
             "roots" => "Manage perimeter roots",
@@ -1345,6 +1368,10 @@ fn parse_subcommand(
     resume_metadata: bool,
 ) -> Result<Invocation, UsageError> {
     match subcommand {
+        Some("worktree") => match clap_or_answer::<WorktreeCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Worktree(parsed.action)),
+        },
         Some("orchestrator") => match clap_or_answer::<OrchestratorCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => match parsed.action {
@@ -1905,6 +1932,11 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     } = command;
 
     reject_ephemeral(flags.ephemeral)?;
+    if flags.worktree.is_some() {
+        return Err(UsageError(
+            "--worktree creates a new session; it cannot resume one".into(),
+        ));
+    }
 
     for (given, flag) in [
         (flags.session.is_some(), "--session"),
@@ -2036,6 +2068,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
     let shape = SessionShape::from(flags.shape);
 
     Ok(Args {
+        worktree: flags.worktree,
         read_only_dir: shape.read_only_dir,
         prompt,
         agent_file,

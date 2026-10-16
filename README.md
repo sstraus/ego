@@ -119,3 +119,13 @@ policy, and the host. **go** moves language into action.
 
 The [brand narrative](ARCHITECTURE.md) preserves the manifesto
 and voice. The workspace declares the MIT license in `Cargo.toml`.
+
+### Retained worktrees
+
+Use `ego --worktree feat/task "implement the task"` or
+`ego run --worktree feat/task "implement the task"` to approve a new branch and
+launch from an isolated Git checkout. Worktrees remain after exit. Inspect the
+printed receipt with `ego worktree show RECEIPT_UUID`; request safe cleanup with
+`ego worktree cleanup RECEIPT_UUID`. Cleanup refuses local changes, ignored files,
+unmerged commits and new commits without upstream evidence. The branch remains.
+TUIC-hosted launches use TUIC ownership and lifecycle controls instead.

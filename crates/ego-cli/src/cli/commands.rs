@@ -699,6 +699,9 @@ pub(super) struct Places {
 
 #[derive(Debug, ClapArgs)]
 pub(super) struct Flags {
+    /// Create a retained managed worktree on this explicitly approved new branch.
+    #[arg(long, value_name = "BRANCH", conflicts_with_all = ["session", "session_id"])]
+    pub(super) worktree: Option<String>,
     /// Read the instruction and its invocation configuration from an agent file.
     #[arg(short = 'f', long = "file", value_name = "FILE")]
     pub(super) file: Option<PathBuf>,
