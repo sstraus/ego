@@ -29,6 +29,8 @@ mod setup;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
+#[path = "live_surface_pty/task_rows.rs"]
+mod task_rows;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
 #[path = "live_surface_pty/workspace_trust.rs"]
@@ -8666,7 +8668,7 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("↳ one ›") && line.contains("read calc.py"))
+            .filter(|line| line.trim() == "↳ task one")
             .count(),
         1,
         "{lines:?}"
@@ -8674,7 +8676,7 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("↳ two ›") && line.contains("read calc.py"))
+            .filter(|line| line.trim() == "↳ task two")
             .count(),
         1,
         "{lines:?}"
@@ -8682,7 +8684,7 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("task one"))
+            .filter(|line| line.trim_start().starts_with("✓ task one"))
             .count(),
         1,
         "{lines:?}"
@@ -8690,11 +8692,21 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("task two"))
+            .filter(|line| line.trim_start().starts_with("✓ task two"))
             .count(),
         1,
         "{lines:?}"
     );
+    for task in ["one", "two"] {
+        let header = lines
+            .iter()
+            .position(|line| line.trim() == format!("↳ task {task}"))
+            .unwrap();
+        assert!(
+            lines[header + 1].trim_start().starts_with("✓ read calc.py"),
+            "{lines:?}"
+        );
+    }
     assert!(
         lines.last().is_some_and(|line| line.starts_with('>')),
         "{lines:?}"
