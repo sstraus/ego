@@ -154,34 +154,26 @@ async fn scenario(name: &str, assertion: u8) {
     collect(&mut output, Duration::from_millis(200), None);
     let start = output.len();
     press(b"\x16");
-    let mut raw_during_host = true;
     if assertion == 2 {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !workspace.join("paste-inspected").exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         let inspected = workspace.join("paste-inspected").exists();
-        let tty = pair.master.tty_name().unwrap();
-        let flags = std::process::Command::new("stty")
-            .arg(if cfg!(target_os = "macos") {
-                "-f"
-            } else {
-                "-F"
-            })
-            .arg(tty)
-            .arg("-a")
-            .output()
-            .unwrap();
-        raw_during_host = inspected
-            && String::from_utf8_lossy(&flags.stdout)
-                .split_whitespace()
-                .any(|f| f.trim_end_matches(';') == "-icanon");
+        assert!(inspected, "pasteboard inspection was not reached");
         // A second paste followed by Enter must remain keys, not tty VLNEXT.
         press(b"\x16\r");
         collect(&mut output, Duration::from_millis(200), None);
         ego.file("paste-release", "release");
     }
     collect(&mut output, Duration::from_secs(5), Some(REFUSAL));
+    if assertion == 2 {
+        collect(
+            &mut output,
+            Duration::from_secs(10),
+            Some("ENTER-SUBMITTED"),
+        );
+    }
     if assertion != 2 {
         press(b"\x1b[D");
         collect(&mut output, Duration::from_millis(200), None);
@@ -212,10 +204,27 @@ async fn scenario(name: &str, assertion: u8) {
                 .any(|row| row.contains(REFUSAL) && !row.contains(" | ") && !row.contains('>')),
             "refusal shares composer row: {visible:?}"
         ),
-        2 => assert!(
-            raw_during_host && !raw.contains("^M"),
-            "host suspension enabled literal-next/CR echo: raw_during_host={raw_during_host}, grid={visible:?}"
-        ),
+        2 => {
+            assert!(
+                visible.contains("ENTER-SUBMITTED"),
+                "queued Enter did not submit: {visible:?}"
+            );
+            let requests = stub.generations();
+            assert_eq!(
+                requests.len(),
+                1,
+                "queued keys must submit exactly one turn"
+            );
+            let messages = requests[0]["messages"].as_array().unwrap();
+            let user = messages
+                .iter()
+                .find(|message| message["role"] == "user")
+                .unwrap();
+            assert_eq!(
+                user["content"], "draft",
+                "literal CR or Ctrl+V polluted submission"
+            );
+        }
         _ => unreachable!(),
     }
 }
