@@ -2624,7 +2624,9 @@ fn rendered_prompt_count(output: &[u8]) -> usize {
             let contents = terminal.screen().contents();
             let last_row = contents.trim_end().lines().last().unwrap_or_default();
             !contents.contains("Esc to interrupt")
-                && (last_row.trim() == ">" || last_row.trim_end().ends_with(" | >"))
+                && (last_row.trim() == ">"
+                    || last_row.trim_start().starts_with("> ")
+                    || last_row.trim_end().ends_with(" | >"))
         })
         .count()
 }
@@ -4157,6 +4159,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             .expect("pasted slash");
         input.flush().expect("pasted slash flush");
         until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
+        until_prompt_from(&reader, &mut output, pasted_start);
         drain_until_quiet(&reader, &mut output);
         assert!(
             rendered_prompt_count(&output[pasted_start..]) > 0,
@@ -5703,7 +5706,7 @@ fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
     // These frames preserve the observed /clear ordering from the live PTY:
     // the first prompt was painted before the command echo and Enter cycle.
     let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
-    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[4;1H\x1b[J\x1b[96m> ";
+    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
     let (sender, receiver) = mpsc::channel();
     let (done, result) = mpsc::channel();
     sender.send(redraw.to_vec()).expect("first PTY frame");
@@ -5749,7 +5752,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     };
     assert_eq!(next_write(), b"/clear\r");
     frames
-        .send(b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> ".to_vec())
+        .send(b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[96m> \x1b[?25h".to_vec())
         .expect("clear terminal frame");
     assert_eq!(next_write(), b"/help\r");
     assert!(
@@ -8761,6 +8764,10 @@ fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
         "incomplete repaint was accepted before its busy status arrived"
     );
     assert!(mcp_composer_is_idle(&idle), "idle repaint was not accepted");
+    assert!(
+        mcp_composer_is_idle(b"\x1b[?25l\x1b[4;1H\x1b[J> retained draft\x1b[?25h"),
+        "completed idle composer with retained draft was rejected"
+    );
     assert!(!mcp_composer_is_idle(b""), "empty output was accepted");
     assert!(
         !mcp_composer_is_idle(b"\x1b[4;1H\x1b[J> second with mcp on"),
