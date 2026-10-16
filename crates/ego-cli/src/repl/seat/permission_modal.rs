@@ -44,8 +44,13 @@ pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> Strin
         .join("; ");
     rows.push(format!("{prefix}Allow {operations}?"));
     rows.extend(headline_rows(request).into_iter().skip(1));
-    rows.push(if remembered_rules(request).is_some() {
-        "[y] yes   [a] yes, remember rule (details: d)".into()
+    rows.push(if let Some(rules) = remembered_rules(request) {
+        let exact = format!("[y] yes   [a] yes, do not ask again for {rules}");
+        if crate::render::line::Line::plain(&exact).width() <= width {
+            exact
+        } else {
+            "[y] yes   [a] yes, remember rule (details: d)".into()
+        }
     } else {
         "[y] yes".into()
     });
