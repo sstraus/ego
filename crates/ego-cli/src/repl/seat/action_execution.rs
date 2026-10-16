@@ -355,6 +355,14 @@ pub(super) fn surface_line(
         }
 
         match command {
+            HostCommand::ClipboardPaste | HostCommand::PastePath(_)
+                if phase.get() == EditPhase::Busy =>
+            {
+                commit_to_transcript(
+                    status,
+                    "image paste is unavailable while source work is pending",
+                );
+            }
             HostCommand::Background => {
                 let notice = if phase.get() == EditPhase::Busy {
                     match futures::executor::block_on(ingress.background()) {

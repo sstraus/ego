@@ -180,12 +180,10 @@ fn xai_responses_uses_input_image_and_input_text_without_remote_origin() {
 #[test]
 fn private_or_unproved_profiles_refuse_images_instead_of_dropping_them() {
     for row in [
-        ProviderRow::openai_codex_default(),
         ProviderRow::github_copilot_default(),
         ProviderRow::nous_default(),
     ] {
         let wire: &dyn WireFormat = match row.id() {
-            "openai-codex" => &OpenAiCodexResponses,
             "github-copilot" => &ego_ai::wire::github_copilot_completions::GithubCopilotCompletions,
             "nous" => &ego_ai::wire::nous_portal::NousPortal,
             other => panic!("unexpected refusal fixture {other}"),
@@ -213,13 +211,19 @@ fn private_or_unproved_profiles_refuse_images_instead_of_dropping_them() {
     );
 }
 
+// Catches: Codex admits an image but the private wire refuses or silently drops it.
 #[test]
-fn image_wire_refusal_happens_before_any_provider_request_body_is_emitted() {
+fn codex_image_input_reaches_the_responses_wire() {
     let row = ProviderRow::openai_codex_default();
-    let refused = OpenAiCodexResponses
-        .build_request(&RequestTarget::new(row.base(), &[]), &request())
-        .unwrap_err();
-    assert!(refused.to_string().contains("image"));
+    let body = body(&row, &OpenAiCodexResponses).expect("Codex image request");
+    let upstream: Value =
+        serde_json::from_str(include_str!("goldens/openai-codex/input-image.json")).unwrap();
+    assert_eq!(body["input"][0]["content"][0]["type"], upstream["type"]);
+    assert_eq!(
+        body["input"][0]["content"][0]["image_url"],
+        format!("data:image/png;base64,{PNG}")
+    );
+    assert_eq!(body["input"][1]["content"], "describe");
 }
 
 #[test]

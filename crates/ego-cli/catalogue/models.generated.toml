@@ -373,6 +373,11 @@ cancel = "cooperative"
 cache = "none"
 transport = "web_socket"
 
+[model."openai-codex/gpt-6-astra".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-luna
 [model."openai-codex/gpt-6-luna".capabilities]
 schema_version = 5
@@ -385,6 +390,11 @@ reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
 cancel = "cooperative"
 cache = "none"
 transport = "web_socket"
+
+[model."openai-codex/gpt-6-luna".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-sol
 [model."openai-codex/gpt-6-sol".capabilities]
@@ -400,6 +410,11 @@ cancel = "cooperative"
 cache = "none"
 transport = "web_socket"
 
+[model."openai-codex/gpt-6-sol".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6.1-sol
 [model."openai-codex/gpt-6.1-sol".capabilities]
 schema_version = 5
@@ -413,6 +428,11 @@ default_reasoning_effort = "low"
 cancel = "cooperative"
 cache = "none"
 transport = "web_socket"
+
+[model."openai-codex/gpt-6.1-sol".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: xai/grok-4.7
 [model."xai-oauth/grok-4.7".capabilities]

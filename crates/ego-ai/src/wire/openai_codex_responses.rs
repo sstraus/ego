@@ -55,7 +55,6 @@ pub const PATH: &str = "codex/responses";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
     ReasoningStateNotCarriable,
-    ImageInputUnproved,
 }
 
 impl std::fmt::Display for Inexpressible {
@@ -64,10 +63,6 @@ impl std::fmt::Display for Inexpressible {
             Inexpressible::ReasoningStateNotCarriable => write!(
                 f,
                 "openai-codex-responses requires valid encrypted reasoning items from its own dialect"
-            ),
-            Inexpressible::ImageInputUnproved => write!(
-                f,
-                "image input is unknown for the private openai-codex-responses contract"
             ),
         }
     }
@@ -161,7 +156,13 @@ fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
                     }
                     items.push(item);
                 }
-                ContentBlock::Image { .. } => {}
+                ContentBlock::Image { image } => items.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "input_image",
+                        "image_url": super::openai_completions::image_data_url(image),
+                    }],
+                })),
                 ContentBlock::Text { text } => match message.role {
                     Role::User => items.push(serde_json::json!({
                         "role": "user",
@@ -198,9 +199,6 @@ fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
 }
 
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
-    if super::request_has_images(req) {
-        return Err(Inexpressible::ImageInputUnproved);
-    }
     let tools: Vec<WireTool<'_>> = req
         .tools
         .iter()
