@@ -562,6 +562,11 @@ fn base64(bytes: &[u8]) -> String {
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
 
+    /// Explicit operator admission of provider-executed paid search.
+    fn admits_hosted_search(&self) -> bool {
+        false
+    }
+
     fn prepare(&self, params: Value, ctx: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError>;
 
     fn execute<'a, 'io>(
@@ -580,6 +585,10 @@ pub trait TypedTool: Send + Sync {
 
     fn name(&self) -> &str;
     fn description(&self) -> &str;
+
+    fn admits_hosted_search(&self) -> bool {
+        false
+    }
 
     fn prepare_typed(
         &self,
@@ -602,6 +611,10 @@ pub trait TypedTool: Send + Sync {
 pub struct Typed<T>(pub T);
 
 impl<T: TypedTool> Tool for Typed<T> {
+    fn admits_hosted_search(&self) -> bool {
+        self.0.admits_hosted_search()
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: self.0.name().to_string(),

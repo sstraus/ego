@@ -4805,7 +4805,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         )?;
         let mut request = GenRequest {
             web_search: (profile.generator.supports_web_search()
-                && descriptors.iter().any(|tool| tool.name == "web_search"))
+                && walk.catalogue.admits_hosted_search())
             .then_some(crate::generator::types::HostedSearch {
                 max_requests: std::num::NonZeroU32::new(5).expect("five is nonzero"),
             }),
