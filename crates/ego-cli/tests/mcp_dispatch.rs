@@ -89,7 +89,7 @@ fn list_dispatch_distinguishes_configured_from_admitted_state() {
     assert_eq!(remote["configured"], true);
     assert_eq!(remote["admitted"], false);
     assert_eq!(remote["health"], "absent");
-    assert_eq!(remote["diagnostic"]["class"], "authority");
+    assert_eq!(remote["diagnostic"]["class"], "credential");
     assert!(remote.get("authorization").is_none());
     assert_eq!(remote["provenance"]["source"], "user");
     assert_eq!(remote["provenance"]["slot"], "base");
