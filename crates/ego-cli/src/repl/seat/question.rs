@@ -467,11 +467,7 @@ fn answer_question(
                     if !consent {
                         return QuestionOutcome::Declined;
                     }
-                    if !open_elicitation_url_on_consent(
-                        url,
-                        consent && !round.expired_at(host_now_ms()),
-                        launch_elicitation_url,
-                    ) {
+                    if round.expired_at(host_now_ms()) || !launch_elicitation_url(url) {
                         surface.status.lock().expect("surface status lock").notice = Some(
                             "The browser could not be opened; the request remains pending"
                                 .to_owned(),
@@ -1900,14 +1896,6 @@ fn host_now_ms() -> u64 {
         })
 }
 
-fn open_elicitation_url_on_consent(
-    url: &str,
-    consent: bool,
-    launch: impl FnOnce(&str) -> bool,
-) -> bool {
-    consent && ego_core::question::validate_url(url).is_ok() && launch(url)
-}
-
 #[cfg(test)]
 #[derive(Default)]
 struct TerminalScript {
@@ -1929,28 +1917,80 @@ pub(crate) fn test_resumed_round_terminal(mut request: QuestionRequest) {
     let asked_for_image = AtomicBool::new(false);
     let (ingress, _control) = interactive_control();
     let mut drafts = DraftStash::new(SessionId::new());
-    let mut surface = ModalSurface { phase: &phase, status: &status, asked_for_image: &asked_for_image, ingress: &ingress, drafts: &mut drafts };
-    let script = |lines: &[&str]| TERMINAL_SCRIPT.set(Some(TerminalScript {
-        lines: lines.iter().map(|line| Line::Submitted((*line).into())).collect(),
-        ..Default::default()
-    }));
+    let mut surface = ModalSurface {
+        phase: &phase,
+        status: &status,
+        asked_for_image: &asked_for_image,
+        ingress: &ingress,
+        drafts: &mut drafts,
+    };
+    let script = |lines: &[&str]| {
+        TERMINAL_SCRIPT.set(Some(TerminalScript {
+            lines: lines
+                .iter()
+                .map(|line| {
+                    if line.is_empty() {
+                        Line::Blank
+                    } else {
+                        Line::Submitted((*line).into())
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        }))
+    };
     // Reopening the same destination never inherits consent from a previous presentation.
     script(&["n"]);
-    assert_eq!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Declined);
+    assert_eq!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::Declined
+    );
     assert!(TERMINAL_SCRIPT.with_borrow(|script| script.as_ref().unwrap().launches.is_empty()));
     script(&["y", "completed"]);
-    let QuestionOutcome::MemberCompleted { key, answer } = answer_question(&mut editor, &mut surface, &request) else { panic!("remaining member must be presented") };
+    assert!(matches!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::MemberCompleted { .. }
+    ));
+    assert_eq!(
+        TERMINAL_SCRIPT.take().unwrap().launches,
+        ["https://example.test/remaining"]
+    );
+    // No member settlement was published: a resumed presentation must ask again.
+    script(&["n"]);
+    assert_eq!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::Declined
+    );
+    assert!(TERMINAL_SCRIPT.take().unwrap().launches.is_empty());
+    script(&["y", "completed"]);
+    let QuestionOutcome::MemberCompleted { key, answer } =
+        answer_question(&mut editor, &mut surface, &request)
+    else {
+        panic!("remaining member must be presented")
+    };
     assert_eq!(key, "b");
     let script_result = TERMINAL_SCRIPT.take().unwrap();
     assert_eq!(script_result.launches, ["https://example.test/remaining"]);
     assert!(script_result.prompts[0].contains("Destination: https://example.test/remaining"));
-    assert!(script_result.prompts.iter().all(|prompt| !prompt.contains("https://example.test/done")));
-    let QuestionMode::Round(round) = &mut request.mode else { panic!("round") };
+    assert!(
+        script_result
+            .prompts
+            .iter()
+            .all(|prompt| !prompt.contains("https://example.test/done"))
+    );
+    let QuestionMode::Round(round) = &mut request.mode else {
+        panic!("round")
+    };
     round.complete_member(&key, answer).unwrap();
-    script(&["decline"]);
-    assert_eq!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Declined);
+    script(&[""]);
+    assert_eq!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::Declined
+    );
     assert!(TERMINAL_SCRIPT.with_borrow(|script| script.as_ref().unwrap().launches.is_empty()));
     script(&["retry"]);
-    assert!(matches!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Answered(QuestionAnswer::Round(answer)) if answer.confirmed && answer.responses.len() == 2));
+    assert!(
+        matches!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Answered(QuestionAnswer::Round(answer)) if answer.confirmed && answer.responses.len() == 2)
+    );
     assert!(TERMINAL_SCRIPT.take().unwrap().launches.is_empty());
 }

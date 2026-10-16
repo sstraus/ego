@@ -1773,9 +1773,16 @@ fn crashes_at_each_question_persistence_boundary_do_not_retry_or_repeat_complete
 }
 
 fn empty_round_request() -> QuestionRequest {
-    QuestionRequest::new("Retry MCP?", QuestionMode::Round(ego_core::question::ElicitationRound {
-        expires_at_ms: None, requests: Default::default(), completed: Default::default(),
-    }), vec![], false)
+    QuestionRequest::new(
+        "Retry MCP?",
+        QuestionMode::Round(ego_core::question::ElicitationRound {
+            expires_at_ms: None,
+            requests: Default::default(),
+            completed: Default::default(),
+        }),
+        vec![],
+        false,
+    )
 }
 
 #[test]
@@ -1783,26 +1790,58 @@ fn declining_successor_round_does_not_resurrect_predecessor() {
     // Catches: declining a successor leaves its tool incomplete and revives an answered predecessor.
     let request = empty_round_request();
     let answer = QuestionAnswer::Round(ego_core::question::ElicitationAnswers {
-        confirmed: true, responses: Default::default(),
+        confirmed: true,
+        responses: Default::default(),
     });
-    let foreign = Arc::new(RecordingForeignQuestionPort::scripted(vec![Ok(ToolExecution::InputRequired(
-        ForeignInputRequired::new(SUCCESSOR_CONTINUATION_ID, request.clone()).unwrap(),
-    ))], None));
-    with_foreign_turn_request(request, foreign_input_generator(), Arc::new(RecordingElicitor::scripted(vec![
-        Ok(QuestionOutcome::Answered(answer)), Ok(QuestionOutcome::Declined),
-    ], None)), foreign.clone(), (None, false), None, |mut turn, store| {
-        futures::executor::block_on(turn.run("invoke MCP")).unwrap();
-        assert_eq!(*foreign.cancelled.lock().unwrap(), vec![SUCCESSOR_CONTINUATION_ID]);
-        assert_eq!(foreign.calls().len(), 1);
-        let replay = SessionState::replay(store.events());
-        assert!(replay.pending_question().is_none(), "decline resurrected an answered predecessor");
-        assert!(store.events().iter().any(|event| matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. })), "cancelled original tool must be durably closed");
-    });
+    let foreign = Arc::new(RecordingForeignQuestionPort::scripted(
+        vec![Ok(ToolExecution::InputRequired(
+            ForeignInputRequired::new(SUCCESSOR_CONTINUATION_ID, request.clone()).unwrap(),
+        ))],
+        None,
+    ));
+    with_foreign_turn_request(
+        request,
+        foreign_input_generator(),
+        Arc::new(RecordingElicitor::scripted(
+            vec![
+                Ok(QuestionOutcome::Answered(answer)),
+                Ok(QuestionOutcome::Declined),
+            ],
+            None,
+        )),
+        foreign.clone(),
+        (None, false),
+        None,
+        |mut turn, store| {
+            futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+            assert_eq!(
+                *foreign.cancelled.lock().unwrap(),
+                vec![SUCCESSOR_CONTINUATION_ID]
+            );
+            assert_eq!(foreign.calls().len(), 1);
+            let replay = SessionState::replay(store.events());
+            assert!(
+                replay.pending_question().is_none(),
+                "decline resurrected an answered predecessor"
+            );
+            assert!(
+                store.events().iter().any(|event| matches!(
+                    event.kind,
+                    EventKind::ToolCallCompleted { ok: false, .. }
+                )),
+                "cancelled original tool must be durably closed"
+            );
+        },
+    );
 }
 
 struct InterruptingElicitor(ego_core::turn::InteractiveIngress);
 impl Elicitor for InterruptingElicitor {
-    fn elicit<'a>(&'a self, _: ItemId, _: QuestionRequest) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
+    fn elicit<'a>(
+        &'a self,
+        _: ItemId,
+        _: QuestionRequest,
+    ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
         Box::pin(async move {
             self.0.interrupt().await.unwrap();
             futures::future::pending().await
@@ -1815,13 +1854,105 @@ fn interrupted_foreign_round_has_no_pending_question_after_replay() {
     // Catches: an interrupted elicitor cancels remote authority but leaves the local question pending.
     let (ingress, mut control) = ego_core::turn::interactive_control();
     let foreign = Arc::new(RecordingForeignQuestionPort::default());
-    with_foreign_turn_request(empty_round_request(), foreign_input_generator(), Arc::new(InterruptingElicitor(ingress)), foreign.clone(), (None, false), None, |turn, store| {
-        let mut turn = turn.with_interactive_control(&mut control);
-        let outcome = futures::executor::block_on(turn.run("invoke MCP")).unwrap();
-        assert!(matches!(outcome.exit_reason, ExitReason::Cancelled(_)));
-        assert_eq!(*foreign.cancelled.lock().unwrap(), vec![CONTINUATION_ID]);
-        let replay = SessionState::replay(store.events());
-        assert!(replay.pending_question().is_none(), "interruption left a pending foreign question after replay");
-        assert!(store.events().iter().any(|event| matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. })), "interrupted original tool must be durably closed");
-    });
+    with_foreign_turn_request(
+        empty_round_request(),
+        foreign_input_generator(),
+        Arc::new(InterruptingElicitor(ingress)),
+        foreign.clone(),
+        (None, false),
+        None,
+        |turn, store| {
+            let mut turn = turn.with_interactive_control(&mut control);
+            let outcome = futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+            assert!(matches!(outcome.exit_reason, ExitReason::Cancelled(_)));
+            assert_eq!(*foreign.cancelled.lock().unwrap(), vec![CONTINUATION_ID]);
+            let replay = SessionState::replay(store.events());
+            assert!(
+                replay.pending_question().is_none(),
+                "interruption left a pending foreign question after replay"
+            );
+            assert!(
+                store.events().iter().any(|event| matches!(
+                    event.kind,
+                    EventKind::ToolCallCompleted { ok: false, .. }
+                )),
+                "interrupted original tool must be durably closed"
+            );
+        },
+    );
+}
+
+#[test]
+fn reopened_foreign_round_keeps_question_identity_and_completed_members() {
+    // Catches: re-presentation mints a replacement question or drops durable member outcomes.
+    let mut request = empty_round_request();
+    let QuestionMode::Round(round) = &mut request.mode else {
+        unreachable!()
+    };
+    round.requests.insert(
+        "done".into(),
+        ego_core::question::ElicitationMember {
+            prompt: "Already completed".into(),
+            kind: ego_core::question::ElicitationKind::Url {
+                url: "https://example.test/done".into(),
+                elicitation_id: "done".into(),
+            },
+        },
+    );
+    let foreign = Arc::new(RecordingForeignQuestionPort::default());
+    let first = Arc::new(RecordingElicitor::scripted(
+        vec![
+            Ok(QuestionOutcome::MemberCompleted {
+                key: "done".into(),
+                answer: serde_json::json!({"completed":true}),
+            }),
+            Ok(QuestionOutcome::Unavailable),
+        ],
+        None,
+    ));
+    with_foreign_turn_request(
+        request,
+        foreign_input_generator(),
+        first,
+        foreign.clone(),
+        (None, false),
+        None,
+        |mut turn, store| {
+            futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+            let restored = SessionState::replay(store.events());
+            let pending = restored.pending_question().unwrap();
+            let question = pending.item_id();
+            let QuestionMode::Round(round) = &pending.request().mode else {
+                unreachable!()
+            };
+            let next = Arc::new(RecordingElicitor::answered(QuestionAnswer::Round(
+                ego_core::question::ElicitationAnswers {
+                    confirmed: true,
+                    responses: round.completed.clone(),
+                },
+            )));
+            let mut reopened = turn.with_elicitor(next.clone());
+            let outcome =
+                futures::executor::block_on(reopened.present_foreign_question(question)).unwrap();
+            assert_eq!(outcome.exit_reason, ExitReason::Completed);
+            assert_eq!(
+                next.calls.lock().unwrap().as_slice(),
+                &[(question, pending.request().clone())]
+            );
+            assert_eq!(
+                store
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::QuestionRequested { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(foreign.calls().len(), 1);
+            assert!(
+                SessionState::replay(store.events())
+                    .pending_question()
+                    .is_none()
+            );
+        },
+    );
 }

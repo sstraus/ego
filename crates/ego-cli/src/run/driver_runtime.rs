@@ -361,7 +361,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                     policy,
                 }) => HeadlessInput::Answered {
                     question,
-                    answer,
+                    answer: answer
+                        .expect("only the terminal plans an answerless foreign presentation"),
                     policy,
                 },
                 None => HeadlessInput::Prompt(&RunPrompt::from(text.clone())),
@@ -1348,10 +1349,19 @@ async fn drive_interactive_input<'session: 'turn, 'turn>(
         Some(RuntimeResume::Foreign {
             question, answer, ..
         }) => {
-            let (termination, result) = turns
-                .drive_answered(loop_, question, answer, turn_cancel, diagnostics)
-                .await;
-            Some((termination, result))
+            let driven = match answer {
+                Some(answer) => {
+                    turns
+                        .drive_answered(loop_, question, answer, turn_cancel, diagnostics)
+                        .await
+                }
+                None => {
+                    turns
+                        .drive_presented(loop_, question, turn_cancel, diagnostics)
+                        .await
+                }
+            };
+            Some(driven)
         }
         None => match asked {
             Some(InteractiveTurnInput::Checkpoint) => Some(
