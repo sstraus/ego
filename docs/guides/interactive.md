@@ -52,6 +52,13 @@ Enter/Escape until answered and preserve the underlying draft/queue.
 Use the shortcuts shown by this binary's `/help`; terminal Meta/function key
 support differs across platforms.
 
+## Setup model authority
+
+`/setup PROMPT` uses a separately resolved model from persistent user/profile
+configuration, not the live session model selected by flags or `/model`.
+If that interpreter model is absent or unavailable, setup explains the reason
+and uses its deterministic inventory. Esc cancels without configuration writes.
+
 ## MCP servers
 
 `/mcp` lists configured servers with their live state. `/mcp toggle NAME` turns

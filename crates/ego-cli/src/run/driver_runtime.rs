@@ -991,10 +991,18 @@ async fn stage_image_path(
 
 async fn run_interactive_setup(
     prompt: String,
+    selection: &model::GenerationSelection,
     root: &Path,
     status: Option<&InteractiveStatus>,
     diagnostics: &dyn Diagnostics,
 ) {
+    match selection.snapshot() {
+        Ok(selected) => diagnostics.note(&format!(
+            "Session model: {}. Setup interpreter uses persistent user/profile configuration, not this session selection.",
+            selected.identity.0
+        )),
+        Err(error) => diagnostics.note(&format!("Session model unavailable: {error}. Setup interpreter uses persistent user/profile configuration.")),
+    }
     let setup_args = crate::cli::SetupArgs {
         items: None,
         judge: None,
@@ -1024,10 +1032,9 @@ async fn run_interactive_setup(
                 QuestionOption::new(
                     finding.id.to_string(),
                     ego_core::permit::terminal_safe(&format!(
-                        "{}: {} — {}",
+                        "{}: {}",
                         finding.id,
-                        finding.requested.display(),
-                        finding.evidence
+                        finding.requested.display()
                     )),
                 )
             })
@@ -2587,7 +2594,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-            run_interactive_setup(prompt, root, status.as_ref(), diagnostics).await;
+            run_interactive_setup(prompt, selection, root, status.as_ref(), diagnostics).await;
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(

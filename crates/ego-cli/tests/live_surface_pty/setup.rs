@@ -168,3 +168,63 @@ fn setup_slash_raw_ctrl_c_stops_stalled_inference_without_publication() {
     );
     assert_eq!(stub.generations().len(), 1);
 }
+
+/// Catches: setup calls a flag-selected active model unconfigured without naming its separate authority.
+#[test]
+fn interactive_setup_explains_session_model_vs_interpreter_model() {
+    let mut captures = Vec::new();
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let places = support::Places::new();
+        let original = "sandbox='off'\nroots=[]\n";
+        std::fs::write(places.home_path().join("config.toml"), original).unwrap();
+        let ego = places
+            .ego(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--yolo",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/setup inspect task\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Select setup proposal items");
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+        until_prompt_from(&reader, &mut output, start);
+        drain_until_quiet(&reader, &mut output);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).unwrap();
+        }
+        captures.push(normalized(&output[start..]));
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        assert_eq!(
+            std::fs::read_to_string(places.home_path().join("config.toml")).unwrap(),
+            original
+        );
+        assert!(
+            stub.generations().is_empty(),
+            "no configured interpreter must not generate"
+        );
+    }
+    for capture in captures {
+        assert!(capture.contains("Session model: ollama/qwen3"), "{capture}");
+        assert!(
+            capture.contains("no persistent setup interpreter model"),
+            "{capture}"
+        );
+        assert!(capture.contains("deterministic inventory"), "{capture}");
+    }
+}
