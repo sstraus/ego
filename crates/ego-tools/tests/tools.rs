@@ -472,6 +472,7 @@ mod registration {
                 "grep",
                 "read",
                 "read_tool_result",
+                "web_fetch",
                 "write"
             ]
         );
@@ -540,6 +541,7 @@ mod registration {
             ("read", json!({ "path": "src/main.rs" })),
             ("glob", json!({ "pattern": "src/**/*.rs" })),
             ("grep", json!({ "query": "TODO", "path": "src" })),
+            ("web_fetch", json!({ "url": "https://example.com/" })),
             ("write", json!({ "path": "src/new.rs", "contents": "hi\n" })),
             (
                 "edit",

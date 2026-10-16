@@ -50,7 +50,7 @@ pub fn vision_model_facts(image_input: &str) -> String {
 schema_version = 5
 max_context_tokens = 128000
 max_output_tokens = 4096
-max_tools = 16
+max_tools = 32
 supports_parallel_tool_calls = false
 reasoning_carryover = "unsupported"
 reasoning_efforts = "any"
