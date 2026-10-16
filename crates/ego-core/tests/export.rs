@@ -796,3 +796,145 @@ fn residual_judge_decision_exports_its_outcome_without_path_or_reason() {
     assert_eq!(record["event"]["outcome"], "granted");
     assert_eq!(record["event"]["recommended"], "session");
 }
+
+// Catches: goal/fallback diagnostics or permission reasons leak through sanitized export.
+#[test]
+fn exporter_redacts_goal_fallback_and_permission_material_but_keeps_decisions() {
+    use ego_core::event::domain::FallbackDecision;
+    use ego_core::event::id::GoalId;
+    use ego_core::goal::{GoalOwner, GoalTransition};
+    use ego_core::run::RequestId;
+    let (mut fixture, target, _) = fixture();
+    fixture.lineages.insert(target, None);
+    let id = GoalId::new();
+    let request = RequestId::new();
+    let secret = "PRIVATE-POLICY-MATERIAL";
+    let mut seq = Seq::ZERO;
+    let kinds = vec![
+        EventKind::SessionTitleChanged {
+            title: Some(secret.into()),
+        },
+        EventKind::SessionPauseRequested { request },
+        EventKind::SessionPaused { request },
+        EventKind::SessionPauseObserved { request },
+        EventKind::SessionResumed { request },
+        EventKind::GoalSet {
+            id,
+            objective: secret.into(),
+            owner: GoalOwner::Operator,
+            ceilings: Default::default(),
+            derived_from: None,
+        },
+        EventKind::GoalAllowanceInherited {
+            id,
+            continuation_budget: Some(2),
+            continuation_turns: 1,
+        },
+        EventKind::GoalCheckConfigured {
+            id,
+            continuation_budget: 2,
+        },
+        EventKind::GoalContinuation {
+            id,
+            text: secret.into(),
+        },
+        EventKind::GoalUpdated {
+            id,
+            objective: secret.into(),
+        },
+        EventKind::GoalCheckStopped {
+            id,
+            reason: secret.into(),
+        },
+        EventKind::GoalTransitioned {
+            id,
+            transition: GoalTransition::BlockerObserved {
+                reason: secret.into(),
+            },
+        },
+        EventKind::FallbackDecision {
+            candidate: ModelRef("provider/model".into()),
+            decision: FallbackDecision::ExpressibilitySkipped {
+                message: secret.into(),
+            },
+        },
+        EventKind::FallbackDecision {
+            candidate: ModelRef("provider/model".into()),
+            decision: FallbackDecision::ResolutionSkipped {
+                message: secret.into(),
+            },
+        },
+        EventKind::FallbackDecision {
+            candidate: ModelRef("provider/model".into()),
+            decision: FallbackDecision::Skipped { gaps: vec![] },
+        },
+        EventKind::FallbackDecision {
+            candidate: ModelRef("provider/model".into()),
+            decision: FallbackDecision::ReasoningDropped {
+                dropped_blocks: 2,
+                dialects: vec!["opaque".into()],
+            },
+        },
+        EventKind::AssistantDelta {
+            text: secret.into(),
+        },
+        EventKind::HostContextAppended {
+            text: secret.into(),
+        },
+        EventKind::CompactionSeeded {
+            source: fixture.source,
+            source_seq: Seq::ZERO,
+            prompt_revision: 1,
+            checkpoint: secret.into(),
+        },
+        EventKind::Compacted {
+            summary: secret.into(),
+        },
+        EventKind::PermissionAmended {
+            tool: secret.into(),
+        },
+        EventKind::PermissionDecided {
+            allowed: Some(false),
+            by: Some(ego_core::permit::Authority::Party),
+            reason: Some(secret.into()),
+        },
+        EventKind::ToolCallDelta {
+            text: secret.into(),
+        },
+    ];
+    let count = kinds.len();
+    fixture.entries.insert(
+        target,
+        Ok(std::iter::once(context(target))
+            .chain(kinds.into_iter().map(|kind| event(&mut seq, kind)))
+            .collect()),
+    );
+    let before = source_bytes(&fixture);
+    let bundle = Exporter::new(&fixture).sanitized(target).unwrap();
+    let encoded = serde_json::to_string(&bundle).unwrap();
+    assert!(!encoded.contains(secret), "{encoded}");
+    let value = serde_json::to_value(bundle).unwrap();
+    let events: Vec<_> = value["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["kind"] == "event")
+        .collect();
+    assert_eq!(events.len(), count);
+    let ledger: BTreeMap<_, _> = value["redactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["category"].as_str().unwrap(),
+                entry["count"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(ledger["opaque_prose"], 12);
+    assert_eq!(ledger["permission_material"], 4);
+    assert_eq!(ledger["tool_material"], 1);
+    assert_eq!(before, source_bytes(&fixture));
+    assert!(encoded.contains("\"allowed\":false"));
+}

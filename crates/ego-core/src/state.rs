@@ -1750,6 +1750,94 @@ impl SessionState {
         references
     }
 
+    fn apply_goal(&mut self, ev: &DomainEvent) {
+        match &ev.kind {
+            EventKind::GoalSet {
+                id,
+                objective,
+                owner,
+                ceilings,
+                derived_from,
+            } => {
+                let may_set = self
+                    .goal
+                    .as_ref()
+                    .is_none_or(|goal| goal.state != GoalState::Active && goal.id != *id);
+                if may_set {
+                    self.goal = Some(GoalRecord {
+                        id: *id,
+                        objective: objective.clone(),
+                        owner: *owner,
+                        ceilings: ceilings.clone(),
+                        derived_from: *derived_from,
+                        created_seq: ev.env.seq,
+                        state: GoalState::Active,
+                        continuation_turns: 0,
+                        continuation_budget: None,
+                        check_stop: None,
+                        blocker_reason: None,
+                        blocker_observations: 0,
+                        achieved_by: None,
+                        achievement_evidence: None,
+                        blocker_turns: Vec::new(),
+                    });
+                }
+            }
+            EventKind::GoalAllowanceInherited {
+                id,
+                continuation_budget,
+                continuation_turns,
+            } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.continuation_budget = *continuation_budget;
+                    goal.continuation_turns = *continuation_turns;
+                }
+            }
+            EventKind::GoalCheckConfigured {
+                id,
+                continuation_budget,
+            } => {
+                if let Some(goal) = self
+                    .goal
+                    .as_mut()
+                    .filter(|goal| goal.id == *id && goal.continuation_budget.is_none())
+                {
+                    goal.continuation_budget = Some(*continuation_budget);
+                }
+            }
+            EventKind::GoalContinuation { id, text } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.continuation_turns = goal.continuation_turns.saturating_add(1);
+                    goal.check_stop = None;
+                }
+                if let Some(item) = self.item_mut(ev, ItemKind::GoalContinuation) {
+                    item.text = text.clone();
+                }
+            }
+            EventKind::GoalCheckStopped { id, reason } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.check_stop = Some(reason.clone());
+                }
+            }
+            EventKind::GoalUpdated { id, objective } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| {
+                    goal.id == *id
+                        && goal.state == GoalState::Active
+                        && goal.owner == crate::goal::GoalOwner::Automated
+                }) {
+                    goal.objective = objective.clone();
+                    goal.blocker_reason = None;
+                    goal.blocker_observations = 0;
+                    goal.blocker_turns.clear();
+                }
+            }
+            EventKind::GoalTransitioned { id, transition } => {
+                self.transition_goal(ev, id, transition)
+            }
+            _ => unreachable!("only goal events reach the goal reducer"),
+        }
+    }
+
     /// Apply one domain event to the state.
     ///
     /// Pure and sync: no I/O, no wall-clock reads, no randomness. Total: no
@@ -1817,59 +1905,13 @@ impl SessionState {
                 self.pause = PauseState::Running;
                 self.holds.resumed.insert(*request);
             }
-            EventKind::GoalSet {
-                id,
-                objective,
-                owner,
-                ceilings,
-                derived_from,
-            } => {
-                let may_set = self
-                    .goal
-                    .as_ref()
-                    .is_none_or(|goal| goal.state != GoalState::Active && goal.id != *id);
-                if may_set {
-                    self.goal = Some(GoalRecord {
-                        id: *id,
-                        objective: objective.clone(),
-                        owner: *owner,
-                        ceilings: ceilings.clone(),
-                        derived_from: *derived_from,
-                        created_seq: ev.env.seq,
-                        state: GoalState::Active,
-                        continuation_turns: 0,
-                        continuation_budget: None,
-                        check_stop: None,
-                        blocker_reason: None,
-                        blocker_observations: 0,
-                        achieved_by: None,
-                        achievement_evidence: None,
-                        blocker_turns: Vec::new(),
-                    });
-                }
-            }
-            EventKind::GoalAllowanceInherited {
-                id,
-                continuation_budget,
-                continuation_turns,
-            } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
-                    goal.continuation_budget = *continuation_budget;
-                    goal.continuation_turns = *continuation_turns;
-                }
-            }
-            EventKind::GoalCheckConfigured {
-                id,
-                continuation_budget,
-            } => {
-                if let Some(goal) = self
-                    .goal
-                    .as_mut()
-                    .filter(|goal| goal.id == *id && goal.continuation_budget.is_none())
-                {
-                    goal.continuation_budget = Some(*continuation_budget);
-                }
-            }
+            EventKind::GoalSet { .. }
+            | EventKind::GoalAllowanceInherited { .. }
+            | EventKind::GoalCheckConfigured { .. }
+            | EventKind::GoalContinuation { .. }
+            | EventKind::GoalCheckStopped { .. }
+            | EventKind::GoalUpdated { .. }
+            | EventKind::GoalTransitioned { .. } => self.apply_goal(ev),
             EventKind::ContextRequested { request } => {
                 self.context_request = Some(request.clone());
             }
@@ -1878,35 +1920,6 @@ impl SessionState {
             }
             EventKind::ContextCooldown { turns } => {
                 self.context_cooldown = *turns;
-            }
-            EventKind::GoalContinuation { id, text } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
-                    goal.continuation_turns = goal.continuation_turns.saturating_add(1);
-                    goal.check_stop = None;
-                }
-                if let Some(item) = self.item_mut(ev, ItemKind::GoalContinuation) {
-                    item.text = text.clone();
-                }
-            }
-            EventKind::GoalCheckStopped { id, reason } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
-                    goal.check_stop = Some(reason.clone());
-                }
-            }
-            EventKind::GoalUpdated { id, objective } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| {
-                    goal.id == *id
-                        && goal.state == GoalState::Active
-                        && goal.owner == crate::goal::GoalOwner::Automated
-                }) {
-                    goal.objective = objective.clone();
-                    goal.blocker_reason = None;
-                    goal.blocker_observations = 0;
-                    goal.blocker_turns.clear();
-                }
-            }
-            EventKind::GoalTransitioned { id, transition } => {
-                self.transition_goal(ev, id, transition)
             }
             EventKind::PromptQueued { id, text, images } => {
                 self.accept_prompt(ev, *id, text, images)

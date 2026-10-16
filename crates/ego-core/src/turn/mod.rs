@@ -5919,6 +5919,34 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         .await
     }
 
+    async fn record_human_tool_decision(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        selector: &str,
+        result: Result<crate::permit::Authorized, PolicyDenied>,
+    ) -> Result<std::ops::ControlFlow<ToolOutcome, crate::permit::Authorized>, StoreError> {
+        match result {
+            Ok(authorized) => {
+                self.decided(turn, call, selector, true, authorized.by().clone())
+                    .await?;
+                Ok(std::ops::ControlFlow::Continue(authorized))
+            }
+            Err(denial) => {
+                self.decided(turn, call, selector, false, denial.authority())
+                    .await?;
+                let outcome = match denial {
+                    PolicyDenied::Redirected { .. } => ToolOutcome::Answered {
+                        ok: false,
+                        result: ToolResult::builtin(denial.to_string()),
+                    },
+                    denial => ToolOutcome::Refused { denial },
+                };
+                Ok(std::ops::ControlFlow::Break(outcome))
+            }
+        }
+    }
+
     async fn run_effect_tool(
         &mut self,
         policy: &PolicyEngine,
@@ -6101,35 +6129,24 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     Resolution::Ask(pending) => {
                                         return Ok(ToolOutcome::Unanswerable { pending });
                                     }
-                                    Resolution::HumanSettled { result, .. } => match result {
-                                        Ok(authorized) => {
-                                            self.decided(
+                                    Resolution::HumanSettled { result, .. } => {
+                                        match self
+                                            .record_human_tool_decision(
                                                 turn,
                                                 call,
                                                 &hook_selector,
-                                                true,
-                                                authorized.by().clone(),
+                                                result,
                                             )
-                                            .await?;
-                                            break authorized;
+                                            .await?
+                                        {
+                                            std::ops::ControlFlow::Continue(authorized) => {
+                                                break authorized;
+                                            }
+                                            std::ops::ControlFlow::Break(outcome) => {
+                                                return Ok(outcome);
+                                            }
                                         }
-                                        Err(denial) => {
-                                            self.decided(
-                                                turn,
-                                                call,
-                                                &hook_selector,
-                                                false,
-                                                denial.authority(),
-                                            )
-                                            .await?;
-                                            return Ok(match denial {
-                                                PolicyDenied::Redirected { .. } => {
-                                                    answered(false, denial.to_string())
-                                                }
-                                                denial => ToolOutcome::Refused { denial },
-                                            });
-                                        }
-                                    },
+                                    }
                                     Resolution::Reclassify { request, params } => {
                                         self.permission(
                                             turn,
@@ -6172,35 +6189,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     },
                                 }
                             }
-                            Resolution::HumanSettled { result, .. } => match result {
-                                Ok(authorized) => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &hook_selector,
-                                        true,
-                                        authorized.by().clone(),
-                                    )
-                                    .await?;
-                                    break authorized;
+                            Resolution::HumanSettled { result, .. } => {
+                                match self
+                                    .record_human_tool_decision(turn, call, &hook_selector, result)
+                                    .await?
+                                {
+                                    std::ops::ControlFlow::Continue(authorized) => {
+                                        break authorized;
+                                    }
+                                    std::ops::ControlFlow::Break(outcome) => return Ok(outcome),
                                 }
-                                Err(denial) => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &hook_selector,
-                                        false,
-                                        denial.authority(),
-                                    )
-                                    .await?;
-                                    return Ok(match denial {
-                                        PolicyDenied::Redirected { .. } => {
-                                            answered(false, denial.to_string())
-                                        }
-                                        denial => ToolOutcome::Refused { denial },
-                                    });
-                                }
-                            },
+                            }
                             Resolution::Reclassify { request, params } => {
                                 self.permission(
                                     turn,

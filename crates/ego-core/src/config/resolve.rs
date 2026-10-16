@@ -410,21 +410,15 @@ fn resolve_inner(
             &mut model,
             &mut thinking,
         );
-        let profile_origin = active_profile_name.map(|name| (name, selected_by));
-        if let Some(m) = profile.and_then(|p| p.mode) {
-            mode = Some(m);
-            mode_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
-        } else if let Some(m) = sourced.value.mode {
-            mode = Some(m);
-            mode_provenance = super::SettingProvenance::layer(sourced.source, None);
-        }
-        if let Some(value) = profile.and_then(|profile| profile.sandbox) {
-            sandbox = Some(value);
-            sandbox_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
-        } else if let Some(value) = sourced.value.sandbox {
-            sandbox = Some(value);
-            sandbox_provenance = super::SettingProvenance::layer(sourced.source, None);
-        }
+        merge_confinement(
+            sourced,
+            profile,
+            active_profile_name.map(|name| (name, selected_by)),
+            &mut mode,
+            &mut mode_provenance,
+            &mut sandbox,
+            &mut sandbox_provenance,
+        );
         merge_exec_controls(&mut exec, sourced, profile);
         if let Some(value) = profile
             .and_then(|profile| profile.network)
@@ -478,22 +472,14 @@ fn resolve_inner(
             .and_then(|p| p.roots.as_ref())
             .or(sourced.value.roots.as_ref())
         {
-            if matches!(sourced.source, Source::Project | Source::Local) {
-                root_restrictions.push(
-                    if roots_source.is_none()
-                        && sandbox.unwrap_or_default() != crate::permit::Confinement::Adaptive
-                    {
-                        vec![crate::permit::RootCfg {
-                            path: "~/Gits".into(),
-                            access: crate::permit::RootAccess::ReadWrite,
-                        }]
-                    } else {
-                        roots.clone()
-                    },
-                );
-            }
-            roots = selected.clone();
-            roots_source = Some(sourced.source);
+            select_roots(
+                sourced.source,
+                selected,
+                sandbox,
+                &mut roots,
+                &mut roots_source,
+                &mut root_restrictions,
+            );
         }
         if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
             artifact_dir = Some(Sourced {
@@ -588,18 +574,7 @@ fn resolve_inner(
     // rather than "system wins", because `CLI.md:311` binds everyone to the
     // administrator's cap and not to the administrator's *figure* — an
     // operator asking for less keeps their own.
-    let mut system_ceiling = Ceilings::default();
-    for sourced in eligible.iter().filter(|l| l.source == Source::System) {
-        if let Some(budget) = &sourced.value.budget {
-            system_ceiling.apply(budget);
-        }
-        if let Some(budget) = active_profile_name
-            .and_then(|name| sourced.value.profile.get(name))
-            .and_then(|profile| profile.budget.as_ref())
-        {
-            system_ceiling.apply(budget);
-        }
-    }
+    let system_ceiling = system_budget_ceiling(&eligible, active_profile_name);
     let clamped = ceilings.clamp(&system_ceiling);
 
     let mut profile_warnings = Vec::new();
@@ -679,6 +654,74 @@ fn resolve_inner(
         mcp,
         discarded,
     })
+}
+
+fn system_budget_ceiling(
+    eligible: &[&Sourced<ConfigLayer>],
+    active_profile_name: Option<&str>,
+) -> Ceilings {
+    let mut system_ceiling = Ceilings::default();
+    for sourced in eligible.iter().filter(|l| l.source == Source::System) {
+        if let Some(budget) = &sourced.value.budget {
+            system_ceiling.apply(budget);
+        }
+        if let Some(budget) = active_profile_name
+            .and_then(|name| sourced.value.profile.get(name))
+            .and_then(|profile| profile.budget.as_ref())
+        {
+            system_ceiling.apply(budget);
+        }
+    }
+    system_ceiling
+}
+
+fn select_roots(
+    source: Source,
+    selected: &[crate::permit::RootCfg],
+    sandbox: Option<Confinement>,
+    roots: &mut Vec<crate::permit::RootCfg>,
+    roots_source: &mut Option<Source>,
+    root_restrictions: &mut Vec<Vec<crate::permit::RootCfg>>,
+) {
+    if matches!(source, Source::Project | Source::Local) {
+        let inherited =
+            if roots_source.is_none() && sandbox.unwrap_or_default() != Confinement::Adaptive {
+                vec![crate::permit::RootCfg {
+                    path: "~/Gits".into(),
+                    access: crate::permit::RootAccess::ReadWrite,
+                }]
+            } else {
+                roots.clone()
+            };
+        root_restrictions.push(inherited);
+    }
+    *roots = selected.to_vec();
+    *roots_source = Some(source);
+}
+
+fn merge_confinement(
+    sourced: &Sourced<ConfigLayer>,
+    profile: Option<&super::layer::ProfileLayer>,
+    profile_origin: Option<(&str, Option<Source>)>,
+    mode: &mut Option<Mode>,
+    mode_provenance: &mut super::SettingProvenance,
+    sandbox: &mut Option<Confinement>,
+    sandbox_provenance: &mut super::SettingProvenance,
+) {
+    if let Some(m) = profile.and_then(|p| p.mode) {
+        *mode = Some(m);
+        *mode_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
+    } else if let Some(m) = sourced.value.mode {
+        *mode = Some(m);
+        *mode_provenance = super::SettingProvenance::layer(sourced.source, None);
+    }
+    if let Some(value) = profile.and_then(|profile| profile.sandbox) {
+        *sandbox = Some(value);
+        *sandbox_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
+    } else if let Some(value) = sourced.value.sandbox {
+        *sandbox = Some(value);
+        *sandbox_provenance = super::SettingProvenance::layer(sourced.source, None);
+    }
 }
 
 fn merge_generation_fields(
