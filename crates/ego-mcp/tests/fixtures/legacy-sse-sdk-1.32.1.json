@@ -2,9 +2,20 @@
   "sdk": "@modelcontextprotocol/sdk@1.32.1",
   "sourceCommit": "ff07b001194fe60ee9deb2121cf119057565796d",
   "capturedAt": "2000-01-25",
-  "endpoint": "/messages?sessionId=00000000-0000-4000-8000-000000010093",
+  "currentPost": {
+    "body": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "method": "server/discover",
+      "params": {}
+    },
+    "status": 404,
+    "contentType": "text/html; charset=utf-8",
+    "response": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Error</title>\n</head>\n<body>\n<pre>Cannot POST /mcp</pre>\n</body>\n</html>\n"
+  },
+  "endpoint": "/messages?sessionId=00000000-0000-4000-8000-0000000100a4",
   "frames": [
-    "event: endpoint\ndata: /messages?sessionId=00000000-0000-4000-8000-000000010093\n\n",
+    "event: endpoint\ndata: /messages?sessionId=00000000-0000-4000-8000-0000000100a4\n\n",
     "event: message\ndata: {\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"logging\":{},\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"simple-sse-server\",\"version\":\"1.0.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}\n\n",
     "event: message\ndata: {\"result\":{\"tools\":[{\"name\":\"start-notification-stream\",\"description\":\"Starts sending periodic notifications\",\"inputSchema\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"interval\":{\"default\":1000,\"type\":\"number\",\"description\":\"Interval in milliseconds between notifications\"},\"count\":{\"default\":10,\"type\":\"number\",\"description\":\"Number of notifications to send\"}}},\"execution\":{\"taskSupport\":\"forbidden\"}}]},\"jsonrpc\":\"2.0\",\"id\":1}\n\n",
     "event: message\ndata: {\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"Starting notification stream with 0 messages every 1ms\"},\"jsonrpc\":\"2.0\"}\n\n",

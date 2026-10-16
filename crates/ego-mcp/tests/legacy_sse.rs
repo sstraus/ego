@@ -122,11 +122,27 @@ impl McpHttpEffects for Replay {
             _ => None,
         };
         // A current POST to this SSE-only endpoint is refused, not converted to GET.
-        let status = if method == "server/discover" {
-            405
-        } else {
-            self.post_status
-        };
+        if method == "server/discover" {
+            let refused = &self.fixture["currentPost"];
+            let status = u16::try_from(refused["status"].as_u64().unwrap()).unwrap();
+            let headers = vec![
+                HttpHeader::new(
+                    "content-type",
+                    refused["contentType"].as_str().unwrap().as_bytes().to_vec(),
+                )
+                .unwrap(),
+            ];
+            let bytes = refused["response"].as_str().unwrap().as_bytes().to_vec();
+            return Box::pin(async move {
+                McpHttpResponse::response(
+                    status,
+                    headers,
+                    futures::stream::once(async move { Ok(bytes) }).boxed(),
+                    DeliveryCertainty::PossiblySent,
+                )
+            });
+        }
+        let status = self.post_status;
         if status == 202
             && let Some(index) = index
         {
