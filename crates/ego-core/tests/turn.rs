@@ -2609,10 +2609,7 @@ mod turn {
                     },
                     AiEvent::Stop(StopReason::Stop),
                 ],
-                goal_reply(
-                    false,
-                    "operator login is complete; artifact is not verified",
-                ),
+                goal_reply(false, "artifact is not verified"),
                 vec![
                     AiEvent::TextDelta {
                         text: "artifact verified".into(),
@@ -2656,11 +2653,11 @@ mod turn {
         );
         assert_eq!(state.usage.uncached_input_tokens, 4);
         let continuation = serde_json::to_value(&calls[2].messages).unwrap();
-        assert!(continuation.as_array().unwrap().iter().any(|m| {
-            m["role"] == "system"
-                && m.to_string()
-                    .contains("operator login is complete; artifact is not verified")
-        }));
+        assert!(
+            continuation.as_array().unwrap().iter().any(
+                |m| m["role"] == "system" && m.to_string().contains("artifact is not verified")
+            )
+        );
         assert_eq!(SessionState::replay(events).goal, Some(goal));
     }
 
