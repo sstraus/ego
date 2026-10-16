@@ -460,7 +460,7 @@ impl Turns<'_> {
         operation: AdmittedSkillOperation,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(loop_.run_admitted_skill(operation), cancel)
+        self.one_running(Box::pin(loop_.run_admitted_skill(operation)), cancel)
             .await
     }
 
