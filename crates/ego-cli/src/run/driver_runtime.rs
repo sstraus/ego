@@ -728,147 +728,56 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 }
                             };
 
-                            // Per turn, for the reason `build` documents.
-                            seat.busy();
-                            if let Some(status) = status.as_ref()
-                                && status.human
-                            {
-                                status.seat.activate();
-                            }
-                            let turn_started = std::time::Instant::now();
-                            let turn_cancel = CancelToken::new();
-                            let (ports, observation, probe_evidence) = effect_scope(
-                                &confinement,
-                                active.evidence(),
-                                &turn_cancel,
-                                run_deadline,
-                                residual.clone(),
-                            )
-                            .await?;
-                            perimeter = perimeter
-                                .with_execution_observation(&observation, probe_evidence.as_ref());
-                            let ports = Arc::new(ports.with_session_processes(&session_hook_ports));
-                            let Some(images) = acquire_interactive_images(InteractiveImages {
-                                asked: asked.as_ref(),
-                                pending_attachments: &mut pending_attachments,
-                                staged_images: &mut staged_images,
-                                source: &source,
-                                ports: &ports,
-                                cancel: &turn_cancel,
-                                run_deadline,
-                                cwd: &cwd,
-                                blobs: active.evidence().blob_store(),
-                                seat: seat.as_ref(),
-                                diagnostics,
-                            })
-                            .await?
-                            else {
-                                continue;
-                            };
-                            let settled_before = state
-                                .detached_execs
-                                .iter()
-                                .filter_map(|(id, snapshot)| snapshot.is_some().then_some(*id))
-                                .collect::<std::collections::HashSet<_>>();
-                            let loop_ = build_interactive_turn(
-                                InteractiveTurnBuild {
+                            let (exit, next_perimeter) = drive_interactive_turn_phase(
+                                InteractiveTurnPhase {
+                                    seat: seat.as_ref(),
+                                    status: status.as_ref(),
+                                    confinement: &confinement,
+                                    active: &active,
+                                    run_deadline: run_deadline,
+                                    residual: residual.clone(),
+                                    perimeter: perimeter,
+                                    session_hook_ports: &session_hook_ports,
+                                    pending_attachments: &mut pending_attachments,
+                                    staged_images: &mut staged_images,
+                                    source: &source,
+                                    cwd: &cwd,
+                                    diagnostics: diagnostics,
+                                    state: &mut state,
                                     args: &args,
                                     effective: &effective,
-                                    source: &source,
                                     policy_source: &policy_source,
                                     gate: &gate,
                                     config: &config,
                                     evidence: &evidence,
-                                    invocation,
-                                    run_deadline,
+                                    invocation: invocation,
                                     registry: &registry,
                                     admitted_tools: &admitted_tools,
-                                    cwd: &cwd,
                                     mcp_runtime: mcp_runtime.as_ref(),
                                     skill_resource_roots: &skill_resource_roots,
                                     elicitor: &elicitor,
-                                    judge_available,
-                                    confinement: &confinement,
-                                    skill_trust,
-                                    active: &active,
-                                    hooks: &session_hooks,
-                                    journal: &session_journal,
+                                    judge_available: judge_available,
+                                    skill_trust: skill_trust,
+                                    session_hooks: &session_hooks,
+                                    session_journal: &session_journal,
                                     skill_owner: skill_owner.clone(),
+                                    refresh_prompt: &mut refresh_prompt,
+                                    control: &mut control,
+                                    turns: &turns,
+                                    last_generation_request: &mut last_generation_request,
+                                    policy_selection: &policy_selection,
+                                    selection: &selection,
+                                    between: between,
+                                    cancel: cancel,
+                                    last: &mut last,
+                                    mcp_errors: &mcp_errors,
                                 },
-                                (&ports, &turn_cancel, observation, probe_evidence),
-                            )?;
-                            let loop_ = match resumed_turn.as_ref() {
-                                Some(RuntimeResume::Foreign { policy, .. }) => loop_
-                                    .with_hook_policy(Arc::clone(policy))
-                                    .map_err(|message| RunTermination::Failed { message })?,
-                                Some(RuntimeResume::Model(_)) | None => loop_,
-                            };
-                            let previous_epoch = state
-                                .prompt_snapshot
-                                .as_ref()
-                                .map(|snapshot| snapshot.epoch);
-                            let loop_ = if refresh_prompt {
-                                loop_.with_prompt_refresh()
-                            } else {
-                                loop_
-                            };
-                            let mut loop_ = loop_
-                                .with_automatic_compaction()
-                                .with_interactive_control(&mut control);
-                            let driven = drive_interactive_input(
-                                &turns,
-                                &mut loop_,
                                 resumed_turn,
                                 asked,
-                                images,
-                                &turn_cancel,
-                                diagnostics,
                             )
-                            .await;
-                            last_generation_request = loop_.last_generation_request();
-                            drop(loop_);
-                            state = session_hooks.state.state();
-                            report_settled_execs(&state, &settled_before, diagnostics);
-                            if state
-                                .prompt_snapshot
-                                .as_ref()
-                                .map(|snapshot| snapshot.epoch)
-                                != previous_epoch
-                            {
-                                refresh_prompt = false;
-                            }
-                            refresh_turn_status(
-                                status.as_ref(),
-                                &policy_selection,
-                                &selection,
-                                &state,
-                                diagnostics,
-                            );
-                            seat.refresh_queue(control.status());
-                            let Some((termination, result)) = driven else {
-                                continue;
-                            };
-                            between();
-                            report_interactive_turn_end(
-                                &termination,
-                                &cancel,
-                                seat.as_ref(),
-                                turn_started,
-                                diagnostics,
-                            );
-                            last = Ended {
-                                termination,
-                                session: active.id(),
-                                state: state.clone(),
-                                result,
-                                selected_session: None,
-                                mcp_errors: mcp_errors.clone(),
-                            };
-
-                            // The person's own cancellations end a turn; the process's end
-                            // the process. A broken stdout or a SIGTERM is not a turn to
-                            // return to a prompt from.
-                            if cancel.is_cancelled() {
+                            .await?;
+                            perimeter = next_perimeter;
+                            if exit {
                                 break 'epoch EpochTransition::Exit;
                             }
                         }
@@ -947,42 +856,20 @@ pub(super) async fn drive_execution<S: EventSink>(
                         request,
                         parent,
                     } => {
-                        let parent_id = active.id();
-                        let parent_context = source_state.context;
-                        active.replace_state(source_state);
-                        if !active.apply_publication(target, &publication) {
-                            return Err(RunTermination::Failed {
-                                message: "the published compaction target could not be activated"
-                                    .to_owned(),
-                            });
-                        }
-                        admit_successor_context(&evidence, &active, &run_context)?;
-                        if let Err(error) = session_end {
-                            diagnostics.note(&format!(
-                                "the compacted source session-end hook failed: {}",
-                                error.exit_reason()
-                            ));
-                        }
-                        publish_compaction_runtime(
-                            runtime,
-                            skills.as_deref(),
-                            &mut registry,
-                            &mut config,
-                            diagnostics,
+                        epoch_start = activate_compaction_transition(
+                            &mut active,
+                            source_state,
+                            session_end,
+                            (target, publication, diagnostic, runtime, request, parent),
+                            CompactionActivation {
+                                evidence: &evidence,
+                                run_context: &run_context,
+                                diagnostics,
+                                skills: skills.as_deref(),
+                                registry: &mut registry,
+                                config: &mut config,
+                            },
                         )?;
-                        diagnostics.note(&format!(
-                            "compacted session {parent_id} into {}; this is now session {}. \
-                             Before: {}; after: known once the next reply is generated. \
-                             To return to the source: ego resume {parent_id}",
-                            active.id(),
-                            active.id(),
-                            crate::usage::context_line(parent_context)
-                        ));
-                        epoch_start = EpochStart::Compact {
-                            diagnostic,
-                            request,
-                            parent,
-                        };
                     }
                 }
             }
@@ -2585,7 +2472,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             return Ok(CommandOutcome::Continue);
         }
         repl::Line::HostCommand(repl::HostCommand::Hooks) => {
-            render_session_hooks(session_hooks.state, diagnostics);
+            render_session_hooks(&session_hooks.state, diagnostics);
             return Ok(CommandOutcome::Continue);
         }
         repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
@@ -3385,4 +3272,298 @@ fn report_interactive_turn_end(
     if let RunTermination::Failed { message } = termination {
         diagnostics.note(&format!("{message}; fix the error and retry, or use /quit"));
     }
+}
+
+struct CompactionActivation<'a> {
+    evidence: &'a EvidenceAdmissionService,
+    run_context: &'a Option<RunContextEvidence>,
+    diagnostics: &'a dyn Diagnostics,
+    skills: Option<&'a crate::skill::SkillCatalogue>,
+    registry: &'a mut Vec<RegisteredTool>,
+    config: &'a mut TurnConfig,
+}
+fn activate_compaction_transition<'store>(
+    active: &mut ActiveSession<'store>,
+    source_state: SessionState,
+    session_end: Result<(), RunTermination>,
+    target: (
+        ActiveSession<'store>,
+        ego_core::session::TargetPublication,
+        Option<String>,
+        Option<CompactionRuntime>,
+        RequestId,
+        Option<EventId>,
+    ),
+    input: CompactionActivation<'_>,
+) -> Result<EpochStart, RunTermination> {
+    let (target, publication, diagnostic, runtime, request, parent) = target;
+    let CompactionActivation {
+        evidence,
+        run_context,
+        diagnostics,
+        skills,
+        registry,
+        config,
+    } = input;
+    let parent_id = active.id();
+    let parent_context = source_state.context;
+    active.replace_state(source_state);
+    if !active.apply_publication(target, &publication) {
+        return Err(RunTermination::Failed {
+            message: "the published compaction target could not be activated".to_owned(),
+        });
+    }
+    admit_successor_context(evidence, active, run_context)?;
+    if let Err(error) = session_end {
+        diagnostics.note(&format!(
+            "the compacted source session-end hook failed: {}",
+            error.exit_reason()
+        ));
+    }
+    publish_compaction_runtime(runtime, skills, registry, config, diagnostics)?;
+    diagnostics.note(&format!(
+        "compacted session {parent_id} into {}; this is now session {}. \
+                             Before: {}; after: known once the next reply is generated. \
+                             To return to the source: ego resume {parent_id}",
+        active.id(),
+        active.id(),
+        crate::usage::context_line(parent_context)
+    ));
+    Ok(EpochStart::Compact {
+        diagnostic,
+        request,
+        parent,
+    })
+}
+
+struct InteractiveTurnPhase<'a, 'session, 'store> {
+    seat: &'a dyn InteractiveSeat,
+    status: Option<&'a InteractiveStatus>,
+    confinement: &'a RunConfinement,
+    active: &'session ActiveSession<'store>,
+    run_deadline: Option<std::time::Instant>,
+    residual: Option<Arc<ResidualWriteDesk>>,
+    perimeter: crate::perimeter::Perimeter,
+    session_hook_ports: &'a Arc<RunEffectPorts>,
+    pending_attachments: &'a mut Vec<String>,
+    staged_images: &'a mut Vec<StagedPasteImage>,
+    source: &'a Arc<model::CliGenerationModelSource>,
+    cwd: &'a Path,
+    diagnostics: &'a dyn Diagnostics,
+    state: &'a mut SessionState,
+    args: &'a Args,
+    effective: &'a Effective,
+    policy_source: &'a Arc<dyn GenerationPolicySource>,
+    gate: &'a SharedBudgetGate,
+    config: &'a TurnConfig,
+    evidence: &'a Arc<EvidenceAdmissionService>,
+    invocation: RunInvocationId,
+    registry: &'a [RegisteredTool],
+    admitted_tools: &'a Option<Arc<dyn AdmittedToolSource>>,
+    mcp_runtime: &'a dyn McpRuntimeBinding,
+    skill_resource_roots: &'a Option<ego_core::skill::SkillResourceRoots>,
+    elicitor: &'a Option<Arc<dyn Elicitor>>,
+    judge_available: bool,
+    skill_trust: Trust,
+    session_hooks: &'a SessionHookComposition<'session>,
+    session_journal: &'a SharedJournal<'session>,
+    skill_owner: Arc<dyn SkillInvocationPort + 'session>,
+    refresh_prompt: &'a mut bool,
+    control: &'a mut InteractiveControl,
+    turns: &'a Turns<'a>,
+    last_generation_request: &'a mut Option<GenRequest>,
+    policy_selection: &'a GenerationPolicySelection,
+    selection: &'a model::GenerationSelection,
+    between: &'a (dyn Fn() + Send + Sync),
+    cancel: &'a CancelToken,
+    last: &'a mut Ended,
+    mcp_errors: &'a [String],
+}
+
+async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
+    input: InteractiveTurnPhase<'a, 'session, 'store>,
+    resumed_turn: Option<RuntimeResume>,
+    asked: Option<InteractiveTurnInput>,
+) -> Result<(bool, crate::perimeter::Perimeter), RunTermination> {
+    let InteractiveTurnPhase {
+        seat,
+        status,
+        confinement,
+        active,
+        run_deadline,
+        residual,
+        mut perimeter,
+        session_hook_ports,
+        pending_attachments,
+        staged_images,
+        source,
+        cwd,
+        diagnostics,
+        state,
+        args,
+        effective,
+        policy_source,
+        gate,
+        config,
+        evidence,
+        invocation,
+        registry,
+        admitted_tools,
+        mcp_runtime,
+        skill_resource_roots,
+        elicitor,
+        judge_available,
+        skill_trust,
+        session_hooks,
+        session_journal,
+        skill_owner,
+        refresh_prompt,
+        control,
+        turns,
+        last_generation_request,
+        policy_selection,
+        selection,
+        between,
+        cancel,
+        last,
+        mcp_errors,
+    } = input;
+    // Per turn, for the reason `build` documents.
+    seat.busy();
+    if let Some(status) = status
+        && status.human
+    {
+        status.seat.activate();
+    }
+    let turn_started = std::time::Instant::now();
+    let turn_cancel = CancelToken::new();
+    let (ports, observation, probe_evidence) = effect_scope(
+        confinement,
+        active.evidence(),
+        &turn_cancel,
+        run_deadline,
+        residual.clone(),
+    )
+    .await?;
+    perimeter = perimeter.with_execution_observation(&observation, probe_evidence.as_ref());
+    let ports = Arc::new(ports.with_session_processes(session_hook_ports));
+    let Some(images) = acquire_interactive_images(InteractiveImages {
+        asked: asked.as_ref(),
+        pending_attachments: pending_attachments,
+        staged_images: staged_images,
+        source: source,
+        ports: &ports,
+        cancel: &turn_cancel,
+        run_deadline,
+        cwd: cwd,
+        blobs: active.evidence().blob_store(),
+        seat: seat.as_ref(),
+        diagnostics,
+    })
+    .await?
+    else {
+        return Ok((false, perimeter));
+    };
+    let settled_before = state
+        .detached_execs
+        .iter()
+        .filter_map(|(id, snapshot)| snapshot.is_some().then_some(*id))
+        .collect::<std::collections::HashSet<_>>();
+    let loop_ = build_interactive_turn(
+        InteractiveTurnBuild {
+            args: args,
+            effective: effective,
+            source: source,
+            policy_source: policy_source,
+            gate: gate,
+            config: config,
+            evidence: evidence,
+            invocation,
+            run_deadline,
+            registry: registry,
+            admitted_tools: admitted_tools,
+            cwd: cwd,
+            mcp_runtime,
+            skill_resource_roots: skill_resource_roots,
+            elicitor: elicitor,
+            judge_available,
+            confinement: confinement,
+            skill_trust,
+            active: active,
+            hooks: session_hooks,
+            journal: session_journal,
+            skill_owner,
+        },
+        (&ports, &turn_cancel, observation, probe_evidence),
+    )?;
+    let loop_ =
+        match resumed_turn.as_ref() {
+            Some(RuntimeResume::Foreign { policy, .. }) => loop_
+                .with_hook_policy(Arc::clone(policy))
+                .map_err(|message| RunTermination::Failed { message })?,
+            Some(RuntimeResume::Model(_)) | None => loop_,
+        };
+    let previous_epoch = state
+        .prompt_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.epoch);
+    let loop_ = if *refresh_prompt {
+        loop_.with_prompt_refresh()
+    } else {
+        loop_
+    };
+    let mut loop_ = loop_
+        .with_automatic_compaction()
+        .with_interactive_control(control);
+    let driven = drive_interactive_input(
+        turns,
+        &mut loop_,
+        resumed_turn,
+        asked,
+        images,
+        &turn_cancel,
+        diagnostics,
+    )
+    .await;
+    *last_generation_request = loop_.last_generation_request();
+    drop(loop_);
+    *state = session_hooks.state.state();
+    report_settled_execs(state, &settled_before, diagnostics);
+    if state
+        .prompt_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.epoch)
+        != previous_epoch
+    {
+        *refresh_prompt = false;
+    }
+    refresh_turn_status(status, policy_selection, selection, state, diagnostics);
+    seat.refresh_queue(control.status());
+    let Some((termination, result)) = driven else {
+        return Ok((false, perimeter));
+    };
+    between();
+    report_interactive_turn_end(
+        &termination,
+        cancel,
+        seat.as_ref(),
+        turn_started,
+        diagnostics,
+    );
+    *last = Ended {
+        termination,
+        session: active.id(),
+        state: state.clone(),
+        result,
+        selected_session: None,
+        mcp_errors: mcp_errors.to_vec(),
+    };
+
+    // The person's own cancellations end a turn; the process's end
+    // the process. A broken stdout or a SIGTERM is not a turn to
+    // return to a prompt from.
+    if cancel.is_cancelled() {
+        return Ok((true, perimeter));
+    }
+    Ok((false, perimeter))
 }
