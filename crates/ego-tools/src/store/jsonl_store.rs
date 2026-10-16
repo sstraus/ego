@@ -1700,6 +1700,69 @@ impl JsonlStore {
         Ok(())
     }
 
+    fn publish_initial_run(
+        &self,
+        session: &SessionId,
+        expected_revision: Option<RunRevision>,
+        transaction: RunTransaction,
+        log_path: &std::path::Path,
+    ) -> Result<RunAppend, StoreError> {
+        let first_admission = matches!(
+            transaction.command(),
+            RunCommand::CommandAdmitted {
+                expected_revision: None,
+                start: true,
+                ..
+            }
+        );
+        if expected_revision.is_some()
+            || transaction.revision() != RunRevision::new(1)
+            || !first_admission
+        {
+            return Err(StoreError::NotFound);
+        }
+
+        let header = Header::new(
+            *session,
+            transaction.observed_at(),
+            transaction.root().as_path().to_path_buf(),
+        );
+        let mut image = encode_header(&header);
+        image.push(b'\n');
+        let mut record_seq = Seq::ZERO;
+        let record_seq = record_seq.next();
+        image.extend_from_slice(&encode_record(
+            record_seq,
+            &SessionEntry::RunTransaction(transaction.clone()),
+        )?);
+        image.push(b'\n');
+
+        match self.io.replace_atomic_publication(log_path, &image)? {
+            AtomicReplacePublication::PublishedDurably => {
+                if let Err(error) = self.rebuild_manifest_from_log(session, &image) {
+                    tracing::warn!(
+                        session = %session_dir_name(session),
+                        error = %error,
+                        "run transaction committed but its manifest projection failed"
+                    );
+                }
+                Ok(RunAppend::Committed {
+                    revision: transaction.revision(),
+                })
+            }
+            AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                if let Err(error) = self.rebuild_manifest_from_log(session, &image) {
+                    tracing::warn!(
+                        session = %session_dir_name(session),
+                        error = %error,
+                        "uncertain run publication also failed its manifest projection"
+                    );
+                }
+                Ok(RunAppend::CommittedDurabilityUncertain { diagnostic })
+            }
+        }
+    }
+
     fn compare_and_append_run_already_locked(
         &self,
         session: &SessionId,
@@ -1716,60 +1779,7 @@ impl JsonlStore {
         let log_path = self.log_path(session);
         let existing = self.io.read(&log_path)?;
         if existing.is_none() {
-            let first_admission = matches!(
-                transaction.command(),
-                RunCommand::CommandAdmitted {
-                    expected_revision: None,
-                    start: true,
-                    ..
-                }
-            );
-            if expected_revision.is_some()
-                || transaction.revision() != RunRevision::new(1)
-                || !first_admission
-            {
-                return Err(StoreError::NotFound);
-            }
-
-            let header = Header::new(
-                *session,
-                transaction.observed_at(),
-                transaction.root().as_path().to_path_buf(),
-            );
-            let mut image = encode_header(&header);
-            image.push(b'\n');
-            let mut record_seq = Seq::ZERO;
-            let record_seq = record_seq.next();
-            image.extend_from_slice(&encode_record(
-                record_seq,
-                &SessionEntry::RunTransaction(transaction.clone()),
-            )?);
-            image.push(b'\n');
-
-            match self.io.replace_atomic_publication(&log_path, &image)? {
-                AtomicReplacePublication::PublishedDurably => {
-                    if let Err(error) = self.rebuild_manifest_from_log(session, &image) {
-                        tracing::warn!(
-                            session = %session_dir_name(session),
-                            error = %error,
-                            "run transaction committed but its manifest projection failed"
-                        );
-                    }
-                    return Ok(RunAppend::Committed {
-                        revision: transaction.revision(),
-                    });
-                }
-                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
-                    if let Err(error) = self.rebuild_manifest_from_log(session, &image) {
-                        tracing::warn!(
-                            session = %session_dir_name(session),
-                            error = %error,
-                            "uncertain run publication also failed its manifest projection"
-                        );
-                    }
-                    return Ok(RunAppend::CommittedDurabilityUncertain { diagnostic });
-                }
-            }
+            return self.publish_initial_run(session, expected_revision, transaction, &log_path);
         }
 
         let bytes = existing.expect("checked above");
