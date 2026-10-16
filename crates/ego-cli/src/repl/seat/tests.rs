@@ -983,3 +983,41 @@ fn disconnected_receipt_pump_leaves_an_operator_notice() {
         "Permission receipt could not reach the output pump | > "
     );
 }
+
+// Catches: a long retry cause wraps onto the composer, or an elapsed delay underflows.
+#[test]
+fn retry_row_is_bounded_and_expired_countdown_saturates() {
+    for width in [20, 80, 120] {
+        let mut status = SurfaceStatus {
+            retry: Some((
+                format!(
+                    "{} — connection problem, retrying in 0.1s (attempt 3/3)",
+                    "日".repeat(200)
+                ),
+                Instant::now() - Duration::from_secs(10),
+                100,
+            )),
+            ..SurfaceStatus::default()
+        };
+        status.permission_capabilities.width = width;
+        let waiting = Waiting::new(Arc::new(Mutex::new(status)));
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        let row = indicator.lines().next().unwrap();
+        assert_eq!(row.lines().count(), 1);
+        assert!(unicode_width::UnicodeWidthStr::width(row.trim_end()) < width);
+    }
+    let status = SurfaceStatus {
+        retry: Some((
+            "overload — connection problem, retrying in 0.1s (attempt 3/3)".into(),
+            Instant::now() - Duration::from_secs(10),
+            100,
+        )),
+        ..SurfaceStatus::default()
+    };
+    let waiting = Waiting::new(Arc::new(Mutex::new(status)));
+    assert!(
+        waiting
+            .render_prompt_indicator(PromptEditMode::Emacs)
+            .contains("retrying in 0.0s")
+    );
+}

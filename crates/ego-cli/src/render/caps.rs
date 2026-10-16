@@ -66,6 +66,8 @@ pub struct Terminal<'a> {
     /// `--no-color` on the command line. Highest precedence: a person who
     /// typed it is not asking for a negotiation.
     pub flag_no_color: bool,
+    /// Explicit append-only, unstyled output.
+    pub flag_plain: bool,
     /// Whether stdout — not stderr, not stdin — is a terminal. Stdout is what
     /// carries the answer, and `CLI.md` §4.5 makes it the channel that has to
     /// stay clean when it is not one.
@@ -94,6 +96,7 @@ impl Terminal<'_> {
     pub fn from_process(flag_no_color: bool, env: &Environment) -> Terminal<'_> {
         Terminal {
             flag_no_color,
+            flag_plain: false,
             stdout_is_terminal: std::io::stdout().is_terminal(),
             columns: terminal_size::terminal_size().map(|(w, _)| usize::from(w.0)),
             no_color: env.no_color.as_deref(),
@@ -167,6 +170,9 @@ const PIPE_WIDTH: usize = 80;
 impl Capabilities {
     /// The whole rule, in evaluation order.
     pub fn of(terminal: &Terminal<'_>) -> Self {
+        if terminal.flag_plain {
+            return Self::plain();
+        }
         let osc = Self::osc_profile(terminal);
         let depth = Self::depth(terminal);
         let width = match terminal.columns {
@@ -326,6 +332,7 @@ mod tests {
     fn rich<'a>() -> Terminal<'a> {
         Terminal {
             flag_no_color: false,
+            flag_plain: false,
             stdout_is_terminal: true,
             columns: Some(120),
             no_color: None,
@@ -469,6 +476,18 @@ mod tests {
             };
             assert_eq!(Capabilities::of(&narrow).width, MIN_WIDTH);
         }
+    }
+
+    // Catches: --plain keeps live cursor updates or colour on a real TTY.
+    #[test]
+    fn plain_overrides_a_rich_terminal() {
+        assert_eq!(
+            Capabilities::of(&Terminal {
+                flag_plain: true,
+                ..rich()
+            }),
+            Capabilities::plain()
+        );
     }
 
     #[test]

@@ -384,6 +384,7 @@ struct SurfaceStatus {
     /// The part of the current turn spent waiting on modals.
     modal_waited: std::time::Duration,
     reply_started: Arc<AtomicBool>,
+    retry: Option<(String, Instant, u64)>,
     notice: Option<String>,
     image_chips: Vec<String>,
     origin: InputOrigin,
@@ -439,6 +440,7 @@ impl Default for SurfaceStatus {
             modal_since: None,
             modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
+            retry: None,
             notice: None,
             image_chips: Vec::new(),
             origin: InputOrigin::Typed,
@@ -681,6 +683,7 @@ pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
+    status: Option<SharedStatus>,
     signals: Option<Sender<String>>,
     cancel: CancelToken,
     reply_started: Arc<AtomicBool>,
@@ -692,6 +695,7 @@ impl SurfaceOutput {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
+            status: None,
             signals: None,
             cancel,
             reply_started: Arc::new(AtomicBool::new(false)),
@@ -732,12 +736,21 @@ impl SurfaceOutput {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
+                status: None,
                 signals: None,
                 cancel,
                 reply_started,
             },
             owner,
         )
+    }
+
+    pub(crate) fn retry_status(&self, message: Option<(&str, u64)>) {
+        if let Some(status) = &self.status {
+            status.lock().expect("surface status lock").retry =
+                message.map(|(text, delay)| (text.to_string(), Instant::now(), delay));
+            repaint_status(status);
+        }
     }
 
     pub(crate) fn signal(&self, sequence: &str) -> Result<(), SendError<String>> {
@@ -1002,6 +1015,7 @@ impl Seat {
         // Host metadata never waits for the row printer or consumes a row.
         let (signal_sender, signals) = crossbeam::channel::unbounded();
         output.signals = Some(signal_sender);
+        output.status = Some(Arc::clone(&status));
         let active_signals = signals.clone();
         editor = editor.with_idle_callback(Box::new(move || {
             let mut out = std::io::stdout().lock();

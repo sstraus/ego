@@ -447,7 +447,7 @@ confined execs. The launcher was subsequently fixed.
     --profile NAME      layer [profile.NAME] from config (§7)
     --bare              no ambient discovery even in a trusted workspace
     --trust-workspace   explicitly trust this launch's workspace, without asking
--q / --no-color
+-q / --no-color / --plain
 ```
 
 **Attachments and tools**
@@ -919,6 +919,13 @@ is a terminal, then `TERM`, then `COLORTERM`, then `TERM_PROGRAM`. No other
 code in the workspace reads one of those variables or formats an escape by
 hand. `--no-color` on a real terminal removes the *colour*, not the layout: the
 person asked for no colour, not for a file.
+
+`--plain` overrides the gate with unstyled, append-only output for CI. Non-TTY
+output and `TERM=dumb` also append retry notices. Interactive retries otherwise
+replace one live row with the cause, attempt, countdown and retry hint, then
+leave one settled cause receipt when the turn recovers or fails. `-q` suppresses
+ordinary diagnostics, not recovery controls; `--output json` and `jsonl` keep
+their machine-readable contracts.
 
 **Out of band**, on a screen only: OSC 133 C/D around the run (so a host
 segments the output into a command block instead of pattern-matching tool
