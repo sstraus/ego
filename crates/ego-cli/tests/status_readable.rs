@@ -87,13 +87,13 @@ fn context_without_a_stated_window_shows_the_count_and_never_a_percentage() {
     );
     assert_eq!(unbounded, "ctx 2.5k");
     let nothing_yet = row(&state(None, None, CumulativeCost::Unstarted), &names, 120);
-    assert_eq!(nothing_yet, "ctx ?");
+    assert_eq!(nothing_yet, "ctx unmeasured");
     let window_only = row(
         &state(None, Some(1_000_000), CumulativeCost::Unstarted),
         &names,
         120,
     );
-    assert_eq!(window_only, "ctx ?/1M");
+    assert_eq!(window_only, "ctx unmeasured/1M");
 }
 
 #[test]
