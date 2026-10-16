@@ -5752,7 +5752,10 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     };
     assert_eq!(next_write(), b"/clear\r");
     frames
-        .send(b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[96m> \x1b[?25h".to_vec())
+        .send(
+            b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[96m> \x1b[?25h"
+                .to_vec(),
+        )
         .expect("clear terminal frame");
     assert_eq!(next_write(), b"/help\r");
     assert!(
