@@ -278,9 +278,10 @@ pub(super) fn tools_with_mode(
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
-    if model
-        .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
-        .is_some_and(|provider| matches!(provider, "openai" | "anthropic"))
+    if selected.is_some_and(|names| names.iter().any(|name| name == "web_search"))
+        && model
+            .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
+            .is_some_and(|provider| matches!(provider, "openai" | "anthropic"))
     {
         all.retain(|tool| tool.descriptor().name != "web_search");
         all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(

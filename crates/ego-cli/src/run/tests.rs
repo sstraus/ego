@@ -3158,5 +3158,22 @@ fn native_search_registry_does_not_require_or_select_exa() {
         assert_eq!(descriptor.name, "web_search");
         assert!(descriptor.description.contains("provider hosted tool"));
         assert!(!descriptor.description.contains("EXA_API_KEY"));
+        let defaults = composition::tools_with_mode(
+            None,
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            ego_core::orchestrator::Mode::Observe,
+            Some(model),
+        )
+        .unwrap();
+        assert!(
+            defaults.iter().all(|tool| !tool
+                .descriptor()
+                .description
+                .contains("provider hosted tool")),
+            "paid native search requires explicit selection"
+        );
     }
 }
