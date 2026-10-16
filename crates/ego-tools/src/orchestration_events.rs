@@ -217,7 +217,12 @@ impl ObservationPump {
     }
 
     async fn resend_spawn(&self, receipt: ego_core::orchestrator::SpawnReceipt) -> Option<String> {
-        let response = self.call("session", json!({"action":"submit", "session_id":receipt.session_id, "input":receipt.prompt})).await;
+        let response = self
+            .call(
+                "session",
+                json!({"action":"submit", "session_id":receipt.session_id, "input":receipt.prompt}),
+            )
+            .await;
         match response {
             Ok(response) if response["acknowledged"] == true => None,
             Ok(_) => Some(format!(

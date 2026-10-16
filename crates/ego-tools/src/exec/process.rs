@@ -700,7 +700,17 @@ async fn execute(
         stderr_pending: None,
     };
     loop {
-        if let Err(error) = running.tick(spec, &cancel, background_cancel.as_ref(), handler.as_ref().map(|(_, scope)| scope), &started, limits.termination_grace()).await {
+        if let Err(error) = running
+            .tick(
+                spec,
+                &cancel,
+                background_cancel.as_ref(),
+                handler.as_ref().map(|(_, scope)| scope),
+                &started,
+                limits.termination_grace(),
+            )
+            .await
+        {
             running.abort(limits.termination_grace()).await;
             return Err(error);
         }
@@ -709,7 +719,12 @@ async fn execute(
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let RunningProcess { status, stdout_pending, stderr_pending, .. } = running;
+    let RunningProcess {
+        status,
+        stdout_pending,
+        stderr_pending,
+        ..
+    } = running;
 
     let stdout = match commit_stream(stdout_pending.expect("stdout reached EOF")).await {
         Ok(block) => block,
@@ -748,9 +763,12 @@ impl RunningProcess {
         request_abort(&mut self.stderr_task);
         self.child.terminate(grace).await;
         let _ = abort_outputs(
-            self.stdout_task.take(), self.stderr_task.take(),
-            self.stdout_pending.take(), self.stderr_pending.take(),
-        ).await;
+            self.stdout_task.take(),
+            self.stderr_task.take(),
+            self.stdout_pending.take(),
+            self.stderr_pending.take(),
+        )
+        .await;
     }
 
     fn check_stop(
@@ -770,9 +788,14 @@ impl RunningProcess {
         if let Some(scope) = scope
             && Instant::now() >= scope.deadline()
         {
-            return Err(ProcessError::Timeout { timeout: scope.timeout() });
+            return Err(ProcessError::Timeout {
+                timeout: scope.timeout(),
+            });
         }
-        if spec.timeout().is_some_and(|timeout| started.elapsed() >= timeout) {
+        if spec
+            .timeout()
+            .is_some_and(|timeout| started.elapsed() >= timeout)
+        {
             let timeout = spec.timeout().expect("checked as present");
             tracing::warn!(
                 elapsed_ms = started.elapsed().as_millis(),
@@ -799,18 +822,31 @@ impl RunningProcess {
     ) -> Result<(), ProcessError> {
         self.check_stop(spec, cancel, background_cancel, scope, started)?;
         self.observe_exit(grace).await?;
-        if self.stdout_task.as_ref().is_some_and(DrainHandle::is_finished) {
-            self.stdout_pending = Some(join_drain(self.stdout_task.take().expect("present")).await?);
+        if self
+            .stdout_task
+            .as_ref()
+            .is_some_and(DrainHandle::is_finished)
+        {
+            self.stdout_pending =
+                Some(join_drain(self.stdout_task.take().expect("present")).await?);
         }
-        if self.stderr_task.as_ref().is_some_and(DrainHandle::is_finished) {
-            self.stderr_pending = Some(join_drain(self.stderr_task.take().expect("present")).await?);
+        if self
+            .stderr_task
+            .as_ref()
+            .is_some_and(DrainHandle::is_finished)
+        {
+            self.stderr_pending =
+                Some(join_drain(self.stderr_task.take().expect("present")).await?);
         }
         Ok(())
     }
 
     async fn observe_exit(&mut self, grace: Duration) -> Result<(), ProcessError> {
         if self.status.is_none() {
-            self.status = self.child.try_wait().map_err(|error| ProcessError::Backend(error.to_string()))?;
+            self.status = self
+                .child
+                .try_wait()
+                .map_err(|error| ProcessError::Backend(error.to_string()))?;
         }
         if self.status.is_some() && !self.descendants_cleaned {
             self.child.cleanup_after_exit(grace).await;

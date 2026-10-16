@@ -143,7 +143,8 @@ pub async fn run_secret_child(
         &mut stdin_task,
         &mut stdout_task,
         &mut stdout_result,
-    ).await;
+    )
+    .await;
 
     let (status, cleanup_complete) = match settlement {
         Settlement::Exited(status) => (
@@ -229,9 +230,7 @@ async fn wait_secret_child(
         if cancel.is_cancelled() {
             break Settlement::Failed(SecretChildError::Cancelled);
         }
-        if run_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+        if run_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             break Settlement::Failed(SecretChildError::RunTimeout);
         }
         if started.elapsed() >= command_timeout {
