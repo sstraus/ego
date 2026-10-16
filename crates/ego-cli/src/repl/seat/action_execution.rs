@@ -149,6 +149,133 @@ pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> Strin
         .join("\n")
 }
 
+/// Both submission paths enforce the same busy-command boundary.
+fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
+    match dispatch {
+        Dispatch::History(_) | Dispatch::Resume(_) => {
+            Some("history is unavailable while a turn is running")
+        }
+        Dispatch::Skill(_) => Some("a skill cannot be invoked while a turn is running"),
+        Dispatch::Skills(_) => Some("skill actions are unavailable while a turn is running"),
+        Dispatch::Export(_) => Some("export is unavailable while a turn is running"),
+        Dispatch::Fork(_) => Some("switching forks is unavailable while a turn is running"),
+        Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
+        Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
+        Dispatch::Config(_) => Some("config is unavailable while a turn is running"),
+        Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
+        _ => None,
+    }
+}
+
+fn refuse_busy_dispatch(status: &SharedStatus, dispatch: &Dispatch) -> bool {
+    let Some(reason) = busy_dispatch_refusal(dispatch) else {
+        return false;
+    };
+    status.lock().expect("surface status lock").notice = Some(reason.to_owned());
+    repaint_status(status);
+    true
+}
+
+fn submit_busy_line(
+    editor: &mut Reedline,
+    prompt: &dyn Prompt,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+    ingress: &InteractiveIngress,
+    drafts: &mut DraftStash,
+    steer: bool,
+) -> Option<(Line, bool)> {
+    let buffer = editor.current_buffer_contents().to_string();
+    if buffer.trim().is_empty() {
+        return None;
+    }
+    let dispatch = {
+        let status = status.lock().expect("surface status lock");
+        status.actions.as_ref().map_or(Dispatch::Prompt, |actions| {
+            actions
+                .registry
+                .classify(actions.registry.submit(buffer.clone(), status.origin))
+        })
+    };
+    if refuse_busy_dispatch(status, &dispatch) {
+        return None;
+    }
+    match dispatch {
+        Dispatch::Action(action) => {
+            let (handled, interrupted) =
+                execute_action_and_modal(editor, phase, status, ingress, action, true);
+            if let Some(interrupted) = interrupted {
+                return Some((interrupted, false));
+            }
+            if handled {
+                editor.run_edit_commands(&[EditCommand::Clear]);
+                status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            }
+            return None;
+        }
+        Dispatch::SessionMetadata(operation) => {
+            route_session_metadata(status, operation, true);
+            return None;
+        }
+        Dispatch::Tasks(arguments) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Tasks(arguments)), false));
+        }
+        Dispatch::Refused { reason } => {
+            status.lock().expect("surface status lock").notice = Some(reason.to_owned());
+            repaint_status(status);
+            return None;
+        }
+        Dispatch::History(_)
+        | Dispatch::Resume(_)
+        | Dispatch::Skill(_)
+        | Dispatch::Skills(_)
+        | Dispatch::Export(_)
+        | Dispatch::Fork(_)
+        | Dispatch::Mcp(_)
+        | Dispatch::Setup(_)
+        | Dispatch::Config(_)
+        | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
+        Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
+    }
+    match futures::executor::block_on(ingress.submit(buffer.clone())) {
+        Ok(queue) => {
+            if editor.accept_buffer(prompt).is_err() {
+                return Some((Line::Ended, true));
+            }
+            let mut current = status.lock().expect("surface status lock");
+            current.queue = queue;
+            current.origin = InputOrigin::Typed;
+            if let Some(snapshot) = current.snapshot.as_mut() {
+                snapshot.set_queue(queue);
+            }
+            current.notice = None;
+            drop(current);
+            if !restore_latest_draft(editor, status, drafts) {
+                repaint_status(status);
+            }
+            // A steer is the submission plus the Esc path: the same
+            // durable expedite, not a second delivery mechanism.
+            if steer && request_interrupt(status, ingress) {
+                return Some((Line::HostCommand(HostCommand::Interrupt), false));
+            }
+        }
+        Err(ego_core::turn::ControlError::Closed) => {
+            // Busy admission can close before the terminal observes idle.
+            // Hand this submission to the next turn through normal input.
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            restore_latest_draft(editor, status, drafts);
+            return Some((Line::Submitted(buffer), false));
+        }
+        Err(error) => {
+            status.lock().expect("surface status lock").notice = Some(error.to_string());
+        }
+    }
+    None
+}
+
 pub(super) fn surface_line(
     editor: &mut Reedline,
     prompt: &dyn Prompt,
@@ -201,6 +328,12 @@ pub(super) fn surface_line(
                 current.origin = InputOrigin::Typed;
                 dispatch
             };
+            if phase.get() == EditPhase::Busy
+                && !matches!(dispatch, Dispatch::Resume(_))
+                && refuse_busy_dispatch(status, &dispatch)
+            {
+                continue;
+            }
             match dispatch {
                 Dispatch::Action(action) => {
                     let (handled, interrupted) = execute_action_and_modal(
@@ -223,12 +356,6 @@ pub(super) fn surface_line(
                     return (Line::HostCommand(HostCommand::Resume(id)), failed);
                 }
                 Dispatch::History(query) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice =
-                            Some("history is unavailable while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::History(query)), failed);
                 }
                 Dispatch::SessionMetadata(operation) => {
@@ -240,81 +367,30 @@ pub(super) fn surface_line(
                     continue;
                 }
                 Dispatch::Skill(operation) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice =
-                            Some("a skill cannot be invoked while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Skill(operation)), failed);
                 }
                 Dispatch::Skills(action) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice = Some(
-                            "skill actions are unavailable while a turn is running".to_owned(),
-                        );
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Skills(action)), failed);
                 }
                 Dispatch::Export(selection) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice =
-                            Some("export is unavailable while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Export(selection)), failed);
                 }
                 Dispatch::Fork(item) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice = Some(
-                            "switching forks is unavailable while a turn is running".to_owned(),
-                        );
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Fork(item)), failed);
                 }
                 Dispatch::Tasks(arguments) => {
                     return (Line::HostCommand(HostCommand::Tasks(arguments)), failed);
                 }
                 Dispatch::Mcp(arguments) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice =
-                            Some("MCP changes are unavailable while a turn is running".into());
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Mcp(arguments)), failed);
                 }
                 Dispatch::Setup(arguments) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice =
-                            Some("setup is unavailable while a turn is running".into());
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Setup(arguments)), failed);
                 }
                 Dispatch::Config(arguments) => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice =
-                            Some("config is unavailable while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Config(arguments)), failed);
                 }
                 Dispatch::Hooks => {
-                    if phase.get() == EditPhase::Busy {
-                        status.lock().expect("surface status lock").notice = Some(
-                            "hook inspection is unavailable while a turn is running".to_owned(),
-                        );
-                        repaint_status(status);
-                        continue;
-                    }
                     return (Line::HostCommand(HostCommand::Hooks), failed);
                 }
                 Dispatch::Refused { reason } => {
@@ -441,143 +517,16 @@ pub(super) fn surface_line(
                 repaint_status(status);
             }
             HostCommand::BusySubmit | HostCommand::BusySteer => {
-                let steer = command == HostCommand::BusySteer;
-                let buffer = editor.current_buffer_contents().to_string();
-                if buffer.trim().is_empty() {
-                    continue;
-                }
-                let dispatch = {
-                    let status = status.lock().expect("surface status lock");
-                    status.actions.as_ref().map_or(Dispatch::Prompt, |actions| {
-                        actions
-                            .registry
-                            .classify(actions.registry.submit(buffer.clone(), status.origin))
-                    })
-                };
-                match dispatch {
-                    Dispatch::Action(action) => {
-                        let (handled, interrupted) =
-                            execute_action_and_modal(editor, phase, status, ingress, action, true);
-                        if let Some(interrupted) = interrupted {
-                            return (interrupted, false);
-                        }
-                        if handled {
-                            editor.run_edit_commands(&[EditCommand::Clear]);
-                            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
-                        }
-                        continue;
-                    }
-                    Dispatch::History(_) | Dispatch::Resume(_) => {
-                        status.lock().expect("surface status lock").notice =
-                            Some("history is unavailable while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::SessionMetadata(operation) => {
-                        route_session_metadata(status, operation, true);
-                        continue;
-                    }
-                    Dispatch::Skill(_) => {
-                        status.lock().expect("surface status lock").notice =
-                            Some("a skill cannot be invoked while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Skills(_) => {
-                        status.lock().expect("surface status lock").notice = Some(
-                            "skill actions are unavailable while a turn is running".to_owned(),
-                        );
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Export(_) => {
-                        // The same refusal the shortcut gives while busy. A
-                        // transcript exported mid-turn would be a snapshot of a
-                        // conversation that is still moving.
-                        status.lock().expect("surface status lock").notice =
-                            Some("export is unavailable while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Fork(_) => {
-                        status.lock().expect("surface status lock").notice = Some(
-                            "switching forks is unavailable while a turn is running".to_owned(),
-                        );
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Tasks(arguments) => {
-                        editor.run_edit_commands(&[EditCommand::Clear]);
-                        status.lock().expect("surface status lock").origin = InputOrigin::Typed;
-                        return (Line::HostCommand(HostCommand::Tasks(arguments)), false);
-                    }
-                    Dispatch::Mcp(_) => {
-                        status.lock().expect("surface status lock").notice =
-                            Some("MCP changes are unavailable while a turn is running".into());
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Setup(_) => {
-                        status.lock().expect("surface status lock").notice =
-                            Some("setup is unavailable while a turn is running".into());
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Config(_) => {
-                        status.lock().expect("surface status lock").notice =
-                            Some("config is unavailable while a turn is running".to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Hooks => {
-                        status.lock().expect("surface status lock").notice = Some(
-                            "hook inspection is unavailable while a turn is running".to_owned(),
-                        );
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Refused { reason } => {
-                        status.lock().expect("surface status lock").notice =
-                            Some(reason.to_owned());
-                        repaint_status(status);
-                        continue;
-                    }
-                    Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
-                }
-                match futures::executor::block_on(ingress.submit(buffer.clone())) {
-                    Ok(queue) => {
-                        if editor.accept_buffer(prompt).is_err() {
-                            return (Line::Ended, true);
-                        }
-                        let mut current = status.lock().expect("surface status lock");
-                        current.queue = queue;
-                        current.origin = InputOrigin::Typed;
-                        if let Some(snapshot) = current.snapshot.as_mut() {
-                            snapshot.set_queue(queue);
-                        }
-                        current.notice = None;
-                        drop(current);
-                        if !restore_latest_draft(editor, status, drafts) {
-                            repaint_status(status);
-                        }
-                        // A steer is the submission plus the Esc path: the same
-                        // durable expedite, not a second delivery mechanism.
-                        if steer && request_interrupt(status, ingress) {
-                            return (Line::HostCommand(HostCommand::Interrupt), false);
-                        }
-                    }
-                    Err(ego_core::turn::ControlError::Closed) => {
-                        // Busy admission can close before the terminal observes idle.
-                        // Hand this submission to the next turn through normal input.
-                        editor.run_edit_commands(&[EditCommand::Clear]);
-                        status.lock().expect("surface status lock").origin = InputOrigin::Typed;
-                        restore_latest_draft(editor, status, drafts);
-                        return (Line::Submitted(buffer), false);
-                    }
-                    Err(error) => {
-                        status.lock().expect("surface status lock").notice =
-                            Some(error.to_string());
-                    }
+                if let Some(outcome) = submit_busy_line(
+                    editor,
+                    prompt,
+                    phase,
+                    status,
+                    ingress,
+                    drafts,
+                    command == HostCommand::BusySteer,
+                ) {
+                    return outcome;
                 }
             }
             HostCommand::Interrupt => {

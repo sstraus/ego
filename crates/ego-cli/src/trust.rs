@@ -179,48 +179,10 @@ pub(crate) fn resolve_selected(
     decision
 }
 
-/// Redacted executable declarations and the programs they run. Kept separate
-/// from the full inventory shown to a first-time reviewer.
-pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
-    executable_surface_selected(root, None)
-}
-
-pub(crate) fn executable_surface_selected(
-    root: &Path,
-    selected: Option<&Path>,
-) -> ExecutableSurface {
-    let Ok(root) = fs::canonicalize(root) else {
-        tracing::warn!(path = %root.display(), "the workspace executable surface root could not be resolved");
-        return ExecutableSurface::default();
-    };
-    let root = root.as_path();
-    let mut surface = ExecutableSurface::default();
-    for path in crate::command::project_files(root) {
-        let mut bytes = Vec::new();
-        if fs::File::open(&path)
-            .and_then(|file| {
-                file.take(TRUST_DIGEST_MAX_BYTES as u64 + 1)
-                    .read_to_end(&mut bytes)
-            })
-            .is_ok()
-        {
-            surface.programs.insert(
-                path.to_string_lossy().into_owned(),
-                ProgramEvidence {
-                    bytes: bytes.len() as u64,
-                    digest: ego_core::digest::sha256_hex(&bytes),
-                    executable: false,
-                    link_target: None,
-                },
-            );
-        }
-    }
-    let configs = project_configs(root);
-    let programs: Vec<_> = configs
-        .iter()
-        .flat_map(|(_, config)| commands_in(config))
-        .filter_map(|command| inside(root, &command))
-        .collect();
+fn collect_executable_declarations(
+    surface: &mut ExecutableSurface,
+    configs: Vec<(&str, toml::Table)>,
+) {
     for (relative, config) in configs {
         if let Some(servers) = config
             .get("mcp")
@@ -306,6 +268,66 @@ pub(crate) fn executable_surface_selected(
             }
         }
     }
+}
+
+fn executable_digest(file: &mut File, path: &Path) -> Option<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return Some(format!("{:x}", hasher.finalize())),
+            Ok(count) => hasher.update(&buffer[..count]),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "an executable program could not be fingerprinted");
+                return None;
+            }
+        }
+    }
+}
+
+/// Redacted executable declarations and the programs they run. Kept separate
+/// from the full inventory shown to a first-time reviewer.
+pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
+    executable_surface_selected(root, None)
+}
+
+pub(crate) fn executable_surface_selected(
+    root: &Path,
+    selected: Option<&Path>,
+) -> ExecutableSurface {
+    let Ok(root) = fs::canonicalize(root) else {
+        tracing::warn!(path = %root.display(), "the workspace executable surface root could not be resolved");
+        return ExecutableSurface::default();
+    };
+    let root = root.as_path();
+    let mut surface = ExecutableSurface::default();
+    for path in crate::command::project_files(root) {
+        let mut bytes = Vec::new();
+        if fs::File::open(&path)
+            .and_then(|file| {
+                file.take(TRUST_DIGEST_MAX_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .is_ok()
+        {
+            surface.programs.insert(
+                path.to_string_lossy().into_owned(),
+                ProgramEvidence {
+                    bytes: bytes.len() as u64,
+                    digest: ego_core::digest::sha256_hex(&bytes),
+                    executable: false,
+                    link_target: None,
+                },
+            );
+        }
+    }
+    let configs = project_configs(root);
+    let programs: Vec<_> = configs
+        .iter()
+        .flat_map(|(_, config)| commands_in(config))
+        .filter_map(|command| inside(root, &command))
+        .collect();
+    collect_executable_declarations(&mut surface, configs);
     for path in programs {
         let Ok(link_metadata) = fs::symlink_metadata(&path) else {
             continue;
@@ -346,18 +368,7 @@ pub(crate) fn executable_surface_selected(
         let Ok(mut file) = File::open(&path) else {
             continue;
         };
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 8192];
-        let digest = loop {
-            match file.read(&mut buffer) {
-                Ok(0) => break Some(format!("{:x}", hasher.finalize())),
-                Ok(count) => hasher.update(&buffer[..count]),
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), %error, "an executable program could not be fingerprinted");
-                    break None;
-                }
-            }
-        };
+        let digest = executable_digest(&mut file, &path);
         let Some(digest) = digest else { continue };
         #[cfg(unix)]
         let executable = {

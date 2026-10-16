@@ -1328,7 +1328,16 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         tokens.extend(tail.iter().cloned());
     }
 
-    match subcommand.as_deref() {
+    parse_subcommand(subcommand.as_deref(), tokens, tail, resume_metadata)
+}
+
+fn parse_subcommand(
+    subcommand: Option<&str>,
+    tokens: Vec<String>,
+    tail: Option<Vec<String>>,
+    resume_metadata: bool,
+) -> Result<Invocation, UsageError> {
+    match subcommand {
         Some("orchestrator") => match clap_or_answer::<OrchestratorCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => match parsed.action {
@@ -1371,31 +1380,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         },
         Some("acp") => match clap_or_answer::<AcpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => {
-                ego_core::config::validate_prompt_options(
-                    parsed.shape.bare,
-                    parsed.shape.instructions.is_some(),
-                )
-                .map_err(|message| UsageError(message.to_owned()))?;
-                let defaults = ego_listen::ConnectionLimits::default();
-                Ok(Invocation::Acp(Box::new(AcpArgs {
-                    session_dir: parsed.places.session_dir,
-                    directory: parsed.places.directory,
-                    sandbox: parsed.ceiling.sandbox,
-                    shape: parsed.shape.into(),
-                    listen: parsed.listen,
-                    allow_public_bind: parsed.allow_public_bind,
-                    max_connections: parsed
-                        .max_connections
-                        .map_or(defaults.max_connections(), NonZeroU32::get),
-                    connection_lifetime: parsed
-                        .connection_lifetime
-                        .unwrap_or(defaults.connection_lifetime()),
-                    max_ingress_bytes: parsed
-                        .max_ingress_bytes
-                        .map_or(defaults.max_ingress_bytes(), NonZeroU64::get),
-                })))
-            }
+            Parsed::Command(parsed) => into_acp_invocation(parsed),
         },
         Some("a2a") => match clap_or_answer::<A2aCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
@@ -1417,121 +1402,9 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 max_resource_bytes: parsed.max_resource_bytes,
             }))),
         },
-        Some("ls") => match clap_or_answer::<LsCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Ls(Box::new(LsArgs {
-                all: parsed.all,
-                session_dir: parsed.common.places.session_dir,
-                directory: parsed.common.places.directory,
-                output: parsed.common.output.unwrap_or(Output::Text),
-            }))),
-        },
-        Some("usage") => match clap_or_answer::<UsageCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Usage(Box::new(UsageArgs {
-                period: parsed.period,
-                session_dir: parsed.places.session_dir,
-                directory: parsed.places.directory,
-                json: parsed.json,
-                all_roles: parsed.all_roles,
-            }))),
-        },
-        Some("rm") => match clap_or_answer::<RmCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => {
-                let source = SessionId::from_str(&parsed.source)
-                    .map_err(|error| UsageError(format!("invalid session id: {error}")))?;
-                if source.uuid().is_nil() {
-                    return Err(UsageError("session id must not be nil".into()));
-                }
-                Ok(Invocation::Rm(Box::new(RmArgs {
-                    source,
-                    yes: parsed.yes,
-                    force: parsed.force,
-                    session_dir: parsed.places.session_dir,
-                    directory: parsed.places.directory,
-                })))
-            }
-        },
-        Some("fork") => match clap_or_answer::<ForkCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => {
-                let source = SessionId::from_str(&parsed.source).map_err(|error| {
-                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
-                })?;
-                let at = parsed
-                    .at
-                    .map(|id| {
-                        ItemId::from_str(&id).map_err(|error| {
-                            UsageError(format!("`{id}` is not a message id: {error}"))
-                        })
-                    })
-                    .transpose()?;
-                Ok(Invocation::Fork(Box::new(ForkArgs {
-                    source,
-                    at,
-                    session_dir: parsed.common.places.session_dir,
-                    directory: parsed.common.places.directory,
-                    output: parsed.common.output.unwrap_or(Output::Text),
-                })))
-            }
-        },
-        Some("compact") => match clap_or_answer::<CompactCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => {
-                let source = SessionId::from_str(&parsed.source).map_err(|error| {
-                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
-                })?;
-                if source.uuid().is_nil() {
-                    return Err(UsageError(
-                        "the compaction source must not be the nil session id".to_owned(),
-                    ));
-                }
-                let request_id = match parsed.request_id {
-                    Some(request_id) => RequestId::from_str(&request_id).map_err(|error| {
-                        UsageError(format!(
-                            "`{request_id}` is not a compaction request id: {error}"
-                        ))
-                    })?,
-                    None => RequestId::from_uuid(uuid::Uuid::now_v7()),
-                };
-                if request_id.uuid().is_nil() {
-                    return Err(UsageError(
-                        "the compaction request id must not be nil".to_owned(),
-                    ));
-                }
-                Ok(Invocation::Compact(Box::new(CompactArgs {
-                    source,
-                    request_id,
-                    budget: parsed.budget,
-                    max_output_tokens: parsed.max_output_tokens,
-                    session_dir: parsed.common.places.session_dir,
-                    directory: parsed.common.places.directory,
-                    output: parsed.common.output.unwrap_or(Output::Text),
-                })))
-            }
-        },
-        Some("export") => match clap_or_answer::<ExportCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => {
-                let source = SessionId::from_str(&parsed.source).map_err(|error| {
-                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
-                })?;
-                if parsed.format == ExportFormat::Jsonl && parsed.file.is_some() {
-                    return Err(UsageError(
-                        "ego export --format jsonl cannot be combined with --file".to_owned(),
-                    ));
-                }
-                Ok(Invocation::Export(Box::new(ExportArgs {
-                    source,
-                    sanitize: parsed.sanitize,
-                    format: parsed.format,
-                    file: parsed.file,
-                    session_dir: parsed.places.session_dir,
-                    directory: parsed.places.directory,
-                })))
-            }
-        },
+        Some(command @ ("ls" | "usage" | "rm" | "fork" | "compact" | "export")) => {
+            parse_session_command(command, &tokens)
+        }
         Some("models") => match clap_or_answer::<ModelsCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Models(Box::new(ModelsArgs {
@@ -1560,7 +1433,83 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Doctor(DoctorArgs { json: parsed.json })),
         },
-        Some("auth") => match clap_or_answer::<AuthCommand>(&tokens)? {
+        Some(command @ ("auth" | "roots" | "config" | "rules" | "mcp")) => {
+            parse_management_command(command, &tokens, tail)
+        }
+        _ => match clap_or_answer::<RunCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
+        },
+    }
+}
+
+fn parse_session_command(command: &str, tokens: &[String]) -> Result<Invocation, UsageError> {
+    match command {
+        "ls" => match clap_or_answer::<LsCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Ls(Box::new(LsArgs {
+                all: parsed.all,
+                session_dir: parsed.common.places.session_dir,
+                directory: parsed.common.places.directory,
+                output: parsed.common.output.unwrap_or(Output::Text),
+            }))),
+        },
+        "usage" => match clap_or_answer::<UsageCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Usage(Box::new(UsageArgs {
+                period: parsed.period,
+                session_dir: parsed.places.session_dir,
+                directory: parsed.places.directory,
+                json: parsed.json,
+                all_roles: parsed.all_roles,
+            }))),
+        },
+        "rm" => match clap_or_answer::<RmCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => into_rm_invocation(parsed),
+        },
+        "fork" => match clap_or_answer::<ForkCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let source = SessionId::from_str(&parsed.source).map_err(|error| {
+                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
+                })?;
+                let at = parsed
+                    .at
+                    .map(|id| {
+                        ItemId::from_str(&id).map_err(|error| {
+                            UsageError(format!("`{id}` is not a message id: {error}"))
+                        })
+                    })
+                    .transpose()?;
+                Ok(Invocation::Fork(Box::new(ForkArgs {
+                    source,
+                    at,
+                    session_dir: parsed.common.places.session_dir,
+                    directory: parsed.common.places.directory,
+                    output: parsed.common.output.unwrap_or(Output::Text),
+                })))
+            }
+        },
+        "compact" => match clap_or_answer::<CompactCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => into_compact_invocation(parsed),
+        },
+        "export" => match clap_or_answer::<ExportCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => into_export_invocation(parsed),
+        },
+        _ => unreachable!("only session commands reach this parser"),
+    }
+}
+
+fn parse_management_command(
+    command: &str,
+    tokens: &[String],
+    tail: Option<Vec<String>>,
+) -> Result<Invocation, UsageError> {
+    match command {
+        "auth" => match clap_or_answer::<AuthCommand>(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let (action, provider, device) = match parsed.action {
@@ -1577,7 +1526,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 })))
             }
         },
-        Some("roots") => match clap_or_answer::<RootsCommand>(&tokens)? {
+        "roots" => match clap_or_answer::<RootsCommand>(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let action = match parsed.action {
@@ -1603,23 +1552,111 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 Ok(Invocation::Config(Box::new(ConfigArgs { action })))
             }
         },
-        Some("config") => match config_clap_or_answer(&tokens)? {
+        "config" => match config_clap_or_answer(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Config(Box::new(into_config_args(parsed)?))),
         },
-        Some("rules") => match rules_clap_or_answer(&tokens)? {
+        "rules" => match rules_clap_or_answer(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Rules(Box::new(into_rules_args(parsed)?))),
         },
-        Some("mcp") => match clap_or_answer::<McpCommand>(&tokens)? {
+        "mcp" => match clap_or_answer::<McpCommand>(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Mcp(Box::new(into_mcp_args(parsed, tail)?))),
         },
-        _ => match clap_or_answer::<RunCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
-        },
+        _ => unreachable!("only management commands reach this parser"),
     }
+}
+
+fn into_acp_invocation(parsed: AcpCommand) -> Result<Invocation, UsageError> {
+    ego_core::config::validate_prompt_options(
+        parsed.shape.bare,
+        parsed.shape.instructions.is_some(),
+    )
+    .map_err(|message| UsageError(message.to_owned()))?;
+    let defaults = ego_listen::ConnectionLimits::default();
+    Ok(Invocation::Acp(Box::new(AcpArgs {
+        session_dir: parsed.places.session_dir,
+        directory: parsed.places.directory,
+        sandbox: parsed.ceiling.sandbox,
+        shape: parsed.shape.into(),
+        listen: parsed.listen,
+        allow_public_bind: parsed.allow_public_bind,
+        max_connections: parsed
+            .max_connections
+            .map_or(defaults.max_connections(), NonZeroU32::get),
+        connection_lifetime: parsed
+            .connection_lifetime
+            .unwrap_or(defaults.connection_lifetime()),
+        max_ingress_bytes: parsed
+            .max_ingress_bytes
+            .map_or(defaults.max_ingress_bytes(), NonZeroU64::get),
+    })))
+}
+
+fn into_rm_invocation(parsed: RmCommand) -> Result<Invocation, UsageError> {
+    let source = SessionId::from_str(&parsed.source)
+        .map_err(|error| UsageError(format!("invalid session id: {error}")))?;
+    if source.uuid().is_nil() {
+        return Err(UsageError("session id must not be nil".into()));
+    }
+    Ok(Invocation::Rm(Box::new(RmArgs {
+        source,
+        yes: parsed.yes,
+        force: parsed.force,
+        session_dir: parsed.places.session_dir,
+        directory: parsed.places.directory,
+    })))
+}
+
+fn into_compact_invocation(parsed: CompactCommand) -> Result<Invocation, UsageError> {
+    let source = SessionId::from_str(&parsed.source)
+        .map_err(|error| UsageError(format!("`{}` is not a session id: {error}", parsed.source)))?;
+    if source.uuid().is_nil() {
+        return Err(UsageError(
+            "the compaction source must not be the nil session id".to_owned(),
+        ));
+    }
+    let request_id = match parsed.request_id {
+        Some(request_id) => RequestId::from_str(&request_id).map_err(|error| {
+            UsageError(format!(
+                "`{request_id}` is not a compaction request id: {error}"
+            ))
+        })?,
+        None => RequestId::from_uuid(uuid::Uuid::now_v7()),
+    };
+    if request_id.uuid().is_nil() {
+        return Err(UsageError(
+            "the compaction request id must not be nil".to_owned(),
+        ));
+    }
+    Ok(Invocation::Compact(Box::new(CompactArgs {
+        source,
+        request_id,
+        budget: parsed.budget,
+        max_output_tokens: parsed.max_output_tokens,
+        session_dir: parsed.common.places.session_dir,
+        directory: parsed.common.places.directory,
+        output: parsed.common.output.unwrap_or(Output::Text),
+    })))
+}
+
+fn into_export_invocation(parsed: ExportCommand) -> Result<Invocation, UsageError> {
+    let source = SessionId::from_str(&parsed.source)
+        .map_err(|error| UsageError(format!("`{}` is not a session id: {error}", parsed.source)))?;
+    if parsed.format == ExportFormat::Jsonl && parsed.file.is_some() {
+        return Err(UsageError(
+            "ego export --format jsonl cannot be combined with --file".to_owned(),
+        ));
+    }
+    Ok(Invocation::Export(Box::new(ExportArgs {
+        source,
+        sanitize: parsed.sanitize,
+        format: parsed.format,
+        file: parsed.file,
+        session_dir: parsed.places.session_dir,
+        directory: parsed.places.directory,
+    })))
 }
 
 fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {

@@ -570,3 +570,84 @@ fn validate_model_image(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ego_core::event::id::SessionId;
+    use ego_core::generator::capabilities::{
+        CacheRetention, CancelSemantics, ReasoningCarryover, ReasoningEffortSupport, Transport,
+    };
+    use ego_core::turn::CancelToken;
+    use ego_tools::store::SessionBlobStore;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Catches: HTTPS acquisition downgrades to plaintext or publishes bytes before TLS validation.
+    #[tokio::test]
+    async fn https_attachment_rejects_plaintext_peer_without_publishing_a_blob() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut hello = [0_u8; 4096];
+            let received = stream.read(&mut hello).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\x89PNG\r\n\x1a\n")
+                .await
+                .unwrap();
+            received
+        });
+        let owner = tempfile::tempdir().unwrap();
+        let blobs = SessionBlobStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let capabilities = ModelCapabilities {
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
+            max_context_tokens: Some(8192),
+            max_output_tokens: Some(128),
+            max_tools: None,
+            supports_parallel_tool_calls: false,
+            reasoning_carryover: ReasoningCarryover::Unsupported,
+            reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
+            cancel: CancelSemantics::Cooperative,
+            cache: CacheRetention::Short,
+            transport: Transport::Sse,
+            image_input: ImageInputSupport::Supported(
+                ImageLimits::new(
+                    [ImageMediaType::Png].into_iter().collect(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            ),
+            default_reasoning_effort: None,
+        };
+        let result = acquire(
+            &[format!("https://{address}/image.png")],
+            &capabilities,
+            "fixture",
+            "fixture/image",
+            owner.path(),
+            effects.ports(),
+            &blobs,
+        )
+        .await;
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("could not fetch"), "{error}");
+        assert!(
+            peer.await.unwrap() > 0,
+            "the local peer received no TLS handshake"
+        );
+        assert_eq!(
+            blobs.collect_garbage(&[]).unwrap(),
+            0,
+            "failed TLS published a blob"
+        );
+    }
+}

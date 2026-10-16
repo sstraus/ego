@@ -43,6 +43,9 @@ impl Fixture {
             .env("PATH", "/usr/bin:/bin")
             .current_dir(self.workspace.path())
             .args(args);
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
         for (key, value) in env {
             command.env(key, value);
         }
@@ -61,6 +64,9 @@ impl Fixture {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
         for (key, value) in env {
             command.env(key, value);
         }

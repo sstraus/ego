@@ -940,6 +940,43 @@ fn confinement_ceiling(
     endpoint.map_or(selected, |endpoint| endpoint.cap_confinement(selected))
 }
 
+async fn session_catalogue(
+    http: &Arc<dyn ego_ai::http::Http>,
+) -> Option<ego_ai::catalogue::ModelCatalogueSnapshot> {
+    match crate::models::build_catalogue_snapshot(
+        &crate::cli::ModelsArgs {
+            provider: None,
+            refresh: false,
+            json: false,
+        },
+        http,
+    )
+    .await
+    {
+        Ok(catalogue) => Some(catalogue),
+        // A picker that lists only the configured model is worse
+        // than one that lists every model; a connection that
+        // refuses to start is worse than both.
+        Err(error) => {
+            tracing::warn!(?error, "the ACP model catalogue is unavailable");
+            None
+        }
+    }
+}
+
+fn permission_rule_target(
+    effective: &ego_core::config::Effective,
+) -> Result<UserConfigTarget, RunTermination> {
+    match effective.active_profile.as_ref() {
+        Some(profile) => ProfileName::parse(&profile.name)
+            .map(UserConfigTarget::Profile)
+            .map_err(|error| RunTermination::UsageError {
+                message: format!("the ACP profile cannot target user rules: {error}"),
+            }),
+        None => Ok(UserConfigTarget::Base),
+    }
+}
+
 /// Serve the protocol on stdio or an explicitly selected endpoint.
 pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> RunTermination {
     let listener = match prepare_listener(args).await {
@@ -1026,25 +1063,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 crate::config::report_discarded(root.as_path(), &effective, &crate::output::Stderr);
                 let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(mcp_effects.ports())))
                     as Arc<dyn ego_ai::http::Http>;
-                let catalogue = match crate::models::build_catalogue_snapshot(
-                    &crate::cli::ModelsArgs {
-                        provider: None,
-                        refresh: false,
-                        json: false,
-                    },
-                    &http,
-                )
-                .await
-                {
-                    Ok(catalogue) => Some(catalogue),
-                    // A picker that lists only the configured model is worse
-                    // than one that lists every model; a connection that
-                    // refuses to start is worse than both.
-                    Err(error) => {
-                        tracing::warn!(?error, "the ACP model catalogue is unavailable");
-                        None
-                    }
-                };
+                let catalogue = session_catalogue(&http).await;
                 // The flag wins over the configuration, and the configuration
                 // over the default. A host that was started at `--sandbox ro`
                 // is capped there whatever any layer says, which is the whole
@@ -1052,18 +1071,9 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 // reached for is the one an untrusted headless resolution
                 // discards.
                 let ceiling = confinement_ceiling(args, effective.sandbox, admitted);
-                let rule_target = match effective.active_profile.as_ref() {
-                    Some(profile) => match ProfileName::parse(&profile.name) {
-                        Ok(name) => UserConfigTarget::Profile(name),
-                        Err(error) => {
-                            return RunTermination::UsageError {
-                                message: format!(
-                                    "the ACP profile cannot target user rules: {error}"
-                                ),
-                            };
-                        }
-                    },
-                    None => UserConfigTarget::Base,
+                let rule_target = match permission_rule_target(&effective) {
+                    Ok(target) => target,
+                    Err(termination) => return termination,
                 };
                 (
                     Arc::new(
