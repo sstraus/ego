@@ -243,9 +243,7 @@ fn submit_busy_line(
     }
     match futures::executor::block_on(ingress.submit(buffer.clone())) {
         Ok(queue) => {
-            if background_notice::commit(editor, status, &buffer) {
-                editor.run_edit_commands(&[EditCommand::Clear]);
-            } else if editor.accept_buffer(prompt).is_err() {
+            if editor.accept_buffer(prompt).is_err() {
                 return Some((Line::Ended, true));
             }
             let mut current = status.lock().expect("surface status lock");
@@ -303,11 +301,6 @@ pub(super) fn surface_line(
         }
         let failed = signal.is_err();
         let line = answer(asked_for_image.swap(false, Ordering::Relaxed), signal);
-        if let Line::Submitted(text) = &line
-            && phase.get() != EditPhase::Modal
-        {
-            background_notice::commit(editor, status, text);
-        }
         if matches!(
             line,
             Line::Interrupted | Line::HostCommand(HostCommand::Interrupt)

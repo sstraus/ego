@@ -263,6 +263,13 @@ impl IntoDiscriminant for PromptEditMode {
 /// Implementors have to provide [`str`]-based content which will be
 /// displayed before the `LineBuffer` is drawn.
 pub trait Prompt: Send {
+    /// Replace the submitted prompt and buffer with a host receipt. The original
+    /// buffer is still returned and saved in history. `None` keeps the ordinary
+    /// prompt echo. The receipt must fit the supplied terminal width.
+    fn render_prompt_submission(&self, _buffer: &str, _width: u16) -> Option<String> {
+        None
+    }
+
     /// Provide content of the left full prompt
     fn render_prompt_left(&self) -> Cow<'_, str>;
     /// Provide content of the right full prompt
