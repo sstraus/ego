@@ -8,6 +8,8 @@ mod finish_queue;
 mod foreign_judge_reason;
 #[path = "live_surface_pty/goal_ancestry.rs"]
 mod goal_ancestry;
+#[path = "live_surface_pty/goal_visibility.rs"]
+mod goal_visibility;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
@@ -9301,7 +9303,7 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         completions.push(Reply::Sse(text("REGRESSION-MARKER-CONTINUED")));
         // The successor keeps the independent goal check; success must still be verified.
         completions.push(Reply::Sse(text(
-            r#"{"achieved":true,"reason":"next sub-task verified"}"#,
+            r#"{"verdict":"achieved","reason":"next sub-task verified"}"#,
         )));
         let stub = Stub::start(Plan {
             completions,

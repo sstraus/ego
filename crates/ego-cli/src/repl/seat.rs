@@ -781,6 +781,20 @@ impl SurfaceOutput {
         )
     }
 
+    pub(crate) fn goal_status(&self, goal: Option<(u32, Option<u32>)>) {
+        if let Some(status) = &self.status {
+            if let Some(snapshot) = status
+                .lock()
+                .expect("surface status lock")
+                .snapshot
+                .as_mut()
+            {
+                snapshot.set_goal(goal);
+            }
+            repaint_status(status);
+        }
+    }
+
     pub(crate) fn retry_status(&self, message: Option<(&str, u64)>) {
         if let Some(status) = &self.status {
             status.lock().expect("surface status lock").retry =

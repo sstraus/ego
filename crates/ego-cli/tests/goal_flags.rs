@@ -91,7 +91,7 @@ fn goal_command_binary_invokes_evaluator_and_persists_achievement() {
         ..Plan::default()
     });
     let evidence = places.workspace_path().join("evaluator-input.json");
-    let script = places.file("check.sh", "cat > \"$1\"\nprintf '%s\\n' '{\"achieved\":true,\"reason\":\"script verified the work\"}'\n");
+    let script = places.file("check.sh", "cat > \"$1\"\nprintf '%s\\n' '{\"verdict\":\"achieved\",\"reason\":\"script verified the work\"}'\n");
     let command = serde_json::json!(["/bin/sh", script, evidence]).to_string();
     let finished = places
         .ego(&stub)
@@ -147,7 +147,7 @@ fn goal_command_workspace_child_reads_evidence_and_ignores_stderr() {
         ..Plan::default()
     });
     let input = places.workspace_path().join("evidence.json");
-    let script = places.file("check.sh", "cat > \"$1\"\nprintf 'diagnostic noise\\n' >&2\nprintf '%s\\n' '{\"achieved\":true,\"reason\":\"verified\"}'\n");
+    let script = places.file("check.sh", "cat > \"$1\"\nprintf 'diagnostic noise\\n' >&2\nprintf '%s\\n' '{\"verdict\":\"achieved\",\"reason\":\"verified\"}'\n");
     let command = serde_json::json!(["/bin/sh", script, input]).to_string();
     let finished = places
         .ego(&stub)
@@ -310,7 +310,7 @@ fn goal_json_summary_reports_stopped_goal_with_reason() {
 #[test]
 fn goal_json_summary_reports_achieved_goal() {
     let report = goal_json_summary(
-        r#"printf '%s\n' '{"achieved":true,"reason":"verified artifact"}'"#,
+        r#"printf '%s\n' '{"verdict":"achieved","reason":"verified artifact"}'"#,
         0,
     );
     assert_eq!(report["goal"]["status"], "achieved");
@@ -322,7 +322,7 @@ fn goal_json_summary_reports_achieved_goal() {
 #[test]
 fn goal_json_summary_reports_exhausted_goal() {
     let report = goal_json_summary(
-        r#"printf '%s\n' '{"achieved":false,"reason":"artifact missing"}'"#,
+        r#"printf '%s\n' '{"verdict":"continue","reason":"artifact missing"}'"#,
         0,
     );
     assert_eq!(report["goal"]["status"], "exhausted");

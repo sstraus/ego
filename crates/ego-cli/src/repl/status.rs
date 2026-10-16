@@ -267,6 +267,7 @@ pub struct SurfaceSnapshot {
     used_tokens: Option<u64>,
     window: Option<u64>,
     cost_display: Option<String>,
+    goal: Option<(u32, Option<u32>)>,
     queue: QueueStatus,
     drafts: usize,
     cwd: String,
@@ -321,6 +322,11 @@ impl SurfaceSnapshot {
             used_tokens: state.context.used_tokens,
             window: state.context.window,
             cost_display: visible_cost(state),
+            goal: state
+                .goal
+                .as_ref()
+                .filter(|goal| goal.state == ego_core::goal::GoalState::Active)
+                .map(|goal| (goal.continuation_turns, goal.continuation_budget)),
             queue: seat.queue,
             drafts: seat.drafts,
             cwd: compact_cwd(&seat.cwd),
@@ -329,6 +335,11 @@ impl SurfaceSnapshot {
             git_failed: false,
             modal: seat.modal,
         }
+    }
+
+    /// Replace the active goal counter from live reduced state.
+    pub(crate) fn set_goal(&mut self, goal: Option<(u32, Option<u32>)>) {
+        self.goal = goal;
     }
 
     /// Replace the live queue projection before publishing a new snapshot.
@@ -480,6 +491,12 @@ impl SurfaceSnapshot {
             // An unpriced or unstarted session has no figure to show; a
             // `$0` here would claim the spend is known to be nothing.
             StatusSegmentName::Cost => self.cost_display.as_ref().map(SegmentValue::text),
+            StatusSegmentName::Goal => self.goal.map(|(used, budget)| {
+                SegmentValue::text(format!(
+                    "goal {used}/{}",
+                    budget.map_or_else(|| "pending".into(), |n| n.to_string())
+                ))
+            }),
             // Idle counters carry no news, so they do not take a row cell.
             StatusSegmentName::Queue => self.active(name).then(|| {
                 SegmentValue::text(format!(
@@ -598,6 +615,7 @@ pub enum StatusSegmentName {
     Mode,
     Context,
     Cost,
+    Goal,
     Queue,
     Drafts,
     Interrupt,
@@ -620,6 +638,7 @@ impl StatusSegmentName {
             Self::Mode => "mode",
             Self::Context => "context",
             Self::Cost => "cost",
+            Self::Goal => "goal",
             Self::Queue => "queue",
             Self::Drafts => "drafts",
             Self::Interrupt => "interrupt",
@@ -641,6 +660,7 @@ impl StatusSegmentName {
                 | Self::Cost
                 | Self::Cwd
                 | Self::Git
+                | Self::Goal
         )
     }
 
@@ -661,6 +681,7 @@ impl StatusSegmentName {
             // remains, so trust goes first once only the two are left.
             Self::Trust => 5,
             Self::Context => 6,
+            Self::Goal => 7,
             Self::Model => usize::MAX,
             Self::Queue | Self::Drafts | Self::Interrupt => usize::MAX,
         }
@@ -757,9 +778,18 @@ impl StatusLine {
             return Self::empty(snapshot, configured.to_vec(), diagnostics);
         };
 
+        // A live goal is operational state, not a configurable convenience.
+        // An explicitly disabled row stays disabled.
+        let mut configured = configured.to_vec();
+        if snapshot.goal.is_some()
+            && !configured.is_empty()
+            && !configured.contains(&StatusSegmentName::Goal)
+        {
+            configured.push(StatusSegmentName::Goal);
+        }
         let mut omitted = Vec::new();
         let mut segments = Vec::new();
-        for name in configured {
+        for name in &configured {
             let value = snapshot.value(name).or_else(|| {
                 values
                     .iter()
