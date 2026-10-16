@@ -1297,9 +1297,11 @@ impl Painter {
         // The painter already tracks the absolute row at which it placed the
         // prompt. Reconstructing that row from buffer bytes cannot account for
         // combining or wide graphemes, and divides by a transient zero width.
-        // Position at the owned anchor directly; repaint below reconciles the
-        // measured post-print anchor exactly as before.
-        self.stdout.queue(MoveTo(0, starting_row))?;
+        // Erase the whole owned prompt footprint before external text can
+        // wrap across its rows. Erasing only the first message row leaves old
+        // prompt suffixes behind when a wrapped message is shorter on a later
+        // row; repaint may scroll that contaminated row above its new anchor.
+        self.clear_from_anchor(starting_row)?;
         let erase_line = format!("\r{}\r", " ".repeat(self.screen_width().into()));
         let max_row = self.screen_height().saturating_sub(1);
         // Invalidate up front: a `?` early-return below can leave
@@ -2613,6 +2615,12 @@ mod tests {
                 .position(|window| window == b"event")
                 .expect("external event was not printed");
             assert!(anchor < event, "anchor must precede event: {bytes:?}");
+            assert!(
+                bytes[anchor..event]
+                    .windows(b"\x1b[J".len())
+                    .any(|window| window == b"\x1b[J"),
+                "the entire old prompt must be erased before a message can wrap: {bytes:?}"
+            );
 
             let mut index = 0;
             while index + 2 < bytes.len() {

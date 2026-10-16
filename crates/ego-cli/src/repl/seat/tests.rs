@@ -1073,3 +1073,37 @@ fn persistent_instruction_actions_487_route_menus_and_refuse_busy_ingress() {
         );
     }
 }
+/// Catches: discovery descriptions omit the grammar of argument-bearing commands.
+#[test]
+fn slash_help_shows_name_goal_and_mcp_grammar() {
+    let registry = ActionRegistry::final_surface();
+    let help = render_action_help(&registry, 120);
+    for grammar in [
+        "/name [show|set TEXT|clear]",
+        "/goal [show|set TEXT|achieve|block REASON]",
+        "/mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
+    ] {
+        assert!(help.contains(grammar), "missing {grammar}: {help}");
+        assert!(
+            registry
+                .iter()
+                .any(|action| action.description_text().contains(grammar)),
+            "menu must use the same grammar: {grammar}"
+        );
+    }
+}
+
+/// Catches: alias spellings cannot be discovered without accidentally submitting a prompt.
+#[test]
+fn slash_aliases_complete_without_changing_unknown_prompt_policy() {
+    let registry = Arc::new(ActionRegistry::final_surface());
+    let mut completer = ActionCompleter { registry };
+    for (prefix, alias) in [
+        ("/resu", "/resume"),
+        ("/cont", "/continue"),
+        ("/hist", "/history"),
+    ] {
+        let result = completer.complete(prefix, prefix.len());
+        assert!(result.suggestions().iter().any(|item| item.value == alias));
+    }
+}
