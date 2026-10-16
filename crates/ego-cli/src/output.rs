@@ -205,7 +205,10 @@ impl Diagnostics for InteractiveOutput {
     }
 
     fn tool_row(&self, rows: &str, detail: String) {
-        self.line(rows);
+        {
+            let mut output = self.inner.lock().expect("surface output lock");
+            let _ = output.write_tool(rows);
+        }
         let mut tools = self.tools.lock().expect("tool detail lock");
         if tools.len() == EXPANDABLE_CALLS {
             tools.pop_front();
@@ -929,7 +932,7 @@ mod tests {
         output.tool_row("row two", "detail two".to_owned());
         assert_eq!(
             rows.try_iter().collect::<Vec<_>>(),
-            ["row one\n", "\n", "row two\n"]
+            ["\n", "row one\n", "\n", "row two\n"]
         );
 
         output.expand_last_tool();

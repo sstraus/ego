@@ -771,6 +771,15 @@ impl SurfaceOutput {
         Ok(())
     }
 
+    pub(crate) fn write_tool(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.begin_block()?;
+        if !self.wrote {
+            self.write_with_kind("\n", false)?;
+        }
+        self.write_with_kind(text, false)?;
+        self.write_with_kind("\n", false)
+    }
+
     pub(crate) fn write_answer(&mut self, text: &str) -> Result<(), SendError<String>> {
         if text.is_empty() {
             return Ok(());
