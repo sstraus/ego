@@ -1600,6 +1600,7 @@ fn handle_interactive_policy(
 fn render_skill_catalogue(
     catalogue: Option<&crate::skill::SkillCatalogue>,
     diagnose: bool,
+    details: bool,
     diagnostics: &dyn Diagnostics,
 ) {
     let Some(catalogue) = catalogue else {
@@ -1609,8 +1610,10 @@ fn render_skill_catalogue(
     match catalogue.capture() {
         Ok(capture) => diagnostics.note(&if diagnose {
             capture.render_diagnostics()
-        } else {
+        } else if details {
             capture.render_list()
+        } else {
+            capture.render_summary()
         }),
         Err(error) => diagnostics.note(&format!(
             "the skill catalogue could not be captured: {error}"
@@ -2472,13 +2475,19 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::List,
         )) => {
-            render_skill_catalogue(skills.as_deref(), false, diagnostics);
+            render_skill_catalogue(skills.as_deref(), false, false, diagnostics);
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Skills(
+            repl::actions::SkillSurfaceAction::Details,
+        )) => {
+            render_skill_catalogue(skills.as_deref(), false, true, diagnostics);
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::Diagnose,
         )) => {
-            render_skill_catalogue(skills.as_deref(), true, diagnostics);
+            render_skill_catalogue(skills.as_deref(), true, false, diagnostics);
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
@@ -2581,15 +2590,37 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             run_interactive_setup(prompt, root, status.as_ref(), diagnostics).await;
             Ok(CommandOutcome::Continue)
         }
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Tools)
+            | repl::HostCommand::Details(repl::actions::ActionId::Tools)),
+        ) => {
+            let details = matches!(command, repl::HostCommand::Details(_));
+            let tools = registry
+                .iter()
+                .map(|tool| tool.descriptor().name.to_string())
+                .collect::<Vec<_>>();
+            diagnostics.note(&format!(
+                "tools: {} admitted; /tools details for the full list",
+                tools.len()
+            ));
+            for name in tools.iter().take(if details { usize::MAX } else { 6 }) {
+                diagnostics.note(name);
+            }
+            Ok(CommandOutcome::Continue)
+        }
         // The same snapshot `ego doctor` prints,
         // built by the same probes. Two renderings
         // of one value is the whole contract; two
         // implementations would be two diagnoses.
-        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Doctor)) => {
-            diagnostics.note(&crate::doctor::observed_session(
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Doctor)
+            | repl::HostCommand::Details(repl::actions::ActionId::Doctor)),
+        ) => {
+            diagnostics.note(&crate::doctor::observed_session_view(
                 root.to_path_buf(),
                 seat.width(),
                 perimeter,
+                matches!(command, repl::HostCommand::Details(_)),
             ));
             Ok(CommandOutcome::Continue)
         }

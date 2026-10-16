@@ -5927,7 +5927,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("usage", Some("usage as of")),
         ("export", None),
         ("config perimeter", Some("capabilities")),
-        ("doctor", Some("acp.extension:hold")),
+        ("doctor", Some("doctor:")),
         ("new", None),
         ("name", None),
         ("goal", None),
@@ -6341,7 +6341,7 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
             &reader,
             &mut output,
             doctor_start,
-            "acp.extension:hold",
+            "doctor:",
             &stub,
             0,
         );

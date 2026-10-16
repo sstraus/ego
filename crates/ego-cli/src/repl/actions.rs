@@ -43,6 +43,11 @@ pub enum ActionId {
     Version,
 }
 
+pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
+pub(crate) const GOAL_GRAMMAR: &str = "usage: /goal [show|set TEXT|achieve|block REASON]";
+pub(crate) const MCP_GRAMMAR: &str =
+    "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
     Local,
@@ -103,6 +108,7 @@ impl Eq for McpContextCommand {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
+    Details(ActionId),
     History(String),
     Resume(Option<String>),
     SessionMetadata(SessionMetadataOperation),
@@ -125,6 +131,7 @@ pub enum Dispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSurfaceAction {
     List,
+    Details,
     Diagnose,
     Rescan,
 }
@@ -517,11 +524,7 @@ impl ActionRegistry {
                 "Inspect effective permission rules",
             )
             .unavailable("the interactive permission controller"),
-            enabled(
-                Mcp,
-                "mcp",
-                "List MCP servers, toggle session state, or add a server",
-            ),
+            enabled(Mcp, "mcp", MCP_GRAMMAR),
             enabled(Sessions, "sessions", "Browse durable sessions")
                 .alias("history")
                 .alias("resume")
@@ -543,7 +546,7 @@ impl ActionRegistry {
                 "Inspect configuration — /config [perimeter | set KEY VALUE]",
             ),
             enabled(Setup, "setup", "Inspect expected work without effects"),
-            enabled(Doctor, "doctor", "Diagnose local subsystem health"),
+            enabled(Doctor, "doctor", "Show health — /doctor [details]"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(
                 Refresh,
@@ -551,22 +554,26 @@ impl ActionRegistry {
                 "Apply current instructions in a new prompt epoch",
             ),
             enabled(New, "new", "Create a durable session"),
-            enabled(Name, "name", "Set durable session display metadata"),
-            enabled(Goal, "goal", "Manage the persistent goal lifecycle"),
+            enabled(Name, "name", NAME_GRAMMAR),
+            enabled(Goal, "goal", GOAL_GRAMMAR),
             enabled(
                 Tasks,
                 "tasks",
                 "Inspect background exec — /tasks [ID | cancel ID]",
             ),
-            enabled(Tools, "tools", "Inspect available tools"),
+            enabled(Tools, "tools", "Show tools — /tools [details]"),
             enabled(
                 Expand,
                 "expand",
                 "Show the full output of the last tool call",
             )
             .shortcut('o'),
-            enabled(Skills, "skills", "List or invoke admitted skills")
-                .unavailable("the skill catalogue"),
+            enabled(
+                Skills,
+                "skills",
+                "Show skills — /skills [details|diagnose|rescan|invoke NAME]",
+            )
+            .unavailable("the skill catalogue"),
             enabled(Hooks, "hooks", "Inspect admitted hooks"),
             enabled(Retry, "retry", "Retry a waiting provider now").shortcut('r'),
             enabled(Version, "version", "Show packaged version information"),
@@ -966,6 +973,7 @@ impl ActionRegistry {
         };
         match raw_arguments {
             "" | "list" => Dispatch::Skills(SkillSurfaceAction::List),
+            "details" => Dispatch::Skills(SkillSurfaceAction::Details),
             "diagnose" => Dispatch::Skills(SkillSurfaceAction::Diagnose),
             "rescan" => Dispatch::Skills(SkillSurfaceAction::Rescan),
             arguments => match parse_skill_invoke(arguments) {
@@ -978,7 +986,7 @@ impl ActionRegistry {
                     }
                 }
                 None => Dispatch::Refused {
-                    reason: "usage: /skills [list|diagnose|rescan|invoke <name> [arguments]]",
+                    reason: "usage: /skills [list|details|diagnose|rescan|invoke <name> [arguments]]",
                 },
             },
         }
@@ -1052,6 +1060,9 @@ impl ActionRegistry {
                     reason: "usage: /mode, /plan, /yolo, and /permissions take no arguments",
                 }
             });
+        }
+        if matches!(id, ActionId::Tools | ActionId::Doctor) && raw_arguments.trim() == "details" {
+            return Some(Dispatch::Details(id));
         }
         Some(if no_arguments {
             Dispatch::Action(id)
@@ -1215,7 +1226,7 @@ fn parse_name_action(arguments: &str) -> Dispatch {
             Some(text) => NameOperation::Set(text.to_owned()),
             None => {
                 return Dispatch::Refused {
-                    reason: "usage: /name [show|set TEXT|clear]",
+                    reason: NAME_GRAMMAR,
                 };
             }
         },
@@ -1234,7 +1245,7 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
                 (tail, GoalOperation::Block as fn(String) -> GoalOperation)
             } else {
                 return Dispatch::Refused {
-                    reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                    reason: GOAL_GRAMMAR,
                 };
             };
             match keyword
@@ -1245,7 +1256,7 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
                 Some(text) => operation(text.to_owned()),
                 None => {
                     return Dispatch::Refused {
-                        reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                        reason: GOAL_GRAMMAR,
                     };
                 }
             }

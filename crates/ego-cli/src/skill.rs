@@ -194,6 +194,23 @@ impl SkillCatalogueCapture {
         self.attempt != self.publication
     }
 
+    pub(crate) fn render_summary(&self) -> String {
+        let mut rows = vec![format!(
+            "skills: {} admitted; /skills details for sources and diagnostics",
+            self.descriptors().len()
+        )];
+        rows.extend(
+            self.descriptors()
+                .iter()
+                .take(6)
+                .map(|spec| format!("/{} — {}", spec.name(), spec.descriptor().description)),
+        );
+        if self.retained_last_good() {
+            rows.push("skills: retained last good catalogue; /skills diagnose".to_owned());
+        }
+        rows.join("\n")
+    }
+
     pub(crate) fn render_list(&self) -> String {
         let state = if self.retained_last_good() {
             "retained_last_good"

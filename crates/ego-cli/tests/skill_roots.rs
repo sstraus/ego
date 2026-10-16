@@ -26,7 +26,7 @@ fn boss_portable_layout_lists_once_and_invokes_admitted_body() {
         ego.workspace_path().join(".claude/skills/foo"),
     )
     .unwrap();
-    let listing = places.ego(&stub).conversing().run_pty("/skills");
+    let listing = places.ego(&stub).conversing().run_pty("/skills details");
     assert_eq!(listing.code, Some(0), "{}", listing.stderr);
     assert_eq!(
         listing.stdout.matches("/foo\r\n").count() + listing.stdout.matches("/foo\n").count(),

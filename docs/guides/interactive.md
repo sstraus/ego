@@ -29,6 +29,14 @@ prompt text; it does not execute a pasted control command.
 retained last-tool output. `/refresh` applies current instructions through a
 new prompt epoch when source work is idle.
 
+`/name [show|set TEXT|clear]` reads or changes display metadata.
+`/goal [show|set TEXT|achieve|block REASON]` inspects or changes the persistent goal.
+`/tools`, `/skills`, and `/doctor` show concise inventories; append `details`
+for complete entries and evidence. `/skills diagnose` shows admission diagnostics.
+`/resume [ID]` and `/continue [ID]` resume sessions; `/history QUERY` searches them.
+These aliases support completion. Unknown slash spellings remain ordinary prompt
+text and can start provider work; this release does not change that policy.
+
 ## Input while work is running
 
 The live composer preserves drafts and queues accepted prompts. Steering and
