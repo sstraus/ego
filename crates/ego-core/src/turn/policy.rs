@@ -94,6 +94,25 @@ impl GenerationPolicySnapshot {
         self.mode
     }
 
+    pub(crate) fn validate_task_roots(
+        &self,
+        roots: Option<&[CanonPath]>,
+    ) -> Result<(), &'static str> {
+        if let Some(roots) = roots {
+            if roots.len() != 1 || roots[0] != self.workspace {
+                return Err(
+                    "named agent roots must retain exactly the parent workspace; conflicting roots are not admitted",
+                );
+            }
+            if !self.roots.is_empty() {
+                return Err(
+                    "named agent roots cannot narrow inherited process confinement; extra parent roots require a new executor",
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Copy the canonical bytes into a fresh zeroizing owner for storage.
     pub fn encode_confidential(&self) -> SecretMaterial {
         SecretMaterial::new(self.canonical.expose_secret_bytes().to_vec())
@@ -317,6 +336,9 @@ impl GenerationPolicyCapture {
         deny: &[Rule],
         roots: Option<&[CanonPath]>,
     ) -> Result<Self, GenerationPolicyCaptureError> {
+        self.snapshot
+            .validate_task_roots(roots)
+            .map_err(|_| GenerationPolicyCaptureError::InvalidSnapshot)?;
         let mode = mode
             .filter(|mode| mode.within(self.snapshot.mode))
             .unwrap_or(self.snapshot.mode);
@@ -330,11 +352,7 @@ impl GenerationPolicyCapture {
                     .push(SourcedRule::new(rule.clone(), Source::AgentFile));
             }
         }
-        let roots = if roots.is_some() {
-            Vec::new()
-        } else {
-            self.snapshot.roots.clone()
-        };
+        let roots = self.snapshot.roots.clone();
         let snapshot = GenerationPolicySnapshot::from_semantics(
             self.snapshot.workspace.clone(),
             roots,

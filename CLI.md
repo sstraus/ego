@@ -626,8 +626,10 @@ rules. `allow` and output `schema` are refused for named tasks. Variables must b
 fully resolved without task-time input. `sandbox`, when set, must match the
 parent's captured backend: an in-process child cannot replace its sandbox.
 Optional `roots` must contain exactly the absolute, canonical parent workspace;
-a conflicting root or relocation is refused before child generation. Extra
-profile roots are removed for that child. The existing sandbox, offline posture,
+a conflicting root or relocation is refused before child generation. If the parent
+has extra profile roots, this ceiling is also refused: the inherited process
+executor cannot narrow its confinement for a child. Omit `roots` to inherit the
+parent perimeter unchanged. The existing sandbox, offline posture,
 shared budget, cancellation, result bounds and depth-one limit remain in force.
 `tools` and `roots` are named-task ceilings, not supported by explicit `--file`.
 
