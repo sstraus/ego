@@ -225,6 +225,8 @@ pub async fn resolve(
                 .expect("OpenRouter owns reported cost")
                 .as_ref(),
         ),
-        rates: None,
+        rates: catalogue
+            .supplied_rates(&format!("{}/{model}", row.id()))
+            .cloned(),
     })
 }

@@ -851,6 +851,100 @@ fn openrouter_current_inventory_resolves_its_owned_wire_without_prices() {
     assert_eq!(stub.paths(), ["/api/v1/models"]);
 }
 
+// Catches: discovery drops the operator admission quote or replaces reported settlement.
+#[test]
+fn openrouter_resolution_preserves_operator_quote() {
+    use ego_ai::catalogue::operator_rates;
+    use ego_core::budget::{Metering, PricingQuote, SettlementSource};
+    use ego_core::cost::{CurrencyCode, PricingRevision};
+
+    let rates = operator_rates(PricingQuote {
+        revision: PricingRevision("operator-openrouter-pin".to_owned()),
+        currency: CurrencyCode::new("USD").unwrap(),
+        uncached_input: Some("0.000002".parse().unwrap()),
+        cache_read: Some("0.0000001".parse().unwrap()),
+        cache_write: Some("0.0000025".parse().unwrap()),
+        cache_write_extended: Some("0.000004".parse().unwrap()),
+        output: Some("0.00001".parse().unwrap()),
+    });
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]).with_hosted(
+        "openrouter/anthropic/claude-sonnet-5.5",
+        HostedModel {
+            capabilities: supplied_capabilities(),
+            authority: SuppliedAuthority::User,
+            metering: tabulated(),
+            rates: Some(rates.clone()),
+        },
+    );
+    let (http, stub) = server([(
+        200,
+        include_str!("goldens/openrouter/models-2026-10-15.json"),
+    )]);
+    let resolved = block_on(catalogue.resolve(
+        &ModelSlug::parse("openrouter/anthropic/claude-sonnet-5.5").unwrap(),
+        &http,
+        &credential(),
+    ))
+    .unwrap();
+    assert_eq!(resolved.rates, Some(rates));
+    assert!(matches!(
+        resolved.metering,
+        Metering::Currency {
+            settlement: SettlementSource::ProviderReported { .. }
+        }
+    ));
+    assert_eq!(stub.paths(), ["/api/v1/models"]);
+}
+
+// Catches: an absent quote is fabricated or copied from a different routed slug.
+#[test]
+fn openrouter_resolution_does_not_borrow_another_models_quote() {
+    use ego_ai::catalogue::operator_rates;
+    use ego_core::budget::PricingQuote;
+    use ego_core::cost::{CurrencyCode, PricingRevision};
+
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()])
+        .with_hosted(
+            "openrouter/anthropic/claude-sonnet-5.5",
+            HostedModel {
+                capabilities: supplied_capabilities(),
+                authority: SuppliedAuthority::User,
+                metering: tabulated(),
+                rates: Some(operator_rates(PricingQuote {
+                    revision: PricingRevision("other-model-only".to_owned()),
+                    currency: CurrencyCode::new("USD").unwrap(),
+                    uncached_input: Some("0.000002".parse().unwrap()),
+                    cache_read: None,
+                    cache_write: None,
+                    cache_write_extended: None,
+                    output: Some("0.00001".parse().unwrap()),
+                })),
+            },
+        )
+        .with_hosted(
+            "openrouter/openai/gpt-6-luna",
+            HostedModel {
+                capabilities: supplied_capabilities(),
+                authority: SuppliedAuthority::User,
+                metering: tabulated(),
+                rates: None,
+            },
+        );
+    for slug in [
+        "openrouter/openai/gpt-6-luna",
+        "openrouter/meta/muse-wonder",
+    ] {
+        let (http, _) = server([(
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        )]);
+        let resolved =
+            block_on(catalogue.resolve(&ModelSlug::parse(slug).unwrap(), &http, &credential()))
+                .unwrap();
+        assert!(resolved.rates.is_none(), "{slug} has no operator quote");
+    }
+}
+
 // Catches: published OpenRouter reasoning support is discarded and low is refused locally.
 #[test]
 fn openrouter_published_reasoning_admits_low() {
