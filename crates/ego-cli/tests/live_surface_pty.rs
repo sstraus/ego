@@ -21,6 +21,8 @@ mod setup;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
+#[path = "live_surface_pty/slash_completion.rs"]
+mod slash_completion;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
 #[path = "live_surface_pty/workspace_trust.rs"]
