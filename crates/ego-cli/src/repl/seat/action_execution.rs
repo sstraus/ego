@@ -195,9 +195,6 @@ fn submit_busy_line(
     steer: bool,
 ) -> Option<(Line, bool)> {
     let buffer = editor.current_buffer_contents().to_string();
-    if buffer.trim().is_empty() {
-        return None;
-    }
     let dispatch = {
         let status = status.lock().expect("surface status lock");
         status.actions.as_ref().map_or(Dispatch::Prompt, |actions| {
@@ -299,6 +296,27 @@ pub(super) fn surface_line(
 ) -> (Line, bool) {
     loop {
         let signal = editor.read_line(prompt);
+        // Reject blank input before Reedline commits it to history or clears
+        // the composer, for both idle submission and busy queue admission.
+        let signal = if matches!(
+            &signal,
+            Ok(reedline::Signal::HostCommand(command))
+                if command == BUSY_SUBMIT_COMMAND || command == BUSY_STEER_COMMAND
+        ) {
+            let buffer = editor.current_buffer_contents().to_string();
+            if buffer.trim().is_empty() {
+                continue;
+            }
+            if phase.get() == EditPhase::Idle {
+                editor
+                    .accept_buffer(prompt)
+                    .map(|()| reedline::Signal::Success(buffer))
+            } else {
+                signal
+            }
+        } else {
+            signal
+        };
         // Hold only the isolated PTY child at the real suspended-read boundary.
         #[cfg(test)]
         if asked_for_image.load(Ordering::Relaxed) && std::env::var_os("EGO_REGRESSION_HOLD").is_some() {
