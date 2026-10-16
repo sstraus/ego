@@ -1800,7 +1800,7 @@ fn declining_successor_round_does_not_resurrect_predecessor() {
     });
 }
 
-struct InterruptingElicitor(ego_core::turn::control::InteractiveIngress);
+struct InterruptingElicitor(ego_core::turn::InteractiveIngress);
 impl Elicitor for InterruptingElicitor {
     fn elicit<'a>(&'a self, _: ItemId, _: QuestionRequest) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
         Box::pin(async move {
@@ -1813,7 +1813,7 @@ impl Elicitor for InterruptingElicitor {
 #[test]
 fn interrupted_foreign_round_has_no_pending_question_after_replay() {
     // Catches: an interrupted elicitor cancels remote authority but leaves the local question pending.
-    let (ingress, mut control) = ego_core::turn::control::interactive_control();
+    let (ingress, mut control) = ego_core::turn::interactive_control();
     let foreign = Arc::new(RecordingForeignQuestionPort::default());
     with_foreign_turn_request(empty_round_request(), foreign_input_generator(), Arc::new(InterruptingElicitor(ingress)), foreign.clone(), (None, false), None, |turn, store| {
         let mut turn = turn.with_interactive_control(&mut control);
