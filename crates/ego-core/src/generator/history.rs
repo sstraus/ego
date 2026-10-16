@@ -190,12 +190,8 @@ fn conversation_from_inner(
                 let mut text_cursor = 0;
                 for durable in &item.images {
                     let offset = durable.text_offset().unwrap_or(0);
-                    let text = item.text.get(text_cursor..offset).ok_or_else(|| {
-                        HistoryError::ImagePromptInvalid {
-                            cause: "image text offsets are not ordered UTF-8 boundaries"
-                                .to_string(),
-                        }
-                    })?;
+                    // All offsets were validated before any blob read above.
+                    let text = &item.text[text_cursor..offset];
                     if !text.is_empty() {
                         push(&mut messages, Role::User, text_block(text));
                     }
@@ -399,9 +395,10 @@ mod ordered_prompt_tests {
                     .with_text_offset(offset)
                 })
                 .collect();
+            let mut seq = Seq::ZERO;
             let event = DomainEvent {
                 env: Envelope {
-                    seq: Seq::ZERO.next(),
+                    seq: seq.next(),
                     id: EventId::new(),
                     turn: TurnId::new(),
                     item: Some(ItemId::new()),
