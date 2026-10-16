@@ -27,6 +27,24 @@ impl SurfaceEditMode {
         }
     }
 
+    fn picker_open(&self) -> bool {
+        if self.phase.get() == EditPhase::Modal {
+            let picker = self
+                .status
+                .lock()
+                .expect("surface status lock")
+                .model_picker
+                .clone();
+            self.status
+                .lock()
+                .expect("surface status lock")
+                .session_picker_open
+                || picker.is_some_and(|picker| picker.lock().expect("model picker lock").is_open())
+        } else {
+            false
+        }
+    }
+
     pub(super) fn asked_for_image(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.asked_for_image)
     }
@@ -61,21 +79,7 @@ impl EditMode for SurfaceEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let raw: Event = event.into();
 
-        let picker_open = if self.phase.get() == EditPhase::Modal {
-            let picker = self
-                .status
-                .lock()
-                .expect("surface status lock")
-                .model_picker
-                .clone();
-            self.status
-                .lock()
-                .expect("surface status lock")
-                .session_picker_open
-                || picker.is_some_and(|picker| picker.lock().expect("model picker lock").is_open())
-        } else {
-            false
-        };
+        let picker_open = self.picker_open();
         let question_selector_open = if self.phase.get() == EditPhase::Modal {
             self.status
                 .lock()

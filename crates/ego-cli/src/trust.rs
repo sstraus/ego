@@ -269,6 +269,21 @@ fn collect_executable_declarations(
     }
 }
 
+fn executable_digest(file: &mut File, path: &Path) -> Option<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return Some(format!("{:x}", hasher.finalize())),
+            Ok(count) => hasher.update(&buffer[..count]),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "an executable program could not be fingerprinted");
+                return None;
+            }
+        }
+    }
+}
+
 /// Redacted executable declarations and the programs they run. Kept separate
 /// from the full inventory shown to a first-time reviewer.
 pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
@@ -325,18 +340,7 @@ pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
         let Ok(mut file) = File::open(&path) else {
             continue;
         };
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 8192];
-        let digest = loop {
-            match file.read(&mut buffer) {
-                Ok(0) => break Some(format!("{:x}", hasher.finalize())),
-                Ok(count) => hasher.update(&buffer[..count]),
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), %error, "an executable program could not be fingerprinted");
-                    break None;
-                }
-            }
-        };
+        let digest = executable_digest(&mut file, &path);
         let Some(digest) = digest else { continue };
         #[cfg(unix)]
         let executable = {

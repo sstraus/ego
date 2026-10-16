@@ -304,6 +304,96 @@ fn preserves_action_policy(
         || action_resolution(after, workspace, call) != 1)
 }
 
+fn root_candidate<'a>(
+    finding: &'a Finding,
+    probes: &[Probe],
+    effective: &Effective,
+    workspace: &CanonPath,
+    home: &Path,
+) -> Option<(&'a std::path::PathBuf, RootCfg, bool, bool)> {
+    let execution = matches!(probes.get(finding.id), Some(Probe::Tool { .. }));
+    if !matches!(finding.status, Status::Blocked)
+        && !(execution && matches!(finding.status, Status::Unknown))
+    {
+        return None;
+    }
+    if !matches!(
+        probes.get(finding.id),
+        Some(
+            Probe::Read { .. }
+                | Probe::Instructions { .. }
+                | Probe::Git { .. }
+                | Probe::Write { .. }
+                | Probe::Tool { .. }
+        )
+    ) {
+        return None;
+    }
+    let path = finding.canonical.as_ref()?;
+    let directory = path.parent()?;
+    // No ancestor of the workspace and no config control directory exposure.
+    if workspace.as_path().starts_with(directory)
+        || home.starts_with(directory)
+        || directory.starts_with(home)
+    {
+        return None;
+    }
+    if execution {
+        if exec_admitted(effective, workspace, &CanonPath::new(path)) {
+            return None;
+        }
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => return None,
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return None;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            return None;
+        }
+    }
+    let write = matches!(probes.get(finding.id), Some(Probe::Write { .. }));
+    if write
+        && (!matches!(
+            effective.sandbox,
+            Some(
+                ego_core::permit::Confinement::Workspace | ego_core::permit::Confinement::Adaptive
+            )
+        ) || !ego_tools::exec::setup_write_root_safe(directory, path).unwrap_or(false))
+    {
+        return None;
+    }
+    if write && effective.sandbox == Some(ego_core::permit::Confinement::Adaptive) {
+        let Ok(captured) = ego_tools::exec::admit_confinement(
+            ego_core::permit::Confinement::Adaptive,
+            effective.network == ego_core::config::Network::Off,
+            workspace.clone(),
+        ) else {
+            return None;
+        };
+        if ego_tools::exec::setup_write_reachable(&captured, &CanonPath::new(path)).unwrap_or(false)
+        {
+            return None;
+        }
+    }
+    let root = RootCfg {
+        path: directory.to_path_buf(),
+        access: if write {
+            RootAccess::ReadWrite
+        } else {
+            RootAccess::Read
+        },
+    };
+    Some((path, root, execution, write))
+}
+
 /// No model-selected TOML, rule wildcard, mode, sandbox, trust or network change.
 /// Workspace writes are policy-only; other backend/consumer gaps remain explicit.
 pub(crate) fn preview(
@@ -365,92 +455,12 @@ pub(crate) fn preview(
     let mut executions = Vec::new();
     let mut change_exec = false;
     for finding in findings {
-        let execution = matches!(probes.get(finding.id), Some(Probe::Tool { .. }));
-        if !matches!(finding.status, Status::Blocked)
-            && !(execution && matches!(finding.status, Status::Unknown))
-        {
-            continue;
-        }
-        if !matches!(
-            probes.get(finding.id),
-            Some(
-                Probe::Read { .. }
-                    | Probe::Instructions { .. }
-                    | Probe::Git { .. }
-                    | Probe::Write { .. }
-                    | Probe::Tool { .. }
-            )
-        ) {
-            continue;
-        }
-        let Some(path) = &finding.canonical else {
+        let Some((path, root, execution, write)) =
+            root_candidate(finding, probes, effective, workspace, home)
+        else {
             continue;
         };
-        let Some(directory) = path.parent() else {
-            continue;
-        };
-        // No ancestor of the workspace and no config control directory exposure.
-        if workspace.as_path().starts_with(directory)
-            || home.starts_with(directory)
-            || directory.starts_with(home)
-        {
-            continue;
-        }
-        if execution {
-            if exec_admitted(effective, workspace, &CanonPath::new(path)) {
-                continue;
-            }
-            let metadata = match std::fs::metadata(path) {
-                Ok(metadata) if metadata.is_file() => metadata,
-                _ => continue,
-            };
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if metadata.permissions().mode() & 0o111 == 0 {
-                    continue;
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = metadata;
-                continue;
-            }
-        }
-        let write = matches!(probes.get(finding.id), Some(Probe::Write { .. }));
-        if write
-            && (!matches!(
-                effective.sandbox,
-                Some(
-                    ego_core::permit::Confinement::Workspace
-                        | ego_core::permit::Confinement::Adaptive
-                )
-            ) || !ego_tools::exec::setup_write_root_safe(directory, path).unwrap_or(false))
-        {
-            continue;
-        }
-        if write && effective.sandbox == Some(ego_core::permit::Confinement::Adaptive) {
-            let Ok(captured) = ego_tools::exec::admit_confinement(
-                ego_core::permit::Confinement::Adaptive,
-                effective.network == ego_core::config::Network::Off,
-                workspace.clone(),
-            ) else {
-                continue;
-            };
-            if ego_tools::exec::setup_write_reachable(&captured, &CanonPath::new(path))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-        }
-        let root = RootCfg {
-            path: directory.to_path_buf(),
-            access: if write {
-                RootAccess::ReadWrite
-            } else {
-                RootAccess::Read
-            },
-        };
+        let directory = root.path.as_path();
         let mut proposed = roots.clone();
         let mut proposed_exec = exec_after.clone();
         if execution && !proposed_exec.contains(&directory.to_path_buf()) {

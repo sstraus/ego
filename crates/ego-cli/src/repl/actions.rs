@@ -855,6 +855,86 @@ impl ActionRegistry {
         }
     }
 
+    fn classify_resume(&self, raw_arguments: &str) -> Dispatch {
+        if self.availability(ActionId::Sessions) != Availability::Enabled {
+            return Dispatch::Refused {
+                reason: "resume is unavailable while a turn is running",
+            };
+        }
+        let argument = raw_arguments.trim();
+        if argument.split_whitespace().count() > 1 {
+            return Dispatch::Refused {
+                reason: "usage: /resume [SESSION_ID] or /continue",
+            };
+        }
+        Dispatch::Resume((!argument.is_empty()).then(|| argument.to_owned()))
+    }
+
+    fn classify_history(&self, raw_arguments: &str) -> Dispatch {
+        if self.availability(ActionId::Sessions) != Availability::Enabled {
+            return Dispatch::Refused {
+                reason: "history is unavailable while a turn is running",
+            };
+        }
+        if raw_arguments.trim().is_empty() {
+            Dispatch::Refused {
+                reason: "usage: /history QUERY",
+            }
+        } else {
+            Dispatch::History(raw_arguments.trim().to_owned())
+        }
+    }
+
+    fn classify_config(&self, raw_arguments: &str) -> Dispatch {
+        if self.availability(ActionId::Config) != Availability::Enabled {
+            return Dispatch::Refused {
+                reason: "config is unavailable",
+            };
+        }
+        let arguments = raw_arguments.trim();
+        if arguments.is_empty() {
+            Dispatch::Action(ActionId::Config)
+        } else if arguments == "perimeter" || arguments.starts_with("set ") {
+            Dispatch::Config(arguments.to_owned())
+        } else {
+            Dispatch::Refused {
+                reason: "usage: /config [perimeter | set KEY TOML_VALUE]",
+            }
+        }
+    }
+
+    fn classify_registered(
+        &self,
+        name: &str,
+        raw_arguments: &str,
+        no_arguments: bool,
+    ) -> Option<Dispatch> {
+        let id = self
+            .resolve_slash(name)
+            .or_else(|| self.resolve_alias(name))?;
+        if matches!(
+            id,
+            ActionId::Mode | ActionId::Plan | ActionId::Yolo | ActionId::Permissions
+        ) {
+            return Some(if raw_arguments.is_empty() {
+                Dispatch::Action(id)
+            } else {
+                Dispatch::Refused {
+                    reason: "usage: /mode, /plan, /yolo, and /permissions take no arguments",
+                }
+            });
+        }
+        Some(if no_arguments {
+            Dispatch::Action(id)
+        } else if id == ActionId::Mcp {
+            Dispatch::Mcp(raw_arguments.trim().to_owned())
+        } else {
+            Dispatch::Refused {
+                reason: "this interactive action takes no arguments; use /help for local syntax",
+            }
+        })
+    }
+
     pub fn classify(&self, submission: Submission) -> Dispatch {
         if submission.origin == InputOrigin::Typed
             && let Some(command) = submission.text.strip_prefix('/')
@@ -868,32 +948,10 @@ impl ActionRegistry {
             if matches!(name, "resume" | "continue")
                 && self.resolve_alias(name) == Some(ActionId::Sessions)
             {
-                if self.availability(ActionId::Sessions) != Availability::Enabled {
-                    return Dispatch::Refused {
-                        reason: "resume is unavailable while a turn is running",
-                    };
-                }
-                let argument = raw_arguments.trim();
-                if argument.split_whitespace().count() > 1 {
-                    return Dispatch::Refused {
-                        reason: "usage: /resume [SESSION_ID] or /continue",
-                    };
-                }
-                return Dispatch::Resume((!argument.is_empty()).then(|| argument.to_owned()));
+                return self.classify_resume(raw_arguments);
             }
             if name == "history" && self.resolve_alias(name) == Some(ActionId::Sessions) {
-                if self.availability(ActionId::Sessions) != Availability::Enabled {
-                    return Dispatch::Refused {
-                        reason: "history is unavailable while a turn is running",
-                    };
-                }
-                return if raw_arguments.trim().is_empty() {
-                    Dispatch::Refused {
-                        reason: "usage: /history QUERY",
-                    }
-                } else {
-                    Dispatch::History(raw_arguments.trim().to_owned())
-                };
+                return self.classify_history(raw_arguments);
             }
             if name == "name" && self.resolve_slash(name) == Some(ActionId::Name) {
                 return parse_name_action(raw_arguments);
@@ -934,21 +992,7 @@ impl ActionRegistry {
                 };
             }
             if name == "config" && self.resolve_slash(name) == Some(ActionId::Config) {
-                if self.availability(ActionId::Config) != Availability::Enabled {
-                    return Dispatch::Refused {
-                        reason: "config is unavailable",
-                    };
-                }
-                let arguments = raw_arguments.trim();
-                return if arguments.is_empty() {
-                    Dispatch::Action(ActionId::Config)
-                } else if arguments == "perimeter" || arguments.starts_with("set ") {
-                    Dispatch::Config(arguments.to_owned())
-                } else {
-                    Dispatch::Refused {
-                        reason: "usage: /config [perimeter | set KEY TOML_VALUE]",
-                    }
-                };
+                return self.classify_config(raw_arguments);
             }
             if name == "hooks" && self.resolve_slash(name) == Some(ActionId::Hooks) {
                 return if !raw_arguments.is_empty() {
@@ -963,37 +1007,10 @@ impl ActionRegistry {
                     }
                 };
             }
-            let policy_action = self
-                .resolve_slash(name)
-                .or_else(|| self.resolve_alias(name))
-                .filter(|id| {
-                    matches!(
-                        id,
-                        ActionId::Mode | ActionId::Plan | ActionId::Yolo | ActionId::Permissions
-                    )
-                });
-            if let Some(id) = policy_action {
-                return if raw_arguments.is_empty() {
-                    Dispatch::Action(id)
-                } else {
-                    Dispatch::Refused {
-                        reason: "usage: /mode, /plan, /yolo, and /permissions take no arguments",
-                    }
-                };
-            }
-            if let Some(id) = self
-                .resolve_slash(name)
-                .or_else(|| self.resolve_alias(name))
+            if let Some(dispatch) =
+                self.classify_registered(name, raw_arguments, boundary == command.len())
             {
-                return if boundary == command.len() {
-                    Dispatch::Action(id)
-                } else if id == ActionId::Mcp {
-                    Dispatch::Mcp(raw_arguments.trim().to_owned())
-                } else {
-                    Dispatch::Refused {
-                        reason: "this interactive action takes no arguments; use /help for local syntax",
-                    }
-                };
+                return dispatch;
             }
             let capture = match self.skill_capture() {
                 Ok(Some(capture)) => capture,

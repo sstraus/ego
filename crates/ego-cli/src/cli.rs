@@ -1460,7 +1460,23 @@ fn parse_subcommand(
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Doctor(DoctorArgs { json: parsed.json })),
         },
-        Some("auth") => match clap_or_answer::<AuthCommand>(&tokens)? {
+        Some(command @ ("auth" | "roots" | "config" | "rules" | "mcp")) => {
+            parse_management_command(command, &tokens, tail)
+        }
+        _ => match clap_or_answer::<RunCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
+        },
+    }
+}
+
+fn parse_management_command(
+    command: &str,
+    tokens: &[String],
+    tail: Option<Vec<String>>,
+) -> Result<Invocation, UsageError> {
+    match command {
+        "auth" => match clap_or_answer::<AuthCommand>(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let (action, provider, device) = match parsed.action {
@@ -1477,7 +1493,7 @@ fn parse_subcommand(
                 })))
             }
         },
-        Some("roots") => match clap_or_answer::<RootsCommand>(&tokens)? {
+        "roots" => match clap_or_answer::<RootsCommand>(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let action = match parsed.action {
@@ -1503,22 +1519,19 @@ fn parse_subcommand(
                 Ok(Invocation::Config(Box::new(ConfigArgs { action })))
             }
         },
-        Some("config") => match config_clap_or_answer(&tokens)? {
+        "config" => match config_clap_or_answer(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Config(Box::new(into_config_args(parsed)?))),
         },
-        Some("rules") => match rules_clap_or_answer(&tokens)? {
+        "rules" => match rules_clap_or_answer(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Rules(Box::new(into_rules_args(parsed)?))),
         },
-        Some("mcp") => match clap_or_answer::<McpCommand>(&tokens)? {
+        "mcp" => match clap_or_answer::<McpCommand>(tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Mcp(Box::new(into_mcp_args(parsed, tail)?))),
         },
-        _ => match clap_or_answer::<RunCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
-        },
+        _ => unreachable!("only management commands reach this parser"),
     }
 }
 
