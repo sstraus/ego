@@ -287,7 +287,7 @@ pub(super) fn answer_control(
                 .lock()
                 .expect("surface status lock")
                 .permission_capabilities;
-            let mut prompt = Question::new(compact_prompt(&request), Arc::clone(surface.status));
+            let mut prompt = Question::new(compact_prompt(&request, capabilities.width), Arc::clone(surface.status));
             tell_host(surface.status, |osc, quiet| {
                 osc.awaiting(request.tool(), !quiet)
             });

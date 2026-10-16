@@ -18,10 +18,42 @@ const RULE_CAP: usize = 60;
 
 /// Four rows at most: what, how risky, and the keys; a fifth when the judge
 /// passed the call to the human says why.
-pub(super) fn compact_prompt(request: &PermissionRequest) -> String {
-    let mut rows = headline_rows(request);
-    rows.extend(key_rows(request, true));
-    rows.join("\n")
+pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> String {
+    let width = width.max(1);
+    let mut rows = vec![String::new()];
+    let prefix = request.child_name().map_or_else(String::new, |name| format!("Child {}: ", safe(name)));
+    let operations = request.ops().iter().map(|op| {
+        let description = describe_operation(op);
+        let (verb, target) = description.split_once(' ').unwrap_or((&description, ""));
+        format!("{verb} {}", keep_target(target, width.saturating_sub(prefix.len() + verb.len() + 9)))
+    }).collect::<Vec<_>>().join("; ");
+    rows.push(format!("{prefix}Allow {operations}?"));
+    rows.extend(headline_rows(request).into_iter().skip(1));
+    rows.push(if remembered_rules(request).is_some() {
+        "[y] yes   [a] yes, remember rule (details: d)".into()
+    } else { "[y] yes".into() });
+    rows.push("[n] no, say what to do instead   [e] edit   [d] details ".into());
+    rows.into_iter().flat_map(|row| {
+        if row.is_empty() { vec![String::new()] } else {
+            crate::render::line::Line::plain(row).wrap(width).into_iter().map(|line| line.text()).collect()
+        }
+    }).collect::<Vec<_>>().join("\n")
+}
+
+/// Keep the operation target's suffix, measured in display cells, not bytes.
+fn keep_target(text: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    if text.width() <= width { return text.to_owned(); }
+    let mut kept = Vec::new();
+    let mut cells = 1;
+    for grapheme in text.graphemes(true).rev() {
+        if cells + grapheme.width() > width { break; }
+        cells += grapheme.width();
+        kept.push(grapheme);
+    }
+    kept.reverse();
+    format!("…{}", kept.concat())
 }
 
 /// The compact prompt's facts plus everything behind the details key: the
@@ -294,7 +326,7 @@ mod tests {
                 path: path.clone(), change: Change::Whole(b"hello".to_vec()),
             }], Escalation::NoRuleCovers { op: OpName::Write, path: path.clone() });
             for width in [80, 120, 200] {
-                let prompt = compact_prompt(&request);
+                let prompt = compact_prompt(&request, width);
                 let pair = NativePtySystem::default().openpty(PtySize {
                     rows: 24, cols: width as u16, pixel_width: 0, pixel_height: 0,
                 }).unwrap();
@@ -375,7 +407,7 @@ mod tests {
                     path: CanonPath::new("/workspace"),
                 },
             );
-            let rendered = compact_prompt(&request);
+            let rendered = compact_prompt(&request, 120);
             assert!(
                 rendered.contains(&format!("Allow {verb} session process {id}?")),
                 "{rendered}"
@@ -407,7 +439,7 @@ mod tests {
                 path: CanonPath::new("/workspace"),
             },
         );
-        let prompt = compact_prompt(&request);
+        let prompt = compact_prompt(&request, 120);
         let args = serde_json::json!({"argv": ["/bin/echo", hostile]}).to_string();
         let tool = crate::render::tool_row::record(
             &crate::render::tool_row::Finished {
@@ -481,10 +513,10 @@ mod permission_modal_diff_tests {
         assert!(!out.contains(r"\n"), "{out}");
         assert!(out.contains("fragment"));
         assert!(out.ends_with("[n] no, say what to do instead   [e] edit "));
-        let compact = compact_prompt(&request);
+        let compact = compact_prompt(&request, 120);
         assert!(!compact.contains("@@"));
         assert!(!compact.contains("return a - b"));
-        assert!(compact.lines().count() <= 4);
+        assert!(compact.lines().count() <= 5);
     }
 
     #[test]
