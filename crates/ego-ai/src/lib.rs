@@ -16,6 +16,7 @@ mod openrouter;
 pub mod pricing;
 pub mod provider;
 pub mod resolver;
+pub mod service_tier;
 mod tool_names;
 pub mod wire;
 

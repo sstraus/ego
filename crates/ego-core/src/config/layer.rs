@@ -707,6 +707,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
 /// row on every launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusSegmentName {
+    Fast,
     Model,
     Effort,
     Mode,
@@ -772,6 +773,7 @@ impl StatusSegmentName {
     pub const NAMES: &[&str] = &[
         "model",
         "effort",
+        "fast",
         "mode",
         "context",
         "cost",
@@ -788,6 +790,7 @@ impl StatusSegmentName {
         match name {
             "model" => Some(Self::Model),
             "effort" => Some(Self::Effort),
+            "fast" => Some(Self::Fast),
             "mode" => Some(Self::Mode),
             "context" => Some(Self::Context),
             "cost" => Some(Self::Cost),
@@ -806,6 +809,7 @@ impl StatusSegmentName {
         match self {
             Self::Model => "model",
             Self::Effort => "effort",
+            Self::Fast => "fast",
             Self::Mode => "mode",
             Self::Context => "context",
             Self::Cost => "cost",
