@@ -1332,6 +1332,72 @@ bounded channels.
 | `--attach` | **yes** | §3.1's durable image path; interactive `Ctrl+V` and bracketed image paths use the same admission and blob commit |
 | OSC 133 A (prompt mark), OSC 7 (cwd) | excluded | not part of the final M5 terminal contract. `ego run` retains 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
+### 6.2.1 Keyboard preferences and Vim editing
+
+The default composer uses Emacs editing. Start `ego --vim` for Vim editing,
+or save `ego config set ui.vim=true` to select it for future interactive
+processes. `--vim` overrides a saved `false` value. The composer starts in
+insert mode; idle `Esc` selects normal mode, and `i` returns to insert mode.
+The prompt shows `[INSERT]`, `[NORMAL]`, or `[VISUAL]`. Vim editing uses the
+bundled Reedline editor, including its motions, operators, counts, and undo.
+Headless `run` and prompted `resume` reject `--vim`; ACP has no terminal
+composer and does not apply keyboard preferences.
+
+Customize action shortcuts in the **user** `config.toml`:
+
+```toml
+[ui]
+vim = true
+keybindings = { model = ["Ctrl+P", "F2"], expand = [] }
+```
+
+The same map can be saved atomically:
+
+```sh
+ego config set 'ui.keybindings={model=["Ctrl+P","F2"],expand=[]}'
+ego config get ui.keybindings
+ego config unset ui.keybindings
+```
+
+Keys in the map are canonical slash action names from `/help`, without the
+slash. Each array replaces that action's complete shortcut list; `[]` removes
+its shortcuts. Unspecified actions keep their defaults: `Option+P` opens the
+model picker, `Option+O` expands tool output, and `Option+R` retries provider
+recovery. `/help` and the startup key hints show the effective shortcuts.
+Unset `ui.keybindings` to restore all defaults.
+
+Supported chords are `Ctrl+LETTER`, `Alt+LETTER`, and `F1` through `F12`.
+Spellings are case-insensitive; `Option` and `Meta` are aliases for `Alt`.
+Letter shortcuts require one ASCII letter. Bare text, mixed modifiers such as
+AltGr, arbitrary escape sequences, and shifted chords cannot be configured.
+This keeps committed Unicode/IME text and terminal paste outside shortcut
+matching. Use a chord that the terminal can transmit; modified Enter reporting
+is not required for configurable shortcuts. The macOS `π` spelling of
+`Option+P` follows the effective binding, not the retired default.
+
+Unknown action names, invalid chords, and duplicate effective chords are
+refused before terminal activation. The check includes unchanged defaults;
+change both actions in one map to swap their keys. Managed `config set` and
+`config batch` also reject invalid maps before publication. Permission,
+picker, paste, draft, suspend, and busy-input controls cannot be remapped;
+terminal aliases such as `Ctrl+I`, `Ctrl+J`, `Ctrl+M`, and `Ctrl+H` are reserved.
+
+Keyboard preferences are user/process-only. They are read before the terminal
+owner starts, apply at the next process start, and remain stable when a session
+or project root changes. Project, local, system, and profile settings do not
+select the keyboard map; `-c` keyboard overrides are refused. These preferences
+do not change the permission mode or confinement.
+
+Vim runs **below** host input routing. Busy `Esc` still interrupts or expedites
+pending input; it does not select normal mode. Modal `Esc` still cancels or
+settles the current decision. Idle `Esc` removes a staged image chip before
+changing Vim mode. Busy Enter queues, Ctrl+Enter steers, Up on an empty composer
+recalls queued input, and Ctrl+S parks/restores drafts in either Vim mode.
+Permission keys and modal text forms keep their existing editing behavior.
+Bracketed paste inserts literal multiline text in both Vim modes; Ctrl+J
+inserts a newline without submitting. Terminal/OS IME pre-edit is owned by the
+terminal; the composer receives its committed Unicode characters.
+
 ### 6.3 Live composer, drafts, queue, and steering
 
 The composer remains editable while a provider streams, a tool runs, or the

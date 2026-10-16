@@ -843,6 +843,9 @@ where
 #[serde(deny_unknown_fields)]
 pub struct UiLayer {
     pub statusline: Option<StatuslineLayer>,
+    /// User/process-only keyboard preferences; not merged into session policy.
+    pub keybindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    pub vim: Option<bool>,
 }
 
 /// Non-secret authentication overrides for one provider.

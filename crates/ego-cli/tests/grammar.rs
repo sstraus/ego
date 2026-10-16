@@ -1619,3 +1619,15 @@ fn run_and_compact_accept_positive_output_caps_and_budget() {
     assert_eq!(args.max_output_tokens.unwrap().get(), 100);
     assert_eq!(args.budget.as_deref(), Some("1$"));
 }
+
+// Catches: --vim is rejected interactively or silently accepted by a headless consumer.
+#[test]
+fn vim_flag_selects_only_interactive_composer_editing() {
+    assert!(converses(["--vim"]).vim);
+    assert!(converses(["--vim", "hello"]).vim);
+    assert!(converses(["resume", "--vim"]).vim);
+    assert!(!converses([]).vim);
+    assert!(refused(["run", "--vim", "hello"]).contains("interactive"));
+    assert!(refused(["resume", "--vim", "--", "hello"]).contains("interactive"));
+    assert!(answered(["--help"]).contains("--vim"));
+}
