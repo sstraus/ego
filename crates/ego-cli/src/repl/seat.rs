@@ -1017,7 +1017,10 @@ impl Seat {
         let held_printer = printer.sender();
         let startup_output = printer.receiver().clone();
         let break_signal = Arc::new(AtomicBool::new(false));
-        let (input_sender, input) = bounded(CHANNEL_CAPACITY);
+        // The driver can wait for the output pump at turn completion. Its
+        // terminal owner must remain free to drain that pump's printer even
+        // when several input lines arrive before the driver reads again.
+        let (input_sender, input) = crossbeam::channel::unbounded();
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
         let owner_break = Arc::clone(&break_signal);
         let owner_phase = phase.clone();
