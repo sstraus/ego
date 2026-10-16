@@ -34,6 +34,37 @@ impl CliSessionTrustAdmission {
 }
 
 impl SessionTrustAdmission for CliSessionTrustAdmission {
+    fn available_commands(
+        &self,
+        root: &RunRoot,
+    ) -> Vec<ego_core::event::skill::SkillDescriptorEvidence> {
+        let trusted = matches!(
+            self.status(root),
+            SessionTrustStatus::Remembered(Trust::Trusted)
+        );
+        let Some(discovery) = crate::skill::SkillDiscovery::for_workspace(root.as_path(), trusted)
+        else {
+            return Vec::new();
+        };
+        let actions = crate::repl::actions::ActionRegistry::final_surface();
+        let fixed = actions
+            .names()
+            .into_iter()
+            .chain(actions.aliases())
+            .collect::<Vec<_>>();
+        let Ok(catalogue) = crate::skill::SkillCatalogue::discover(discovery, &fixed) else {
+            return Vec::new();
+        };
+        let Ok(capture) = catalogue.capture() else {
+            return Vec::new();
+        };
+        capture
+            .descriptors()
+            .iter()
+            .filter(|spec| spec.descriptor().user_invocable)
+            .map(|spec| spec.descriptor().clone())
+            .collect()
+    }
     fn attest_trusted(&self, root: &RunRoot) {
         if self.host_profile {
             let surface = crate::trust::executable_surface(root.as_path());

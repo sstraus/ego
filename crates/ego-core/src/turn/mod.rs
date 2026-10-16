@@ -11,6 +11,7 @@
 //! decision inside it is a pure function it calls.
 
 mod catalogue;
+mod commands;
 mod context_capacity;
 pub use context_capacity::compaction_due;
 mod control;
@@ -2221,6 +2222,33 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         prompt: &str,
         images: Vec<crate::generator::types::ImageRef>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
+        if let Some(named) = prompt.strip_prefix('/') {
+            let end = named.find(char::is_whitespace).unwrap_or(named.len());
+            if let Some(catalogue) = self.tools.skill_catalogue()
+                && let Ok(spec) = catalogue.authorize_user(&named[..end])
+                && spec.command_template().is_some()
+            {
+                if !images.is_empty() {
+                    let turn = TurnId::new();
+                    let outcome = async {
+                        self.begin_turn(turn)?;
+                        let driven = self.refuse_drive(
+                            turn,
+                            "custom commands do not accept image attachments".into(),
+                            ExitReason::Usage,
+                        )?;
+                        self.finish_turn(turn, driven).await
+                    }
+                    .await;
+                    return outcome.map_err(|cause| self.abandon(turn, cause));
+                }
+                let operation = crate::skill::AdmittedSkillOperation::invoke(
+                    spec.descriptor(),
+                    named[end..].trim_start(),
+                );
+                return self.run_admitted_skill(operation).await;
+            }
+        }
         self.run_prompts(vec![(prompt.to_string(), images, None)])
             .await
     }
@@ -2267,14 +2295,45 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
         let selector = operation.name().to_owned();
         let item = ItemId::new();
-        let (invocation, admitted) = crate::skill::SkillInvocation::admit_user_in_turn_with_origin(
-            &catalogue,
-            operation,
-            self.tools.blob_store(),
-            &self.journal,
-            turn,
-            item,
-        )
+        let template = catalogue
+            .authorize_user_operation(&operation)
+            .map_err(skill_store_error)?
+            .command_template()
+            .map(str::to_owned);
+        let (invocation, admitted) = if let Some(template) = template {
+            let rendered = match self
+                .expand_command(&template, operation.raw_arguments(), turn)
+                .await
+            {
+                Ok(rendered) => rendered,
+                Err(message) => {
+                    let driven = self.refuse_drive(
+                        turn,
+                        format!("command expansion failed: {message}"),
+                        ExitReason::Usage,
+                    )?;
+                    return self.finish_turn(turn, driven).await;
+                }
+            };
+            crate::skill::SkillInvocation::admit_command_in_turn(
+                &catalogue,
+                operation,
+                rendered,
+                self.tools.blob_store(),
+                &self.journal,
+                turn,
+                item,
+            )
+        } else {
+            crate::skill::SkillInvocation::admit_user_in_turn_with_origin(
+                &catalogue,
+                operation,
+                self.tools.blob_store(),
+                &self.journal,
+                turn,
+                item,
+            )
+        }
         .map_err(skill_store_error)?;
         if invocation.fork_wait().is_some() {
             let effect_tools = next_scope

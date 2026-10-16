@@ -29,7 +29,11 @@ pub(crate) fn discover_capability_roots(
             .find(|path| path.join(".git").exists());
         // A non-repository workspace has no authority over its ancestors.
         for directory in workspace.ancestors() {
-            for namespace in [".ego", ".agents", ".claude"] {
+            for namespace in if leaf == "commands" {
+                &[".ego", ".agents", ".claude", ".opencode"][..]
+            } else {
+                &[".ego", ".agents", ".claude"][..]
+            } {
                 roots.push(CapabilityRoot {
                     source: SkillSourceAuthority::Project,
                     path: directory.join(namespace).join(leaf),
@@ -46,6 +50,16 @@ pub(crate) fn discover_capability_roots(
     });
     if let Some(home) = home {
         for namespace in [".agents", ".claude"] {
+            roots.push(CapabilityRoot {
+                source: SkillSourceAuthority::User,
+                path: home.join(namespace).join(leaf),
+            });
+        }
+    }
+    if leaf == "commands"
+        && let Some(home) = home
+    {
+        for namespace in [".opencode", ".config/opencode"] {
             roots.push(CapabilityRoot {
                 source: SkillSourceAuthority::User,
                 path: home.join(namespace).join(leaf),

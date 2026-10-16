@@ -113,6 +113,18 @@ pub trait PathResolver: Send + Sync {
 pub trait Fs: PathResolver {
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError>;
 
+    /// A bounded import read. OS adapters must bound the read before allocation.
+    fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, FsError> {
+        let bytes = self.read(path)?;
+        if bytes.len() > limit {
+            return Err(FsError::Io {
+                path: path.clone(),
+                message: "file exceeds import byte limit".into(),
+            });
+        }
+        Ok(bytes)
+    }
+
     /// Replace the whole file at `path` with `bytes`.
     ///
     /// A persistent implementation publishes the replacement atomically and
@@ -149,6 +161,18 @@ pub trait GuardedIo<'s>: Send + Sync {
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied>;
 
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, IoDenied>;
+
+    fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, IoDenied> {
+        let bytes = self.read(path)?;
+        if bytes.len() > limit {
+            return Err(FsError::Io {
+                path: path.clone(),
+                message: "file exceeds import byte limit".into(),
+            }
+            .into());
+        }
+        Ok(bytes)
+    }
 
     /// The names under `req.root`, and nothing else about them.
     fn list(&self, req: &ScanRequest) -> Result<Scan, IoDenied>;
@@ -781,6 +805,12 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
         let fresh = self.fs.canonicalize(path.as_path())?;
         self.permit.allows_read(&fresh)?;
         credential_keys(&fresh, self.fs.read(&fresh)?)
+    }
+
+    fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, IoDenied> {
+        let fresh = self.fs.canonicalize(path.as_path())?;
+        self.permit.allows_read(&fresh)?;
+        credential_keys(&fresh, self.fs.read_bounded(&fresh, limit)?)
     }
 
     fn list(&self, req: &ScanRequest) -> Result<Scan, IoDenied> {

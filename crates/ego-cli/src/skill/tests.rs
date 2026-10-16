@@ -673,6 +673,7 @@ mod regression_case {
 
     fn discovery(roots: &Roots, workspace: &Path, trusted: bool) -> SkillDiscovery {
         SkillDiscovery {
+            command_roots: Vec::new(),
             roots: discover_capability_roots(
                 workspace,
                 trusted,

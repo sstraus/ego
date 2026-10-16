@@ -94,6 +94,15 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 .map(&render),
         );
     }
+    let capabilities = registry.skill_menu("");
+    if !capabilities.is_empty() {
+        logical.push("Skills and custom commands".to_owned());
+        logical.extend(
+            capabilities
+                .into_iter()
+                .map(|(name, description)| format!("  /{name}  {description}")),
+        );
+    }
     logical.push("Keys".to_owned());
     logical.extend(
         registry

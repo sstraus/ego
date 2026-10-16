@@ -185,6 +185,26 @@ pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
     };
     let root = root.as_path();
     let mut surface = ExecutableSurface::default();
+    for path in crate::command::project_files(root) {
+        let mut bytes = Vec::new();
+        if fs::File::open(&path)
+            .and_then(|file| {
+                file.take(TRUST_DIGEST_MAX_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .is_ok()
+        {
+            surface.programs.insert(
+                path.to_string_lossy().into_owned(),
+                ProgramEvidence {
+                    bytes: bytes.len() as u64,
+                    digest: ego_core::digest::sha256_hex(&bytes),
+                    executable: false,
+                    link_target: None,
+                },
+            );
+        }
+    }
     let configs = project_configs(root);
     let programs: Vec<_> = configs
         .iter()
@@ -581,11 +601,17 @@ fn inventory(root: &Path) -> TrustInventory {
         .iter()
         .map(|relative| root.join(relative))
         .collect();
+
     paths.extend(referenced_commands(root));
     let mut entries: Vec<_> = paths
         .iter()
         .filter_map(|path| content(root, path))
         .collect();
+    entries.extend(
+        crate::command::project_files(root)
+            .iter()
+            .filter_map(|path| content(path.parent()?, path)),
+    );
     entries.extend(skill_files(root).iter().filter_map(|path| {
         // Ancestor skill roots are part of the same explicit trust answer.
         content(path.parent()?, path)
@@ -1360,6 +1386,16 @@ mod tests {
             ".ego/config.toml",
             "[mcp.servers.new]\ntype = 'stdio'\ncommand = '/usr/bin/env'\n",
         );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
+    #[test]
+    fn command_only_workspace_requires_trust_again_when_shell_source_changes() {
+        let fixture = Fixture::new();
+        fixture.write(".claude/commands/review.md", "Review !`true`\n");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        fixture.write(".claude/commands/review.md", "Review !`false`\n");
         assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
         assert_eq!(fixture.asked.get(), 2);
     }

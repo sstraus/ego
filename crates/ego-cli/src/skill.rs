@@ -35,6 +35,7 @@ pub(crate) use ego_core::event::skill::SkillSourceAuthority;
 #[derive(Clone, Debug)]
 pub(crate) struct SkillDiscovery {
     roots: Vec<crate::capability_roots::CapabilityRoot>,
+    command_roots: Vec<crate::capability_roots::CapabilityRoot>,
     trusted_project: bool,
 }
 
@@ -64,6 +65,7 @@ impl SkillDiscovery {
         });
         Self {
             roots,
+            command_roots: Vec::new(),
             trusted_project,
         }
     }
@@ -71,6 +73,14 @@ impl SkillDiscovery {
     pub(crate) fn for_workspace(workspace: &Path, trusted_project: bool) -> Option<Self> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         Some(Self {
+            command_roots: crate::capability_roots::discover_capability_roots(
+                workspace,
+                trusted_project,
+                Path::new("/etc/ego"),
+                &crate::config::ego_home()?,
+                home.as_deref(),
+                "commands",
+            ),
             roots: crate::capability_roots::discover_capability_roots(
                 workspace,
                 trusted_project,
@@ -436,6 +446,15 @@ impl Candidate {
             PathBuf::from("bundled/context-management/SKILL.md"),
         )];
         let mut diagnostics = Vec::new();
+        {
+            let (commands, errors) = crate::command::discover_roots(&discovery.command_roots);
+            admitted.extend(commands);
+            diagnostics.extend(
+                errors
+                    .into_iter()
+                    .map(|(name, source, path, message)| diagnostic(name, source, path, message)),
+            );
+        }
         let mut seen_paths = BTreeSet::new();
         for root in discovery.roots {
             discover_root(
