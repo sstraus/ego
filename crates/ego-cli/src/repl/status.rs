@@ -11,7 +11,37 @@ use ego_core::generator::types::ThinkingLevel;
 use ego_core::state::{QueueStatus, SessionState};
 use unicode_width::UnicodeWidthStr;
 
+use crate::render::line::{Line, Span};
+use crate::render::style::{Palette, Style};
+
 const SEPARATOR: &str = " · ";
+
+fn compact_cwd(cwd: &str) -> String {
+    let home = std::env::var_os("HOME");
+    let path = Path::new(cwd);
+    let shown = home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(Path::new(home)).ok())
+        .map(|suffix| {
+            if suffix.as_os_str().is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{}", suffix.display())
+            }
+        })
+        .unwrap_or_else(|| cwd.to_owned());
+    let mut parts = shown.split('/').collect::<Vec<_>>();
+    let last = parts.len().saturating_sub(1);
+    for part in &mut parts[..last] {
+        if *part != "~" {
+            *part = part
+                .char_indices()
+                .nth(1)
+                .map_or(*part, |(end, _)| &part[..end]);
+        }
+    }
+    parts.join("/")
+}
 
 /// Facts selected by the operator rather than reduced from the event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,9 +124,9 @@ impl GitFacts {
 
     fn display(&self) -> String {
         if self.dirty {
-            format!("{}*", self.branch)
+            format!("⎇ {}●", self.branch)
         } else {
-            self.branch.clone()
+            format!("⎇ {}", self.branch)
         }
     }
 }
@@ -293,7 +323,7 @@ impl SurfaceSnapshot {
             cost_display: visible_cost(state),
             queue: seat.queue,
             drafts: seat.drafts,
-            cwd: seat.cwd,
+            cwd: compact_cwd(&seat.cwd),
             trust: seat.trust,
             git,
             git_failed: false,
@@ -324,7 +354,7 @@ impl SurfaceSnapshot {
 
     /// Replace the working directory before publishing a new snapshot.
     pub fn set_cwd(&mut self, cwd: impl Into<String>) {
-        self.cwd = cwd.into();
+        self.cwd = compact_cwd(&cwd.into());
     }
 
     /// Install the latest successful asynchronous Git projection.
@@ -399,17 +429,43 @@ impl SurfaceSnapshot {
     }
 
     fn context_display(&self) -> String {
+        let filled = match (self.used_tokens, self.window) {
+            (Some(used), Some(window)) if window > 0 => {
+                ((u128::from(used) * 10 / u128::from(window)).min(10)) as usize
+            }
+            _ => 0,
+        };
+        let used = self
+            .used_tokens
+            .map(compact_tokens)
+            .unwrap_or_else(|| "?".into());
+        let window = self
+            .window
+            .filter(|window| *window > 0)
+            .map(compact_tokens)
+            .unwrap_or_else(|| "?".into());
+        format!(
+            "{}{} {used}/{window}",
+            "▰".repeat(filled),
+            "▱".repeat(10 - filled)
+        )
+    }
+
+    fn context_style(&self) -> Style {
         match (self.used_tokens, self.window) {
             (Some(used), Some(window)) if window > 0 => {
-                format!(
-                    "ctx {:.1}%/{}",
-                    used as f64 * 100.0 / window as f64,
-                    compact_tokens(window)
-                )
+                let percent = u128::from(used) * 100;
+                let window = u128::from(window);
+                let colour = if percent >= window * 85 {
+                    Palette::ERROR
+                } else if percent >= window * 60 {
+                    Palette::WARNING
+                } else {
+                    Palette::ADDED_FG
+                };
+                Style::fg(colour)
             }
-            (Some(used), _) => format!("ctx {}", compact_tokens(used)),
-            (None, Some(window)) => format!("ctx unmeasured/{}", compact_tokens(window)),
-            (None, None) => "ctx unmeasured".to_owned(),
+            _ => Style::PLAIN,
         }
     }
 
@@ -499,17 +555,9 @@ fn visible_cost(state: &SessionState) -> Option<String> {
         }
     }
     if policies > 0 {
-        let estimate = equivalent.map(|amount| {
-            format!(
-                "{} subscription-equivalent (standard API)",
-                money_display(&amount)
-            )
-        });
+        let estimate = equivalent.map(|amount| format!("≈{}", money_display(&amount)));
         return Some(if unpriced || monetary {
-            estimate.map_or_else(
-                || "unpriced".to_owned(),
-                |text| format!("{text} (partial; mixed/unpriced)"),
-            )
+            estimate.map_or_else(|| "unpriced".to_owned(), |text| format!("{text} (partial)"))
         } else {
             estimate.unwrap_or_else(|| "unpriced".to_owned())
         });
@@ -586,7 +634,13 @@ impl StatusSegmentName {
     fn self_describing(&self) -> bool {
         matches!(
             self,
-            Self::Model | Self::Effort | Self::Mode | Self::Context | Self::Cost
+            Self::Model
+                | Self::Effort
+                | Self::Mode
+                | Self::Context
+                | Self::Cost
+                | Self::Cwd
+                | Self::Git
         )
     }
 
@@ -674,6 +728,7 @@ struct RenderedSegment {
 pub struct StatusLine {
     text: String,
     width: usize,
+    styled: Line,
     omitted: Vec<StatusSegmentName>,
     diagnostics: Vec<StatusDiagnostic>,
     snapshot_revision: String,
@@ -753,14 +808,26 @@ impl StatusLine {
             diagnostics.push(StatusDiagnostic::CriticalOverflow);
         }
 
-        let text = segments
-            .iter()
-            .map(|segment| segment.text.as_str())
-            .collect::<Vec<_>>()
-            .join(SEPARATOR);
+        let mut styled = Line::empty();
+        for (index, segment) in segments.iter().enumerate() {
+            if index > 0 {
+                styled.push(Span::plain(segment_separator(
+                    &segments[index - 1].name,
+                    &segment.name,
+                )));
+            }
+            let style = if segment.name == StatusSegmentName::Context {
+                snapshot.context_style()
+            } else {
+                Style::PLAIN
+            };
+            styled.push(Span::new(&segment.text, style));
+        }
+        let text = styled.text();
         Self {
-            width: UnicodeWidthStr::width(text.as_str()),
+            width: styled.width(),
             text,
+            styled,
             omitted,
             diagnostics,
             snapshot_revision: snapshot.revision.clone(),
@@ -775,6 +842,7 @@ impl StatusLine {
         Self {
             text: String::new(),
             width: 0,
+            styled: Line::empty(),
             omitted,
             diagnostics,
             snapshot_revision: snapshot.revision.clone(),
@@ -784,6 +852,11 @@ impl StatusLine {
     /// Rendered text without a trailing newline.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Paint the retained context segment using the terminal colour policy.
+    pub fn terminal_text(&self, capabilities: &crate::render::Capabilities) -> String {
+        self.styled.render(capabilities.depth)
     }
 
     /// Unicode display-cell width of [`Self::text`].
@@ -821,8 +894,20 @@ fn segments_width(segments: &[RenderedSegment]) -> usize {
         .map(|segment| UnicodeWidthStr::width(segment.text.as_str()))
         .sum::<usize>();
     contents.saturating_add(
-        UnicodeWidthStr::width(SEPARATOR).saturating_mul(segments.len().saturating_sub(1)),
+        segments
+            .windows(2)
+            .map(|pair| UnicodeWidthStr::width(segment_separator(&pair[0].name, &pair[1].name)))
+            .sum::<usize>(),
     )
+}
+
+fn segment_separator(left: &StatusSegmentName, right: &StatusSegmentName) -> &'static str {
+    use StatusSegmentName::{Context, Cost, Cwd, Git};
+    if matches!(left, Context | Cost | Cwd | Git) || matches!(right, Context | Cost | Cwd | Git) {
+        " "
+    } else {
+        SEPARATOR
+    }
 }
 
 /// `1_000_000` → `1M`, `2_482` → `2.5k`: one decimal, trailing `.0` dropped.
@@ -842,7 +927,7 @@ fn money_display(money: &Money) -> String {
     if amount > 0.0 && amount < 0.0005 && money.currency.as_str() == "USD" {
         return "<$0.001".to_owned();
     }
-    let places = if amount < 1.0 { 3 } else { 2 };
+    let places = if amount < 0.1 { 3 } else { 2 };
     match money.currency.as_str() {
         "USD" => format!("${amount:.places$}"),
         code => format!("{amount:.places$} {code}"),

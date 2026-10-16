@@ -64,11 +64,11 @@ fn a_trusted_posture_is_dropped_before_an_untrusted_one() {
         StatusSegmentName::Cwd,
     ];
 
-    let trusted = StatusLine::render(&snapshot(Trust::Trusted), &names, 40);
-    assert_eq!(trusted.text(), "gpt-5.6 · cwd=/workspace/ego");
+    let trusted = StatusLine::render(&snapshot(Trust::Trusted), &names, 30);
+    assert_eq!(trusted.text(), "gpt-5.6 /w/ego");
     assert!(trusted.omitted(StatusSegmentName::Trust));
 
-    let untrusted = StatusLine::render(&snapshot(Trust::Untrusted), &names, 40);
+    let untrusted = StatusLine::render(&snapshot(Trust::Untrusted), &names, 30);
     assert_eq!(untrusted.text(), "trust=untrusted · gpt-5.6");
     assert!(untrusted.omitted(StatusSegmentName::Cwd));
 }

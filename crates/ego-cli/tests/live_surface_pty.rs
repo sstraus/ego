@@ -20,6 +20,8 @@ mod retry_line;
 mod setup;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
+#[path = "live_surface_pty/status_compact.rs"]
+mod status_compact;
 #[path = "live_surface_pty/status_history.rs"]
 mod status_history;
 mod support;
@@ -6323,12 +6325,12 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     assert!(session.quit(input).success());
     let status = |rows: &[String]| {
         rows.iter()
-            .find(|row| row.contains("ctx"))
+            .find(|row| row.contains("▱") || row.contains("▰"))
             .cloned()
             .unwrap_or_else(|| panic!("no status row on screen: {rows:?}"))
     };
     assert!(
-        !status(&before).contains("ctx ?"),
+        !status(&before).contains(" ?/"),
         "precondition: the resumed source shows its context reading: {before:?}"
     );
     status(&after)
@@ -6339,7 +6341,7 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
 fn the_forked_session_keeps_the_context_reading_in_its_status_row() {
     let status = status_row_after_forking_a_session_with_a_context_reading();
     assert!(
-        status.contains("ctx 9.2%"),
+        status.contains("3k/32.8k"),
         "the fork lost or changed the measured context reading: {status:?}"
     );
 }
