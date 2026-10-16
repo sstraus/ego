@@ -240,6 +240,10 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
 #[path = "run/tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "run/phase_boundary_tests.rs"]
+mod phase_boundary_tests;
+
 /// Inspect only IDs admitted in the current session's durable journal.
 fn background_tasks(
     arguments: &str,
