@@ -145,7 +145,9 @@ async fn nothing_is_advertised_that_this_build_cannot_do() {
         "image prompts are served but not advertised: {response}"
     );
 
-    for claimed in ["loadSession", "audio", "embeddedContext"] {
+    assert_eq!(capabilities["promptCapabilities"]["embeddedContext"], true);
+
+    for claimed in ["loadSession", "audio"] {
         let advertised = capabilities
             .get(claimed)
             .or_else(|| capabilities.get("promptCapabilities")?.get(claimed))

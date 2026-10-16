@@ -2165,23 +2165,81 @@ async fn embedded_host_context_needs_no_disk_file_and_drops_private_metadata() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
     let session = connection.open(WORKSPACE).await;
-    let (response, _) = connection.request("session/prompt", serde_json::json!({
-        "sessionId": session,
-        "prompt": [
-            {"type":"text", "text":"before"},
-            {"type":"resource", "resource": {
-                "uri":"untitled://user:SECRET@editor/unsaved?token=SECRET",
-                "mimeType":"text/plain", "text":"unsaved host buffer",
-                "_meta":{"secret":"SECRET"}
-            }},
-            {"type":"text", "text":"after"}
-        ]
-    })).await;
+    let (response, _) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [
+                    {"type":"text", "text":"before"},
+                    {"type":"resource", "resource": {
+                        "uri":"untitled://user:SECRET@editor/unsaved?token=SECRET",
+                        "mimeType":"text/plain", "text":"unsaved host buffer",
+                        "_meta":{"secret":"SECRET"}
+                    }},
+                    {"type":"text", "text":"after"}
+                ]
+            }),
+        )
+        .await;
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     let prompt = turns.turns()[0].0.text().to_owned();
     assert!(prompt.contains("unsaved host buffer"));
     assert!(prompt.find("before") < prompt.find("unsaved host buffer"));
     assert!(prompt.find("unsaved host buffer") < prompt.find("after"));
     assert!(!prompt.contains("SECRET"));
+    connection.finish().await;
+}
+
+/// Catches dropping binary host resources or moving images ahead of their text.
+#[tokio::test]
+async fn embedded_binary_images_keep_their_text_position() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open(WORKSPACE).await;
+    let (response, _) = connection.request("session/prompt", serde_json::json!({
+        "sessionId":session, "prompt":[
+            {"type":"text", "text":"before é"},
+            {"type":"resource", "resource":{"uri":"untitled:picture", "mimeType":"image/png", "blob":BASE64.encode(PNG_1X1)}},
+            {"type":"text", "text":"after"},
+            {"type":"image", "mimeType":"image/png", "data":BASE64.encode(PNG_1X1)}
+        ]
+    })).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let prompt = turns.turns()[0].0.clone();
+    assert_eq!(prompt.images().len(), 2);
+    assert_eq!(prompt.images()[0].bytes(), PNG_1X1);
+    let first = prompt.images()[0].text_offset().unwrap();
+    assert!(first < prompt.text().len());
+    assert_eq!(&prompt.text()[first..], "\nafter");
+    assert_eq!(prompt.images()[1].text_offset(), Some(prompt.text().len()));
+    connection.finish().await;
+}
+
+/// Catches permissive decoding of unsupported, oversized or unlabelled resources.
+#[tokio::test]
+async fn embedded_resource_bounds_refuse_without_starting_a_turn() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open(WORKSPACE).await;
+    for resource in [
+        serde_json::json!({"uri":"untitled:pdf", "mimeType":"application/pdf", "blob":"aGk="}),
+        serde_json::json!({"uri":"untitled:unknown", "blob":BASE64.encode(PNG_1X1)}),
+        serde_json::json!({"uri":"untitled:bad", "mimeType":"image/png", "blob":"bad!"}),
+        serde_json::json!({"uri":"untitled:text", "text":"x".repeat(1024*1024+1)}),
+        serde_json::json!({"uri":"x".repeat(4097), "text":"short"}),
+        serde_json::json!({"uri":"untitled:text", "mimeType":"application/octet-stream", "text":"short"}),
+    ] {
+        let (response, _) = connection
+            .request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId":session, "prompt":[{"type":"resource", "resource":resource}]
+                }),
+            )
+            .await;
+        assert!(response.get("error").is_some(), "{response}");
+    }
+    assert!(turns.turns().is_empty());
     connection.finish().await;
 }

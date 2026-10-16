@@ -219,6 +219,10 @@ fn commit_staged(staged: Vec<Staged>) -> Result<Vec<ImageRef>, UsageError> {
                 staged.image.width(),
                 staged.image.height(),
             )
+            .map(|reference| match staged.image.text_offset() {
+                Some(offset) => reference.with_text_offset(offset),
+                None => reference,
+            })
             .map_err(|error| {
                 UsageError(format!(
                     "attachment {index} produced invalid durable metadata: {error}"

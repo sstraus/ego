@@ -48,6 +48,9 @@ pub struct Image {
     media_type: ImageMediaType,
     width: u32,
     height: u32,
+    /// UTF-8 byte position in the accompanying prompt text; absent means leading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_offset: Option<usize>,
 }
 
 impl Image {
@@ -60,7 +63,17 @@ impl Image {
             media_type,
             width,
             height,
+            text_offset: None,
         })
+    }
+
+    pub fn with_text_offset(mut self, offset: usize) -> Self {
+        self.text_offset = Some(offset);
+        self
+    }
+
+    pub const fn text_offset(&self) -> Option<usize> {
+        self.text_offset
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -87,6 +100,9 @@ struct ImageWire {
     media_type: ImageMediaType,
     width: u32,
     height: u32,
+    /// UTF-8 byte position in the accompanying prompt text; absent means leading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_offset: Option<usize>,
 }
 
 impl<'de> Deserialize<'de> for Image {
@@ -102,7 +118,10 @@ impl<'de> Deserialize<'de> for Image {
                 wire.width, wire.height, image.width, image.height
             )));
         }
-        Ok(image)
+        Ok(match wire.text_offset {
+            Some(offset) => image.with_text_offset(offset),
+            None => image,
+        })
     }
 }
 
@@ -114,6 +133,9 @@ pub struct ImageRef {
     media_type: ImageMediaType,
     width: u32,
     height: u32,
+    /// UTF-8 byte position in the accompanying prompt text; absent means leading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_offset: Option<usize>,
 }
 
 impl ImageRef {
@@ -136,6 +158,7 @@ impl ImageRef {
             media_type,
             width,
             height,
+            text_offset: None,
         })
     }
 
@@ -149,7 +172,19 @@ impl ImageRef {
                 decoded_height: image.height,
             });
         }
-        Ok(image)
+        Ok(match self.text_offset {
+            Some(offset) => image.with_text_offset(offset),
+            None => image,
+        })
+    }
+
+    pub fn with_text_offset(mut self, offset: usize) -> Self {
+        self.text_offset = Some(offset);
+        self
+    }
+
+    pub const fn text_offset(&self) -> Option<usize> {
+        self.text_offset
     }
 
     pub fn reference(&self) -> &BlobRef {
@@ -173,6 +208,9 @@ struct ImageRefWire {
     media_type: ImageMediaType,
     width: u32,
     height: u32,
+    /// UTF-8 byte position in the accompanying prompt text; absent means leading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_offset: Option<usize>,
 }
 
 impl<'de> Deserialize<'de> for ImageRef {
@@ -182,6 +220,10 @@ impl<'de> Deserialize<'de> for ImageRef {
     {
         let wire = ImageRefWire::deserialize(deserializer)?;
         Self::new(wire.reference, wire.media_type, wire.width, wire.height)
+            .map(|image| match wire.text_offset {
+                Some(offset) => image.with_text_offset(offset),
+                None => image,
+            })
             .map_err(serde::de::Error::custom)
     }
 }
