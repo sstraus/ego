@@ -644,13 +644,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     match seeded.take() {
                                         Some(first) => repl::Line::Submitted(first),
                                         None => {
-                                            seat.idle();
-                                            if let Some(status) = status.as_ref()
-                                                && status.human
-                                            {
-                                                status.seat.activate();
-                                            }
-                                            seat.read()
+                                            read_interactive_command(seat.as_ref(), status.as_ref())
                                         }
                                     }
                                 };
@@ -824,16 +818,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                         break 'sessions Ok(last);
                     }
                     EpochTransition::New { target } => {
-                        active.replace_state(source_state);
-                        if let Err(error) = session_end {
-                            diagnostics.note(&format!(
-                                "the previous session-end hook failed: {}",
-                                error.exit_reason()
-                            ));
-                        }
-                        active = target;
-                        admit_successor_context(&evidence, &active, &run_context)?;
-                        epoch_start = EpochStart::New;
+                        epoch_start = activate_new_session(
+                            &mut active,
+                            source_state,
+                            session_end,
+                            target,
+                            (&evidence, &run_context, diagnostics),
+                        )?;
                     }
                     EpochTransition::Fork {
                         target,
@@ -3568,4 +3559,41 @@ fn finish_interactive_session(
         last.selected_session = Some(meta);
         seat.restore_control(control);
     }
+}
+
+fn read_interactive_command(
+    seat: &dyn InteractiveSeat,
+    status: Option<&InteractiveStatus>,
+) -> repl::Line {
+    seat.idle();
+    if let Some(status) = status
+        && status.human
+    {
+        status.seat.activate();
+    }
+    seat.read()
+}
+
+fn activate_new_session<'store>(
+    active: &mut ActiveSession<'store>,
+    source_state: SessionState,
+    session_end: Result<(), RunTermination>,
+    target: ActiveSession<'store>,
+    context: (
+        &EvidenceAdmissionService,
+        &Option<RunContextEvidence>,
+        &dyn Diagnostics,
+    ),
+) -> Result<EpochStart, RunTermination> {
+    let (evidence, run_context, diagnostics) = context;
+    active.replace_state(source_state);
+    if let Err(error) = session_end {
+        diagnostics.note(&format!(
+            "the previous session-end hook failed: {}",
+            error.exit_reason()
+        ));
+    }
+    *active = target;
+    admit_successor_context(evidence, active, run_context)?;
+    Ok(EpochStart::New)
 }
