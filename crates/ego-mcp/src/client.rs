@@ -1383,15 +1383,7 @@ async fn acp_bridge(
         };
         let params = frame["params"].as_object().cloned();
         let Some(id) = frame.get("id").cloned() else {
-            if method == "notifications/cancelled" {
-                if let Some(request_id) = params.as_ref().and_then(|params| params.get("requestId"))
-                    && let Some(request) = active.lock().await.remove(&request_id.to_string())
-                {
-                    request.abort();
-                }
-                continue;
-            }
-            let _ = effects.notify(connection_id.clone(), method.to_owned(), params);
+            acp_notification(&connection_id, method, params, effects.as_ref(), &active).await;
             continue;
         };
         let effects = Arc::clone(&effects);
@@ -1417,6 +1409,24 @@ async fn acp_bridge(
         });
         active_requests.insert(key, request.abort_handle());
     }
+}
+
+async fn acp_notification(
+    connection_id: &str,
+    method: &str,
+    params: Option<serde_json::Map<String, serde_json::Value>>,
+    effects: &dyn McpAcpEffects,
+    active: &tokio::sync::Mutex<HashMap<String, tokio::task::AbortHandle>>,
+) {
+    if method == "notifications/cancelled" {
+        if let Some(request_id) = params.as_ref().and_then(|params| params.get("requestId"))
+            && let Some(request) = active.lock().await.remove(&request_id.to_string())
+        {
+            request.abort();
+        }
+        return;
+    }
+    let _ = effects.notify(connection_id.to_owned(), method.to_owned(), params);
 }
 
 pub struct McpClientSettlement {

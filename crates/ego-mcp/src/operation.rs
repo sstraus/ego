@@ -1282,10 +1282,7 @@ async fn execute_http_hook(
     if envelope.transport() != &transport || envelope.transport_fingerprint() != fingerprint {
         return Err(authority("selected MCP hook transport fingerprint changed"));
     }
-    let request = operation_request(&envelope)?;
-    if !matches!(&request, OperationRequest::Tool(_)) {
-        return Err(authority("MCP hook operation is not a tool call"));
-    }
+    let request = hook_operation_request(&envelope)?;
     let expected_wire_params = request.wire_params()?;
     let claim = io.claim_mcp_http(call).map_err(McpError::from)?;
     if claim.envelope() != &envelope {
@@ -1304,16 +1301,13 @@ async fn execute_http_hook(
         admission.oauth_session().cloned(),
     ));
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
-    let mut client = McpClient::connect_http(
+    let client = McpClient::connect_http(
         server,
         config.clone(),
         factory.limits.hook_options(&scope)?,
         effects,
     )?;
-    if let Err(error) = client.discover().await {
-        let _ = client.settle().await;
-        return Err(error);
-    }
+    let mut client = discover_hook_client(client).await?;
     let outcome = invoke_in_scope(request, &mut client, &scope).await;
     let settlement = client.settle().await;
     let outcome = outcome?;
@@ -1322,6 +1316,16 @@ async fn execute_http_hook(
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP hook HTTP operation was not settled"))?;
     project_hook_outcome(outcome, io, selected.delivery())
+}
+
+fn hook_operation_request(
+    envelope: &ego_core::permit::McpPreparedEnvelope,
+) -> Result<OperationRequest, McpError> {
+    let request = operation_request(envelope)?;
+    if !matches!(&request, OperationRequest::Tool(_)) {
+        return Err(authority("MCP hook operation is not a tool call"));
+    }
+    Ok(request)
 }
 
 async fn execute_stdio_hook(
@@ -1351,20 +1355,14 @@ async fn execute_stdio_hook(
     {
         return Err(authority("selected MCP hook transport fingerprint changed"));
     }
-    let request = operation_request(&envelope)?;
-    if !matches!(&request, OperationRequest::Tool(_)) {
-        return Err(authority("MCP hook operation is not a tool call"));
-    }
+    let request = hook_operation_request(&envelope)?;
     let duplex = io.guarded_duplex(call).await.map_err(McpError::from)?;
     let effects: Box<dyn McpDuplexEffects> = Box::new(ClaimedDuplexEffects {
         server: server.clone(),
         duplex: Some(duplex),
     });
-    let mut client = McpClient::connect_stdio(server, limits.hook_options(&scope)?, effects)?;
-    if let Err(error) = client.discover().await {
-        let _ = client.settle().await;
-        return Err(error);
-    }
+    let client = McpClient::connect_stdio(server, limits.hook_options(&scope)?, effects)?;
+    let mut client = discover_hook_client(client).await?;
     let outcome = invoke_in_scope(request, &mut client, &scope).await;
     let settlement = client.settle().await;
     let outcome = outcome?;
@@ -1373,6 +1371,14 @@ async fn execute_stdio_hook(
         .duplex()
         .ok_or_else(|| protocol("selected MCP hook stdio operation has no settlement"))?;
     project_hook_outcome(outcome, io, duplex.delivery())
+}
+
+async fn discover_hook_client(mut client: McpClient) -> Result<McpClient, McpError> {
+    if let Err(error) = client.discover().await {
+        let _ = client.settle().await;
+        return Err(error);
+    }
+    Ok(client)
 }
 
 async fn invoke_in_scope(
@@ -1559,6 +1565,19 @@ fn tool_schema_command(
     let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
         return Ok(None);
     };
+    let structured_content = schema_lookup_content(result)?;
+    let parameters: Value = serde_json::from_slice(envelope.parameters())?;
+    let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
+    Ok(Some(McpToolSchemaCommand::new(
+        server_admission,
+        generation.to_string(),
+        envelope.admission().clone(),
+        requested_name,
+        structured_content,
+    )))
+}
+
+fn schema_lookup_content(result: &CallToolResult) -> Result<Value, McpError> {
     if result.is_error == Some(true)
         || !result
             .result_type
@@ -1584,15 +1603,7 @@ fn tool_schema_command(
                 .map_err(|_| protocol("collapsed schema lookup text content is not valid JSON"))?
         }
     };
-    let parameters: Value = serde_json::from_slice(envelope.parameters())?;
-    let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
-    Ok(Some(McpToolSchemaCommand::new(
-        server_admission,
-        generation.to_string(),
-        envelope.admission().clone(),
-        requested_name,
-        structured_content,
-    )))
+    Ok(structured_content)
 }
 
 async fn project_outcome(
