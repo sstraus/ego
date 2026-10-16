@@ -777,43 +777,9 @@ impl<'a> CliSkillInvocationOwner<'a> {
             std::mem::take(&mut *background.lock().expect("background skill invocations"));
         let mut first_error = None;
         for (id, background) in pending {
-            let BackgroundSkill {
-                service,
-                invocation,
-                turn,
-                execution,
-            } = background;
-            if cancel_children && let Err(error) = service.cancel_owned(id).await {
-                first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
-            }
-            if let Some(task) = execution
-                && let Err(error) = Self::await_execution(task).await
+            if let Err(error) =
+                Self::settle_background_skill(id, background, hooks, cancel_children).await
             {
-                first_error.get_or_insert(error);
-            }
-            let source = match invocation.hook_source() {
-                Ok(source) => source,
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                    continue;
-                }
-            };
-            if let Err(error) = hooks.hook_state().replace_skill_sources(turn, &[source]) {
-                first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
-                continue;
-            }
-            let collected = service
-                .collect_background(id, hooks)
-                .await
-                .map_err(|error| SkillError::new(error.to_string()));
-            let cleared = hooks
-                .hook_state()
-                .replace_skill_sources(turn, &[])
-                .map_err(|error| SkillError::new(error.to_string()));
-            if let Err(error) = collected {
-                first_error.get_or_insert(error);
-            }
-            if let Err(error) = cleared {
                 first_error.get_or_insert(error);
             }
         }
@@ -821,6 +787,58 @@ impl<'a> CliSkillInvocationOwner<'a> {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    async fn settle_background_skill(
+        id: SubagentInvocationId,
+        background: BackgroundSkill,
+        hooks: &SessionHookRuntime<'_>,
+        cancel_children: bool,
+    ) -> Result<(), SkillError> {
+        let mut first_error = None;
+        let BackgroundSkill {
+            service,
+            invocation,
+            turn,
+            execution,
+        } = background;
+        if cancel_children && let Err(error) = service.cancel_owned(id).await {
+            first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
+        }
+        if let Some(task) = execution
+            && let Err(error) = Self::await_execution(task).await
+        {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) =
+            Self::collect_background_skill(&service, id, &invocation, turn, hooks).await
+        {
+            first_error.get_or_insert(error);
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    async fn collect_background_skill(
+        service: &ChildRunService,
+        id: SubagentInvocationId,
+        invocation: &SkillInvocation,
+        turn: TurnId,
+        hooks: &SessionHookRuntime<'_>,
+    ) -> Result<(), SkillError> {
+        let source = invocation.hook_source()?;
+        hooks
+            .hook_state()
+            .replace_skill_sources(turn, &[source])
+            .map_err(|error| SkillError::new(error.to_string()))?;
+        let collected = service
+            .collect_background(id, hooks)
+            .await
+            .map_err(|error| SkillError::new(error.to_string()));
+        let cleared = hooks
+            .hook_state()
+            .replace_skill_sources(turn, &[])
+            .map_err(|error| SkillError::new(error.to_string()));
+        collected.and(cleared)
     }
 }
 
