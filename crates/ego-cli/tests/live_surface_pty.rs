@@ -2603,7 +2603,7 @@ fn until_from(
 
 #[cfg(not(windows))]
 fn rendered_prompt_count(output: &[u8]) -> usize {
-    output.windows(2).filter(|window| *window == b"> ").count()
+    support::ready_prompt_count_with_status(output)
 }
 
 #[cfg(windows)]

@@ -205,6 +205,8 @@ fn submit_busy_line(
             let (handled, interrupted) =
                 execute_action_and_modal(editor, phase, status, ingress, action, true);
             if let Some(interrupted) = interrupted {
+                editor.run_edit_commands(&[EditCommand::Clear]);
+                status.lock().expect("surface status lock").origin = InputOrigin::Typed;
                 return Some((interrupted, false));
             }
             if handled {
