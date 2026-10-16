@@ -281,6 +281,54 @@ fn truncate(text: &str, cap: usize) -> String {
 mod tests {
     use super::*;
 
+    // Catches: fixed character limits hide the target and wrap decision keys.
+    #[cfg(unix)]
+    #[test]
+    fn rendered_permission_retains_target_at_80_columns() {
+        use ego_core::permit::{CanonPath, Change, Escalation, OpName};
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+        for target in ["review-example.txt", "界面-example.txt"] {
+            let path = CanonPath::new(format!("/workspace/{}/{target}", "long-directory/".repeat(12)));
+            let request = PermissionRequest::new("write", vec![Op::Write {
+                path: path.clone(), change: Change::Whole(b"hello".to_vec()),
+            }], Escalation::NoRuleCovers { op: OpName::Write, path: path.clone() });
+            for width in [80, 120, 200] {
+                let prompt = compact_prompt(&request);
+                let pair = NativePtySystem::default().openpty(PtySize {
+                    rows: 24, cols: width as u16, pixel_width: 0, pixel_height: 0,
+                }).unwrap();
+                let mut command = CommandBuilder::new("/bin/sh");
+                command.args(["-c", "printf '%s' \"$1\"", "permission-capture", &prompt]);
+                let mut child = pair.slave.spawn_command(command).unwrap();
+                drop(pair.slave);
+                let mut bytes = Vec::new();
+                let mut reader = pair.master.try_clone_reader().unwrap();
+                let mut buffer = [0; 4096];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                        Err(error) if error.raw_os_error() == Some(5) => break,
+                        Err(error) => panic!("PTY read: {error}"),
+                    }
+                }
+                assert!(child.wait().unwrap().success());
+                let mut terminal = vt100::Parser::new(24, width as u16, 0);
+                terminal.process(&bytes);
+                let grid = terminal.screen().contents();
+                assert!(grid.lines().any(|row| row.starts_with("Allow write ") && row.ends_with(&format!("{target}?"))), "{width}: {grid}");
+                for key in ["[y]", "[n]", "[e]", "[d]"] {
+                    assert!(grid.contains(key), "{grid}");
+                }
+                assert!(prompt.lines().all(|row| unicode_width::UnicodeWidthStr::width(row) <= width));
+                let detail = details_prompt(&request, crate::render::Capabilities::plain());
+                assert!(detail.contains(&path.to_string()));
+                println!("permission width={width} grid={grid:?}");
+            }
+        }
+    }
+
     fn risk(class: RiskClass, reasons: Vec<RiskReason>) -> RiskAssessment {
         RiskAssessment { class, reasons }
     }
