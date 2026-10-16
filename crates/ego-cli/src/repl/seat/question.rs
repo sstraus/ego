@@ -67,6 +67,45 @@ pub(super) fn leave_modal(
     repaint_status(status);
 }
 
+fn confirm_compaction_drafts(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    source: SessionId,
+) -> bool {
+    if surface.drafts.active() != source {
+        false
+    } else {
+        let drafts = surface.drafts.active_count();
+        if drafts == 0 {
+            true
+        } else {
+            let prompt = Question::new(
+                format!(
+                    "Compact session {source} into a new clean durable session while retaining {drafts} source-owned drafts? [y/N] "
+                ),
+                Arc::clone(surface.status),
+            );
+            loop {
+                match modal_line(editor, surface, &prompt) {
+                    Line::Submitted(answer) => match parse_trust(&answer) {
+                        Some(Trust::Trusted) => break true,
+                        Some(Trust::Untrusted) => break false,
+                        None => continue,
+                    },
+                    Line::Interrupted
+                    | Line::Blank
+                    | Line::Ended
+                    | Line::ExternalBreak(_)
+                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                        break false;
+                    }
+                    Line::Refused(_) | Line::HostCommand(_) => continue,
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn answer_control(
     editor: &mut Reedline,
     phase: &SurfacePhase,
@@ -186,38 +225,7 @@ pub(super) fn answer_control(
 
     let (reply, after, mut keep_running) = match control {
         Control::ConfirmCompaction { source, reply } => {
-            let confirmed = if surface.drafts.active() != source {
-                false
-            } else {
-                let drafts = surface.drafts.active_count();
-                if drafts == 0 {
-                    true
-                } else {
-                    let prompt = Question::new(
-                        format!(
-                            "Compact session {source} into a new clean durable session while retaining {drafts} source-owned drafts? [y/N] "
-                        ),
-                        Arc::clone(surface.status),
-                    );
-                    loop {
-                        match modal_line(editor, surface, &prompt) {
-                            Line::Submitted(answer) => match parse_trust(&answer) {
-                                Some(Trust::Trusted) => break true,
-                                Some(Trust::Untrusted) => break false,
-                                None => continue,
-                            },
-                            Line::Interrupted
-                            | Line::Blank
-                            | Line::Ended
-                            | Line::ExternalBreak(_)
-                            | Line::HostCommand(
-                                HostCommand::Interrupt | HostCommand::ModalEscape,
-                            ) => break false,
-                            Line::Refused(_) | Line::HostCommand(_) => continue,
-                        }
-                    }
-                }
-            };
+            let confirmed = confirm_compaction_drafts(editor, surface, source);
             (Reply::Compaction(reply, confirmed), EditPhase::Idle, true)
         }
         Control::Trust {
@@ -901,6 +909,71 @@ pub(super) enum PermissionEditOutcome {
     Propagate(Line),
 }
 
+fn read_permission_parameter(
+    editor: &mut Reedline,
+    status: &SharedStatus,
+    prompt: String,
+    value: String,
+    blank: &str,
+    mut set: impl FnMut(String) -> Result<(), String>,
+) -> Result<(), PermissionEditOutcome> {
+    loop {
+        editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(value.clone())]);
+        let prompt = Question::new(prompt.clone(), Arc::clone(status));
+        let result = match answer(false, editor.read_line(&prompt)) {
+            Line::Submitted(raw) => set(raw),
+            Line::Blank => set(blank.to_owned()),
+            line @ (Line::Ended | Line::ExternalBreak(_)) => {
+                return Err(PermissionEditOutcome::Propagate(line));
+            }
+            Line::Interrupted
+            | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                return Err(PermissionEditOutcome::Cancelled);
+            }
+            Line::Refused(_) | Line::HostCommand(_) => continue,
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => inline_permission_error(status, error),
+        }
+    }
+}
+
+fn read_permission_form(
+    editor: &mut Reedline,
+    status: &SharedStatus,
+    form: &mut PermissionEditForm,
+) -> Result<serde_json::Map<String, serde_json::Value>, PermissionEditOutcome> {
+    loop {
+        for index in 0..form.fields.len() {
+            let field = &form.fields[index];
+            let prompt = format!("{}: ", field.name);
+            let value = field.raw.clone();
+            read_permission_parameter(editor, status, prompt, value, "", |raw| {
+                form.set_field(index, raw)
+            })?;
+        }
+        if form.has_fallback() {
+            let value = form.fallback_json();
+            read_permission_parameter(
+                editor,
+                status,
+                "Nested or additional parameters (JSON): ".into(),
+                value,
+                "{}",
+                |raw| form.set_fallback(&raw),
+            )?;
+        }
+        match form.validate() {
+            Ok(serde_json::Value::Object(parameters)) => {
+                return Ok(parameters);
+            }
+            Ok(_) => unreachable!("permission forms validate only objects"),
+            Err(error) => inline_permission_error(status, error),
+        }
+    }
+}
+
 pub(super) fn edit_permission_parameters(
     editor: &mut Reedline,
     phase: &SurfacePhase,
@@ -917,73 +990,7 @@ pub(super) fn edit_permission_parameters(
         }
     };
     let saved = enter_modal(editor, phase, status);
-    let outcome = 'edit: loop {
-        for index in 0..form.fields.len() {
-            loop {
-                let field = &form.fields[index];
-                editor.run_edit_commands(&[
-                    EditCommand::Clear,
-                    EditCommand::InsertString(field.raw.clone()),
-                ]);
-                let prompt = Question::new(format!("{}: ", field.name), Arc::clone(status));
-                match answer(false, editor.read_line(&prompt)) {
-                    Line::Submitted(raw) => match form.set_field(index, raw) {
-                        Ok(()) => break,
-                        Err(error) => inline_permission_error(status, error),
-                    },
-                    Line::Blank => match form.set_field(index, String::new()) {
-                        Ok(()) => break,
-                        Err(error) => inline_permission_error(status, error),
-                    },
-                    line @ (Line::Ended | Line::ExternalBreak(_)) => {
-                        break 'edit PermissionEditOutcome::Propagate(line);
-                    }
-                    Line::Interrupted
-                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
-                        break 'edit PermissionEditOutcome::Cancelled;
-                    }
-                    Line::Refused(_) | Line::HostCommand(_) => continue,
-                }
-            }
-        }
-        if form.has_fallback() {
-            loop {
-                editor.run_edit_commands(&[
-                    EditCommand::Clear,
-                    EditCommand::InsertString(form.fallback_json()),
-                ]);
-                let prompt = Question::new(
-                    "Nested or additional parameters (JSON): ".into(),
-                    Arc::clone(status),
-                );
-                match answer(false, editor.read_line(&prompt)) {
-                    Line::Submitted(raw) => match form.set_fallback(&raw) {
-                        Ok(()) => break,
-                        Err(error) => inline_permission_error(status, error),
-                    },
-                    Line::Blank => match form.set_fallback("{}") {
-                        Ok(()) => break,
-                        Err(error) => inline_permission_error(status, error),
-                    },
-                    line @ (Line::Ended | Line::ExternalBreak(_)) => {
-                        break 'edit PermissionEditOutcome::Propagate(line);
-                    }
-                    Line::Interrupted
-                    | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
-                        break 'edit PermissionEditOutcome::Cancelled;
-                    }
-                    Line::Refused(_) | Line::HostCommand(_) => continue,
-                }
-            }
-        }
-        match form.validate() {
-            Ok(serde_json::Value::Object(parameters)) => {
-                break PermissionEditOutcome::Value(parameters);
-            }
-            Ok(_) => unreachable!("permission forms validate only objects"),
-            Err(error) => inline_permission_error(status, error),
-        }
-    };
+    let outcome = read_permission_form(editor, status, &mut form);
     leave_modal(
         editor,
         phase,
@@ -995,7 +1002,10 @@ pub(super) fn edit_permission_parameters(
             EditPhase::Idle
         },
     );
-    outcome
+    match outcome {
+        Ok(parameters) => PermissionEditOutcome::Value(parameters),
+        Err(outcome) => outcome,
+    }
 }
 
 fn prefilled_modal_line(
