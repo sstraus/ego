@@ -196,7 +196,13 @@ impl LocalRepository {
                 &[
                     "rev-parse",
                     "--verify",
-                    &format!("{}@{{upstream}}", receipt.source_ref),
+                    &format!(
+                        "{}@{{upstream}}",
+                        receipt
+                            .source_ref
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(&receipt.source_ref)
+                    ),
                 ],
             )
             .map_err(|_| "no upstream proof for new commits; cleanup refused".to_owned())?;
