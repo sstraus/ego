@@ -254,6 +254,49 @@ pub trait SearchBackend: Send + Sync {
         'io: 'a;
 }
 
+/// Retain both explicitly selected search routes until generation resolves its provider.
+pub fn selected_web_search(
+    local: Option<Arc<dyn ego_core::permit::Tool>>,
+) -> Arc<dyn ego_core::permit::Tool> {
+    Arc::new(ego_core::permit::Typed(SelectedWebSearch { local }))
+}
+
+struct SelectedWebSearch {
+    local: Option<Arc<dyn ego_core::permit::Tool>>,
+}
+impl TypedTool for SelectedWebSearch {
+    type Params = WebSearchParams;
+    fn name(&self) -> &str {
+        HostedWebSearch.name()
+    }
+    fn description(&self) -> &str {
+        HostedWebSearch.description()
+    }
+    fn admits_hosted_search(&self) -> bool {
+        true
+    }
+    fn local_search_tool(&self) -> Option<Arc<dyn ego_core::permit::Tool>> {
+        self.local.clone()
+    }
+    fn prepare_typed(
+        &self,
+        params: Self::Params,
+        ctx: &PrepareCtx<'_>,
+    ) -> Result<PreparedCall, ToolError> {
+        HostedWebSearch.prepare_typed(params, ctx)
+    }
+    fn execute<'a, 'io>(
+        &'a self,
+        call: PreparedCall,
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
+        HostedWebSearch.execute(call, io)
+    }
+}
+
 /// Declaration for a provider-executed tool. Local execution always refuses.
 pub struct HostedWebSearch;
 

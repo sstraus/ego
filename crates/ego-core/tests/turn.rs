@@ -13079,6 +13079,77 @@ mod turn {
             }
         }
 
+        struct FixtureSearch(Arc<AtomicUsize>);
+        impl ego_tools::tools::SearchBackend for FixtureSearch {
+            fn prepare(&self, query: &str, _: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError> {
+                assert_eq!(query, "child query");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(PreparedCall::new(
+                    "web_search",
+                    Op::Read {
+                        path: CanonPath::new("/ws/source"),
+                    },
+                ))
+            }
+            fn execute<'a, 'io>(
+                &'a self,
+                _: PreparedCall,
+                _: &'a dyn GuardedIo<'io>,
+            ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+            where
+                'io: 'a,
+            {
+                Box::pin(async { Ok(ToolResult::builtin("fake Exa source")) })
+            }
+        }
+
+        #[test]
+        fn named_non_native_agent_keeps_configured_exa_search() {
+            // Catches: a native startup registry discarding Exa before a named provider override.
+            let reached = Arc::new(AtomicUsize::new(0));
+            let local = Arc::new(Typed(ego_tools::tools::WebSearch::with_backend(Arc::new(
+                FixtureSearch(reached.clone()),
+            ))));
+            let mut fx = Fixture::new(vec![]);
+            fx.registry = vec![ego_tools::tools::selected_web_search(Some(local))];
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"lookup", "agent":"reviewer", "prompt":"search"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "search1",
+                        "web_search",
+                        json!({"query":"child query", "allow_paid":true}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let mut definition = reviewer();
+            definition.model = Some(ModelRef("other/fixture".into()));
+            definition.mode = None;
+            definition.tools = Some(BTreeSet::from(["web_search".into()]));
+            let (exit, _) =
+                run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+            assert_eq!(exit, ExitReason::Completed);
+            let calls = generator.calls();
+            assert_eq!(calls[1].model, "other/fixture");
+            assert!(calls[1].web_search.is_none());
+            assert_eq!(
+                reached.load(Ordering::SeqCst),
+                1,
+                "named child must reach the configured Exa backend"
+            );
+            assert!(format!("{:?}", calls[2].messages).contains("fake Exa source"));
+        }
+
         #[test]
         fn named_task_intersects_tools_and_injects_definition_without_child_delegation() {
             // Catches: named tool ceilings only changing the prompt, not executable tools.

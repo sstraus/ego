@@ -272,21 +272,22 @@ pub(super) fn tools_with_mode(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
     orchestration: ego_core::orchestrator::Mode,
-    model: Option<&str>,
+    _model: Option<&str>,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
-    if selected.is_some_and(|names| names.iter().any(|name| name == "web_search"))
-        && model
-            .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
-            .is_some_and(|provider| matches!(provider, "openai" | "anthropic"))
-    {
+    if selected.is_some_and(|names| names.iter().any(|name| name == "web_search")) {
+        let local = all
+            .iter()
+            .find(|tool| tool.descriptor().name == "web_search")
+            .and_then(RegisteredTool::as_effect)
+            .cloned();
         all.retain(|tool| tool.descriptor().name != "web_search");
-        all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
-            ego_tools::tools::HostedWebSearch,
-        ))));
+        all.push(RegisteredTool::Effect(
+            ego_tools::tools::selected_web_search(local),
+        ));
     }
     if profile == Some("coordinator") {
         all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
