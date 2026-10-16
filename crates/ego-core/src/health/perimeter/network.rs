@@ -1,6 +1,7 @@
 //! Read-only destination declarations; authorization remains in the permit engine.
 
-use crate::config::{Effective, ManagedRuleEffect, OriginSet, RuleManagement};
+use crate::config::rule_management::RuleManagement;
+use crate::config::{Effective, ManagedRuleEffect, OriginSet};
 use crate::permit::rule::Rule;
 use serde::Serialize;
 
