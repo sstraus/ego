@@ -127,6 +127,7 @@ enum SurfaceActionEffect {
 struct McpSurfaceActions {
     registry: Arc<McpRegistryController>,
     native_tools: Arc<[RegisteredTool]>,
+    servers: Vec<(ego_core::config::McpServerName, bool)>,
 }
 
 struct SurfaceActionSink {
@@ -1392,6 +1393,12 @@ impl Seat {
             status.model_selection = Some(selection);
             status.config_store = Some(config_store);
             status.mcp_actions = Some(McpSurfaceActions {
+                servers: mcp_registry
+                    .status()
+                    .servers()
+                    .iter()
+                    .map(|server| (server.name().clone(), false))
+                    .collect(),
                 registry: mcp_registry,
                 native_tools: native_tools.into(),
             });
@@ -1412,6 +1419,19 @@ impl Seat {
             .set_availability(ActionId::Compact, availability);
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
+        }
+    }
+
+    /// Keep the busy inventory bound to the same session-local enablement as idle commands.
+    pub(crate) fn set_mcp_session_servers(
+        &self,
+        servers: Vec<(ego_core::config::McpServerName, bool)>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            if let Some(actions) = status.mcp_actions.as_mut() {
+                actions.servers = servers;
+            }
         }
     }
 

@@ -17,13 +17,7 @@ fn initial_ready_prompt_resets_stale_host_working_state() {
     input.flush().expect("flush");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
-    if let Some(directory) = std::env::var_os("EGO_SLASH_RECORD_DIR") {
-        let directory = std::path::PathBuf::from(directory);
-        std::fs::create_dir_all(&directory).expect("record directory");
-        std::fs::write(directory.join("80x24.ansi"), &output).expect("capture");
-        std::fs::write(directory.join("80x24.json"), "{\"cols\":80,\"rows\":24}\n")
-            .expect("geometry");
-    }
+    record_slash_capture(&output, 24, 80);
     let ready = String::from_utf8_lossy(&output[start..]).into_owned();
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("flush");

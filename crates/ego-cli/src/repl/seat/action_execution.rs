@@ -857,12 +857,14 @@ pub(super) fn apply_surface_effect(
                 .clone()
                 .expect("the enabled MCP action has an installed handler");
             let registry_status = actions.registry.status();
-            let notice = if registry_status.servers().is_empty() {
-                "mcp: no admitted servers".to_string()
-            } else {
-                format!("mcp: {:?}", registry_status.servers())
-            };
-            status.lock().expect("surface status lock").notice = Some(notice);
+            let inventory = crate::mcp::session_inventory(
+                &registry_status,
+                actions
+                    .servers
+                    .iter()
+                    .map(|(name, disabled)| (name, *disabled)),
+            );
+            commit_to_transcript(status, &inventory);
         }
         SurfaceActionEffect::Tasks => {
             return Some(Line::HostCommand(HostCommand::Tasks(String::new())));

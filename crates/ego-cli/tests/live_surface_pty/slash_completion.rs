@@ -30,17 +30,7 @@ fn selected_slash_completion_enter_runs_once() {
             drain_until_quiet(&reader, &mut output);
             assert_eq!(normalized(&output[start..]).matches("mcp:").count(), 1);
         }));
-        if let Some(directory) = std::env::var_os("EGO_SLASH_RECORD_DIR") {
-            let directory = std::path::PathBuf::from(directory);
-            std::fs::create_dir_all(&directory).expect("record directory");
-            std::fs::write(directory.join(format!("{cols}x{rows}.ansi")), &output)
-                .expect("raw capture");
-            std::fs::write(
-                directory.join(format!("{cols}x{rows}.json")),
-                format!("{{\"cols\":{cols},\"rows\":{rows}}}\n"),
-            )
-            .expect("geometry");
-        }
+        record_slash_capture(&output, rows, cols);
         input.write_all(b"\x15/quit\r").expect("exit");
         input.flush().expect("flush");
         session.quit(input);

@@ -8,23 +8,25 @@ mod finish_queue;
 mod foreign_judge_reason;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
+#[path = "live_surface_pty/mcp_inventory.rs"]
+mod mcp_inventory;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
+#[path = "live_surface_pty/prompt_readiness.rs"]
+mod prompt_readiness;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/slash_completion.rs"]
+mod slash_completion;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
-#[path = "live_surface_pty/slash_completion.rs"]
-mod slash_completion;
-#[path = "live_surface_pty/prompt_readiness.rs"]
-mod prompt_readiness;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
 #[path = "live_surface_pty/workspace_trust.rs"]
@@ -9254,5 +9256,18 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
             "{successor}"
         );
         assert!(successor.contains("Finish both sub-tasks"), "{successor}");
+    }
+}
+
+fn record_slash_capture(output: &[u8], rows: u16, cols: u16) {
+    if let Some(directory) = std::env::var_os("EGO_SLASH_RECORD_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("record directory");
+        std::fs::write(directory.join(format!("{cols}x{rows}.ansi")), output).expect("raw capture");
+        std::fs::write(
+            directory.join(format!("{cols}x{rows}.json")),
+            format!("{{\"cols\":{cols},\"rows\":{rows}}}\n"),
+        )
+        .expect("geometry");
     }
 }
