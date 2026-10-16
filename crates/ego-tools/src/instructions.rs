@@ -112,8 +112,29 @@ fn open_no_links(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_no_links(_path: &Path) -> std::io::Result<fs::File> {
+fn open_no_links(path: &Path) -> std::io::Result<fs::File> {
+    open_portable(path)
+}
+
+#[cfg(any(not(unix), test))]
+fn open_portable(_path: &Path) -> std::io::Result<fs::File> {
     Err(std::io::Error::other(
         "race-safe instruction reads are unsupported on this platform",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches refusing ordinary in-tree instructions on non-Unix platforms.
+    #[test]
+    fn portable_in_tree_agents_is_read_instead_of_unsupported() {
+        let tree = tempfile::tempdir().unwrap();
+        let path = tree.path().join("AGENTS.md");
+        fs::write(&path, "workspace rules").unwrap();
+        let mut text = String::new();
+        open_portable(&path).unwrap().read_to_string(&mut text).unwrap();
+        assert_eq!(text, "workspace rules");
+    }
 }
