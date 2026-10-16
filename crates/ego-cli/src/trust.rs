@@ -1603,25 +1603,3 @@ mod tests {
         assert_eq!(fixture.asked.get(), 2);
     }
 }
-
-#[cfg(test)]
-mod regression_case {
-    use super::*;
-
-    #[test]
-    fn portable_only_workspace_prompts_and_ancestor_changes_invalidate_trust() {
-        // Catches: portable skills bypass the prompt or reuse stale approval.
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        fs::create_dir(root.join(".git")).unwrap();
-        let nested = root.join("nested");
-        fs::create_dir(&nested).unwrap();
-        let skill = root.join(".agents/skills/foo/SKILL.md");
-        fs::create_dir_all(skill.parent().unwrap()).unwrap();
-        fs::write(&skill, "first").unwrap();
-        let before = inventory(&nested);
-        assert!(!before.is_empty());
-        fs::write(&skill, "second").unwrap();
-        assert_ne!(before.digest(), inventory(&nested).digest());
-    }
-}

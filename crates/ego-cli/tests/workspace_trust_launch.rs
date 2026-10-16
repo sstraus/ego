@@ -265,3 +265,51 @@ fn explicit_instruction_file_external_import_survives_explicit_workspace_grant()
         result.stderr
     );
 }
+
+// Catches: portable-only ancestor skills fail to trigger the real trust question,
+// or ordinary skill edits incorrectly revoke an executable-surface answer.
+#[test]
+fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
+    let places = Places::new();
+    places.file(".git/HEAD", "ref: refs/heads/fixture\n");
+    let skill = places.file(
+        ".agents/skills/foo/SKILL.md",
+        "---\nname: foo\ndescription: portable fixture\n---\nFIRST-REGRESSION-MARKER\n",
+    );
+    let nested = places
+        .file("nested/.keep", "")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK")); 3],
+        ..Plan::default()
+    });
+    for (index, expected_prompt) in [true, false, false].into_iter().enumerate() {
+        if index == 2 {
+            std::fs::write(
+                &skill,
+                "---\nname: foo\ndescription: changed portable fixture\n---\nSECOND-REGRESSION-MARKER\n",
+            )
+            .unwrap();
+        }
+        let result = support::Ego::at(places.home_path(), &nested, Some(&stub))
+            .conversing()
+            .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+            .run_pty_trusting("yes", "/skills");
+        assert_eq!(result.code, Some(0), "{}", result.stdout);
+        assert_eq!(
+            result.stdout.contains("Trust project files"),
+            expected_prompt,
+            "{}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("/foo"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains(&skill.display().to_string()),
+            "{}",
+            result.stdout
+        );
+    }
+    assert!(stub.generations().is_empty());
+}
