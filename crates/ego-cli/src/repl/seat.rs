@@ -738,9 +738,9 @@ impl SurfaceOutput {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
-            answer_block: false,
-            wrote: false,
-            blank: false,
+                answer_block: false,
+                wrote: false,
+                blank: false,
                 signals: None,
                 cancel,
                 reply_started,
@@ -772,13 +772,19 @@ impl SurfaceOutput {
     }
 
     pub(crate) fn write_answer(&mut self, text: &str) -> Result<(), SendError<String>> {
-        if text.is_empty() { return Ok(()); }
+        if text.is_empty() {
+            return Ok(());
+        }
         let text = if !self.answer_block {
             self.begin_block()?;
-            if !self.wrote { self.write_with_kind("\n", false)?; }
+            if !self.wrote {
+                self.write_with_kind("\n", false)?;
+            }
             self.answer_block = true;
             text.trim_start_matches('\n')
-        } else { text };
+        } else {
+            text
+        };
         self.write_with_kind(text, true)
     }
 

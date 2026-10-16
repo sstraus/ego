@@ -248,7 +248,11 @@ impl TextOutput for InteractiveOutput {
     }
 
     fn begin_block(&self) {
-        let _ = self.inner.lock().expect("surface output lock").begin_block();
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .begin_block();
     }
 
     fn finish(&self) {
