@@ -47,7 +47,7 @@ impl fmt::Debug for HttpProfileFingerprint {
 }
 
 /// A reusable policy table private to one provider or auxiliary endpoint.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AdmittedHttpProfile {
     fingerprint: HttpProfileFingerprint,
     routes: Vec<HttpRoute>,

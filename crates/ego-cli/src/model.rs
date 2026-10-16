@@ -7,7 +7,7 @@
 //! the process — reading the environment for a credential and for a daemon
 //! address.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::generator::StaticRequestProfile;
@@ -466,6 +466,7 @@ impl CliGenerationModelSource {
             http,
             cancel,
             run_deadline,
+            generator: Mutex::new(None),
         })
     }
 
@@ -475,6 +476,7 @@ impl CliGenerationModelSource {
         http: &Arc<dyn Http>,
         cancel: &CancelToken,
         run_deadline: Option<std::time::Instant>,
+        retained: &Mutex<Option<RetainedGenerator>>,
     ) -> Result<GenerationProfile, GenerationModelError> {
         let role = request.role();
         let has_model_overlay = request.model().is_some();
@@ -638,12 +640,30 @@ impl CliGenerationModelSource {
                 .initialize(identity.clone(), thinking, self.initial_thinking)?;
         }
         let request_model = resolved.model.clone();
-        let generator: Arc<dyn Generator> = Arc::new(ego_ai::generator::WireGenerator::new(
-            resolved.row,
-            resolved.wire,
-            Arc::clone(http),
-            credential,
-        ));
+        let mut retained = retained.lock().map_err(|_| selection_lock_error())?;
+        let generator: Arc<dyn Generator> = if role == GenerationRole::Main
+            && let Some(previous) = retained.as_ref()
+            && previous.model == request_model
+            && previous
+                .generator
+                .matches_resolution(&resolved.row, resolved.wire, &credential)
+        {
+            previous.generator.clone()
+        } else {
+            let generator = Arc::new(ego_ai::generator::WireGenerator::new(
+                resolved.row,
+                resolved.wire,
+                Arc::clone(http),
+                credential,
+            ));
+            if role == GenerationRole::Main {
+                *retained = Some(RetainedGenerator {
+                    model: request_model.clone(),
+                    generator: Arc::clone(&generator),
+                });
+            }
+            generator
+        };
         Ok(GenerationProfile {
             output_limit: self.output_limit,
             identity,
@@ -657,11 +677,17 @@ impl CliGenerationModelSource {
     }
 }
 
+struct RetainedGenerator {
+    model: String,
+    generator: Arc<ego_ai::generator::WireGenerator>,
+}
+
 struct BoundGenerationModelSource {
     source: Arc<CliGenerationModelSource>,
     http: Arc<dyn Http>,
     cancel: CancelToken,
     run_deadline: Option<std::time::Instant>,
+    generator: Mutex<Option<RetainedGenerator>>,
 }
 
 impl GenerationModelSource for BoundGenerationModelSource {
@@ -669,10 +695,13 @@ impl GenerationModelSource for BoundGenerationModelSource {
         &'a self,
         request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
-        Box::pin(
-            self.source
-                .resolve_role(request, &self.http, &self.cancel, self.run_deadline),
-        )
+        Box::pin(self.source.resolve_role(
+            request,
+            &self.http,
+            &self.cancel,
+            self.run_deadline,
+            &self.generator,
+        ))
     }
 }
 
@@ -966,11 +995,16 @@ mod tests {
         .bind(http, CancelToken::new(), None);
         let id = SessionId::new();
         let mut messages = vec![Message::text(Role::User, "read")];
+        let mut previous_generator = None;
         for generation in 0..2 {
             let profile = source
                 .resolve(GenerationModelRequest::new(GenerationRole::Main))
                 .await
                 .unwrap();
+            if let Some(previous) = previous_generator.as_ref() {
+                assert!(Arc::ptr_eq(previous, &profile.generator));
+            }
+            previous_generator = Some(profile.generator.clone());
             let req = GenRequest {
                 cache: Some(PromptCache {
                     session_id: id,
@@ -1025,6 +1059,28 @@ mod tests {
                 });
             }
         }
+        // Catches: stale generator reuse after model selection changes.
+        let changed = source
+            .resolve(
+                GenerationModelRequest::new(GenerationRole::Main)
+                    .with_model(ModelRef("openai-codex/gpt-6-sol".into())),
+            )
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            previous_generator.as_ref().unwrap(),
+            &changed.generator
+        ));
+        // Auxiliary resolution must not discard the main tool continuation owner.
+        source
+            .resolve(GenerationModelRequest::new(GenerationRole::Compaction))
+            .await
+            .unwrap();
+        let returned = source
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&changed.generator, &returned.generator));
         let requests = recording.0.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(

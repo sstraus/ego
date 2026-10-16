@@ -1,5 +1,8 @@
 {
   "body": {
+    "include": [
+      "reasoning.encrypted_content"
+    ],
     "input": [
       {
         "content": "Reply with the single word: ok",

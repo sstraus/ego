@@ -133,6 +133,13 @@ pub(crate) async fn execute(
         .continuation
         .take()
         .map_or_else(|| body.clone(), |prior| prior.request(&body));
+    tracing::debug!(
+        target: "ego_ai::codex_session",
+        incremental = outgoing.get("previous_response_id").is_some(),
+        full_input_items = body["input"].as_array().map_or(0, Vec::len),
+        sent_input_items = outgoing["input"].as_array().map_or(0, Vec::len),
+        "sending Codex WebSocket generation"
+    );
     outgoing["type"] = json!("response.create");
     request.body = Some(serde_json::to_vec(&outgoing).expect("Codex JSON serializes"));
     let prepared = profile

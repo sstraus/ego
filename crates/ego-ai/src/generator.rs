@@ -133,6 +133,22 @@ impl WireGenerator {
         }
     }
 
+    /// Whether a fresh resolution can retain this run-owned transport session.
+    pub fn matches_resolution(
+        &self,
+        row: &ProviderRow,
+        wire: &'static dyn WireFormat,
+        credential: &ResolvedCredential,
+    ) -> bool {
+        self.row.id() == row.id()
+            && self.row.base() == row.base()
+            && self.row.http_profile == row.http_profile
+            && self.row.extra_headers == row.extra_headers
+            && std::ptr::eq(self.wire, wire)
+            && self.credential.base_override() == credential.base_override()
+            && self.credential.headers() == credential.headers()
+    }
+
     /// Which provider this generates against.
     pub fn provider(&self) -> &str {
         self.row.id()
