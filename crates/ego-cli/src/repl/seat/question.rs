@@ -282,12 +282,17 @@ pub(super) fn answer_control(
                 .lock()
                 .expect("surface status lock")
                 .permission_modal = true;
-            let capabilities = surface
-                .status
-                .lock()
-                .expect("surface status lock")
-                .permission_capabilities;
-            let mut prompt = Question::new(compact_prompt(&request), Arc::clone(surface.status));
+            let capabilities = {
+                let status = surface.status.lock().expect("surface status lock");
+                crate::render::Capabilities {
+                    width: status.width.max(1),
+                    ..status.permission_capabilities
+                }
+            };
+            let mut prompt = Question::new(
+                compact_prompt(&request, capabilities.width),
+                Arc::clone(surface.status),
+            );
             tell_host(surface.status, |osc, quiet| {
                 osc.awaiting(request.tool(), !quiet)
             });

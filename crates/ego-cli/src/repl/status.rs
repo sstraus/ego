@@ -408,8 +408,8 @@ impl SurfaceSnapshot {
                 )
             }
             (Some(used), _) => format!("ctx {}", compact_tokens(used)),
-            (None, Some(window)) => format!("ctx ?/{}", compact_tokens(window)),
-            (None, None) => "ctx ?".to_owned(),
+            (None, Some(window)) => format!("ctx unmeasured/{}", compact_tokens(window)),
+            (None, None) => "ctx unmeasured".to_owned(),
         }
     }
 

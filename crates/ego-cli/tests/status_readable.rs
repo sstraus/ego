@@ -87,13 +87,13 @@ fn context_without_a_stated_window_shows_the_count_and_never_a_percentage() {
     );
     assert_eq!(unbounded, "ctx 2.5k");
     let nothing_yet = row(&state(None, None, CumulativeCost::Unstarted), &names, 120);
-    assert_eq!(nothing_yet, "ctx ?");
+    assert_eq!(nothing_yet, "ctx unmeasured");
     let window_only = row(
         &state(None, Some(1_000_000), CumulativeCost::Unstarted),
         &names,
         120,
     );
-    assert_eq!(window_only, "ctx ?/1M");
+    assert_eq!(window_only, "ctx unmeasured/1M");
 }
 
 #[test]
@@ -439,4 +439,56 @@ fn legacy_policy_attribution_decodes_without_an_equivalent_price() {
     let bytes = serde_json::to_string(&cost).unwrap();
     assert!(bytes.contains("v1"));
     assert_eq!(serde_json::from_str::<CostDelta>(&bytes).unwrap(), cost);
+}
+
+// Catches: missing occupancy renders unexplained punctuation or a fabricated zero.
+#[test]
+fn rendered_status_explains_unmeasured_context() {
+    let names = [StatusSegmentName::Context, StatusSegmentName::Cost];
+    for (used, window, expected) in [
+        (None, None, "ctx unmeasured"),
+        (None, Some(1_000_000), "ctx unmeasured/1M"),
+        (Some(7_010), Some(1_000_000), "ctx 0.7%/1M"),
+    ] {
+        let facts = state(used, window, CumulativeCost::Unstarted);
+        for width in [80, 120, 200] {
+            let shown = row(&facts, &names, width);
+            let mut terminal = vt100::Parser::new(4, width as u16, 0);
+            terminal.process(shown.as_bytes());
+            assert_eq!(terminal.screen().contents(), expected, "width={width}");
+            println!(
+                "status width={width} grid={:?}",
+                terminal.screen().contents()
+            );
+        }
+        for width in 1..25 {
+            let shown = row(&facts, &names, width);
+            assert!(
+                shown.is_empty() || shown == expected,
+                "width={width}: {shown}"
+            );
+        }
+    }
+    // A resumed log without any occupancy event has no measurement to invent.
+    let resumed = SessionState::replay(Vec::<DomainEvent>::new());
+    assert_eq!(row(&resumed, &names, 80), "ctx unmeasured");
+    // Compaction creates a checkpoint-seeded session, not a zero occupancy event.
+    let compacted = SessionState::replay([DomainEvent {
+        env: Envelope {
+            seq: Seq::ZERO,
+            id: EventId::new(),
+            turn: TurnId::new(),
+            item: Some(ego_core::event::id::ItemId::new()),
+            parent: None,
+            ts: Timestamp::from_millis(1),
+            producer: Producer::Main,
+        },
+        kind: EventKind::CompactionSeeded {
+            source: SessionId::new(),
+            source_seq: Seq::ZERO,
+            prompt_revision: 1,
+            checkpoint: "Retained facts".into(),
+        },
+    }]);
+    assert_eq!(row(&compacted, &names, 80), "ctx unmeasured");
 }
