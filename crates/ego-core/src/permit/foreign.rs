@@ -1122,11 +1122,36 @@ impl fmt::Debug for OneHopResponse {
     }
 }
 
+/// A run-owned, admitted message transport. Every send consumes fresh authority.
+pub trait WebSocketSession: Send {
+    fn send(
+        &mut self,
+        connect: PreparedConnect,
+        request: HttpRequest,
+        deadline: std::time::Instant,
+    ) -> BoxFuture<'_, Result<(), TransportError>>;
+
+    fn receive(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>>;
+}
+
 pub trait OneHop: Send + Sync {
     /// Refuse MCP use before DNS, connection, or request delivery.
     /// Adapters that do not bind an invocation confinement fail closed.
     fn admit_mcp(&self) -> Result<(), TransportError> {
         Err(authority_mismatch())
+    }
+
+    /// Unsupported adapters fail closed, before any socket is opened.
+    fn open_websocket(
+        &self,
+        _connect: ResolvedConnect,
+        _request: HttpRequest,
+        _deadline: std::time::Instant,
+    ) -> BoxFuture<'static, Result<Box<dyn WebSocketSession>, TransportError>> {
+        Box::pin(futures::future::ready(Err(authority_mismatch())))
     }
 
     fn begin_call(&self) -> std::time::Instant;
@@ -1156,6 +1181,34 @@ impl GuardedHttp {
 
     pub fn admit_mcp(&self) -> Result<(), TransportError> {
         self.one_hop.admit_mcp()
+    }
+
+    pub fn open_websocket_admitted(
+        &self,
+        route: HttpRoute,
+        connect: PreparedConnect,
+        request: HttpRequest,
+        deadline: std::time::Instant,
+    ) -> BoxFuture<'static, Result<Box<dyn WebSocketSession>, TransportError>> {
+        if route.target != connect.target || !connect.matches(&request) {
+            return Box::pin(futures::future::ready(Err(authority_mismatch())));
+        }
+        let resolver = Arc::clone(&self.resolver);
+        let one_hop = Arc::clone(&self.one_hop);
+        Box::pin(async move {
+            let resolved = if connect.target.ip().is_some() {
+                ResolvedConnect::literal(route, connect)?
+            } else {
+                let resolution = resolver.resolve(connect.target.clone(), deadline).await?;
+                let selected = resolution
+                    .addresses
+                    .first()
+                    .copied()
+                    .ok_or_else(authority_mismatch)?;
+                ResolvedConnect::from_resolution(route, connect, resolution, selected)?
+            };
+            one_hop.open_websocket(resolved, request, deadline).await
+        })
     }
 
     pub fn execute_admitted(

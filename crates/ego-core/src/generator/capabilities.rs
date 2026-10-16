@@ -329,21 +329,8 @@ pub enum ReasoningEffortSupport {
 
 /// The wire transport a generation streams over.
 ///
-/// One variant, because one is what this build can enact. `Http`
-/// (`ego_ai::http`) is request/response plus a byte stream and opens no
-/// socket, so there is no seam a second transport could be reached through,
-/// no decoder that frames one, and nothing that would select between them.
-///
-/// enum (`ARCHITECTURE.md`) rather than anything measured here, and neither
-/// was ever constructed. `Auto` was the worse of the two on its own terms: it
-/// is a selection *policy*, and this record states what a generation did — a
-/// manifest saying `auto` names no transport at all.
-///
-/// They were not merely unreachable. `models.toml` decodes
-/// [`ModelCapabilities`] directly (`ego-cli`'s `facts.rs`), so `serde` was a
-/// producer an operator could reach: a file could say `web_socket`, decode,
-/// and the run would stream SSE anyway. Removing the variants is what makes
-/// that file refuse.
+/// Codex uses WebSocket; other hosted rows use SSE. Automatic selection is
+/// policy, not a transport, and unsupported spellings must fail during decoding.
 ///
 /// **A variant is added here when a row produces it** — an implemented
 /// transport, a decoder that frames it, and a generation that resolves to it.
@@ -353,6 +340,7 @@ pub enum ReasoningEffortSupport {
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     Sse,
+    WebSocket,
 }
 
 /// A versioned snapshot of what a model can do in conversation, resolved per
@@ -935,17 +923,10 @@ impl ModelCapabilities {
 mod tests {
     use super::*;
 
-    /// The converse of removing the two variants: an operator's file must be
-    /// *refused* for naming one, not quietly accepted.
-    ///
-    /// `models.toml` decodes [`ModelCapabilities`] directly, so `serde` is a
-    /// producer an operator can reach. Removing `WebSocket` and `Auto` only
-    /// closes that door if the decoder says no, and nothing here asserted it
-    /// did — the enum's own doc claims the removal "is what makes that file
-    /// refuse", which is a claim about behaviour with no test behind it.
+    /// Unsupported transports must fail when operator-supplied facts decode.
     #[test]
     fn a_transport_this_build_cannot_speak_does_not_decode() {
-        for spelling in ["web_socket", "auto", "websocket", "grpc"] {
+        for spelling in ["web_transport", "auto", "websocket", "grpc"] {
             let named = format!("\"{spelling}\"");
 
             assert!(
@@ -959,6 +940,10 @@ mod tests {
     /// refusing everything.
     #[test]
     fn the_transport_this_build_speaks_still_decodes() {
+        assert_eq!(
+            serde_json::from_str::<Transport>("\"web_socket\"").expect("WebSocket decodes"),
+            Transport::WebSocket
+        );
         assert_eq!(
             serde_json::from_str::<Transport>("\"sse\"").expect("sse decodes"),
             Transport::Sse

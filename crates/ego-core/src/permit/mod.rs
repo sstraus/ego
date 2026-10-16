@@ -39,7 +39,7 @@ pub use foreign::{
     DuplexSpawner, ForeignToolId, ForeignTransportTarget, ForeignValueError, GuardedHttp, HttpBody,
     HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, InvocationDigest,
     NetworkTarget, OneHop, OneHopPayload, OneHopResponse, PreparedConnect, ResolvedConnect,
-    Resolver, Subject, TransportError, TransportFailure,
+    Resolver, Subject, TransportError, TransportFailure, WebSocketSession,
 };
 pub use fs::{
     Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpAcpClaim, McpHttpClaim, McpStdioClaim,

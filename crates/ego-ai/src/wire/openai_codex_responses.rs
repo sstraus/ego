@@ -28,6 +28,10 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 pub struct OpenAiCodexResponses;
 
 impl WireFormat for OpenAiCodexResponses {
+    fn websocket(&self) -> bool {
+        true
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -59,8 +63,7 @@ impl std::fmt::Display for Inexpressible {
         match self {
             Inexpressible::ReasoningStateNotCarriable => write!(
                 f,
-                "openai-codex-responses has no field for opaque reasoning \
-                 state, so carrying it over would mean dropping it"
+                "openai-codex-responses requires valid encrypted reasoning items from its own dialect"
             ),
             Inexpressible::ImageInputUnproved => write!(
                 f,
@@ -93,6 +96,7 @@ struct WireRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
     reasoning: WireReasoning,
+    include: [&'static str; 1],
 }
 
 #[derive(Debug, Serialize)]
@@ -121,14 +125,6 @@ fn reasoning_effort(level: ThinkingLevel) -> &'static str {
     }
 }
 
-fn carries_reasoning(req: &GenRequest) -> bool {
-    req.messages
-        .messages()
-        .iter()
-        .flat_map(|message| &message.content)
-        .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
-}
-
 fn system_instructions(messages: &[Message]) -> Option<String> {
     let text: Vec<&str> = messages
         .iter()
@@ -146,7 +142,7 @@ fn system_instructions(messages: &[Message]) -> Option<String> {
     }
 }
 
-fn input_items(messages: &[Message]) -> Vec<Value> {
+fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
     let mut items = Vec::new();
     for message in messages {
         if message.role == Role::System {
@@ -154,7 +150,17 @@ fn input_items(messages: &[Message]) -> Vec<Value> {
         }
         for block in &message.content {
             match block {
-                ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Reasoning { state } => {
+                    if state.dialect != "openai-codex-responses" {
+                        return Err(Inexpressible::ReasoningStateNotCarriable);
+                    }
+                    let item: Value = serde_json::from_str(&state.blob)
+                        .map_err(|_| Inexpressible::ReasoningStateNotCarriable)?;
+                    if item["type"] != "reasoning" || !item["encrypted_content"].is_string() {
+                        return Err(Inexpressible::ReasoningStateNotCarriable);
+                    }
+                    items.push(item);
+                }
                 ContentBlock::Image { .. } => {}
                 ContentBlock::Text { text } => match message.role {
                     Role::User => items.push(serde_json::json!({
@@ -188,15 +194,12 @@ fn input_items(messages: &[Message]) -> Vec<Value> {
             }
         }
     }
-    items
+    Ok(items)
 }
 
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     if super::request_has_images(req) {
         return Err(Inexpressible::ImageInputUnproved);
-    }
-    if carries_reasoning(req) {
-        return Err(Inexpressible::ReasoningStateNotCarriable);
     }
     let tools: Vec<WireTool<'_>> = req
         .tools
@@ -214,9 +217,10 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         store: false,
         prompt_cache_key: super::cache::routing_key(req, "openai-codex"),
         instructions: system_instructions(req.messages.messages()),
-        input: input_items(req.messages.messages()),
+        input: input_items(req.messages.messages())?,
         parallel_tool_calls: (!tools.is_empty()).then_some(req.parallel_tool_calls),
         tools,
+        include: ["reasoning.encrypted_content"],
         reasoning: WireReasoning {
             effort: reasoning_effort(req.thinking),
         },
@@ -297,6 +301,10 @@ struct OutputItem {
     name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
+    #[serde(default)]
+    encrypted_content: Option<String>,
+    #[serde(default)]
+    summary: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -460,6 +468,17 @@ impl StreamDecoder {
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 if let Some(text) = event.delta.filter(|text| !text.is_empty()) {
                     out.push(AiEvent::ReasoningDelta { text });
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(item) = event.item
+                    && item.kind.as_deref() == Some("reasoning")
+                    && let Some(encrypted) = item.encrypted_content
+                {
+                    out.push(AiEvent::ReasoningState(ego_core::generator::types::ReasoningState {
+                        dialect: "openai-codex-responses".into(),
+                        blob: serde_json::json!({"type":"reasoning", "id":item.id, "encrypted_content":encrypted, "summary":item.summary}).to_string(),
+                    }));
                 }
             }
             "response.output_item.added" => {

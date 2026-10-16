@@ -380,3 +380,104 @@ async fn one_call_handle_rejects_a_changed_profile_before_a_second_effect() {
     assert!(requests.recv_timeout(Duration::from_millis(100)).is_err());
     server.join().expect("server thread");
 }
+
+#[tokio::test]
+async fn codex_websocket_tool_result_uses_incremental_input_through_run_authority() {
+    use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
+    use ego_core::generator::types::{ContentBlock, PromptCache};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = async_tungstenite::tokio::accept_async(tcp).await.unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(first["type"], "response.create");
+        assert_eq!(first["input"].as_array().unwrap().len(), 1);
+        let tool = serde_json::json!({"type":"function_call","id":"fc1","call_id":"c1","name":"read","arguments":"{}"});
+        for event in [
+            serde_json::json!({"type":"response.output_item.added","item":tool}),
+            serde_json::json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[tool]}}),
+        ] {
+            socket
+                .send(async_tungstenite::tungstenite::Message::Text(
+                    event.to_string().into(),
+                ))
+                .await
+                .unwrap();
+        }
+        let second: serde_json::Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(second["previous_response_id"], "resp_1");
+        assert_eq!(
+            second["input"],
+            serde_json::json!([{"type":"function_call_output","call_id":"c1","output":"ok"}])
+        );
+        let event = serde_json::json!({"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[]}});
+        socket
+            .send(async_tungstenite::tungstenite::Message::Text(
+                event.to_string().into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let resolver = RecordingResolver::default();
+    let observations = resolver.deadlines.clone();
+    let ports = run_ports(resolver).await;
+    let adapter = Arc::new(ProviderHttpAdapter::new(ports.ports.clone())) as Arc<dyn Http>;
+    let row = provider_row(LOGICAL_HOST, port);
+    let credential = credential(&row);
+    let generator = WireGenerator::new(row, &OpenAiCodexResponses, adapter, credential);
+    let mut req = request();
+    let id = SessionId::new();
+    req.cache = Some(PromptCache {
+        session_id: id,
+        lineage_root: id,
+        retention: CacheRetention::Short,
+        stable_messages: 0,
+    });
+    let metering = ego_ai::catalogue::unmetered();
+    let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").unwrap());
+    let events: Vec<_> = generator
+        .generate(req.clone(), attempt(&mut gate, &req, &metering))
+        .collect()
+        .await;
+    assert!(
+        matches!(events.last(), Some(AiEvent::Stop(StopReason::ToolUse))),
+        "{events:?}"
+    );
+    req.messages = Conversation::new(vec![
+        Message::text(Role::User, "hello"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                call_id: "c1".into(),
+                name: "read".into(),
+                args: "{}".into(),
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "c1".into(),
+                output: "ok".into(),
+                is_error: false,
+            }],
+        },
+    ])
+    .unwrap();
+    let events: Vec<_> = generator
+        .generate(req.clone(), attempt(&mut gate, &req, &metering))
+        .collect()
+        .await;
+    assert!(
+        matches!(events.last(), Some(AiEvent::Stop(StopReason::Stop))),
+        "{events:?}"
+    );
+    assert_eq!(
+        observations.lock().unwrap().len(),
+        1,
+        "reuse the admitted socket without new DNS"
+    );
+    server.await.unwrap();
+}

@@ -108,6 +108,7 @@ pub struct WireGenerator {
     /// for a condition settled at startup. Now the failure has exactly one
     /// site, and it is the site that can name the variable to set.
     credential: ResolvedCredential,
+    codex_session: Arc<futures::lock::Mutex<crate::codex_session::Session>>,
 }
 
 impl WireGenerator {
@@ -128,7 +129,24 @@ impl WireGenerator {
             profile,
             http,
             credential,
+            codex_session: Arc::default(),
         }
+    }
+
+    /// Whether a fresh resolution can retain this run-owned transport session.
+    pub fn matches_resolution(
+        &self,
+        row: &ProviderRow,
+        wire: &'static dyn WireFormat,
+        credential: &ResolvedCredential,
+    ) -> bool {
+        self.row.id() == row.id()
+            && self.row.base() == row.base()
+            && self.row.http_profile == row.http_profile
+            && self.row.extra_headers == row.extra_headers
+            && std::ptr::eq(self.wire, wire)
+            && self.credential.base_override() == credential.base_override()
+            && self.credential.headers() == credential.headers()
     }
 
     /// Which provider this generates against.
@@ -230,10 +248,25 @@ impl Generator for WireGenerator {
         // the metering ADR §8 forbids.
         let cost = self.row.cost.clone();
         let wire = self.wire;
-        let inner = stream::once(async move { profile.execute(http.as_ref(), request).await })
-            .flat_map(move |response| wire.decode(response, cost.clone()))
-            .flat_map(move |event| stream::iter(names.restore(event)))
-            .boxed();
+        let websocket = wire.websocket();
+        let session = self.codex_session.clone();
+        let inner = stream::once(async move {
+            if websocket {
+                crate::codex_session::execute(
+                    session,
+                    http,
+                    profile,
+                    request,
+                    req.cache.as_ref().map(|cache| cache.session_id),
+                )
+                .await
+            } else {
+                profile.execute(http.as_ref(), request).await
+            }
+        })
+        .flat_map(move |response| wire.decode(response, cost.clone()))
+        .flat_map(move |event| stream::iter(names.restore(event)))
+        .boxed();
         AttemptStream::new(attempt, inner)
     }
 }

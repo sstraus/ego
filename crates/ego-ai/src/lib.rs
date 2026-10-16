@@ -5,6 +5,7 @@
 //! owns `Http`, credentials and the provider tables.
 
 pub mod catalogue;
+mod codex_session;
 pub mod conformance;
 pub mod generator;
 pub mod http;

@@ -2497,21 +2497,12 @@ fn a_models_file_that_does_not_parse_is_refused_by_name() {
 /// accepted and then ignored.
 ///
 /// `models.toml` deserializes [`ModelCapabilities`] directly
-/// (`crates/ego-cli/src/facts.rs:80`), which makes an operator's file a
-/// *producer* of every variant the enum admits. While `Transport` carried
-/// `WebSocket` and `Auto` — neither of which any code in this workspace can
-/// construct, select or read — a file could say `web_socket`, decode, and the
-/// run would still stream SSE over `Http`. That is worse than a dead variant:
-/// it is accepted configuration that misdescribes what happened, in the record
-/// ARCH §3.1 (I5) says is resolved per generation.
-///
-/// Both spellings in one test because they fail for one reason. `serde`'s
-/// unknown-variant message names the field and the variants that exist, so the
-/// assertion is on the file and the value, not on wording this test does not
-/// own.
+/// `models.toml` decodes transport facts directly. Unsupported spellings must
+/// fail at the file boundary instead of claiming a transport the run cannot use.
+/// WebSocket is supported by Codex; automatic selection and WebTransport are not.
 #[test]
 fn a_transport_no_row_can_speak_is_refused_where_it_is_written() {
-    for spelling in ["web_socket", "auto"] {
+    for spelling in ["web_transport", "auto"] {
         let stub = Stub::start(Plan::default());
         let ego = Ego::against(&stub);
         ego.home_file(

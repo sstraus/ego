@@ -459,7 +459,7 @@ transport = "{transport}"
             toml::from_str::<Facts>(&entry("sse")).is_ok(),
             "the transport this build speaks must still decode"
         );
-        for spelling in ["web_socket", "auto"] {
+        for spelling in ["web_transport", "auto"] {
             assert!(
                 toml::from_str::<Facts>(&entry(spelling)).is_err(),
                 "`{spelling}` decoded from a TOML file this build reads"

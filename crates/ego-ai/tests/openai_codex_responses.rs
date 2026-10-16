@@ -170,9 +170,7 @@ async fn a_non_200_ends_in_the_shared_terminal_events() {
     assert!(matches!(events[3], AiEvent::Stop(StopReason::Error)));
 }
 
-/// The Codex Responses body has no field for an opaque reasoning signature.
-/// Sending the request without it would be a silent drop of state the next
-/// turn cannot reconstruct.
+/// Malformed state must not be silently dropped or interpreted as plain text.
 #[test]
 fn reasoning_state_is_refused_rather_than_dropped() {
     let mut req = request();
@@ -234,4 +232,59 @@ async fn codex_usage_partitions_cache_writes_and_rejects_overflow() {
             assert_eq!(usage.cache_read_tokens, read);
         }
     }
+}
+
+#[test]
+fn codex_requests_encrypted_reasoning_instead_of_losing_replay_state() {
+    let body: serde_json::Value =
+        serde_json::from_slice(&request_body(&request()).unwrap()).unwrap();
+    assert_eq!(
+        body["include"],
+        serde_json::json!(["reasoning.encrypted_content"])
+    );
+}
+
+#[tokio::test]
+async fn encrypted_reasoning_is_persistable_and_replayed_without_plaintext_substitution() {
+    let item = serde_json::json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque-ciphertext","summary":[]});
+    let sse = format!(
+        "data: {}\n\ndata: {}\n\n",
+        serde_json::json!({"type":"response.output_item.done","item":item}),
+        serde_json::json!({"type":"response.completed","response":{"status":"completed"}})
+    );
+    let events: Vec<_> = OpenAiCodexResponses
+        .decode(
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: Box::pin(futures::stream::iter(vec![Ok(bytes::Bytes::from(sse))])),
+            }),
+            None,
+        )
+        .collect()
+        .await;
+    let state = events
+        .into_iter()
+        .find_map(|event| {
+            if let AiEvent::ReasoningState(state) = event {
+                Some(state)
+            } else {
+                None
+            }
+        })
+        .expect("opaque state emitted");
+    let durable = serde_json::to_vec(&state).unwrap();
+    let mut req = request();
+    req.messages = Conversation::new(vec![
+        Message::text(Role::User, "read"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning {
+                state: serde_json::from_slice(&durable).unwrap(),
+            }],
+        },
+    ])
+    .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request_body(&req).unwrap()).unwrap();
+    assert_eq!(body["input"][1], item);
 }

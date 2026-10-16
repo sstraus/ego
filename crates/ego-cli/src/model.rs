@@ -7,7 +7,7 @@
 //! the process — reading the environment for a credential and for a daemon
 //! address.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::generator::StaticRequestProfile;
@@ -466,6 +466,7 @@ impl CliGenerationModelSource {
             http,
             cancel,
             run_deadline,
+            generator: Mutex::new(None),
         })
     }
 
@@ -475,6 +476,7 @@ impl CliGenerationModelSource {
         http: &Arc<dyn Http>,
         cancel: &CancelToken,
         run_deadline: Option<std::time::Instant>,
+        retained: &Mutex<Option<RetainedGenerator>>,
     ) -> Result<GenerationProfile, GenerationModelError> {
         let role = request.role();
         let has_model_overlay = request.model().is_some();
@@ -638,12 +640,30 @@ impl CliGenerationModelSource {
                 .initialize(identity.clone(), thinking, self.initial_thinking)?;
         }
         let request_model = resolved.model.clone();
-        let generator: Arc<dyn Generator> = Arc::new(ego_ai::generator::WireGenerator::new(
-            resolved.row,
-            resolved.wire,
-            Arc::clone(http),
-            credential,
-        ));
+        let mut retained = retained.lock().map_err(|_| selection_lock_error())?;
+        let generator: Arc<dyn Generator> = if role == GenerationRole::Main
+            && let Some(previous) = retained.as_ref()
+            && previous.model == request_model
+            && previous
+                .generator
+                .matches_resolution(&resolved.row, resolved.wire, &credential)
+        {
+            previous.generator.clone()
+        } else {
+            let generator = Arc::new(ego_ai::generator::WireGenerator::new(
+                resolved.row,
+                resolved.wire,
+                Arc::clone(http),
+                credential,
+            ));
+            if role == GenerationRole::Main {
+                *retained = Some(RetainedGenerator {
+                    model: request_model.clone(),
+                    generator: Arc::clone(&generator),
+                });
+            }
+            generator
+        };
         Ok(GenerationProfile {
             output_limit: self.output_limit,
             identity,
@@ -657,11 +677,17 @@ impl CliGenerationModelSource {
     }
 }
 
+struct RetainedGenerator {
+    model: String,
+    generator: Arc<ego_ai::generator::WireGenerator>,
+}
+
 struct BoundGenerationModelSource {
     source: Arc<CliGenerationModelSource>,
     http: Arc<dyn Http>,
     cancel: CancelToken,
     run_deadline: Option<std::time::Instant>,
+    generator: Mutex<Option<RetainedGenerator>>,
 }
 
 impl GenerationModelSource for BoundGenerationModelSource {
@@ -669,10 +695,13 @@ impl GenerationModelSource for BoundGenerationModelSource {
         &'a self,
         request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
-        Box::pin(
-            self.source
-                .resolve_role(request, &self.http, &self.cancel, self.run_deadline),
-        )
+        Box::pin(self.source.resolve_role(
+            request,
+            &self.http,
+            &self.cancel,
+            self.run_deadline,
+            &self.generator,
+        ))
     }
 }
 
@@ -892,6 +921,199 @@ mod tests {
             .snapshot()
             .expect_err("a source without an initial effort is unresolved");
         assert!(error.to_string().contains("thinking"));
+    }
+
+    // Catches: fresh model resolution discards the previous tool response and socket.
+    #[tokio::test]
+    async fn codex_generation_boundaries_preserve_incremental_tool_continuation() {
+        use ego_ai::http::HttpWebSocket;
+        use ego_core::budget::BudgetGate;
+        use ego_core::cost::CurrencyCode;
+        use ego_core::event::id::{GenerationId, SessionId};
+        use ego_core::generator::attempt::GenerationAttempt;
+        use ego_core::generator::types::{ContentBlock, PromptCache};
+        use futures::StreamExt;
+        use std::sync::Mutex;
+
+        const CHILD: &str = "EGO_TEST_CODEX_GENERATION_BOUNDARY";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            // Synthetic subscription state; never inspect the developer's credentials.
+            std::fs::write(home.path().join("auth.json"), serde_json::json!({
+                "openai-codex": {"type":"o_auth", "access":
+                    "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig"}
+            }).to_string()).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "model::tests::codex_generation_boundaries_preserve_incremental_tool_continuation", "--nocapture"])
+                .env(CHILD, "1")
+                .env("EGO_HOME", home.path())
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        #[derive(Default)]
+        struct RecordingHttp(Arc<Mutex<Vec<serde_json::Value>>>);
+        struct Socket {
+            requests: Arc<Mutex<Vec<serde_json::Value>>>,
+            events: std::collections::VecDeque<serde_json::Value>,
+        }
+        impl ego_ai::http::Http for RecordingHttp {
+            fn begin_call(&self) -> Box<dyn HttpCall> {
+                Box::new(NoHttpCall)
+            }
+            fn open_websocket(
+                &self,
+                _call: PreparedHttpCall,
+            ) -> BoxFuture<'static, Result<Box<dyn HttpWebSocket>, TransportError>> {
+                let socket = Socket {
+                    requests: self.0.clone(),
+                    events: Default::default(),
+                };
+                Box::pin(async move { Ok(Box::new(socket) as Box<dyn HttpWebSocket>) })
+            }
+        }
+        impl HttpWebSocket for Socket {
+            fn send(
+                &mut self,
+                call: PreparedHttpCall,
+            ) -> BoxFuture<'_, Result<(), TransportError>> {
+                let (_, _, _, request) = call.into_parts();
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(serde_json::from_slice(request.body()).unwrap());
+                let tool = serde_json::json!({"type":"function_call", "id":"fc1", "call_id":"c1", "name":"read", "arguments":"{}"});
+                if requests.len() == 1 {
+                    self.events.push_back(
+                        serde_json::json!({"type":"response.output_item.added", "item":tool}),
+                    );
+                    self.events.push_back(serde_json::json!({"type":"response.completed", "response":{"id":"resp_1", "status":"completed", "output":[tool]}}));
+                } else {
+                    self.events.push_back(serde_json::json!({"type":"response.completed", "response":{"id":"resp_2", "status":"completed", "output":[]}}));
+                }
+                Box::pin(async { Ok(()) })
+            }
+            fn receive(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
+                let event = self
+                    .events
+                    .pop_front()
+                    .map(|event| serde_json::to_vec(&event).unwrap());
+                Box::pin(async move { Ok(event) })
+            }
+        }
+
+        let recording = Arc::new(RecordingHttp::default());
+        let http = recording.clone() as Arc<dyn Http>;
+        let source = Arc::new(CliGenerationModelSource::new(
+            ModelRef("openai-codex/gpt-6.1-sol".into()),
+            Some(ThinkingLevel::Low),
+            None,
+            Ceilings::default(),
+            Default::default(),
+        ))
+        .bind(http, CancelToken::new(), None);
+        let id = SessionId::new();
+        let mut messages = vec![Message::text(Role::User, "read")];
+        let mut previous_generator = None;
+        for generation in 0..2 {
+            let profile = source
+                .resolve(GenerationModelRequest::new(GenerationRole::Main))
+                .await
+                .unwrap();
+            if let Some(previous) = previous_generator.as_ref() {
+                assert!(Arc::ptr_eq(previous, &profile.generator));
+            }
+            previous_generator = Some(profile.generator.clone());
+            let req = GenRequest {
+                cache: Some(PromptCache {
+                    session_id: id,
+                    lineage_root: id,
+                    retention: CacheRetention::Short,
+                    stable_messages: 0,
+                }),
+                model: profile.request_model.clone(),
+                messages: Conversation::new(messages.clone()).unwrap(),
+                tools: vec![],
+                thinking: profile.thinking,
+                max_output_tokens: Some(16),
+                parallel_tool_calls: false,
+            };
+            let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").unwrap());
+            let reservation = gate
+                .reserve(&profile.metering, None, &req, &profile.capabilities)
+                .unwrap();
+            let attempt = GenerationAttempt::new(
+                GenerationId::new(),
+                reservation,
+                &profile.metering,
+                None,
+                &req,
+                &profile.capabilities,
+            )
+            .unwrap();
+            let events: Vec<_> = profile.generator.generate(req, attempt).collect().await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(ego_core::generator::port::AiEvent::Stop(_))
+                ),
+                "{events:?}"
+            );
+            if generation == 0 {
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        call_id: "c1".into(),
+                        name: "read".into(),
+                        args: "{}".into(),
+                    }],
+                });
+                messages.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        call_id: "c1".into(),
+                        output: "ok".into(),
+                        is_error: false,
+                    }],
+                });
+            }
+        }
+        // Catches: stale generator reuse after model selection changes.
+        let changed = source
+            .resolve(
+                GenerationModelRequest::new(GenerationRole::Main)
+                    .with_model(ModelRef("openai-codex/gpt-6-sol".into())),
+            )
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            previous_generator.as_ref().unwrap(),
+            &changed.generator
+        ));
+        // Auxiliary resolution must not discard the main tool continuation owner.
+        source
+            .resolve(GenerationModelRequest::new(GenerationRole::Compaction))
+            .await
+            .unwrap();
+        let returned = source
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&changed.generator, &returned.generator));
+        let requests = recording.0.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1]["previous_response_id"], "resp_1",
+            "model resolution must retain the completed response across tool generations"
+        );
+        assert_eq!(
+            requests[1]["input"],
+            serde_json::json!([{"type":"function_call_output","call_id":"c1","output":"ok"}])
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use ego_ai::http::{Http, HttpCall, HttpProfileFingerprint, PreparedHttpCall};
+use ego_ai::http::{Http, HttpCall, HttpProfileFingerprint, HttpWebSocket, PreparedHttpCall};
 use ego_core::event::id::SessionId;
 use ego_core::permit::residual::ResidualWriteDesk;
 use ego_core::permit::{
@@ -72,12 +72,59 @@ impl ProviderHttpAdapter {
 }
 
 impl Http for ProviderHttpAdapter {
+    fn open_websocket(
+        &self,
+        call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<Box<dyn HttpWebSocket>, TransportError>> {
+        let (profile, route, connect, request) = call.into_parts();
+        let authority = self.authority.clone();
+        let deadline = authority.begin_call();
+        Box::pin(async move {
+            let socket = authority
+                .guarded()
+                .open_websocket_admitted(route.clone(), connect, request, deadline)
+                .await?;
+            Ok(Box::new(ProviderWebSocket {
+                authority,
+                profile,
+                route,
+                socket,
+                deadline,
+            }) as Box<dyn HttpWebSocket>)
+        })
+    }
+
     fn begin_call(&self) -> Box<dyn HttpCall> {
         Box::new(ProviderHttpCall {
             deadline: self.authority.begin_call(),
             authority: self.authority.clone(),
             profile: None,
         })
+    }
+}
+
+struct ProviderWebSocket {
+    authority: ProviderHttpAuthority,
+    profile: HttpProfileFingerprint,
+    route: ego_core::permit::HttpRoute,
+    socket: Box<dyn ego_core::permit::WebSocketSession>,
+    deadline: Instant,
+}
+
+impl HttpWebSocket for ProviderWebSocket {
+    fn send(&mut self, call: PreparedHttpCall) -> BoxFuture<'_, Result<(), TransportError>> {
+        let (profile, route, connect, request) = call.into_parts();
+        if profile != self.profile || route != self.route {
+            return Box::pin(futures::future::ready(Err(
+                TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),
+            )));
+        }
+        self.deadline = self.authority.begin_call();
+        self.socket.send(connect, request, self.deadline)
+    }
+
+    fn receive(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
+        self.socket.receive(self.deadline)
     }
 }
 
