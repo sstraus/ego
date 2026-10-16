@@ -46,6 +46,11 @@ impl Answer {
         }
     }
 
+    /// Update the geometry before rendering the next buffered block.
+    pub fn resize(&mut self, width: usize) {
+        self.capabilities.width = width;
+    }
+
     /// Whether this answer is being drawn rather than piped.
     fn rendering(&self) -> bool {
         self.capabilities.on_screen()

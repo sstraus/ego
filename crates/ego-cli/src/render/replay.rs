@@ -39,7 +39,7 @@ pub(crate) fn replay(
 }
 
 fn message(output: &dyn TextOutput, text: &str, capabilities: Capabilities) {
-    let mut answer = Answer::new(capabilities);
+    let mut answer = Answer::new(capabilities.with_current_width());
     let mut rendered = answer.push(text);
     rendered.push_str(&answer.finish());
     output.begin_block();
@@ -83,6 +83,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
     let mut partials: HashMap<ItemId, String> = HashMap::new();
     let mut calls: HashMap<ItemId, (&str, &str)> = HashMap::new();
     let mut timings = HashMap::new();
+    let mut tools = tool_row::ToolRows::default();
     for (index, event) in events.iter().enumerate() {
         let transcript = matches!(
             event.kind,
@@ -93,19 +94,23 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
                 | EventKind::ToolCallCompleted { .. }
         );
         if transcript && event.env.item.is_none() {
+            tools.separate();
             output.line(UNAVAILABLE);
             continue;
         }
         match &event.kind {
             EventKind::UserPrompt { text, .. } => {
+                tools.separate();
                 output.line(&format!("> {text}"));
             }
             EventKind::AssistantMessage { text } => {
                 if event.env.item.and_then(|item| finals.get(&item)) == Some(&index) {
+                    tools.separate();
                     message(output, text, capabilities);
                 }
             }
             EventKind::CompactionSeeded { checkpoint, .. } => {
+                tools.separate();
                 message(output, checkpoint, capabilities)
             }
             EventKind::AssistantDelta { text } => {
@@ -114,6 +119,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
                     let partial = partials.entry(item).or_default();
                     partial.push_str(text);
                     if last_delta.get(&item) == Some(&index) {
+                        tools.separate();
                         message(output, partial, capabilities);
                     }
                 }
@@ -136,7 +142,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
                         continue;
                     }
                     let result = result.model_text();
-                    let record = tool_row::record(
+                    let record = tools.record(
                         &tool_row::Finished {
                             name,
                             args,
@@ -144,10 +150,11 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
                             result: &result,
                             timing: timings.remove(&item),
                         },
-                        capabilities,
+                        capabilities.with_current_width(),
                     );
                     output.tool_row(&record.rows, record.detail);
                 } else {
+                    tools.separate();
                     output.line(UNAVAILABLE);
                 }
             }
@@ -211,7 +218,7 @@ mod tests {
         let output = Recorded::default();
         render(&events, &output, Capabilities::plain());
         let text = output.0.lock().unwrap();
-        assert!(text.contains("duration unavailable"), "{text}");
+        assert!(!text.contains("duration unavailable"), "{text}");
         assert!(
             !text.contains("15.9s"),
             "approval pause is not execution: {text}"
@@ -381,7 +388,7 @@ mod tests {
             let grid = capture(&replayed, width);
             assert_eq!(
                 grid,
-                "> first\n\nProse\n\n✓ read first · 1 line · duration unavailable\n\nDone\n\n> second\n\nFinal"
+                "> first\n\nProse\n\n✓ read first · 1 line\n\nDone\n\n> second\n\nFinal"
             );
             println!("rhythm replay width={width} grid={grid:?}");
 
