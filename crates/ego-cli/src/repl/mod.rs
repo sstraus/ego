@@ -486,3 +486,6 @@ mod live_surface_red {
         pump.join().expect("output pump thread panicked");
     }
 }
+
+#[cfg(test)]
+pub(crate) use seat::test_resumed_round_terminal;

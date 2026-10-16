@@ -905,6 +905,15 @@ fn permission_line(
 }
 
 fn modal_line(editor: &mut Reedline, surface: &mut ModalSurface<'_>, prompt: &dyn Prompt) -> Line {
+    #[cfg(test)]
+    if let Some(line) = TERMINAL_SCRIPT.with_borrow_mut(|script| {
+        script.as_mut().map(|script| {
+            script.prompts.push(prompt.render_prompt_left().to_string());
+            script.lines.pop_front().expect("scripted terminal input")
+        })
+    }) {
+        return line;
+    }
     surface_line(
         editor,
         prompt,
@@ -1852,6 +1861,15 @@ mod permission_edit_form_tests {
 
 /// The terminal owner invokes this only after fresh explicit human consent.
 fn launch_elicitation_url(url: &str) -> bool {
+    #[cfg(test)]
+    if let Some(opened) = TERMINAL_SCRIPT.with_borrow_mut(|script| {
+        script.as_mut().map(|script| {
+            script.launches.push(url.to_owned());
+            true
+        })
+    }) {
+        return opened;
+    }
     if ego_core::question::validate_url(url).is_err() {
         return false;
     }
@@ -1891,26 +1909,48 @@ fn open_elicitation_url_on_consent(
 }
 
 #[cfg(test)]
-mod elicitation_url_consent_tests {
-    use super::*;
+#[derive(Default)]
+struct TerminalScript {
+    lines: std::collections::VecDeque<Line>,
+    prompts: Vec<String>,
+    launches: Vec<String>,
+}
 
-    #[test]
-    fn url_launch_requires_fresh_consent_even_when_the_same_url_is_replayed() {
-        // Catches: a rendered/restarted question reuses permission from an earlier launch.
-        let mut launches = 0;
-        for consent in [false, true, false] {
-            let opened =
-                open_elicitation_url_on_consent("https://example.test/verify", consent, |_| {
-                    launches += 1;
-                    true
-                });
-            assert_eq!(opened, consent);
-        }
-        assert_eq!(launches, 1);
-        assert!(!open_elicitation_url_on_consent(
-            "javascript:alert(1)",
-            true,
-            |_| panic!("unsafe URL must never reach the browser")
-        ));
-    }
+#[cfg(test)]
+thread_local! {
+    static TERMINAL_SCRIPT: std::cell::RefCell<Option<TerminalScript>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_resumed_round_terminal(mut request: QuestionRequest) {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Modal);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let asked_for_image = AtomicBool::new(false);
+    let (ingress, _control) = interactive_control();
+    let mut drafts = DraftStash::new(SessionId::new());
+    let mut surface = ModalSurface { phase: &phase, status: &status, asked_for_image: &asked_for_image, ingress: &ingress, drafts: &mut drafts };
+    let script = |lines: &[&str]| TERMINAL_SCRIPT.set(Some(TerminalScript {
+        lines: lines.iter().map(|line| Line::Submitted((*line).into())).collect(),
+        ..Default::default()
+    }));
+    // Reopening the same destination never inherits consent from a previous presentation.
+    script(&["n"]);
+    assert_eq!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Declined);
+    assert!(TERMINAL_SCRIPT.with_borrow(|script| script.as_ref().unwrap().launches.is_empty()));
+    script(&["y", "completed"]);
+    let QuestionOutcome::MemberCompleted { key, answer } = answer_question(&mut editor, &mut surface, &request) else { panic!("remaining member must be presented") };
+    assert_eq!(key, "b");
+    let script_result = TERMINAL_SCRIPT.take().unwrap();
+    assert_eq!(script_result.launches, ["https://example.test/remaining"]);
+    assert!(script_result.prompts[0].contains("Destination: https://example.test/remaining"));
+    assert!(script_result.prompts.iter().all(|prompt| !prompt.contains("https://example.test/done")));
+    let QuestionMode::Round(round) = &mut request.mode else { panic!("round") };
+    round.complete_member(&key, answer).unwrap();
+    script(&["decline"]);
+    assert_eq!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Declined);
+    assert!(TERMINAL_SCRIPT.with_borrow(|script| script.as_ref().unwrap().launches.is_empty()));
+    script(&["retry"]);
+    assert!(matches!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Answered(QuestionAnswer::Round(answer)) if answer.confirmed && answer.responses.len() == 2));
+    assert!(TERMINAL_SCRIPT.take().unwrap().launches.is_empty());
 }

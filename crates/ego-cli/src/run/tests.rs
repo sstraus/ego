@@ -2579,3 +2579,42 @@ fn recovery_interactive_signals_do_not_wait_for_a_text_row() {
         }
     }
 }
+
+#[test]
+fn resumed_terminal_round_prompts_remaining_members_and_fresh_retry_consent() {
+    // Catches: an answerless terminal restart has no plan for its durable foreign round.
+    use ego_core::question::{ElicitationKind, ElicitationMember, ElicitationRound};
+    let dir = tempdir().unwrap();
+    let store = ego_tools::store::JsonlStore::new(dir.path().join("sessions"), dir.path().to_path_buf(), Box::new(ego_tools::store::OsIo));
+    let session = SessionId::new();
+    let question = ItemId::new();
+    let turn = TurnId::new();
+    let request_event = EventId::new();
+    let round = ElicitationRound {
+        expires_at_ms: None,
+        requests: std::collections::BTreeMap::from([
+            ("a".into(), ElicitationMember { prompt: "Already completed".into(), kind: ElicitationKind::Url { url: "https://example.test/done".into(), elicitation_id: "done".into() } }),
+            ("b".into(), ElicitationMember { prompt: "Remaining action".into(), kind: ElicitationKind::Url { url: "https://example.test/remaining".into(), elicitation_id: "remaining".into() } }),
+        ]),
+        completed: Default::default(),
+    };
+    let request = QuestionRequest::new("MCP input", QuestionMode::Round(round), vec![], false);
+    for (seq, kind) in [
+        EventKind::QuestionRequested { request, target: QuestionTarget::ForeignContinuation { tool_call: ItemId::new(), continuation_id: "mcp-reopened".into() } },
+        EventKind::QuestionMemberSettled { key: "a".into(), answer: serde_json::json!({"completed":true}) },
+    ].into_iter().enumerate() {
+        store.append(&session, &DomainEvent { env: Envelope { seq: Seq(seq as u64), id: if seq == 0 { request_event } else { EventId::new() }, turn, item: Some(question), parent: None, ts: Timestamp::from_millis(1000), producer: Producer::Main }, kind }).unwrap();
+    }
+    let entries = futures::executor::block_on(async {
+        use futures::StreamExt;
+        store.read(&session).unwrap().collect::<Vec<_>>().await
+    });
+    let state = SessionState::replay(entries.into_iter().filter_map(|entry| match entry.unwrap() {
+        ego_core::store::session_store::SessionEntry::Event(event) => Some(event),
+        _ => None,
+    }));
+    let plan = plan_resume_answer(&state, &[]).expect("terminal resume must present the pending foreign round without a hand-constructed answer");
+    assert!(matches!(plan, ResumePlan::Foreign { question: id, .. } if id == question));
+    let pending = state.pending_question().unwrap();
+    crate::repl::test_resumed_round_terminal(pending.request().clone());
+}
