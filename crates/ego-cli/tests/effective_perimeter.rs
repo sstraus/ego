@@ -294,3 +294,55 @@ async fn session_perimeter_projects_existing_probe_evidence_without_remeasuring(
     );
     assert!(value.get("probe_evidence").is_none());
 }
+
+// Catches: effective CLI/doctor omit selected destination declarations or read ambient HOME policy.
+#[test]
+fn destination_profile_is_shared_by_effective_cli_and_doctor_in_isolated_home() {
+    let scratch = tempfile::tempdir().unwrap();
+    let home = scratch.path().join("home");
+    let ego_home = home.join(".ego");
+    let workspace = scratch.path().join("workspace");
+    std::fs::create_dir_all(&ego_home).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(
+        ego_home.join("config.toml"),
+        "[profile.docs]\nsandbox='off'\nnetwork='on'\n[profile.docs.permissions]\nallow=['net(docs.example.test:443)']\ndeny=['net(blocked.example.test)']\n",
+    ).unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ego"))
+            .args(args)
+            .current_dir(&workspace)
+            .env("HOME", &home)
+            .env("EGO_HOME", &ego_home)
+            .env("EGO_PROFILE", "docs")
+            .env_remove("EGO_MODEL")
+            .output()
+            .unwrap();
+        if args.first() == Some(&"doctor") {
+            // Missing credentials can make the health snapshot unhealthy; rendering still succeeds.
+            assert!(matches!(output.status.code(), Some(0 | 1)));
+        } else {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        output.stdout
+    };
+    let json: serde_json::Value =
+        serde_json::from_slice(&run(&["config", "ls", "--effective", "--json"])).unwrap();
+    assert_eq!(json["destination_policy"]["profile"], "docs");
+    assert_eq!(json["destination_policy"]["rules"][0]["effect"], "deny");
+    assert_eq!(
+        json["destination_policy"]["rules"][1]["rule"],
+        "net(docs.example.test:443)"
+    );
+    assert_eq!(json["destination_policy"]["rules"][1]["source"], "user");
+    assert_eq!(json["capabilities"], "not_checked");
+    let block = String::from_utf8(run(&["config", "ls", "--effective"])).unwrap();
+    assert!(block.contains("destination_allow\tnet(docs.example.test:443)\tuser"));
+    assert!(block.contains("net rules do not filter child sockets"));
+    let doctor = String::from_utf8(run(&["doctor"])).unwrap();
+    assert!(doctor.contains(block.trim_end()), "{doctor}");
+}
