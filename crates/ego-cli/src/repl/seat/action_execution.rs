@@ -231,8 +231,7 @@ fn submit_busy_line(
             return Some((Line::HostCommand(HostCommand::Tasks(arguments)), false));
         }
         Dispatch::Refused { reason } => {
-            status.lock().expect("surface status lock").notice = Some(reason.to_owned());
-            repaint_status(status);
+            commit_to_transcript(status, reason);
             return None;
         }
         Dispatch::History(_)
@@ -427,8 +426,7 @@ pub(super) fn surface_line(
                     return (Line::HostCommand(HostCommand::Hooks), failed);
                 }
                 Dispatch::Refused { reason } => {
-                    status.lock().expect("surface status lock").notice = Some(reason.to_owned());
-                    repaint_status(status);
+                    commit_to_transcript(status, reason);
                     continue;
                 }
                 Dispatch::Prompt => {

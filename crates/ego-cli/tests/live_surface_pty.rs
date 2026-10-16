@@ -10,6 +10,8 @@ mod finish_queue;
 mod foreign_judge_reason;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
+#[path = "live_surface_pty/metadata_refusal.rs"]
+mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/permission_receipts.rs"]
