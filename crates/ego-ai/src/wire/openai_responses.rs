@@ -616,65 +616,62 @@ impl StreamDecoder {
                 return;
             }
         };
-        if event.kind == "response.output_item.done" {
-            if let Ok(raw) = serde_json::from_str::<Value>(frame)
-                && let Some(item) = raw.get("item")
-                && let Some(id) = item["id"].as_str()
-                && self.provider_items.insert(id.to_owned())
-            {
-                match item["type"].as_str() {
-                    Some("web_search_call") => {
-                        let id = item["id"].as_str().unwrap_or_default().to_owned();
-                        if item["action"]["type"] == "search"
-                            && self.search_calls.insert(id.clone())
-                        {
-                            out.push(AiEvent::WebSearch {
-                                call_id: id,
-                                query: item["action"]["query"]
-                                    .as_str()
-                                    .unwrap_or("web search")
-                                    .to_owned(),
-                            });
-                        }
-                        out.push(AiEvent::ProviderContent {
-                            state: ego_core::generator::types::ReasoningState {
-                                dialect: "openai-responses".into(),
-                                blob: serde_json::to_string(item).expect("JSON value"),
-                            },
-                            visible: false,
+        if event.kind == "response.output_item.done"
+            && let Ok(raw) = serde_json::from_str::<Value>(frame)
+            && let Some(item) = raw.get("item")
+            && let Some(id) = item["id"].as_str()
+            && self.provider_items.insert(id.to_owned())
+        {
+            match item["type"].as_str() {
+                Some("web_search_call") => {
+                    let id = item["id"].as_str().unwrap_or_default().to_owned();
+                    if item["action"]["type"] == "search" && self.search_calls.insert(id.clone()) {
+                        out.push(AiEvent::WebSearch {
+                            call_id: id,
+                            query: item["action"]["query"]
+                                .as_str()
+                                .unwrap_or("web search")
+                                .to_owned(),
                         });
                     }
-                    Some("message")
-                        if item["content"].as_array().is_some_and(|parts| {
-                            parts.iter().any(|part| {
-                                part["annotations"]
-                                    .as_array()
-                                    .is_some_and(|a| !a.is_empty())
-                            })
-                        }) =>
-                    {
-                        for part in item["content"].as_array().into_iter().flatten() {
-                            for citation in part["annotations"].as_array().into_iter().flatten() {
-                                if citation["type"] == "url_citation"
-                                    && let Some(url) = citation["url"].as_str()
-                                {
-                                    out.push(AiEvent::Citation {
-                                        url: url.into(),
-                                        title: citation["title"].as_str().unwrap_or(url).into(),
-                                    });
-                                }
+                    out.push(AiEvent::ProviderContent {
+                        state: ego_core::generator::types::ReasoningState {
+                            dialect: "openai-responses".into(),
+                            blob: serde_json::to_string(item).expect("JSON value"),
+                        },
+                        visible: false,
+                    });
+                }
+                Some("message")
+                    if item["content"].as_array().is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            part["annotations"]
+                                .as_array()
+                                .is_some_and(|a| !a.is_empty())
+                        })
+                    }) =>
+                {
+                    for part in item["content"].as_array().into_iter().flatten() {
+                        for citation in part["annotations"].as_array().into_iter().flatten() {
+                            if citation["type"] == "url_citation"
+                                && let Some(url) = citation["url"].as_str()
+                            {
+                                out.push(AiEvent::Citation {
+                                    url: url.into(),
+                                    title: citation["title"].as_str().unwrap_or(url).into(),
+                                });
                             }
                         }
-                        out.push(AiEvent::ProviderContent {
-                            state: ego_core::generator::types::ReasoningState {
-                                dialect: "openai-responses".into(),
-                                blob: serde_json::to_string(item).expect("JSON value"),
-                            },
-                            visible: true,
-                        });
                     }
-                    _ => {}
+                    out.push(AiEvent::ProviderContent {
+                        state: ego_core::generator::types::ReasoningState {
+                            dialect: "openai-responses".into(),
+                            blob: serde_json::to_string(item).expect("JSON value"),
+                        },
+                        visible: true,
+                    });
                 }
+                _ => {}
             }
         }
         match event.kind.as_str() {
