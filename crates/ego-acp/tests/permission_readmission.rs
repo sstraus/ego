@@ -104,3 +104,15 @@ async fn tool_session_grant_still_requires_readmission_answer() {
     ])
     .await;
 }
+
+// Catches: remembered answers without a rule writer are treated as immediate grants.
+#[tokio::test]
+async fn durable_answers_without_persistence_never_grant_authority() {
+    answers(vec![
+        (tool(), "allow-always", PermissionDecision::Deny),
+        (tool(), "reject-always", PermissionDecision::Deny),
+        (tool(), "invented-allow", PermissionDecision::Deny),
+        (tool(), "allow-once", PermissionDecision::Allow),
+    ])
+    .await;
+}

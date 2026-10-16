@@ -226,44 +226,60 @@ impl AcpPermissionAdapter {
         }
         let wire = self.live_request(item, &request);
         match connection.send_request(wire).block_task().await {
-            Ok(response) => {
-                if request.requires_explicit_answer() {
-                    return Self::decision(&response);
-                }
-                let v1::RequestPermissionOutcome::Selected(selected) = &response.outcome else {
-                    return PermissionDecision::Deny;
-                };
-                if selected.option_id.0.as_ref() == Self::ALLOW_SESSION {
-                    self.session_approval.store(true, Ordering::Release);
-                    return PermissionDecision::Allow;
-                }
-                let effect = match selected.option_id.0.as_ref() {
-                    Self::ALLOW_ALWAYS => ManagedRuleEffect::Allow,
-                    Self::REJECT_ALWAYS => ManagedRuleEffect::Deny,
-                    _ => return Self::decision(&response),
-                };
-                let Some(writer) = &self.rule_writer else {
-                    return PermissionDecision::Deny;
-                };
-                let Some(plan) = request
-                    .presentation()
-                    .and_then(|presentation| presentation.remember_plan().ok())
-                else {
-                    return PermissionDecision::Deny;
-                };
-                match writer.remember(effect, plan.clone()).await {
-                    Ok(()) if effect == ManagedRuleEffect::Allow => PermissionDecision::Allow,
-                    Ok(()) => PermissionDecision::Deny,
-                    Err(error) => {
-                        tracing::warn!(%error, "ACP remembered permission could not be stored");
-                        PermissionDecision::Deny
-                    }
-                }
-            }
+            Ok(response) => self.apply_answer(&request, &response).await,
             // A transport failure settles the waiting boundary without
             // granting authority; the run records the denial, not a hang.
             Err(error) => {
                 tracing::warn!(%error, "ACP permission request failed");
+                PermissionDecision::Deny
+            }
+        }
+    }
+
+    async fn apply_answer(
+        &self,
+        request: &PermissionRequest,
+        response: &v1::RequestPermissionResponse,
+    ) -> PermissionDecision {
+        if request.requires_explicit_answer() {
+            return Self::decision(response);
+        }
+        let v1::RequestPermissionOutcome::Selected(selected) = &response.outcome else {
+            return PermissionDecision::Deny;
+        };
+        match selected.option_id.0.as_ref() {
+            Self::ALLOW_SESSION => {
+                self.session_approval.store(true, Ordering::Release);
+                PermissionDecision::Allow
+            }
+            Self::ALLOW_ALWAYS => {
+                self.remember_answer(request, ManagedRuleEffect::Allow)
+                    .await
+            }
+            Self::REJECT_ALWAYS => self.remember_answer(request, ManagedRuleEffect::Deny).await,
+            _ => Self::decision(response),
+        }
+    }
+
+    async fn remember_answer(
+        &self,
+        request: &PermissionRequest,
+        effect: ManagedRuleEffect,
+    ) -> PermissionDecision {
+        let Some(writer) = &self.rule_writer else {
+            return PermissionDecision::Deny;
+        };
+        let Some(plan) = request
+            .presentation()
+            .and_then(|presentation| presentation.remember_plan().ok())
+        else {
+            return PermissionDecision::Deny;
+        };
+        match writer.remember(effect, plan.clone()).await {
+            Ok(()) if effect == ManagedRuleEffect::Allow => PermissionDecision::Allow,
+            Ok(()) => PermissionDecision::Deny,
+            Err(error) => {
+                tracing::warn!(%error, "ACP remembered permission could not be stored");
                 PermissionDecision::Deny
             }
         }
