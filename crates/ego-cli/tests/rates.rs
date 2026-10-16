@@ -446,6 +446,7 @@ async fn rates_that_are_already_resolved_are_not_replaced_by_the_table() {
     let mut supplied = model(tabulated());
     supplied.rates = Some(ego_ai::catalogue::operator_rates(
         ego_core::budget::PricingQuote {
+            web_search: None,
             revision: ego_core::cost::PricingRevision("acme/negotiated/2026-08".to_string()),
             currency: CurrencyCode::new("USD").expect("USD"),
             uncached_input: Some("0.000001".parse().expect("a rate")),

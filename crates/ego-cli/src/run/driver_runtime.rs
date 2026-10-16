@@ -1375,6 +1375,11 @@ async fn drive_interactive_input<'session: 'turn, 'turn>(
                     .await;
                 Some((termination, result))
             }
+            Some(InteractiveTurnInput::McpContext(command)) => Some(
+                turns
+                    .drive_mcp_context(loop_, command, turn_cancel, diagnostics)
+                    .await,
+            ),
             Some(InteractiveTurnInput::Skill(operation)) => {
                 let (termination, result) = turns
                     .drive_admitted_skill(loop_, operation, turn_cancel, diagnostics)
@@ -1804,6 +1809,10 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         })?,
         None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
+    let tools = tools.with_named_agents(
+        crate::named_agents::discover(cwd, skill_trust)
+            .map_err(|error| RunTermination::UsageError { message: error.0 })?,
+    );
     let tools = match McpRuntimeBinding::resume_sealer(mcp_runtime) {
         Some(resume) => tools.with_resume(resume),
         None => tools,
@@ -1960,6 +1969,9 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
             .policy()
             .map_err(|error| CompactionError::Internal(error.to_string()))?,
         super::composition::orchestration_mode(effective),
+        args.model
+            .as_deref()
+            .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),
     )
     .map_err(|error| CompactionError::Internal(error.to_string()))?;
     if !args.no_context_tool && args.tools.is_none() {
@@ -2207,6 +2219,9 @@ fn rescan_session_skills(
         Some(Arc::new(jsonl_store.history())),
         exec_environment,
         super::composition::orchestration_mode(effective),
+        args.model
+            .as_deref()
+            .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),
     ) {
         Ok(registry) => registry,
         Err(error) => {
@@ -2433,6 +2448,16 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 operation,
                 pending_work,
             )
+        }
+        repl::Line::HostCommand(repl::HostCommand::McpContext(command)) => {
+            if pending_work {
+                diagnostics
+                    .note("MCP context commands are unavailable while source work is pending");
+                return Ok(CommandOutcome::Continue);
+            }
+            Ok(CommandOutcome::Input(InteractiveTurnInput::McpContext(
+                command,
+            )))
         }
         repl::Line::HostCommand(repl::HostCommand::Skill(operation)) => {
             if pending_work {

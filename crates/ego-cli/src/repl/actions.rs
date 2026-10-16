@@ -77,6 +77,29 @@ impl Submission {
     }
 }
 
+/// The immutable authority selected by a typed user context command.
+#[derive(Clone)]
+pub struct McpContextCommand {
+    pub catalogue: ego_core::turn::CapturedToolCatalogue,
+    pub name: String,
+    pub parameters: serde_json::Value,
+}
+impl std::fmt::Debug for McpContextCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpContextCommand")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for McpContextCommand {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.parameters == other.parameters
+            && self.catalogue.generation() == other.catalogue.generation()
+    }
+}
+impl Eq for McpContextCommand {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
@@ -92,6 +115,7 @@ pub enum Dispatch {
     Setup(String),
     Tasks(String),
     Mcp(String),
+    McpContext(McpContextCommand),
     Prompt,
     Immediate,
     InteractiveIngress,
@@ -413,12 +437,21 @@ impl std::fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
+#[derive(Clone, Default)]
+struct McpCommandView(Option<Arc<dyn ego_core::mcp::McpRuntimeBinding>>);
+impl std::fmt::Debug for McpCommandView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("McpCommandView")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
     bindings: Vec<KeyBinding>,
     live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
     skill_view: Arc<Mutex<Option<SkillCatalogueView>>>,
+    mcp_view: Arc<Mutex<McpCommandView>>,
 }
 
 impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
@@ -455,6 +488,7 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
             bindings: Vec::new(),
             live_availability: Arc::new(Mutex::new(HashMap::new())),
             skill_view: Arc::new(Mutex::new(None)),
+            mcp_view: Arc::new(Mutex::new(McpCommandView::default())),
         })
     }
 }
@@ -713,6 +747,101 @@ impl ActionRegistry {
         .transpose()
     }
 
+    pub(crate) fn bind_mcp_view(&self, runtime: Arc<dyn ego_core::mcp::McpRuntimeBinding>) {
+        self.mcp_view.lock().expect("MCP command view").0 = Some(runtime);
+    }
+
+    fn mcp_capture(&self) -> Option<ego_core::turn::CapturedToolCatalogue> {
+        self.mcp_view
+            .lock()
+            .expect("MCP command view")
+            .0
+            .as_ref()?
+            .context_commands()
+            .ok()
+    }
+
+    pub(crate) fn mcp_menu(&self, filter: &str) -> Vec<(String, String)> {
+        self.mcp_capture()
+            .map(|capture| {
+                capture
+                    .tools()
+                    .iter()
+                    .filter_map(|tool| {
+                        let ego_core::turn::RegisteredTool::Effect(tool) = tool else {
+                            return None;
+                        };
+                        let descriptor = tool.descriptor();
+                        let schema = serde_json::to_value(&descriptor.schema).ok()?;
+                        let arguments = schema["properties"]
+                            .as_object()
+                            .filter(|properties| !properties.is_empty())
+                            .map(|properties| {
+                                let keys = properties
+                                    .keys()
+                                    .map(|key| format!("\"{key}\":\"...\""))
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                format!(" — {{{keys}}}")
+                            })
+                            .unwrap_or_default();
+                        descriptor.name.starts_with(filter).then_some((
+                            descriptor.name,
+                            format!("{}{arguments}", descriptor.description),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn classify_mcp_context(&self, name: &str, raw: &str) -> Dispatch {
+        let refused = || Dispatch::Refused {
+            reason: "MCP context command is unavailable or arguments do not match its schema; use a JSON object of string arguments",
+        };
+        let Some(catalogue) = self.mcp_capture() else {
+            return refused();
+        };
+        let Some(descriptor) = catalogue.tools().iter().find_map(|tool| match tool {
+            ego_core::turn::RegisteredTool::Effect(tool) if tool.descriptor().name == name => {
+                Some(tool.descriptor())
+            }
+            _ => None,
+        }) else {
+            return refused();
+        };
+        let parameters = if raw.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            match serde_json::from_str(raw) {
+                Ok(value) => value,
+                Err(_) => return refused(),
+            }
+        };
+        let Some(object) = parameters.as_object() else {
+            return refused();
+        };
+        let Ok(schema) = serde_json::to_value(descriptor.schema) else {
+            return refused();
+        };
+        let properties = schema["properties"].as_object();
+        if object.iter().any(|(key, value)| {
+            !value.is_string() || !properties.is_some_and(|properties| properties.contains_key(key))
+        }) || schema["required"].as_array().is_some_and(|required| {
+            required
+                .iter()
+                .filter_map(|key| key.as_str())
+                .any(|key| !object.contains_key(key))
+        }) {
+            return refused();
+        }
+        Dispatch::McpContext(McpContextCommand {
+            catalogue,
+            name: name.to_owned(),
+            parameters,
+        })
+    }
+
     pub(crate) fn skill_menu(&self, filter: &str) -> Vec<(String, String)> {
         let Ok(Some(capture)) = self.skill_capture() else {
             return Vec::new();
@@ -942,6 +1071,9 @@ impl ActionRegistry {
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if name.starts_with("mcp__") || name.starts_with("mcp_resource__") {
+                return self.classify_mcp_context(name, raw_arguments);
+            }
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
             }

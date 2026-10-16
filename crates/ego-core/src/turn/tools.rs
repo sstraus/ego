@@ -55,6 +55,31 @@ pub(crate) struct GenerationToolCatalogue {
 }
 
 impl GenerationToolCatalogue {
+    /// Route from the resolved candidate, without changing the inherited registry.
+    pub(crate) fn for_provider(&self, native_search: bool) -> Self {
+        let (registry, descriptors) = self
+            .registry
+            .iter()
+            .zip(&self.descriptors)
+            .filter_map(|(entry, descriptor)| match entry.as_effect() {
+                Some(tool) if tool.admits_hosted_search() && !native_search => {
+                    tool.local_search_tool().map(|local| {
+                        let entry = RegisteredTool::Effect(local);
+                        let descriptor = entry.descriptor();
+                        (entry, descriptor)
+                    })
+                }
+                _ => Some((entry.clone(), descriptor.clone())),
+            })
+            .unzip();
+        Self {
+            generation: self.generation.clone(),
+            registry,
+            descriptors,
+            authority: self.authority.clone(),
+        }
+    }
+
     pub(crate) fn generation(&self) -> std::sync::Arc<str> {
         std::sync::Arc::clone(&self.generation)
     }
@@ -69,6 +94,14 @@ impl GenerationToolCatalogue {
             .find(|registered| registered.matches_name(name))
             .cloned()
             .ok_or_else(|| format!("there is no tool named {name}"))
+    }
+
+    pub(crate) fn admits_hosted_search(&self) -> bool {
+        self.registry.iter().any(|entry| {
+            entry
+                .as_effect()
+                .is_some_and(|tool| tool.admits_hosted_search())
+        })
     }
 
     pub(crate) fn authority(&self) -> ToolCaptureAuthority {
@@ -241,6 +274,8 @@ pub struct Tools<'a> {
     skill_resource_roots: Option<crate::skill::SkillResourceRoots>,
     resume: Option<std::sync::Arc<ResumeSealer>>,
     task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
+    pub(super) named_agents: Vec<super::NamedAgent>,
+    task_tool_ceiling: Option<std::collections::BTreeSet<String>>,
 }
 
 impl<'a> Tools<'a> {
@@ -266,6 +301,8 @@ impl<'a> Tools<'a> {
             skill_resource_roots: None,
             resume: None,
             task_context: None,
+            named_agents: Vec::new(),
+            task_tool_ceiling: None,
         }
     }
 
@@ -285,6 +322,8 @@ impl<'a> Tools<'a> {
             skill_resource_roots: None,
             resume: None,
             task_context: None,
+            named_agents: Vec::new(),
+            task_tool_ceiling: None,
         }
     }
 
@@ -305,7 +344,29 @@ impl<'a> Tools<'a> {
             skill_resource_roots: None,
             resume: None,
             task_context: None,
+            named_agents: Vec::new(),
+            task_tool_ceiling: None,
         })
+    }
+
+    /// Install a read-only catalogue admitted by the host's trust boundary.
+    pub fn with_named_agents(mut self, agents: Vec<super::NamedAgent>) -> Self {
+        self.named_agents = agents;
+        self
+    }
+
+    fn describe(&self, tool: &RegisteredTool) -> GenToolDescriptor {
+        let mut descriptor = tool.descriptor();
+        if matches!(tool, RegisteredTool::Task) && !self.named_agents.is_empty() {
+            let names: Vec<_> = self
+                .named_agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect();
+            descriptor.parameters["properties"]["agent"]["enum"] = serde_json::json!(names);
+            descriptor.description.push_str(" Select an optional named agent with the agent field; its authority cannot exceed yours.");
+        }
+        descriptor
     }
 
     pub fn with_resume(mut self, resume: std::sync::Arc<ResumeSealer>) -> Self {
@@ -353,6 +414,7 @@ impl<'a> Tools<'a> {
         name: String,
         serial: std::sync::Arc<futures::lock::Mutex<()>>,
         cancel: super::CancelToken,
+        ceiling: Option<std::collections::BTreeSet<String>>,
     ) -> Result<Self, ToolCatalogueError> {
         Ok(Self {
             registry: self
@@ -371,6 +433,8 @@ impl<'a> Tools<'a> {
             skill_resource_roots: self.skill_resource_roots.clone(),
             resume: self.resume.clone(),
             task_context: Some((name, serial)),
+            named_agents: Vec::new(),
+            task_tool_ceiling: ceiling,
         })
     }
 
@@ -412,8 +476,11 @@ impl<'a> Tools<'a> {
         if self.task_context.is_some() {
             registry.retain(|tool| !matches!(tool, RegisteredTool::Task));
         }
+        if let Some(ceiling) = &self.task_tool_ceiling {
+            registry.retain(|tool| ceiling.contains(&tool.descriptor().name));
+        }
         validate_distinct(&registry)?;
-        let descriptors = registry.iter().map(RegisteredTool::descriptor).collect();
+        let descriptors = registry.iter().map(|tool| self.describe(tool)).collect();
         Ok(GenerationToolCatalogue {
             generation: std::sync::Arc::from(dynamic.generation()),
             registry,
@@ -437,7 +504,7 @@ impl<'a> Tools<'a> {
             captured.descriptors = captured
                 .registry
                 .iter()
-                .map(RegisteredTool::descriptor)
+                .map(|tool| self.describe(tool))
                 .collect();
         }
         Ok(captured)
@@ -541,7 +608,7 @@ impl<'a> Tools<'a> {
     pub fn descriptors(&self) -> Vec<GenToolDescriptor> {
         self.registry
             .iter()
-            .map(RegisteredTool::descriptor)
+            .map(|tool| self.describe(tool))
             .collect()
     }
 

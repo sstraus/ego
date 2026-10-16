@@ -896,9 +896,17 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.hidden_reasoning += 1;
             ExportEvent::ReasoningDelta
         }
-        EventKind::ReasoningState { state: _ } => {
+        EventKind::ReasoningState { state: _ }
+        | EventKind::ProviderContent {
+            state: _,
+            visible: _,
+        } => {
             redactions.hidden_reasoning += 1;
             ExportEvent::ReasoningState
+        }
+        EventKind::ContextCommandStarted { name: _, args: _ } => {
+            redactions.tool_material += 2;
+            ExportEvent::ToolCallStarted
         }
         EventKind::ToolCallStarted {
             name: _,

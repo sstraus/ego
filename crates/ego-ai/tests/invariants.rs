@@ -110,6 +110,7 @@ fn usd(decimal: &str) -> Money {
 
 fn quote() -> PricingQuote {
     PricingQuote {
+        web_search: None,
         revision: PricingRevision("test-2026-08".to_string()),
         currency: CurrencyCode::new("USD").expect("USD is valid"),
         uncached_input: Some("0.000003".parse().expect("a valid rate")),
@@ -543,6 +544,7 @@ async fn a_provider_on_a_supported_dialect_is_configuration_and_nothing_else() {
             cache_write_tokens: 100,
             cache_write_extended_tokens: 0,
             output_tokens: 250,
+            web_search_requests: 0,
             reasoning_tokens: Some(180),
         },
         "0.005745",
@@ -726,6 +728,7 @@ fn reported(seen: Totals) -> Usage {
         output_tokens: seen.emitted,
         // This wire does not separate them out, and inventing a zero would
         // claim it said none.
+        web_search_requests: 0,
         reasoning_tokens: None,
     }
 }
@@ -788,6 +791,7 @@ async fn a_new_protocol_is_an_adapter_and_its_registration() {
             cache_write_tokens: 0,
             cache_write_extended_tokens: 0,
             output_tokens: 250,
+            web_search_requests: 0,
             reasoning_tokens: None,
         },
         "0.005370",
@@ -845,6 +849,7 @@ async fn a_cut_stream_settles_against_the_last_report_the_mapping_held() {
             cache_write_tokens: 0,
             cache_write_extended_tokens: 0,
             output_tokens: 250,
+            web_search_requests: 0,
             reasoning_tokens: None,
         }
     );

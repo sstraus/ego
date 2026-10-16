@@ -26,7 +26,7 @@ SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
 ContextRequested | ContextRequestConsumed | ContextCooldown |
 GoalAllowanceInherited | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
-AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState |
+AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted |
 ToolCallStarted | ToolCallDelta | ToolCallCompleted | ToolCallMeasured |
 DetachedExecStarted | DetachedExecSettled | QuestionRequested |
 QuestionSettled | QuestionMemberSettled | PermissionRequested | PermissionAmended |
@@ -40,7 +40,7 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-62 variants in the current schema, and this list is exhaustive by contract.
+64 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
 62, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, skill, and clean-session compaction lifecycles.

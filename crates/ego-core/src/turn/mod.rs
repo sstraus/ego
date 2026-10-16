@@ -22,6 +22,7 @@ mod mcp_registry;
 mod policy;
 mod residual;
 mod task;
+pub use task::NamedAgent;
 mod tools;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -478,6 +479,7 @@ pub struct TurnAbandoned {
 /// One tool call the model asked for and the loop has not yet answered.
 struct PendingCall {
     timing: crate::event::domain::ToolTiming,
+    user_effect: Option<Arc<dyn crate::permit::Tool>>,
     /// The item the call was logged against. `ToolCallCompleted` must name
     /// the same one, or the result attaches to nothing.
     item: ItemId,
@@ -983,6 +985,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
             ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
         })?;
         let request = GenRequest {
+            web_search: None,
             cache: None,
             model: profile.request_model.clone(),
             messages,
@@ -1122,7 +1125,10 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                 AiEvent::Error { message, .. } => {
                     provider_error.get_or_insert(message);
                 }
-                AiEvent::ReasoningDelta { .. }
+                AiEvent::ProviderContent { .. }
+                | AiEvent::WebSearch { .. }
+                | AiEvent::Citation { .. }
+                | AiEvent::ReasoningDelta { .. }
                 | AiEvent::ReasoningState(_)
                 | AiEvent::DeliveryObserved(_)
                 | AiEvent::ProviderFailure { .. }
@@ -1912,6 +1918,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let request = live_request.unwrap_or_else(|| {
             let stable_messages = source_messages.messages().len().saturating_sub(1);
             GenRequest {
+                web_search: None,
                 cache: Some(crate::generator::types::PromptCache {
                     session_id: self.session_id,
                     lineage_root: self.lineage_root,
@@ -1981,6 +1988,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             checkpoint_frame(checkpoint.text()),
         ));
         let baseline = GenRequest {
+            web_search: None,
             cache: None,
             model: main.request_model.clone(),
             messages: Conversation::new(target_messages).map_err(CompactionError::History)?,
@@ -2369,6 +2377,94 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         self.finish_turn(turn, driven).await
     }
 
+    /// Execute user-selected MCP context through the ordinary effect authority.
+    /// No provider call is needed to attach the returned context.
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned retains durable state"
+    )]
+    pub async fn run_admitted_context(
+        &mut self,
+        catalogue: CapturedToolCatalogue,
+        name: String,
+        parameters: serde_json::Value,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
+        let turn = TurnId::new();
+        let result = self
+            .run_admitted_context_inner(turn, catalogue, name, parameters)
+            .await;
+        result.map_err(|cause| self.abandon(turn, cause))
+    }
+
+    async fn run_admitted_context_inner(
+        &mut self,
+        turn: TurnId,
+        catalogue: CapturedToolCatalogue,
+        name: String,
+        parameters: serde_json::Value,
+    ) -> Result<TurnOutcome, StoreError> {
+        self.begin_turn(turn)?;
+        let current = self
+            .tools
+            .capture()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+        if current.generation().as_ref() != catalogue.generation() {
+            let driven = self.refuse_drive(
+                turn,
+                "MCP context command generation is no longer admitted".to_owned(),
+                ExitReason::Usage,
+            )?;
+            return self.finish_turn(turn, driven).await;
+        }
+        let tool = catalogue
+            .tools()
+            .iter()
+            .find_map(|registered| match registered {
+                RegisteredTool::Effect(tool) if tool.descriptor().name == name => {
+                    Some(Arc::clone(tool))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                StoreError::Io(std::io::Error::other("MCP context command is not admitted"))
+            })?;
+        let capture = self
+            .policy_source
+            .capture()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+        let item = ItemId::new();
+        let args = parameters.to_string();
+        let started = self.journal.append(
+            turn,
+            Some(item),
+            None,
+            EventKind::ContextCommandStarted {
+                name,
+                args: args.clone(),
+            },
+        )?;
+        let pending = PendingCall {
+            timing: Default::default(),
+            user_effect: Some(tool),
+            item,
+            started,
+            selected: None,
+            args,
+            _catalogue_generation: Arc::from(catalogue.generation()),
+            capture_authority: catalogue.authority(),
+        };
+        let driven = self
+            .run_pending_batch(
+                turn,
+                capture.policy().as_ref(),
+                &capture.snapshot(),
+                vec![pending],
+            )
+            .await?
+            .unwrap_or(DriveOutcome::Ended(ExitReason::Completed, None));
+        self.finish_turn(turn, driven).await
+    }
+
     /// Re-present an unsettled foreign round using its durable identity and member outcomes.
     /// The host must restore the captured continuation binding before calling this method.
     #[expect(
@@ -2721,6 +2817,31 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 .finish_turn(turn, DriveOutcome::Ended(ExitReason::Provider, None))
                 .await
             {
+                Ok(outcome) => Ok(outcome),
+                Err(cause) => Err(self.abandon(turn, cause)),
+            };
+        }
+        if self.is_context_command_turn(turn) {
+            let complete = self
+                .state()
+                .items
+                .values()
+                .filter(|item| item.turn == turn && item.context_command)
+                .all(|item| item.completed);
+            let driven = if complete {
+                DriveOutcome::Ended(ExitReason::Completed, None)
+            } else {
+                match self.refuse_drive(
+                    turn,
+                    "an incomplete MCP context command cannot be replayed as a model turn"
+                        .to_owned(),
+                    ExitReason::Usage,
+                ) {
+                    Ok(driven) => driven,
+                    Err(cause) => return Err(self.abandon(turn, cause)),
+                }
+            };
+            return match self.finish_turn(turn, driven).await {
                 Ok(outcome) => Ok(outcome),
                 Err(cause) => Err(self.abandon(turn, cause)),
             };
@@ -3171,6 +3292,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             .expect("turn loop journal inspection")
     }
 
+    fn is_context_command_turn(&self, turn: TurnId) -> bool {
+        self.state()
+            .items
+            .values()
+            .any(|item| item.turn == turn && item.context_command)
+    }
+
     async fn finish_turn(
         &mut self,
         mut turn: TurnId,
@@ -3207,12 +3335,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             let ok = matches!(exit_reason, ExitReason::Completed);
             // Observe before completion: the reducer resets the blocker audit only
             // when a turn completed without an observation of the same condition.
-            let continuation =
-                if ok && self.must_stop().is_none() && self.state().context_request.is_none() {
-                    self.check_goal(turn).await?
-                } else {
-                    None
-                };
+            let continuation = if ok
+                && !self.is_context_command_turn(turn)
+                && self.must_stop().is_none()
+                && self.state().context_request.is_none()
+            {
+                self.check_goal(turn).await?
+            } else {
+                None
+            };
             self.journal.append(
                 turn,
                 None,
@@ -3670,6 +3801,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         error_kind,
                     } => (capture, generation, terminal, reason, pending, error_kind),
                 };
+            if reason == StopReason::Continue {
+                self.close_unstarted_siblings(turn, &pending)?;
+                continue;
+            }
             let policy = capture.policy();
             let policy_snapshot = capture.snapshot();
 
@@ -3682,6 +3817,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 self.close_unstarted_siblings(turn, &pending)?;
                 let exit = match reason {
                     StopReason::Stop | StopReason::ToolUse => ExitReason::Completed,
+                    StopReason::Continue => {
+                        unreachable!("provider continuation handled before completion")
+                    }
                     StopReason::Length => ExitReason::Budget,
                     // Not `Cancelled`: our own cancellation was already
                     // answered above and at `drained.cancelled`, so an
@@ -4382,11 +4520,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 }
             };
 
+            let catalogue = walk
+                .catalogue
+                .for_provider(profile.generator.supports_web_search());
             let (request, repaired) = match self.prepare_candidate_request(
                 turn,
                 candidate.as_ref(),
                 &profile,
                 &walk,
+                &catalogue,
                 candidate_conversation,
             )? {
                 std::ops::ControlFlow::Break(ended) => {
@@ -4467,7 +4609,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         metering: &profile.metering,
                         quote: quote.as_ref(),
                         visibility: GenerationVisibility::Conversation,
-                        catalogue: Some(&walk.catalogue),
+                        catalogue: Some(&catalogue),
                     },
                 )
                 .await;
@@ -4626,12 +4768,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         candidate: Option<&ModelRef>,
         profile: &GenerationProfile,
         walk: &GenerationWalk,
+        catalogue: &GenerationToolCatalogue,
         mut candidate_conversation: Conversation,
     ) -> Result<std::ops::ControlFlow<Generated, Option<(GenRequest, Conversation)>>, StoreError>
     {
         let policy_snapshot = walk.capture.snapshot();
-        let descriptors = walk.catalogue.descriptors();
-        let mcp_servers = walk.catalogue.mcp_servers();
+        let descriptors = catalogue.descriptors();
+        let mcp_servers = catalogue.mcp_servers();
         if let Some(message) = context_capacity::exhausted(
             self.state().context,
             profile.capabilities.max_context_tokens,
@@ -4666,6 +4809,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             identity.as_deref(),
         )?;
         let mut request = GenRequest {
+            web_search: (profile.generator.supports_web_search()
+                && catalogue.admits_hosted_search())
+            .then_some(crate::generator::types::HostedSearch {
+                max_requests: std::num::NonZeroU32::new(5).expect("five is nonzero"),
+            }),
             cache: Some(crate::generator::types::PromptCache {
                 session_id: self.session_id,
                 lineage_root: self.lineage_root,
@@ -5356,6 +5504,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut message: Option<ItemId> = None;
         let mut reasoning: Option<ItemId> = None;
         let mut assembled = String::new();
+        let mut message_text = String::new();
         let mut failure = None;
         let mut cancelled = false;
         let mut corrupt: Option<String> = None;
@@ -5427,16 +5576,94 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     break;
                 }
             };
+            let event = match event {
+                AiEvent::Citation { url, title } => {
+                    let title = title.replace(['\n', '\r', '[', ']', '\\'], " ");
+                    let text = match url::Url::parse(&url) {
+                        Ok(url)
+                            if matches!(url.scheme(), "http" | "https")
+                                && url.host_str().is_some()
+                                && url.username().is_empty()
+                                && url.password().is_none() =>
+                        {
+                            format!(
+                                "\n[{title}]({})",
+                                url.as_str().replace('(', "%28").replace(')', "%29")
+                            )
+                        }
+                        _ => format!("\nSource: {title} (invalid source URL)"),
+                    };
+                    AiEvent::TextDelta { text }
+                }
+                AiEvent::WebSearch { call_id: _, query } => AiEvent::ReasoningDelta {
+                    text: format!("Searching the web: {query}\n"),
+                },
+                event => event,
+            };
             emitted_output |= matches!(
                 event,
-                AiEvent::TextDelta { .. }
+                AiEvent::ProviderContent { .. }
+                    | AiEvent::TextDelta { .. }
                     | AiEvent::ReasoningDelta { .. }
                     | AiEvent::ReasoningState(_)
                     | AiEvent::ToolCall { .. }
             );
             let appended = match event {
+                AiEvent::WebSearch { .. } | AiEvent::Citation { .. } => {
+                    unreachable!("projected above")
+                }
+                AiEvent::ProviderContent { state, visible } => {
+                    if visibility == GenerationVisibility::CompactionPrivate {
+                        Ok(())
+                    } else {
+                        let item = if visible {
+                            message.take().unwrap_or_default()
+                        } else {
+                            reasoning.take().unwrap_or_default()
+                        };
+                        let close = if visible {
+                            self.journal
+                                .append(
+                                    turn,
+                                    Some(item),
+                                    None,
+                                    EventKind::AssistantMessage {
+                                        text: std::mem::take(&mut message_text),
+                                    },
+                                )
+                                .map(|_| ())
+                        } else {
+                            // The next visible block must not append to text preceding this server block.
+                            if let Some(previous) = message.take() {
+                                self.journal
+                                    .append(
+                                        turn,
+                                        Some(previous),
+                                        None,
+                                        EventKind::AssistantMessage {
+                                            text: std::mem::take(&mut message_text),
+                                        },
+                                    )
+                                    .map(|_| ())
+                            } else {
+                                Ok(())
+                            }
+                        };
+                        close.and_then(|_| {
+                            self.journal
+                                .append(
+                                    turn,
+                                    Some(item),
+                                    None,
+                                    EventKind::ProviderContent { state, visible },
+                                )
+                                .map(|_| ())
+                        })
+                    }
+                }
                 AiEvent::TextDelta { text } => {
                     assembled.push_str(&text);
+                    message_text.push_str(&text);
                     if visibility == GenerationVisibility::CompactionPrivate {
                         Ok(())
                     } else {
@@ -5555,6 +5782,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             .map(|started| {
                                 pending.push(PendingCall {
                                     timing: Default::default(),
+                                    user_effect: None,
                                     item,
                                     started,
                                     selected: Some(selected),
@@ -5672,7 +5900,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 Some(item),
                 None,
                 EventKind::AssistantMessage {
-                    text: assembled.clone(),
+                    text: message_text.clone(),
                 },
             )
         {
@@ -5950,6 +6178,26 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             ok,
             result: ToolResult::builtin(text),
         };
+        if let Some(tool) = call.user_effect.take() {
+            let params = match serde_json::from_str(&call.args) {
+                Ok(params) => params,
+                Err(error) => return Ok(answered(false, error.to_string())),
+            };
+            let (prepared, presentation) = match self.tools.prepare_amendment(tool.as_ref(), params)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => return Ok(answered(false, error)),
+            };
+            return self
+                .run_effect_tool(
+                    policy,
+                    policy_snapshot,
+                    turn,
+                    call,
+                    (tool, prepared, presentation),
+                )
+                .await;
+        }
         let selected = match call
             .selected
             .take()

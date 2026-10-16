@@ -2327,6 +2327,7 @@ mod end_to_end {
     fn quote() -> PricingQuote {
         let rate = |d: &str| Some(d.parse::<Amount>().expect("a valid test rate"));
         PricingQuote {
+            web_search: None,
             revision: PricingRevision("test-2026-08".to_string()),
             currency: CurrencyCode::new("USD").expect("USD is a valid code"),
             uncached_input: rate("0.000003"),

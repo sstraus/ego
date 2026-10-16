@@ -723,6 +723,8 @@ pub struct McpCapturedContextOperation {
     admission: McpAdmissionFingerprint,
     server_admission: Arc<McpServerAdmission>,
     factory: Arc<dyn McpOperationFactory>,
+    descriptor: ego_core::permit::ToolDescriptor,
+    generation: Arc<str>,
 }
 
 type PreparedCapturedOperation = (
@@ -737,6 +739,45 @@ pub(crate) type PreparedResumeOperation = (
     PreparedCall,
     ResumeFingerprints,
 );
+
+impl Tool for McpCapturedContextOperation {
+    fn descriptor(&self) -> ego_core::permit::ToolDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn prepare(
+        &self,
+        params: serde_json::Value,
+        _: &ego_core::permit::PrepareCtx<'_>,
+    ) -> Result<PreparedCall, ToolError> {
+        let schema = serde_json::to_value(&self.descriptor.schema)
+            .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+        let validator = jsonschema::validator_for(&schema)
+            .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+        validator
+            .validate(&params)
+            .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+        self.prepare_captured(params)
+            .map(|(_, _, call)| call)
+            .map_err(|e| ToolError::InvalidParams(e.to_string()))
+    }
+
+    fn execute<'a, 'io>(
+        &'a self,
+        call: PreparedCall,
+        io: &'a dyn ego_core::permit::GuardedIo<'io>,
+    ) -> futures::future::BoxFuture<'a, Result<ego_core::mcp::ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
+        self.factory.execute(
+            Arc::clone(&self.server_admission),
+            call,
+            io,
+            Arc::clone(&self.generation),
+        )
+    }
+}
 
 impl McpCapturedContextOperation {
     pub fn entry(&self) -> &ContextEntry {
@@ -863,6 +904,18 @@ impl McpRegistryCapture {
 
     pub fn stable_fingerprint(&self) -> &str {
         &self.inner.stable_fingerprint
+    }
+
+    /// Context-only commands retain the same immutable admission as tool calls.
+    pub fn context_commands(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
+        let commands = self
+            .inner
+            .contexts
+            .operations()
+            .iter()
+            .map(|operation| RegisteredTool::Effect(Arc::new(operation.clone()) as Arc<dyn Tool>))
+            .collect();
+        CapturedToolCatalogue::new_mcp(self.generation().to_owned(), commands, self.clone())
     }
 
     pub fn tools(&self) -> &[Arc<dyn Tool>] {
@@ -1590,6 +1643,11 @@ impl McpRegistryRuntime {
 }
 
 impl McpRuntimeBinding for McpRegistryRuntime {
+    fn context_commands(&self) -> Result<CapturedToolCatalogue, String> {
+        let capture = self.controller.capture().map_err(|e| e.to_string())?;
+        capture.context_commands().map_err(|e| e.to_string())
+    }
+
     fn resume_sealer(&self) -> Option<Arc<ResumeSealer>> {
         Some(Arc::clone(&self.resume_sealer))
     }
@@ -2009,7 +2067,7 @@ impl McpRegistryController {
                 servers.keys(),
             );
         }
-        let contexts = match capture_contexts(&stable_fingerprint, &servers) {
+        let contexts = match capture_contexts(&stable_fingerprint, &generation, &servers) {
             Ok(contexts) => Arc::new(contexts),
             Err(error) => {
                 return self.fail_publication(
@@ -2433,6 +2491,7 @@ fn validate_candidate_contents(
 
 fn capture_contexts(
     capture: &str,
+    generation: &Arc<str>,
     servers: &BTreeMap<McpServerName, Arc<AdmittedServerSlice>>,
 ) -> Result<McpCapturedContextSource, McpRegistryError> {
     let mut operations = Vec::new();
@@ -2467,6 +2526,14 @@ fn capture_contexts(
             operations.push(McpCapturedContextOperation {
                 entry,
                 subject,
+                generation: Arc::clone(generation),
+                descriptor: context_command_descriptor(
+                    server_name.as_str(),
+                    &resource.uri,
+                    false,
+                    &resource.name,
+                    &[],
+                ),
                 operation: McpOperationKind::ReadResource,
                 admission,
                 server_admission: Arc::clone(&server.admission),
@@ -2511,6 +2578,14 @@ fn capture_contexts(
             operations.push(McpCapturedContextOperation {
                 entry,
                 subject,
+                generation: Arc::clone(generation),
+                descriptor: context_command_descriptor(
+                    server_name.as_str(),
+                    &prompt.name,
+                    true,
+                    prompt.description.as_deref().unwrap_or(""),
+                    prompt.arguments.as_deref().unwrap_or_default(),
+                ),
                 operation: McpOperationKind::GetPrompt,
                 admission,
                 server_admission: Arc::clone(&server.admission),
@@ -3082,5 +3157,65 @@ mod collapsed_mcp_red {
             .expect("remove refresh");
         assert!(removed.admitted_tools().is_empty());
         assert!(removed.capture().tools().is_empty());
+    }
+}
+
+fn context_command_descriptor(
+    server: &str,
+    name: &str,
+    prompt: bool,
+    description: &str,
+    arguments: &[rmcp::model::PromptArgument],
+) -> ego_core::permit::ToolDescriptor {
+    // Escape underscores too, so the server/name separator cannot collide.
+    let encode = |value: &str| {
+        value
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || byte == b'-' {
+                    char::from(byte).to_string()
+                } else {
+                    format!("_{byte:02x}")
+                }
+            })
+            .collect::<String>()
+    };
+    let kind = if prompt { "mcp" } else { "mcp_resource" };
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for argument in arguments {
+        let mut property = serde_json::json!({"type":"string"});
+        if let Some(description) = &argument.description {
+            property["description"] = serde_json::Value::String(description.clone());
+        }
+        properties.insert(argument.name.clone(), property);
+        if argument.required == Some(true) {
+            required.push(argument.name.clone());
+        }
+    }
+    let schema = serde_json::json!({"type":"object", "properties":properties, "required":required, "additionalProperties":false});
+    ego_core::permit::ToolDescriptor {
+        name: format!("{kind}__{}__{}", encode(server), encode(name)),
+        description: format!("{server}: {name} — {description}"),
+        schema: serde_json::from_value(schema).expect("context command object schema"),
+    }
+}
+
+#[cfg(test)]
+mod context_command_tests {
+    use super::*;
+
+    #[test]
+    fn context_command_names_do_not_alias_server_or_prompt_separators() {
+        // Catches server/name delimiter collisions and same-name cross-server shadowing.
+        let descriptor =
+            |server, name| context_command_descriptor(server, name, true, "", &[]).name;
+        assert_ne!(descriptor("a__b", "c"), descriptor("a", "b__c"));
+        assert_ne!(descriptor("alpha", "review"), descriptor("beta", "review"));
+        assert_ne!(descriptor("a_2f", "c"), descriptor("a/", "c"));
+        assert_ne!(
+            descriptor("alpha", "guide"),
+            context_command_descriptor("alpha", "guide", false, "", &[]).name
+        );
     }
 }

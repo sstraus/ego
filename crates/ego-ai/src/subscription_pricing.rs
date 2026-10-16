@@ -16,6 +16,7 @@ pub(crate) fn standard(slug: &str) -> Option<Box<EquivalentPricing>> {
     Some(Box::new(EquivalentPricing {
         model: slug.to_owned(),
         quote: PricingQuote {
+            web_search: None,
             revision: PricingRevision(format!(
                 "https://developers.openai.com/api/docs/models/{model}#standard-2026-10-16"
             )),
