@@ -66,7 +66,7 @@ fn live_and_replay_preserve_execution_and_approval_measurements() {
         match execution_ms {
             Some(200) => assert!(actual.contains("200ms"), "{actual}"),
             Some(0) => assert!(actual.contains("0ms"), "{actual}"),
-            None => assert!(actual.contains("duration unavailable"), "{actual}"),
+            None => assert!(!actual.contains("duration unavailable"), "{actual}"),
             _ => unreachable!(),
         }
         assert_eq!(

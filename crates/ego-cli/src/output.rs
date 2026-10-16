@@ -381,6 +381,7 @@ struct StartedCall {
 /// The state of the answer currently being written.
 struct Streaming {
     answer: Answer,
+    tools: tool_row::ToolRows,
     open: bool,
 }
 
@@ -391,6 +392,7 @@ impl<'a> TextSink<'a> {
             quiet,
             text: Mutex::new(Streaming {
                 answer: Answer::new(capabilities),
+                tools: tool_row::ToolRows::default(),
                 open: false,
             }),
             ceiling: Mutex::new(None),
@@ -541,8 +543,16 @@ impl<'a> TextSink<'a> {
             .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
+        self.finish_text(&mut text);
+        text.tools.separate();
+    }
+
+    fn finish_text(&self, text: &mut Streaming) {
+        text.answer
+            .resize(self.capabilities.with_current_width().width);
         let rest = text.answer.finish();
         if !rest.is_empty() {
+            text.tools.separate();
             self.out.answer(&rest);
             text.open = !rest.ends_with('\n');
         }
@@ -557,10 +567,13 @@ impl<'a> TextSink<'a> {
             .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
+        text.answer
+            .resize(self.capabilities.with_current_width().width);
         let ready = text.answer.push(delta);
         if ready.is_empty() {
             return;
         }
+        text.tools.separate();
         self.out.answer(&ready);
         text.open = !ready.ends_with('\n');
     }
@@ -637,7 +650,9 @@ impl EventSink for TextSink<'_> {
                     .expect("a poisoned lock means a writer panicked mid-line")
                     .remove(item);
                 if let Some(started) = started {
-                    let record = tool_row::record(
+                    let mut streaming = self.text.lock().expect("streaming output lock");
+                    self.finish_text(&mut streaming);
+                    let record = streaming.tools.record(
                         &Finished {
                             name: &started.name,
                             args: &started.args,
@@ -645,9 +660,8 @@ impl EventSink for TextSink<'_> {
                             result: text.as_deref().unwrap_or(""),
                             timing: state.items.get(item).and_then(|item| item.tool_timing),
                         },
-                        self.capabilities,
+                        self.capabilities.with_current_width(),
                     );
-                    self.finish();
                     self.out.tool_row(&record.rows, record.detail);
                 }
             }
@@ -1008,11 +1022,7 @@ mod tests {
 
         let rows = out.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(
-            rows[0].0.starts_with("✓ read a.rs · 2 lines · "),
-            "{:?}",
-            rows[0].0
-        );
+        assert!(rows[0].0 == "✓ read a.rs · 2 lines", "{:?}", rows[0].0);
         assert!(!rows[0].0.contains('{'), "{:?}", rows[0].0);
         assert!(out.notes.lock().unwrap().is_empty());
     }
@@ -1034,6 +1044,61 @@ mod tests {
         let rows = out.rows.lock().unwrap();
         assert!(rows[0].0.starts_with("✓ read second.rs"), "{:?}", rows[0].0);
         assert!(rows[1].0.starts_with("✗ read first.rs"), "{:?}", rows[1].0);
+    }
+
+    // Catches: child groups lose ownership after task/parent/prose interleaving,
+    // or expand detail depends on an earlier task header still being visible.
+    #[test]
+    fn child_tool_groups_keep_ownership_across_interleaved_output() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let state = SessionState::default();
+        for name in [
+            "alpha › exec",
+            "alpha › read",
+            "beta › read",
+            "alpha › read",
+            "read",
+            "alpha › read",
+        ] {
+            let item = ItemId::new();
+            sink.publish(
+                &started(item, name, r#"{"path":"a.rs","argv":["printf","one"]}"#),
+                &state,
+            );
+            sink.publish(&completed(item, true, "one\ntwo\nthree"), &state);
+        }
+        sink.stream("parent prose\n\n");
+        let item = ItemId::new();
+        sink.publish(&started(item, "alpha › read", r#"{"path":"b.rs"}"#), &state);
+        sink.publish(&completed(item, true, "hello"), &state);
+        let rows = out.rows.lock().unwrap();
+        let shown = rows
+            .iter()
+            .map(|(rows, _)| rows.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let headers: Vec<_> = shown.lines().filter(|line| line.contains('↳')).collect();
+        assert_eq!(
+            headers,
+            [
+                "  ↳ task alpha",
+                "  ↳ task beta",
+                "  ↳ task alpha",
+                "  ↳ task alpha",
+                "  ↳ task alpha"
+            ]
+        );
+        assert!(!shown.contains("duration unavailable"));
+        assert!(
+            rows[1].1.starts_with("  ↳ task alpha\n    ✓ read a.rs"),
+            "expand detail must be self-contained: {:?}",
+            rows[1].1
+        );
+        assert!(
+            !rows[1].0.contains("alpha"),
+            "same-task continuation repeats header"
+        );
     }
 
     #[test]
