@@ -151,6 +151,8 @@ pub struct Reedline {
     // State of the painter after a `ReedlineEvent::ExecuteHostCommand` was requested, used after
     // execution to decide if we can re-use the previous prompt or paint a new one.
     suspended_state: Option<PainterSuspendedState>,
+    // Parsed keys following a host command belong to the resumed read.
+    pending_events: Vec<ReedlineEvent>,
 
     // Where the last `read_line` left its prompt, until anything repaints.
     last_prompt: Option<PromptFootprint>,
@@ -365,6 +367,7 @@ impl Reedline {
             history_cursor_on_excluded: false,
             input_mode: InputMode::Regular,
             suspended_state: None,
+            pending_events: Vec::new(),
             last_prompt: None,
             last_render_snapshot: None,
             painter,
@@ -1114,7 +1117,7 @@ impl Reedline {
 
             let mut events: Vec<Event> = vec![];
 
-            if !self.immediately_accept {
+            if !self.immediately_accept && self.pending_events.is_empty() {
                 if self.input_needs_polling() || completer_pending {
                     if event::poll(self.poll_interval)? {
                         events.push(crossterm::event::read()?);
@@ -1252,7 +1255,7 @@ impl Reedline {
         // Convert `Event` into `ReedlineEvent`. Also, fuse consecutive
         // `ReedlineEvent::EditCommand` into one. Also, if there're multiple
         // `ReedlineEvent::Resize`, only keep the last one.
-        let mut reedline_events: Vec<ReedlineEvent> = vec![];
+        let mut reedline_events = std::mem::take(&mut self.pending_events);
         let mut edits = vec![];
         let mut resize = None;
         for event in events {
@@ -1289,7 +1292,8 @@ impl Reedline {
 
         // Handle reedline events.
         let mut need_repaint = false;
-        for event in reedline_events {
+        let mut remaining = reedline_events.into_iter();
+        while let Some(event) = remaining.next() {
             match self.handle_event(prompt, event)? {
                 EventStatus::Exits(signal) => {
                     // Check if we are merely suspended (to process an ExecuteHostCommand event)
@@ -1301,6 +1305,7 @@ impl Reedline {
                         self.painter.move_cursor_to_end()?;
                     } else {
                         self.last_prompt = Some(self.painter.footprint_in_place());
+                        self.pending_events.extend(remaining);
                     }
                     return Ok(ControlFlow::Break(signal));
                 }
