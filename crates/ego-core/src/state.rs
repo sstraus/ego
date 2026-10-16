@@ -1340,6 +1340,10 @@ impl SessionState {
                 .filter(|settled| {
                     matches!(settled.outcome, QuestionOutcome::Answered(_))
                         && matches!(
+                            settled.pending.request.mode,
+                            crate::question::QuestionMode::Round(_)
+                        )
+                        && matches!(
                             settled.pending.target,
                             QuestionTarget::ForeignContinuation { .. }
                         )

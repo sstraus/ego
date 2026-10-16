@@ -314,7 +314,8 @@ impl McpContinuationOwner {
                 .journal
                 .accept_answer(id, raw_answer, now)
                 .map_err(continuation)?,
-            ContinuationState::Accepted if pending.accepted_answer() == Some(raw_answer) => {}
+            ContinuationState::Accepted
+                if pending.round().is_some() && pending.accepted_answer() == Some(raw_answer) => {}
             _ => return Err(continuation(ContinuationError::InvalidTransition)),
         }
         let accepted = self
