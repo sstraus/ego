@@ -276,6 +276,9 @@ pub(super) fn tools_with_mode(
             .iter()
             .any(|tool| tool.descriptor().name == name.as_str())
         {
+            if name == "web_search" {
+                return Err(UsageError("--tools web_search: no search backend configured; set EXA_API_KEY to enable Exa (account credits and possible paid charges); no fallback is used".into()));
+            }
             let known: Vec<String> = all.iter().map(|tool| tool.descriptor().name).collect();
             return Err(UsageError(format!(
                 "--tools {name}: there is no such builtin; this build has {}",
