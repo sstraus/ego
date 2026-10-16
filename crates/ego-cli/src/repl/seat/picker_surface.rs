@@ -151,7 +151,7 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
             } else {
                 (
                     "Type to filter; Up/Down or number selects. Enter continues, then s = this session only; Esc cancels.",
-                    "Enter continues, then s = this session only; Esc cancels.",
+                    "Enter continues; Esc cancels.",
                 )
             };
             // A short terminal keeps its rows and gives up the typing hint.
@@ -159,12 +159,8 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
             if height.saturating_sub(3 + instructions.len()) < MIN_VISIBLE_MODELS {
                 instructions = wrap_instruction(compact, width);
             }
-            let visible_rows = height.saturating_sub(3 + instructions.len()).max(1);
-            let selected = view
-                .models
-                .iter()
-                .position(|row| view.current_id.as_deref() == Some(row.slug.to_string().as_str()));
-            let (start, end) = window_bounds(view.models.len(), visible_rows, selected);
+            let visible_rows = height.saturating_sub(2 + instructions.len()).max(1);
+            let (models, start, end) = model_window(view, width, visible_rows);
             let title = format!(
                 "Select model ({}-{end} of {})",
                 if end == 0 { 0 } else { start + 1 },
@@ -175,34 +171,13 @@ fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> S
             } else {
                 truncate_cells(&format!("{title} · filter: {}", view.filter), width)
             });
-            rows.push("✓ available; ! unavailable".to_string());
             if view.models.is_empty() {
                 rows.push(truncate_cells(
                     &format!("No model matches \"{}\"; Backspace edits.", view.filter),
                     width,
                 ));
             }
-            rows.extend(
-                view.models[start..end]
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, row)| {
-                        let index = start + offset;
-                        let id = row.slug.to_string();
-                        let marker = if view.current_id.as_deref() == Some(id.as_str()) {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        let symbol = availability_symbol(&row.availability);
-                        let suffix = if view.current_model.as_deref() == Some(id.as_str()) {
-                            format!(" {symbol} current")
-                        } else {
-                            format!(" | {symbol}")
-                        };
-                        model_row(marker, index + 1, &id, &suffix, width)
-                    }),
-            );
+            rows.extend(models);
             rows.extend(instructions);
         }
         PickerFocus::Reasoning => {
@@ -267,11 +242,115 @@ pub(super) fn window_bounds(
     (start, start + visible)
 }
 
-fn availability_symbol(availability: &ego_ai::catalogue::ModelAvailability) -> &'static str {
-    match availability {
-        ego_ai::catalogue::ModelAvailability::Available => "✓",
-        ego_ai::catalogue::ModelAvailability::Unavailable { .. } => "!",
+/// Window physical rows, retaining the provider explanation when its first
+/// model has scrolled out of view. Headings are not selectable model numbers.
+fn model_window(
+    view: &ModelPickerView,
+    width: usize,
+    visible: usize,
+) -> (Vec<String>, usize, usize) {
+    let mut lines = Vec::new();
+    let mut groups = Vec::new();
+    let mut indices = Vec::new();
+    let mut selected = None;
+    let mut previous = None;
+    let mut heading = Vec::new();
+    for (index, row) in view.models.iter().enumerate() {
+        let group = match &row.availability {
+            ego_ai::catalogue::ModelAvailability::Available => None,
+            ego_ai::catalogue::ModelAvailability::Unavailable { cause, .. } => {
+                Some((row.slug.provider.as_str(), *cause))
+            }
+        };
+        if group != previous {
+            heading = group.map_or_else(Vec::new, |(provider, cause)| {
+                provider_unavailable(provider, cause)
+                    .lines()
+                    .flat_map(|line| wrap_instruction(line, width))
+                    .collect()
+            });
+            for (part, text) in heading.iter().enumerate() {
+                lines.push(text.clone());
+                groups.push(heading[..part].to_vec());
+                indices.push(None);
+            }
+            previous = group;
+        }
+        let id = row.slug.to_string();
+        let marker = if view.current_id.as_deref() == Some(id.as_str()) {
+            selected = Some(lines.len());
+            ">"
+        } else {
+            " "
+        };
+        let suffix = if view.current_model.as_deref() == Some(id.as_str()) {
+            " current"
+        } else {
+            ""
+        };
+        let text = model_row(marker, index + 1, &id, suffix, width);
+        lines.push(if group.is_some() {
+            crate::render::Line::styled(text, crate::render::Style::PLAIN.dim())
+                .render(crate::render::Depth::TrueColor)
+        } else {
+            text
+        });
+        groups.push(heading.clone());
+        indices.push(Some(index));
     }
+    let (mut start, _) = window_bounds(lines.len(), visible, selected);
+    // Do not put a continuation heading between its selected model and the
+    // viewport. At narrow sizes, prefer the model over unrelated earlier rows.
+    while selected.is_some_and(|selected| {
+        selected >= start + visible.saturating_sub(groups[start].len()).max(1)
+    }) {
+        start += 1;
+    }
+    let context = groups.get(start).cloned().unwrap_or_default();
+    let mut end = (start + visible.saturating_sub(context.len()).max(1)).min(lines.len());
+    while end > start && indices[end - 1].is_none() {
+        end -= 1;
+    }
+    let first = indices[start..end]
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .unwrap_or(0);
+    let last = indices[start..end]
+        .iter()
+        .flatten()
+        .last()
+        .map_or(0, |index| index + 1);
+    let mut rendered = context;
+    rendered.extend_from_slice(&lines[start..end]);
+    (rendered, first, last)
+}
+
+fn provider_unavailable(
+    provider: &str,
+    cause: ego_ai::catalogue::ModelAvailabilityCause,
+) -> String {
+    use ego_ai::catalogue::ModelAvailabilityCause;
+    let remedy = match cause {
+        ModelAvailabilityCause::MissingCredential => {
+            format!("not signed in\nRun `ego auth login {provider}`")
+        }
+        ModelAvailabilityCause::SourceUnreachable => {
+            format!(
+                "cannot reach provider; check its connection, then run `ego models --provider {provider} --refresh`"
+            )
+        }
+        ModelAvailabilityCause::SourceMalformed | ModelAvailabilityCause::IncompleteFacts => {
+            format!(
+                "model details missing or invalid; run `ego models --provider {provider} --refresh`"
+            )
+        }
+        ModelAvailabilityCause::MappingUnavailable => {
+            "provider not supported; choose another provider".to_owned()
+        }
+    };
+    format!("{provider} — unavailable: {remedy}")
 }
 
 fn model_row(marker: &str, index: usize, slug: &str, suffix: &str, width: usize) -> String {
@@ -340,6 +419,98 @@ mod tests {
         }
     }
 
+    fn plain_picker(rendered: &str) -> String {
+        rendered.replace("\x1b[2m", "").replace("\x1b[0m", "")
+    }
+
+    // Catches: scrolled model rows depend on a legend for a bare pipe and symbol.
+    #[test]
+    fn scrolled_picker_rows_have_no_bare_separator_or_symbol() {
+        let mut view = view();
+        for index in 0..30 {
+            let mut missing = view.models[1].clone();
+            missing.slug.model = format!("model-{index:02}");
+            view.models.push(missing);
+        }
+        view.current_id = Some(view.models[25].slug.to_string());
+        for width in [40, 60, 80] {
+            let rendered = model_picker_prompt(&view, width, 12);
+            assert!(!rendered.contains('|'), "{rendered}");
+            assert!(!rendered.contains('!'), "{rendered}");
+            assert!(!rendered.contains("✓ available"), "{rendered}");
+            assert!(
+                plain_picker(&rendered)
+                    .lines()
+                    .all(|line| line.width() <= width)
+            );
+        }
+    }
+
+    // Catches: unavailable provider rows omit the reason and recovery command.
+    #[test]
+    fn unavailable_provider_group_explains_credentials_without_secret_details() {
+        let mut view = view();
+        view.models.push(view.models[1].clone());
+        let rendered = model_picker_prompt(&view, 80, 24);
+        assert_eq!(
+            rendered.matches("anthropic — unavailable").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(rendered.contains("not signed in"), "{rendered}");
+        assert!(rendered.contains("ego auth login anthropic"), "{rendered}");
+        assert!(!rendered.contains("MissingCredential"));
+        assert!(!rendered.contains("ANTHROPIC_API_KEY"));
+    }
+
+    // Catches: scrolling inside an unavailable group loses its recovery context.
+    #[test]
+    fn scrolled_provider_keeps_its_heading_and_selected_model_at_every_width() {
+        let mut view = view();
+        for index in 0..30 {
+            let mut row = view.models[1].clone();
+            row.slug.model = format!("model-{index:02}");
+            view.models.push(row);
+        }
+        for width in [40, 60, 80] {
+            for index in [0, 1, 16, 31] {
+                view.current_id = Some(view.models[index].slug.to_string());
+                let rendered = model_picker_prompt(&view, width, 12);
+                let plain = plain_picker(&rendered);
+                assert!(plain.lines().count() < 12, "{plain}");
+                assert!(plain.lines().all(|line| line.width() <= width), "{plain}");
+                assert!(plain.contains(&format!("> {}.", index + 1)), "{plain}");
+                if index > 0 {
+                    assert!(plain.contains("anthropic — unavailable"), "{plain}");
+                    assert!(plain.contains("ego auth login anthropic"), "{plain}");
+                    assert!(rendered.contains("\x1b[2m"), "models must be dimmed");
+                }
+            }
+        }
+    }
+
+    // Catches: discovery failures misleadingly recommend signing in.
+    #[test]
+    fn provider_failures_name_their_own_recovery_not_credentials() {
+        for cause in [
+            ModelAvailabilityCause::SourceUnreachable,
+            ModelAvailabilityCause::SourceMalformed,
+            ModelAvailabilityCause::IncompleteFacts,
+            ModelAvailabilityCause::MappingUnavailable,
+        ] {
+            let text = provider_unavailable("ollama", cause);
+            assert!(!text.contains("login"));
+            assert!(!text.contains(&format!("{cause:?}")));
+            assert!(
+                text.contains(if cause == ModelAvailabilityCause::MappingUnavailable {
+                    "choose another provider"
+                } else {
+                    "ego models --provider ollama --refresh"
+                })
+            );
+        }
+    }
+
     #[test]
     fn a_picker_before_session_setup_draws_in_the_terminal_width() {
         assert_eq!(picker_width(0, Some(120)), 120);
@@ -352,7 +523,7 @@ mod tests {
         for width in [80, 60, 40] {
             let rendered = model_picker_prompt(&view(), width, 24);
             assert!(
-                rendered
+                plain_picker(&rendered)
                     .lines()
                     .all(|line| UnicodeWidthStr::width(line) <= width),
                 "picker exceeded {width} cells:\n{rendered}"

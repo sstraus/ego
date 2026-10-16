@@ -4216,6 +4216,56 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     writer_join.join().expect("writer thread panicked");
 }
 
+// Catches: the live picker loses unavailable-provider context after navigation.
+#[test]
+fn model_picker_unavailable_groups_read_without_a_legend_at_80_columns() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# picker grouping fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(b"/model\r").expect("open picker");
+    input.flush().expect("picker flush");
+    until_normalized(&reader, &mut output, start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    // Filtering still runs through the production selector and snapshot.
+    let filtered = output.len();
+    input.write_all(b"anthropic").expect("filter picker");
+    input.flush().expect("filter flush");
+    until_normalized(&reader, &mut output, filtered, "filter: anthropic");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("anthropic — unavailable: not signed in"),
+        "{visible}"
+    );
+    assert!(visible.contains("ego auth login anthropic"), "{visible}");
+    assert!(!visible.contains("| !"), "{visible}");
+    assert!(!visible.contains("✓ available"), "{visible}");
+    let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reports/visual");
+    std::fs::create_dir_all(&artifacts).expect("visual evidence directory");
+    std::fs::write(artifacts.join("picker-after-80.txt"), &visible).expect("screen evidence");
+    std::fs::write(artifacts.join("picker-after-80.ansi"), &output).expect("PTY evidence");
+    let start = output.len();
+    input.write_all(b"\x1b").expect("close picker");
+    input.flush().expect("close flush");
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+}
+
 #[test]
 fn model_picker_title_remains_visible_in_a_short_terminal() {
     let stub = Stub::start(Plan::default());
