@@ -6,12 +6,17 @@ mod support;
 use serde_json::json;
 use support::{AcpHost, Ego, Places, Plan, Reply, Stub, text};
 
-fn host(places: &Places, stub: &Stub) -> AcpHost {
+fn configure(places: &Places) {
+    std::fs::create_dir_all(places.home_path().join("Gits")).expect("isolated default roots");
     std::fs::write(
         places.home_path().join("config.toml"),
-        "model = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'off'\n",
+        "model = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'workspace'\n",
     )
     .expect("isolated ACP configuration");
+}
+
+fn host(places: &Places, stub: &Stub) -> AcpHost {
+    configure(places);
     AcpHost::adopt(
         Ego::at(places.home_path(), places.workspace_path(), Some(stub))
             .subcommand("acp")
@@ -91,7 +96,28 @@ fn malformed_prompt_is_refused_then_two_stdio_turns_keep_attachment_and_history(
 fn stdin_eof_before_initialize_exits_without_generation() {
     let places = Places::new();
     let stub = Stub::start(Plan::default());
-    let stderr = host(&places, &stub).finish();
-    assert!(stderr.is_empty(), "unexpected diagnostics: {stderr}");
+    configure(&places);
+    let mut running = Ego::at(places.home_path(), places.workspace_path(), Some(&stub))
+        .subcommand("acp")
+        .spawn();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while running.is_running() {
+        if std::time::Instant::now() >= deadline {
+            running
+                .child
+                .kill()
+                .expect("kill timed-out owned ACP process");
+            let output = running.finish();
+            panic!("ACP did not exit after empty stdin EOF: {}", output.stderr);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = running.finish();
+    assert_eq!(output.code, Some(0), "{}", output.stderr);
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected diagnostics: {}",
+        output.stderr
+    );
     assert!(stub.generations().is_empty(), "EOF submitted a prompt");
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Stdio};
+use agent_client_protocol::{ByteStreams, Client, ConnectTo, ConnectionTo};
 use agent_client_protocol_schema::v1;
 use ego_acp::auth::Credential;
 use ego_acp::serve::{
@@ -45,7 +45,9 @@ use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
 use ego_tools::store::OsIo;
 use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::watch;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::acp_confinement::CliSessionConfinementAdmission;
 use crate::acp_controls::AcpSessionControls;
@@ -1246,10 +1248,23 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         )
         .await
         .map_err(|error| format!("the ACP listener ended badly: {error}")),
-        None => factory()
-            .connect_to(Stdio::new())
-            .await
-            .map_err(|error| format!("the ACP connection ended badly: {error}")),
+        None => {
+            let mut input = tokio::io::BufReader::new(tokio::io::stdin());
+            // No initialization is possible after empty stdin EOF. The SDK's
+            // negotiation router otherwise waits for a first frame indefinitely.
+            // Keep any buffered bytes for the ordinary SDK framing path.
+            match input.fill_buf().await {
+                Ok([]) => Ok(()),
+                Ok(_) => factory()
+                    .connect_to(ByteStreams::new(
+                        tokio::io::stdout().compat_write(),
+                        input.compat(),
+                    ))
+                    .await
+                    .map_err(|error| format!("the ACP connection ended badly: {error}")),
+                Err(error) => Err(format!("the ACP input could not be read: {error}")),
+            }
+        }
     };
     mcp_cancel.cancel(CancelCause::Host);
     drop(mcp_effects);
