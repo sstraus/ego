@@ -60,8 +60,6 @@ pub trait TextOutput: Diagnostics {
     }
     /// Replace a live retry row; ordinary outputs remain append-only.
     fn retry_status(&self, _message: Option<(&str, u64)>) {}
-    }
-
     fn begin_block(&self) {}
     fn finish(&self) {}
 }
