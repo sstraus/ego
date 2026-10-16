@@ -795,61 +795,22 @@ pub(super) async fn drive_execution<S: EventSink>(
                             perimeter = perimeter
                                 .with_execution_observation(&observation, probe_evidence.as_ref());
                             let ports = Arc::new(ports.with_session_processes(&session_hook_ports));
-                            let inline = staged_images
-                                .iter()
-                                .filter_map(|staged| match &staged.source {
-                                    StagedPasteSource::Inline(image) => Some(image.clone()),
-                                    StagedPasteSource::Path(_) => None,
-                                })
-                                .collect::<Vec<_>>();
-                            let specs = pending_attachments
-                                .iter()
-                                .cloned()
-                                .chain(staged_images.iter().filter_map(
-                                    |staged| match &staged.source {
-                                        StagedPasteSource::Path(path) => Some(path.clone()),
-                                        StagedPasteSource::Inline(_) => None,
-                                    },
-                                ))
-                                .collect::<Vec<_>>();
-                            let images = if matches!(
-                                asked.as_ref(),
-                                Some(InteractiveTurnInput::Prompt(_))
-                            ) && (!inline.is_empty() || !specs.is_empty())
-                            {
-                                let images = match acquire_attachments(
-                                    Attachments {
-                                        inline: &inline,
-                                        specs: &specs,
-                                    },
-                                    &source,
-                                    &ports,
-                                    &turn_cancel,
-                                    run_deadline,
-                                    &cwd,
-                                    active.evidence().blob_store(),
-                                )
-                                .await
-                                {
-                                    Ok(images) => images,
-                                    // An admission refusal of this turn's
-                                    // attachments is not a bad command line:
-                                    // the staged images stay so the user can
-                                    // remove one (Ctrl+Backspace) and resubmit.
-                                    Err(RunTermination::UsageError { message }) => {
-                                        diagnostics.note(&format!(
-                                                "{message}; the turn was not sent, remove an attachment and submit it again"
-                                            ));
-                                        continue;
-                                    }
-                                    Err(other) => return Err(other),
-                                };
-                                pending_attachments.clear();
-                                staged_images.clear();
-                                seat.set_image_chips(Vec::new());
-                                images
-                            } else {
-                                Vec::new()
+                            let Some(images) = acquire_interactive_images(InteractiveImages {
+                                asked: asked.as_ref(),
+                                pending_attachments: &mut pending_attachments,
+                                staged_images: &mut staged_images,
+                                source: &source,
+                                ports: &ports,
+                                cancel: &turn_cancel,
+                                run_deadline,
+                                cwd: &cwd,
+                                blobs: active.evidence().blob_store(),
+                                seat: seat.as_ref(),
+                                diagnostics,
+                            })
+                            .await?
+                            else {
+                                continue;
                             };
                             let settled_before = state
                                 .detached_execs
@@ -929,22 +890,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                             {
                                 refresh_prompt = false;
                             }
-                            if let Some(status) = status.as_ref()
-                                && status.human
-                            {
-                                match policy_selection.snapshot() {
-                                    Ok(policy) => status.seat.set_status_mode(policy.mode),
-                                    Err(error) => diagnostics.note(&format!(
-                                        "the active policy mode could not be refreshed: {error}"
-                                    )),
-                                }
-                                match selection.snapshot() {
-                        Ok(selected) => status.seat.refresh_status(&state, selected),
-                        Err(error) => diagnostics.note(&format!(
-                            "the native status selection could not be refreshed: {error}"
-                        )),
-                    }
-                            }
+                            refresh_turn_status(
+                                status.as_ref(),
+                                &policy_selection,
+                                &selection,
+                                &state,
+                                diagnostics,
+                            );
                             seat.refresh_queue(control.status());
                             let Some((termination, result)) = driven else {
                                 continue;
@@ -987,29 +939,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                     };
 
                     drop(model_switch_owner);
-                    let session_end = match skill_owner.drain().await {
-                        Ok(()) => {
-                            let runtime = match recovered_epoch_policy {
-                                Some(policy) => session_hooks.bind_policy(policy),
-                                None => session_hooks.bind_current(policy_source.as_ref()),
-                            };
-                            match runtime {
-                                Ok(runtime) => {
-                                    dispatch_session_hook(
-                                        &runtime,
-                                        active.id(),
-                                        session_hooks.turn,
-                                        HookLifecycle::SessionEnd,
-                                    )
-                                    .await
-                                }
-                                Err(error) => Err(error),
-                            }
-                        }
-                        Err(error) => Err(RunTermination::Failed {
-                            message: error.to_string(),
-                        }),
-                    };
+                    let session_end = end_session_epoch(
+                        &skill_owner,
+                        &session_hooks,
+                        recovered_epoch_policy,
+                        policy_source.as_ref(),
+                        active.id(),
+                    )
+                    .await;
                     drop(skill_owner);
                     drop(session_hooks);
                     drop(session_journal);
@@ -3248,4 +3185,151 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         request: request_id,
         parent: pre_compact.closure_event(),
     }));
+}
+
+async fn end_session_epoch(
+    skill_owner: &CliSkillInvocationOwner<'_>,
+    session_hooks: &SessionHookComposition<'_>,
+    recovered_epoch_policy: Option<Arc<PolicyEngine>>,
+    policy_source: &dyn GenerationPolicySource,
+    session_id: SessionId,
+) -> Result<(), RunTermination> {
+    match skill_owner.drain().await {
+        Ok(()) => {
+            let runtime = match recovered_epoch_policy {
+                Some(policy) => session_hooks.bind_policy(policy),
+                None => session_hooks.bind_current(policy_source),
+            };
+            match runtime {
+                Ok(runtime) => {
+                    dispatch_session_hook(
+                        &runtime,
+                        session_id,
+                        session_hooks.turn,
+                        HookLifecycle::SessionEnd,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(RunTermination::Failed {
+            message: error.to_string(),
+        }),
+    }
+}
+
+struct InteractiveImages<'a> {
+    asked: Option<&'a InteractiveTurnInput>,
+    pending_attachments: &'a mut Vec<String>,
+    staged_images: &'a mut Vec<StagedPasteImage>,
+    source: &'a Arc<model::CliGenerationModelSource>,
+    ports: &'a Arc<RunEffectPorts>,
+    cancel: &'a CancelToken,
+    run_deadline: Option<std::time::Instant>,
+    cwd: &'a Path,
+    blobs: &'a dyn BlobStore,
+    seat: &'a dyn InteractiveSeat,
+    diagnostics: &'a dyn Diagnostics,
+}
+
+async fn acquire_interactive_images(
+    input: InteractiveImages<'_>,
+) -> Result<Option<Vec<ImageRef>>, RunTermination> {
+    let InteractiveImages {
+        asked,
+        pending_attachments,
+        staged_images,
+        source,
+        ports,
+        cancel: turn_cancel,
+        run_deadline,
+        cwd,
+        blobs,
+        seat,
+        diagnostics,
+    } = input;
+    let inline = staged_images
+        .iter()
+        .filter_map(|staged| match &staged.source {
+            StagedPasteSource::Inline(image) => Some(image.clone()),
+            StagedPasteSource::Path(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let specs = pending_attachments
+        .iter()
+        .cloned()
+        .chain(
+            staged_images
+                .iter()
+                .filter_map(|staged| match &staged.source {
+                    StagedPasteSource::Path(path) => Some(path.clone()),
+                    StagedPasteSource::Inline(_) => None,
+                }),
+        )
+        .collect::<Vec<_>>();
+    let images = if matches!(asked, Some(InteractiveTurnInput::Prompt(_)))
+        && (!inline.is_empty() || !specs.is_empty())
+    {
+        let images = match acquire_attachments(
+            Attachments {
+                inline: &inline,
+                specs: &specs,
+            },
+            source,
+            ports,
+            turn_cancel,
+            run_deadline,
+            cwd,
+            blobs,
+        )
+        .await
+        {
+            Ok(images) => images,
+            // An admission refusal of this turn's
+            // attachments is not a bad command line:
+            // the staged images stay so the user can
+            // remove one (Ctrl+Backspace) and resubmit.
+            Err(RunTermination::UsageError { message }) => {
+                diagnostics.note(&format!(
+                    "{message}; the turn was not sent, remove an attachment and submit it again"
+                ));
+                return Ok(None);
+            }
+            Err(other) => return Err(other),
+        };
+        pending_attachments.clear();
+        staged_images.clear();
+        seat.set_image_chips(Vec::new());
+        images
+    } else {
+        Vec::new()
+    };
+
+    Ok(Some(images))
+}
+
+fn refresh_turn_status(
+    status: Option<&InteractiveStatus>,
+    policy_selection: &GenerationPolicySelection,
+    selection: &model::GenerationSelection,
+    state: &SessionState,
+    diagnostics: &dyn Diagnostics,
+) {
+    if let Some(status) = status
+        && status.human
+    {
+        match policy_selection.snapshot() {
+            Ok(policy) => status.seat.set_status_mode(policy.mode),
+            Err(error) => diagnostics.note(&format!(
+                "the active policy mode could not be refreshed: {error}"
+            )),
+        }
+        match selection.snapshot() {
+            Ok(selected) => status.seat.refresh_status(state, selected),
+            Err(error) => diagnostics.note(&format!(
+                "the native status selection could not be refreshed: {error}"
+            )),
+        }
+    }
 }
