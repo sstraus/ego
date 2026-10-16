@@ -41,7 +41,14 @@ fn discover_roots(roots: &[PathBuf]) -> Result<Vec<NamedAgent>, UsageError> {
             .canonicalize()
             .map_err(|error| UsageError(error.to_string()))?;
         // A project-local link must not silently import definitions outside its scope.
-        if canonical != *root {
+        if [Some(root.as_path()), root.parent()]
+            .into_iter()
+            .flatten()
+            .any(|path| {
+                std::fs::symlink_metadata(path)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            })
+        {
             return Err(UsageError(format!(
                 "agent catalogue {} must not traverse symlinks",
                 root.display()
@@ -206,6 +213,28 @@ mod tests {
                 .unwrap_err()
                 .0
                 .contains("cannot grant")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_ancestor_alias_does_not_reject_a_regular_catalogue() {
+        // Catches: macOS /etc -> /private/etc making every system catalogue invalid.
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let actual = root.join("actual");
+        let definitions = actual.join("ego/agents");
+        std::fs::create_dir_all(&definitions).unwrap();
+        std::fs::write(
+            definitions.join("review.md"),
+            "---\nversion: 1\n---\nReview",
+        )
+        .unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(actual, &alias).unwrap();
+        assert_eq!(
+            discover_roots(&[alias.join("ego/agents")]).unwrap().len(),
+            1
         );
     }
 
