@@ -38,6 +38,9 @@ impl Fixture {
             .env("TMPDIR", self.temp.path())
             .current_dir(self.workspace.path())
             .args(args);
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
         for (key, value) in env {
             command.env(key, value);
         }
