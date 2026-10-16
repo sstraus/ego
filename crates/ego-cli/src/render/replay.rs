@@ -384,6 +384,21 @@ mod tests {
                 "> first\n\nProse\n\n✓ read first · 1 line · duration unavailable\n\nDone\n\n> second\n\nFinal"
             );
             println!("rhythm replay width={width} grid={grid:?}");
+
+            for (prose, expected) in [(true, "\nOnly prose"), (false, "\n✓ read only\n  tail")] {
+                let (sender, receiver) = crossbeam::channel::unbounded();
+                let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+                if prose {
+                    for delta in ["Only ", "pro", "se", "\n"] {
+                        output.answer(delta);
+                    }
+                } else {
+                    output.tool_row("✓ read only\n  tail", String::new());
+                }
+                output.finish();
+                let bytes = receiver.try_iter().collect::<String>();
+                assert_eq!(capture(&bytes, width), expected);
+            }
         }
     }
 
