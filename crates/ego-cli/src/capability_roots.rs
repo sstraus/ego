@@ -32,7 +32,7 @@ pub(crate) fn discover_capability_roots(
             for namespace in if leaf == "commands" {
                 &[".ego", ".agents", ".claude", ".opencode"][..]
             } else {
-                &[".ego", ".agents", ".claude"][..]
+                &[".ego", ".agents", ".claude", ".codex"][..]
             } {
                 roots.push(CapabilityRoot {
                     source: SkillSourceAuthority::Project,
@@ -72,3 +72,80 @@ pub(crate) fn discover_capability_roots(
     });
     roots
 }
+
+/// Add filesystem-backed foreign skill roots without importing foreign policy.
+/// Plugin caches are intentionally not roots: installation does not mean enabled.
+pub(crate) fn register_external_skill_roots(
+    roots: &mut Vec<CapabilityRoot>,
+    codex_home: Option<&Path>,
+    claude_config: Option<&Path>,
+    claude_managed: &Path,
+    codex_managed: &Path,
+) {
+    let insertion = roots
+        .iter()
+        .position(|root| root.source == SkillSourceAuthority::System)
+        .unwrap_or(roots.len());
+    let mut external = Vec::new();
+    if let Some(base) = codex_home {
+        for suffix in ["skills", "skills/.system"] {
+            external.push(CapabilityRoot {
+                // Both caches are writable by the user, not machine policy.
+                source: SkillSourceAuthority::User,
+                path: base.join(suffix),
+            });
+        }
+    }
+    if let Some(base) = claude_config {
+        external.push(CapabilityRoot {
+            source: SkillSourceAuthority::User,
+            path: base.join("skills"),
+        });
+    }
+    for path in [
+        claude_managed.join(".claude/skills"),
+        codex_managed.join("skills"),
+    ] {
+        external.push(CapabilityRoot {
+            source: SkillSourceAuthority::System,
+            path,
+        });
+    }
+    external.retain(|candidate| !roots.iter().any(|root| root.path == candidate.path));
+    roots.splice(insertion..insertion, external);
+}
+
+pub(crate) fn claude_managed_directory() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
+    }
+}
+
+pub(crate) fn codex_managed_directory() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\ProgramData\OpenAI\Codex")
+    } else {
+        PathBuf::from("/etc/codex")
+    }
+}
+
+/// No cache scan can reproduce foreign enablement, account sync or host context.
+/// Doctor reports these unsupported source classes even when no cache exists.
+pub(crate) const UNSUPPORTED_SKILL_SOURCES: &[(&str, &str)] = &[
+    (
+        "skills.plugins.claude",
+        "Claude Code plugin skills are unsupported: enabled plugin roots, manifest skills paths, root SKILL.md and --plugin-dir require foreign enablement and namespace policy; installed caches are not admitted",
+    ),
+    (
+        "skills.plugins.codex",
+        "Codex plugin skills are unsupported: configured, bundled and remote plugin roots require foreign enablement and namespace policy; installed caches are not admitted",
+    ),
+    (
+        "skills.dynamic",
+        "Dynamic skill sources are unsupported: Claude additional-directory, worktree-origin and claude.ai synced skills; Codex remote environment roots and custom config-layer roots; install a reviewed standalone skill in an ego skill root",
+    ),
+];

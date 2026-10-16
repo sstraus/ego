@@ -72,6 +72,27 @@ impl SkillDiscovery {
 
     pub(crate) fn for_workspace(workspace: &Path, trusted_project: bool) -> Option<Self> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut roots = crate::capability_roots::discover_capability_roots(
+            workspace,
+            trusted_project,
+            Path::new("/etc/ego"),
+            &crate::config::ego_home()?,
+            home.as_deref(),
+            "skills",
+        );
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|path| path.join(".codex")));
+        let claude_config = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|path| path.join(".claude")));
+        crate::capability_roots::register_external_skill_roots(
+            &mut roots,
+            codex_home.as_deref(),
+            claude_config.as_deref(),
+            &crate::capability_roots::claude_managed_directory(),
+            &crate::capability_roots::codex_managed_directory(),
+        );
         Some(Self {
             command_roots: crate::capability_roots::discover_capability_roots(
                 workspace,
@@ -81,14 +102,7 @@ impl SkillDiscovery {
                 home.as_deref(),
                 "commands",
             ),
-            roots: crate::capability_roots::discover_capability_roots(
-                workspace,
-                trusted_project,
-                Path::new("/etc/ego"),
-                &crate::config::ego_home()?,
-                home.as_deref(),
-                "skills",
-            ),
+            roots,
             trusted_project,
         })
     }
