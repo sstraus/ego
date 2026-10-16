@@ -353,7 +353,7 @@ pub struct PreparedCall {
     read_offset: u64,
     mcp: Option<Box<McpPreparedEnvelope>>,
     hook_http: Option<Box<HookHttpPreparedEnvelope>>,
-    web_http: Option<(HttpRoute, HttpRequest)>,
+    web_http: Option<Box<(HttpRoute, HttpRequest)>>,
     provenance: PreparedCallProvenance,
 }
 
@@ -452,12 +452,12 @@ impl PreparedCall {
                 request_digest: HttpRequestDigest::of(&request),
             },
         );
-        call.web_http = Some((route, request));
+        call.web_http = Some(Box::new((route, request)));
         call
     }
 
     pub fn web_http_envelope(&self) -> Option<&(HttpRoute, HttpRequest)> {
-        self.web_http.as_ref()
+        self.web_http.as_deref()
     }
 
     pub fn with_op(mut self, additional: Op) -> Self {
@@ -874,7 +874,7 @@ impl PreparedCall {
             frame(&mut digest, envelope.request_digest.as_bytes());
             frame(&mut digest, &[u8::from(envelope.secret.is_some())]);
         }
-        if let Some((route, request)) = &self.web_http {
+        if let Some((route, request)) = self.web_http.as_deref() {
             frame(&mut digest, b"web-http");
             frame(&mut digest, format!("{route:?}").as_bytes());
             frame(&mut digest, HttpRequestDigest::of(request).as_bytes());
