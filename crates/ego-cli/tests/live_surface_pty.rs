@@ -2746,8 +2746,9 @@ fn until_local_action_completed(
     budget: Duration,
 ) {
     let marker = format!("/{command}");
-    // Reedline toggles bracketed paste around an accepted line; a redraw
-    // prompt before that cycle does not mean the command has completed.
+    // A fresh editor cycle must follow acceptance; an earlier redraw is not
+    // command completion. A host-intercepted Enter suspends the editor before
+    // accept_buffer echoes the line, while native acceptance echoes it first.
     let completed = |bytes: &[u8]| {
         let find_after = |bytes: &[u8], marker: &[u8]| {
             bytes
@@ -2756,8 +2757,9 @@ fn until_local_action_completed(
                 .map(|position| position + marker.len())
         };
         let echoed = find_after(bytes, marker.as_bytes())?;
-        let stopped = echoed + find_after(&bytes[echoed..], b"\x1b[?2004l")?;
-        let resumed = stopped + find_after(&bytes[stopped..], b"\x1b[?2004h")?;
+        let stopped = find_after(bytes, b"\x1b[?2004l")?;
+        let accepted = echoed.max(stopped);
+        let resumed = accepted + find_after(&bytes[accepted..], b"\x1b[?2004h")?;
         (rendered_prompt_count(&bytes[resumed..]) > 0).then_some(resumed)
     };
     let deadline = Instant::now() + budget;
@@ -5763,26 +5765,37 @@ fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
     // the first prompt was painted before the command echo and Enter cycle.
     let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
     let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
-    let (sender, receiver) = mpsc::channel();
-    let (done, result) = mpsc::channel();
-    sender.send(redraw.to_vec()).expect("first PTY frame");
-    let waiter = thread::spawn(move || {
-        let mut output = Vec::new();
-        until_local_action_completed(&receiver, &mut output, 0, "clear", Duration::from_secs(2));
-        done.send(output).expect("completion result");
-    });
-    assert!(
-        result.recv_timeout(Duration::from_millis(100)).is_err(),
-        "a redraw prompt was mistaken for /clear completion"
-    );
-    sender
-        .send(completion.to_vec())
-        .expect("completion PTY frame");
-    let output = result
-        .recv_timeout(Duration::from_secs(2))
-        .expect("real command completion");
-    assert!(output.ends_with(completion));
-    waiter.join().expect("waiter thread");
+    // Host acceptance suspends before echoing the accepted buffer; both
+    // orderings still require a fresh resumed editor after acceptance.
+    let host_completion = b"\x1b[?2004l\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
+    for completion in [completion.as_slice(), host_completion.as_slice()] {
+        let (sender, receiver) = mpsc::channel();
+        let (done, result) = mpsc::channel();
+        sender.send(redraw.to_vec()).expect("first PTY frame");
+        let waiter = thread::spawn(move || {
+            let mut output = Vec::new();
+            until_local_action_completed(
+                &receiver,
+                &mut output,
+                0,
+                "clear",
+                Duration::from_secs(2),
+            );
+            done.send(output).expect("completion result");
+        });
+        assert!(
+            result.recv_timeout(Duration::from_millis(100)).is_err(),
+            "a redraw prompt was mistaken for /clear completion"
+        );
+        sender
+            .send(completion.to_vec())
+            .expect("completion PTY frame");
+        let output = result
+            .recv_timeout(Duration::from_secs(2))
+            .expect("real command completion");
+        assert!(output.ends_with(completion));
+        waiter.join().expect("waiter thread");
+    }
 }
 
 #[test]

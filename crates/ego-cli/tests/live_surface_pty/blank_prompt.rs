@@ -23,6 +23,7 @@ fn whitespace_only_composer(busy: bool) {
             ]
         } else {
             vec![
+                Reply::Sse(text("REGRESSION-MARKER-ANCHOR")),
                 Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
                 Reply::Sse(text("REGRESSION-MARKER-RECALLED")),
             ]
@@ -45,10 +46,19 @@ fn whitespace_only_composer(busy: bool) {
     input.write_all(b"yes\r").unwrap();
     input.flush().unwrap();
     until_prompt_from(&reader, &mut output, start);
+    let anchor = if busy {
+        "start gated turn"
+    } else {
+        "history anchor"
+    };
+    let anchor_start = output.len();
+    input.write_all(format!("{anchor}\r").as_bytes()).unwrap();
+    input.flush().unwrap();
     if busy {
-        input.write_all(b"start gated turn\r").unwrap();
-        input.flush().unwrap();
         until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    } else {
+        until(&reader, &mut output, b"REGRESSION-MARKER-ANCHOR");
+        until_prompt_from(&reader, &mut output, anchor_start);
     }
 
     // Paste preserves tabs and blank lines instead of invoking editor bindings.
@@ -70,7 +80,9 @@ fn whitespace_only_composer(busy: bool) {
     until_prompt_from(&reader, &mut output, valid_start);
     // Recall the real submission, then move back once more. A blank history
     // entry would replace this draft; an absent entry leaves it unchanged.
-    input.write_all(b"\x1b[A\x1b[A").unwrap();
+    // History recall rests at the first line end; Alt+> moves to the full
+    // multiline buffer end before appending the observable recall suffix.
+    input.write_all(b"\x1b[A\x1b[A\x1b>").unwrap();
     input.flush().unwrap();
     drain_until_quiet(&reader, &mut output);
     let recall_start = output.len();
@@ -81,27 +93,22 @@ fn whitespace_only_composer(busy: bool) {
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    assert_eq!(
-        requests_after_blank,
-        usize::from(busy),
-        "blank prompt reached provider"
-    );
+    assert_eq!(requests_after_blank, 1, "blank prompt reached provider");
     let generations = stub.generations();
-    assert_eq!(generations.len(), 2 + usize::from(busy));
+    assert_eq!(generations.len(), 3);
     let expected = format!("{blank}REGRESSION-MARKER-VALID");
     assert_eq!(
-        count_exact_strings(&generations[usize::from(busy)]["messages"], &expected),
+        count_exact_strings(&generations[1]["messages"], &expected),
         1,
         "blank Enter must preserve the composer for the next real submission"
     );
-    let recalled = if busy {
-        "start gated turn-RECALL".to_owned()
-    } else {
-        format!("{expected}-RECALL")
-    };
+    // Use an explicit previous user prompt: startup trust answers may also
+    // be in editor history, so the oldest entry is not an empty-history oracle.
+    let recalled = format!("{anchor}-RECALL");
     assert_eq!(
         count_exact_strings(&generations.last().unwrap()["messages"], &recalled),
         1,
-        "blank draft must not enter recall history"
+        "blank draft must not enter recall history: {:?}",
+        generations.last().unwrap()["messages"]
     );
 }
