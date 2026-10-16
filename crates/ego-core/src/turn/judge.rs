@@ -41,33 +41,7 @@ impl JudgeGeneration<'_, '_, '_> {
         let mut request = input.request_with_context(&config, context, main);
         request.thinking = profile.thinking;
 
-        let gaps = profile.capabilities.request_gaps(&request);
-        if !gaps.is_empty() {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: gaps
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
-            return Ok(JudgeGenerationResult::Unavailable);
-        }
-        if let Err(refused) = profile.generator.ensure_expressible(&request) {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: refused.to_string(),
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
+        if !self.admit_request(turn, profile, &request)? {
             return Ok(JudgeGenerationResult::Unavailable);
         }
         let budget = self
@@ -244,5 +218,42 @@ impl JudgeGeneration<'_, '_, '_> {
             decoder,
             attempt: reference,
         })
+    }
+    fn admit_request(
+        &self,
+        turn: TurnId,
+        profile: &GenerationProfile,
+        request: &GenRequest,
+    ) -> Result<bool, StoreError> {
+        let gaps = profile.capabilities.request_gaps(&request);
+        if !gaps.is_empty() {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message: gaps
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    kind: ErrorKind::Unclassified,
+                },
+            )?;
+            return Ok(false);
+        }
+        if let Err(refused) = profile.generator.ensure_expressible(&request) {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message: refused.to_string(),
+                    kind: ErrorKind::Unclassified,
+                },
+            )?;
+            return Ok(false);
+        }
+        Ok(true)
     }
 }
