@@ -1378,60 +1378,9 @@ fn parse_subcommand(
                 max_resource_bytes: parsed.max_resource_bytes,
             }))),
         },
-        Some("ls") => match clap_or_answer::<LsCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Ls(Box::new(LsArgs {
-                all: parsed.all,
-                session_dir: parsed.common.places.session_dir,
-                directory: parsed.common.places.directory,
-                output: parsed.common.output.unwrap_or(Output::Text),
-            }))),
-        },
-        Some("usage") => match clap_or_answer::<UsageCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Usage(Box::new(UsageArgs {
-                period: parsed.period,
-                session_dir: parsed.places.session_dir,
-                directory: parsed.places.directory,
-                json: parsed.json,
-                all_roles: parsed.all_roles,
-            }))),
-        },
-        Some("rm") => match clap_or_answer::<RmCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => into_rm_invocation(parsed),
-        },
-        Some("fork") => match clap_or_answer::<ForkCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => {
-                let source = SessionId::from_str(&parsed.source).map_err(|error| {
-                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
-                })?;
-                let at = parsed
-                    .at
-                    .map(|id| {
-                        ItemId::from_str(&id).map_err(|error| {
-                            UsageError(format!("`{id}` is not a message id: {error}"))
-                        })
-                    })
-                    .transpose()?;
-                Ok(Invocation::Fork(Box::new(ForkArgs {
-                    source,
-                    at,
-                    session_dir: parsed.common.places.session_dir,
-                    directory: parsed.common.places.directory,
-                    output: parsed.common.output.unwrap_or(Output::Text),
-                })))
-            }
-        },
-        Some("compact") => match clap_or_answer::<CompactCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => into_compact_invocation(parsed),
-        },
-        Some("export") => match clap_or_answer::<ExportCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => into_export_invocation(parsed),
-        },
+        Some(command @ ("ls" | "usage" | "rm" | "fork" | "compact" | "export")) => {
+            parse_session_command(command, &tokens)
+        }
         Some("models") => match clap_or_answer::<ModelsCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Models(Box::new(ModelsArgs {
@@ -1467,6 +1416,66 @@ fn parse_subcommand(
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
         },
+    }
+}
+
+fn parse_session_command(command: &str, tokens: &[String]) -> Result<Invocation, UsageError> {
+    match command {
+        "ls" => match clap_or_answer::<LsCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Ls(Box::new(LsArgs {
+                all: parsed.all,
+                session_dir: parsed.common.places.session_dir,
+                directory: parsed.common.places.directory,
+                output: parsed.common.output.unwrap_or(Output::Text),
+            }))),
+        },
+        "usage" => match clap_or_answer::<UsageCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Usage(Box::new(UsageArgs {
+                period: parsed.period,
+                session_dir: parsed.places.session_dir,
+                directory: parsed.places.directory,
+                json: parsed.json,
+                all_roles: parsed.all_roles,
+            }))),
+        },
+        "rm" => match clap_or_answer::<RmCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => into_rm_invocation(parsed),
+        },
+        "fork" => match clap_or_answer::<ForkCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let source = SessionId::from_str(&parsed.source).map_err(|error| {
+                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
+                })?;
+                let at = parsed
+                    .at
+                    .map(|id| {
+                        ItemId::from_str(&id).map_err(|error| {
+                            UsageError(format!("`{id}` is not a message id: {error}"))
+                        })
+                    })
+                    .transpose()?;
+                Ok(Invocation::Fork(Box::new(ForkArgs {
+                    source,
+                    at,
+                    session_dir: parsed.common.places.session_dir,
+                    directory: parsed.common.places.directory,
+                    output: parsed.common.output.unwrap_or(Output::Text),
+                })))
+            }
+        },
+        "compact" => match clap_or_answer::<CompactCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => into_compact_invocation(parsed),
+        },
+        "export" => match clap_or_answer::<ExportCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => into_export_invocation(parsed),
+        },
+        _ => unreachable!("only session commands reach this parser"),
     }
 }
 
