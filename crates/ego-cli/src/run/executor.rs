@@ -352,6 +352,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         ceiling_profile: None,
         quiet: false,
         no_color: false,
+        plain: false,
     }
 }
 

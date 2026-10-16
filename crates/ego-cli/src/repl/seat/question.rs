@@ -1451,6 +1451,31 @@ fn status_right(status: &SharedStatus) -> String {
 }
 
 fn status_row(status: &SurfaceStatus) -> String {
+    if let Some((message, started, delay_ms)) = &status.retry {
+        let remaining = delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
+        let message = if let Some((cause, rest)) =
+            message.split_once(" — connection problem, retrying in ")
+        {
+            let counter = rest
+                .split_once(" (")
+                .map(|(_, counter)| counter)
+                .unwrap_or("");
+            format!(
+                "{cause} — connection problem, retrying in {:.1}s ({counter}",
+                remaining as f64 / 1000.0
+            )
+        } else {
+            message.clone()
+        };
+        let message = message.replace(['\r', '\n', '\t'], " ");
+        let mut line = crate::render::line::Line::empty();
+        line.push(crate::render::line::Span::plain(message));
+        return format!(
+            "{}\n",
+            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
+                .text()
+        );
+    }
     if status.activity {
         let elapsed = status
             .activity_since

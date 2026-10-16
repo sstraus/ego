@@ -824,6 +824,10 @@ pub(super) struct Flags {
     /// Never emit ANSI colour, whatever the terminal claims to support.
     #[arg(long)]
     pub(super) no_color: bool,
+
+    /// Append plain output without terminal styling or live retry updates.
+    #[arg(long)]
+    pub(super) plain: bool,
 }
 
 #[derive(Debug, Parser)]
