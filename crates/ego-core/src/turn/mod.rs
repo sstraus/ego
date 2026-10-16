@@ -22,6 +22,7 @@ mod mcp_registry;
 mod policy;
 mod residual;
 mod task;
+pub use task::NamedAgent;
 mod tools;
 
 use std::collections::{BTreeMap, BTreeSet};
