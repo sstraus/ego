@@ -2222,33 +2222,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         prompt: &str,
         images: Vec<crate::generator::types::ImageRef>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
-        if let Some(named) = prompt.strip_prefix('/') {
-            let end = named.find(char::is_whitespace).unwrap_or(named.len());
-            if let Some(catalogue) = self.tools.skill_catalogue()
-                && let Ok(spec) = catalogue.authorize_user(&named[..end])
-                && spec.command_template().is_some()
-            {
-                if !images.is_empty() {
-                    let turn = TurnId::new();
-                    let outcome = async {
-                        self.begin_turn(turn)?;
-                        let driven = self.refuse_drive(
-                            turn,
-                            "custom commands do not accept image attachments".into(),
-                            ExitReason::Usage,
-                        )?;
-                        self.finish_turn(turn, driven).await
-                    }
-                    .await;
-                    return outcome.map_err(|cause| self.abandon(turn, cause));
-                }
-                let operation = crate::skill::AdmittedSkillOperation::invoke(
-                    spec.descriptor(),
-                    named[end..].trim_start(),
-                );
-                return self.run_admitted_skill(operation).await;
-            }
-        }
         self.run_prompts(vec![(prompt.to_string(), images, None)])
             .await
     }
