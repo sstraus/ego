@@ -249,3 +249,29 @@ fn pasted_custom_command_stays_literal_and_never_runs_its_shell() {
     );
     assert!(stub.generations()[0].to_string().contains("/review"));
 }
+
+// Catches: preserving literal pasted prompts also disables explicitly typed commands.
+#[test]
+fn typed_custom_command_selects_its_admitted_operation() {
+    let stub = Stub::start(plan());
+    let places = Places::new();
+    let ego = places.ego(&stub);
+    ego.home_file(
+        "config.toml",
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    );
+    ego.home_file(
+        "commands/review.md",
+        "TYPED-EXPANDED !`touch typed-command-effect`",
+    );
+    let result = places
+        .ego(&stub)
+        .conversing()
+        .args(["--mode", "yolo", "--sandbox", "off"])
+        .run_pty("/review");
+    assert_eq!(result.code, Some(0), "{}", result.stdout);
+    assert!(ego.workspace_path().join("typed-command-effect").exists());
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1);
+    assert!(generations[0].to_string().contains("TYPED-EXPANDED"));
+}
