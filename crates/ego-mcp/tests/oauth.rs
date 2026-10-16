@@ -1259,7 +1259,7 @@ fn public_contracts_preserve_resource_path_and_explicit_public_client_policy() {
         )
         .unwrap();
         let response =
-            |key: &str| McpHttpResponse::json(200, &serde_json::to_vec(&fixture[key]).unwrap());
+            |key: &str| McpHttpResponse::json(200, serde_json::to_vec(&fixture[key]).unwrap());
         let mut responses = vec![
             response("protected_resource"),
             response("authorization_server"),
