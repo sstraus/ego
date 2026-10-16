@@ -1,5 +1,7 @@
 //! OS-owned materialization and guarded effects for the MCP runtime.
 
+pub use crate::mcp_oauth::{LoopbackOAuthInteraction, oauth_session, persist_oauth_locator};
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +25,24 @@ use crate::exec::RunEffectPorts;
 pub fn materialize_admissions(
     selected: Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>,
 ) -> Vec<McpRegistryCandidate> {
+    let home = std::env::var_os("EGO_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ego"))
+        });
+    materialize_admissions_with_credentials(
+        selected,
+        home.as_deref().map(|home| home.join("mcp")).as_deref(),
+        Arc::new(crate::credentials::OsCredentialStore::default()),
+    )
+}
+
+/// Injected store/root seam for restart and credential isolation tests.
+pub fn materialize_admissions_with_credentials(
+    selected: Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>,
+    root: Option<&std::path::Path>,
+    credentials: Arc<dyn ego_core::credentials::CredentialStore>,
+) -> Vec<McpRegistryCandidate> {
     selected
         .into_iter()
         .map(|(name, server, provenance)| {
@@ -40,9 +60,13 @@ pub fn materialize_admissions(
                         .collect::<Result<Vec<_>, McpFailure>>();
                     environment.map(McpTransportMaterial::stdio)
                 }
-                McpServerConfig::Http(http) if http.auth == McpHttpAuth::Oauth => {
-                    Err(McpFailure::Authority)
-                }
+                McpServerConfig::Http(http) if http.auth == McpHttpAuth::Oauth => root
+                    .ok_or(McpFailure::Credential)
+                    .and_then(|root| {
+                        oauth_session(root, &name, http, Arc::clone(&credentials))
+                            .map_err(|error| error.failure())
+                    })
+                    .map(McpTransportMaterial::oauth),
                 McpServerConfig::Http(_) => Ok(McpTransportMaterial::http(Vec::new())),
                 McpServerConfig::Acp { .. } => Err(McpFailure::Authority),
             };

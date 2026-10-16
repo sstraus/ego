@@ -695,6 +695,13 @@ pub enum McpAction {
     },
     Login {
         name: McpServerName,
+        client_id: Option<String>,
+        cimd: Option<String>,
+        dcr: bool,
+        callback_port: u16,
+        refresh: bool,
+        issuer: Option<String>,
+        account: Option<String>,
     },
     Reload {
         name: Option<McpServerName>,
@@ -1002,10 +1009,26 @@ fn into_mcp_args(
             reject_mcp_separator(separator_tail)?;
             McpAction::List { json }
         }
-        McpSubcommand::Login { name } => {
+        McpSubcommand::Login {
+            name,
+            client_id,
+            cimd,
+            dcr,
+            callback_port,
+            refresh,
+            issuer,
+            account,
+        } => {
             reject_mcp_separator(separator_tail)?;
             McpAction::Login {
                 name: parse_mcp_name(name)?,
+                client_id,
+                cimd,
+                dcr,
+                callback_port,
+                refresh,
+                issuer,
+                account,
             }
         }
         McpSubcommand::Reload { name } => {

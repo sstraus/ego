@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::fmt;
+use std::sync::Arc;
 
 use ego_core::config::{McpEnvironmentName, McpHttpAuth, McpServerConfig, McpServerName};
 use ego_core::credentials::SecretMaterial;
@@ -144,6 +145,7 @@ pub struct McpTransportMaterial {
 enum TransportMaterial {
     Stdio(Vec<McpEnvironmentBinding>),
     Http(Vec<McpHeaderBinding>),
+    OAuth(Arc<crate::oauth::McpOAuthSession>),
     Acp,
 }
 
@@ -157,6 +159,12 @@ impl McpTransportMaterial {
     pub fn http(headers: Vec<McpHeaderBinding>) -> Self {
         Self {
             transport: TransportMaterial::Http(headers),
+        }
+    }
+
+    pub fn oauth(session: Arc<crate::oauth::McpOAuthSession>) -> Self {
+        Self {
+            transport: TransportMaterial::OAuth(session),
         }
     }
 
@@ -177,6 +185,10 @@ impl fmt::Debug for McpTransportMaterial {
             TransportMaterial::Http(headers) => formatter
                 .debug_tuple("McpTransportMaterial::Http")
                 .field(headers)
+                .finish(),
+            TransportMaterial::OAuth(session) => formatter
+                .debug_tuple("McpTransportMaterial::OAuth")
+                .field(session)
                 .finish(),
             TransportMaterial::Acp => formatter.write_str("McpTransportMaterial::Acp"),
         }
@@ -247,6 +259,11 @@ impl McpServerAdmission {
                     ));
                 }
             }
+            (McpServerConfig::Http(config), TransportMaterial::OAuth(session))
+                if config.auth == McpHttpAuth::Oauth && session.matches(&name, config) => {}
+            (_, TransportMaterial::OAuth(_)) => {
+                return Err(invalid("OAuth material requires OAuth HTTP configuration"));
+            }
             (McpServerConfig::Acp { .. }, TransportMaterial::Acp) => {}
             (McpServerConfig::Stdio(_), TransportMaterial::Http(_))
             | (McpServerConfig::Http(_), TransportMaterial::Stdio(_))
@@ -272,17 +289,49 @@ impl McpServerAdmission {
         &self.config
     }
 
+    pub(crate) fn oauth_session(&self) -> Option<&Arc<crate::oauth::McpOAuthSession>> {
+        match &self.material.transport {
+            TransportMaterial::OAuth(session) => Some(session),
+            _ => None,
+        }
+    }
+
+    pub(crate) async fn authorization_headers(
+        &self,
+        effects: Option<Arc<dyn crate::McpHttpEffects>>,
+        deadline: std::time::Instant,
+    ) -> Result<Vec<ego_core::permit::HttpHeader>, McpError> {
+        if let Some(session) = self.oauth_session() {
+            return session.headers(effects, deadline).await;
+        }
+        self.http_headers()
+            .ok_or_else(|| invalid("HTTP header material absent"))?
+            .iter()
+            .map(|binding| {
+                ego_core::permit::HttpHeader::secret(
+                    binding.name(),
+                    SecretMaterial::new(binding.value().expose_secret_bytes().to_vec()),
+                )
+                .map_err(|error| invalid(error.to_string()))
+            })
+            .collect()
+    }
+
     pub(crate) fn stdio_environment(&self) -> Option<&[McpEnvironmentBinding]> {
         match &self.material.transport {
             TransportMaterial::Stdio(environment) => Some(environment),
-            TransportMaterial::Http(_) | TransportMaterial::Acp => None,
+            TransportMaterial::Http(_) | TransportMaterial::OAuth(_) | TransportMaterial::Acp => {
+                None
+            }
         }
     }
 
     pub(crate) fn http_headers(&self) -> Option<&[McpHeaderBinding]> {
         match &self.material.transport {
             TransportMaterial::Http(headers) => Some(headers),
-            TransportMaterial::Stdio(_) | TransportMaterial::Acp => None,
+            TransportMaterial::Stdio(_) | TransportMaterial::OAuth(_) | TransportMaterial::Acp => {
+                None
+            }
         }
     }
 }

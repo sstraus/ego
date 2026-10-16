@@ -14,6 +14,7 @@ pub mod http;
 pub mod instructions;
 pub mod mcp;
 pub mod mcp_continuation;
+mod mcp_oauth;
 pub mod mcp_registry;
 pub mod model_catalogue_cache;
 pub mod orchestration_events;
