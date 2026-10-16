@@ -388,7 +388,8 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     places.file("release", "continue\n");
     gate.release();
     until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
-    until_prompt_from(&reader, &mut output, start);
+    let answer_end = output.len();
+    until_prompt_from(&reader, &mut output, answer_end);
     drain_until_quiet(&reader, &mut output);
     let launch_output = normalized(&output[start..]);
     let launch_history =
@@ -5361,6 +5362,8 @@ fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
         .expect("post-cancel prompt");
     input.flush().expect("post-cancel prompt flush");
     until_normalized(&reader, &mut output, cancel_start, "AFTER-CANCEL");
+    let answer_end = output.len();
+    until_prompt_from(&reader, &mut output, answer_end);
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"\x03").expect("first idle Ctrl-C");
     input.flush().expect("first idle Ctrl-C flush");
