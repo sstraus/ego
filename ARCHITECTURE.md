@@ -29,7 +29,7 @@ PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
 AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState |
 ToolCallStarted | ToolCallDelta | ToolCallCompleted | ToolCallMeasured |
 DetachedExecStarted | DetachedExecSettled | QuestionRequested |
-QuestionSettled | PermissionRequested | PermissionAmended |
+QuestionSettled | QuestionMemberSettled | PermissionRequested | PermissionAmended |
 PermissionDecided | GenerationStarted | FallbackDecision | ExecutionObserved |
 ExecutionMeasured | JudgeResponse | SandboxResidualDecided | AttemptSettled |
 UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
@@ -40,9 +40,9 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-61 variants in the current schema, and this list is exhaustive by contract.
+62 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-57, including the session-metadata, pause and goal, question, detached-exec,
+62, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, skill, and clean-session compaction lifecycles.
 `ExecutionObserved` records an admitted execution authority.
 `ExecutionMeasured` records a capability measurement as evidence only (§3.4).

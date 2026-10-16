@@ -224,6 +224,7 @@ enum TurnStart {
         images: Vec<ImageRef>,
     },
     Resumed(ego_core::event::id::TurnId),
+    Presented(ItemId),
     Answered {
         question: ItemId,
         answer: QuestionAnswer,
@@ -306,6 +307,17 @@ impl Turns<'_> {
         .await
     }
 
+    pub(super) async fn drive_presented<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        question: ItemId,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(loop_, TurnStart::Presented(question), cancel, diagnostics)
+            .await
+    }
+
     async fn drive_from<'session: 'turn, 'turn>(
         &self,
         loop_: &mut TurnLoop<'session, 'turn>,
@@ -328,6 +340,10 @@ impl Turns<'_> {
                 }
                 TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
                 TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
+                TurnStart::Presented(question) => {
+                    self.one_running(loop_.present_foreign_question(question), cancel)
+                        .await
+                }
                 TurnStart::Answered { question, answer } => {
                     self.one_answered(loop_, question, answer, cancel).await
                 }

@@ -158,6 +158,7 @@ where
 
 #[derive(Default)]
 struct MemoryStore {
+    fail_append: Mutex<Option<(&'static str, bool)>>,
     events: Mutex<Vec<DomainEvent>>,
     trace: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
@@ -169,6 +170,7 @@ impl MemoryStore {
 
     fn with_trace(trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
+            fail_append: Mutex::new(None),
             events: Mutex::new(Vec::new()),
             trace: Some(trace),
         }
@@ -181,6 +183,22 @@ impl SessionStore for MemoryStore {
         _id: &ego_core::event::id::SessionId,
         event: &DomainEvent,
     ) -> Result<(), StoreError> {
+        let failure = {
+            let mut fail = self.fail_append.lock().unwrap();
+            if fail
+                .as_ref()
+                .is_some_and(|(kind, _)| *kind == event.kind.name())
+            {
+                fail.take()
+            } else {
+                None
+            }
+        };
+        if failure == Some((event.kind.name(), false)) {
+            return Err(StoreError::Io(std::io::Error::other(
+                "crash before event publication",
+            )));
+        }
         if let Some(trace) = &self.trace {
             let label = if matches!(&event.kind, EventKind::QuestionRequested { .. }) {
                 "question-requested"
@@ -197,6 +215,12 @@ impl SessionStore for MemoryStore {
             .lock()
             .expect("memory store events")
             .push(event.clone());
+        if failure.is_some() {
+            return Err(StoreError::Io(std::io::Error::other(
+                "crash after event publication",
+            )));
+        }
+
         Ok(())
     }
 
@@ -386,6 +410,7 @@ struct ForeignInputTool {
 
 #[derive(Default)]
 struct RecordingForeignQuestionPort {
+    cancelled: Mutex<Vec<String>>,
     calls: Mutex<Vec<(String, String)>>,
     outcomes: Mutex<VecDeque<Result<ToolExecution, String>>>,
     trace: Option<Arc<Mutex<Vec<&'static str>>>>,
@@ -401,6 +426,7 @@ impl RecordingForeignQuestionPort {
         trace: Option<Arc<Mutex<Vec<&'static str>>>>,
     ) -> Self {
         Self {
+            cancelled: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             outcomes: Mutex::new(outcomes.into()),
             trace,
@@ -409,6 +435,10 @@ impl RecordingForeignQuestionPort {
 }
 
 impl ForeignQuestionPort for RecordingForeignQuestionPort {
+    fn cancel(&self, id: &str) -> Result<(), String> {
+        self.cancelled.lock().unwrap().push(id.to_owned());
+        Ok(())
+    }
     fn resume<'a>(
         &'a self,
         continuation_id: &'a str,
@@ -614,6 +644,27 @@ fn with_foreign_turn<R>(
     trace_store: bool,
     test: impl for<'a> FnOnce(TurnLoop<'a, 'a>, &'a MemoryStore) -> R,
 ) -> R {
+    with_foreign_turn_request(
+        foreign_question_request(),
+        generator,
+        elicitor,
+        foreign_port,
+        (trace, trace_store),
+        fail_at,
+        test,
+    )
+}
+
+fn with_foreign_turn_request<R>(
+    request: QuestionRequest,
+    generator: Arc<FakeGenerator>,
+    elicitor: Arc<dyn Elicitor>,
+    foreign_port: Arc<RecordingForeignQuestionPort>,
+    store_trace: (Option<Arc<Mutex<Vec<&'static str>>>>, bool),
+    fail_at: Option<usize>,
+    test: impl for<'a> FnOnce(TurnLoop<'a, 'a>, &'a MemoryStore) -> R,
+) -> R {
+    let (trace, trace_store) = store_trace;
     let store = if trace_store {
         trace
             .clone()
@@ -638,9 +689,9 @@ fn with_foreign_turn<R>(
     let resolver = Arc::new(NoResolver);
     let one_hop = Arc::new(NoHop);
     let duplex = Arc::new(NoDuplex);
-    let registry = vec![RegisteredTool::Effect(Arc::new(ForeignInputTool {
-        request: foreign_question_request(),
-    }) as Arc<dyn Tool>)];
+    let registry = vec![RegisteredTool::Effect(
+        Arc::new(ForeignInputTool { request }) as Arc<dyn Tool>,
+    )];
     let tools = Tools::from_registry(
         &registry,
         ToolEffectPorts::new(&fs, &process, &evidence, resolver, one_hop, duplex),
@@ -1464,4 +1515,444 @@ impl ego_core::turn::RetryPause for NoRetryPause {
     fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
         Box::pin(futures::future::ready(()))
     }
+}
+
+#[test]
+fn declined_or_cancelled_foreign_question_closes_remote_authority_without_retry() {
+    // Catches: local question settlement leaves remote continuation resumable.
+    for outcome in [QuestionOutcome::Declined, QuestionOutcome::Cancelled] {
+        let foreign = Arc::new(RecordingForeignQuestionPort::default());
+        with_foreign_turn(
+            foreign_input_generator(),
+            Arc::new(RecordingElicitor::scripted(vec![Ok(outcome.clone())], None)),
+            foreign.clone(),
+            None,
+            None,
+            false,
+            |mut turn, store| {
+                futures::executor::block_on(turn.run("invoke the MCP operation")).unwrap();
+                assert_eq!(*foreign.cancelled.lock().unwrap(), vec![CONTINUATION_ID]);
+                assert!(foreign.calls().is_empty());
+                assert!(store.events().iter().any(|event| matches!(&event.kind, EventKind::QuestionSettled { outcome: recorded } if recorded == &outcome)));
+            },
+        );
+    }
+}
+
+#[test]
+fn member_persistence_survives_restart_before_final_retry_consent() {
+    // Catches: a completed URL is lost on restart or partial answers trigger a retry.
+    use ego_core::question::{ElicitationKind, ElicitationMember, ElicitationRound};
+    let request = QuestionRequest::new(
+        "MCP server alpha requires input",
+        QuestionMode::Round(ElicitationRound {
+            expires_at_ms: None,
+            requests: std::collections::BTreeMap::from([(
+                "verify".to_owned(),
+                ElicitationMember {
+                    prompt: "Complete on the page".to_owned(),
+                    kind: ElicitationKind::Url {
+                        url: "https://example.test/verify?private=secret".to_owned(),
+                        elicitation_id: "verify-42".to_owned(),
+                    },
+                },
+            )]),
+            completed: Default::default(),
+        }),
+        vec![],
+        false,
+    );
+    let elicitor = Arc::new(RecordingElicitor::scripted(
+        vec![
+            Ok(QuestionOutcome::MemberCompleted {
+                key: "verify".to_owned(),
+                answer: serde_json::json!({"completed":true}),
+            }),
+            Ok(QuestionOutcome::Unavailable),
+        ],
+        None,
+    ));
+    let foreign = Arc::new(RecordingForeignQuestionPort::default());
+    with_foreign_turn_request(
+        request,
+        foreign_input_generator(),
+        elicitor.clone(),
+        foreign.clone(),
+        (None, false),
+        None,
+        |mut turn, store| {
+            futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+            assert!(
+                foreign.calls().is_empty(),
+                "a member outcome does not consent to retry"
+            );
+            let calls = elicitor.calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            let QuestionMode::Round(round) = &calls[1].1.mode else {
+                panic!("round")
+            };
+            assert_eq!(
+                round.completed["verify"],
+                serde_json::json!({"completed":true})
+            );
+            assert!(
+                round.next_member().is_none(),
+                "already completed URL is never opened again"
+            );
+            let mut replay = SessionState::default();
+            for event in store.events() {
+                replay.apply(&event);
+            }
+            let pending = replay.pending_question().expect("round survives restart");
+            let QuestionMode::Round(restored) = &pending.request().mode else {
+                panic!("round")
+            };
+            assert_eq!(restored, round);
+            assert!(restored.next_member().is_none());
+            let (conversation, _) =
+                ego_core::generator::history::conversation_from(&replay).unwrap();
+            let model_context = serde_json::to_string(conversation.messages()).unwrap();
+            assert!(!model_context.contains("private=secret"));
+            assert!(!model_context.contains("verify-42"));
+            assert!(!model_context.contains("Complete on the page"));
+        },
+    );
+}
+
+#[test]
+fn crash_after_question_settlement_requires_explicit_same_answer_before_retry() {
+    // Catches: a settlement before remote acceptance strands the operation or replays it automatically.
+    use ego_core::question::{ElicitationAnswers, ElicitationRound};
+    let request = QuestionRequest::new(
+        "Retry MCP?",
+        QuestionMode::Round(ElicitationRound {
+            expires_at_ms: None,
+            requests: Default::default(),
+            completed: Default::default(),
+        }),
+        vec![],
+        false,
+    );
+    let answer = QuestionAnswer::Round(ElicitationAnswers {
+        confirmed: true,
+        responses: Default::default(),
+    });
+    let foreign = Arc::new(RecordingForeignQuestionPort::scripted(
+        vec![Err("crash before acceptance".to_owned())],
+        None,
+    ));
+    with_foreign_turn_request(
+        request,
+        foreign_input_generator(),
+        Arc::new(RecordingElicitor::answered(answer.clone())),
+        foreign.clone(),
+        (None, false),
+        None,
+        |mut turn, store| {
+            assert!(futures::executor::block_on(turn.run("invoke MCP")).is_err());
+            let state = turn.state();
+            let pending = state
+                .pending_question()
+                .expect("settled but uncompleted foreign question remains recoverable");
+            let question = pending.item_id();
+            let mut replay = SessionState::default();
+            for event in store.events() {
+                replay.apply(&event);
+            }
+            assert_eq!(replay.pending_question().unwrap().item_id(), question);
+            assert_eq!(foreign.calls().len(), 1, "replay must not drive effects");
+            let outcome =
+                futures::executor::block_on(turn.resume_question(question, answer)).unwrap();
+            assert_eq!(outcome.exit_reason, ExitReason::Completed);
+            assert_eq!(
+                foreign.calls().len(),
+                2,
+                "only explicit user resume retries acceptance"
+            );
+            assert_eq!(
+                store
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::QuestionSettled { .. }))
+                    .count(),
+                1
+            );
+        },
+    );
+}
+
+#[test]
+fn crashes_at_each_question_persistence_boundary_do_not_retry_or_repeat_completed_members() {
+    // Catches: uncertain question/member/final writes trigger effects before durable recovery.
+    use ego_core::question::{
+        ElicitationAnswers, ElicitationKind, ElicitationMember, ElicitationRound,
+    };
+    for kind in [
+        "question_requested",
+        "question_member_settled",
+        "question_settled",
+    ] {
+        for published in [false, true] {
+            let request = QuestionRequest::new(
+                "MCP server alpha",
+                QuestionMode::Round(ElicitationRound {
+                    expires_at_ms: None,
+                    requests: std::collections::BTreeMap::from([(
+                        "url-key".to_owned(),
+                        ElicitationMember {
+                            prompt: "Verify on page".to_owned(),
+                            kind: ElicitationKind::Url {
+                                url: "https://example.test/verify".to_owned(),
+                                elicitation_id: "url-id".to_owned(),
+                            },
+                        },
+                    )]),
+                    completed: Default::default(),
+                }),
+                vec![],
+                false,
+            );
+            let responses = std::collections::BTreeMap::from([(
+                "url-key".to_owned(),
+                serde_json::json!({"completed":true}),
+            )]);
+            let elicitor = Arc::new(RecordingElicitor::scripted(
+                vec![
+                    Ok(QuestionOutcome::MemberCompleted {
+                        key: "url-key".to_owned(),
+                        answer: serde_json::json!({"completed":true}),
+                    }),
+                    Ok(QuestionOutcome::Answered(QuestionAnswer::Round(
+                        ElicitationAnswers {
+                            confirmed: true,
+                            responses,
+                        },
+                    ))),
+                ],
+                None,
+            ));
+            let foreign = Arc::new(RecordingForeignQuestionPort::default());
+            with_foreign_turn_request(
+                request,
+                foreign_input_generator(),
+                elicitor,
+                foreign.clone(),
+                (None, false),
+                None,
+                |mut turn, store| {
+                    *store.fail_append.lock().unwrap() = Some((kind, published));
+                    assert!(futures::executor::block_on(turn.run("invoke MCP")).is_err());
+                    assert!(
+                        foreign.calls().is_empty(),
+                        "no remote retry across an uncertain session write"
+                    );
+                    let mut replay = SessionState::default();
+                    for event in store.events() {
+                        replay.apply(&event);
+                    }
+                    if kind != "question_requested" || published {
+                        let pending = replay
+                            .pending_question()
+                            .expect("durable unfinished operation remains visible");
+                        let QuestionMode::Round(round) = &pending.request().mode else {
+                            panic!("round")
+                        };
+                        let member_was_durable = kind == "question_settled"
+                            || (kind == "question_member_settled" && published);
+                        assert_eq!(round.completed.contains_key("url-key"), member_was_durable);
+                        if member_was_durable {
+                            assert!(round.next_member().is_none());
+                        }
+                    } else {
+                        assert!(replay.pending_question().is_none());
+                    }
+                },
+            );
+        }
+    }
+}
+
+fn empty_round_request() -> QuestionRequest {
+    QuestionRequest::new(
+        "Retry MCP?",
+        QuestionMode::Round(ego_core::question::ElicitationRound {
+            expires_at_ms: None,
+            requests: Default::default(),
+            completed: Default::default(),
+        }),
+        vec![],
+        false,
+    )
+}
+
+#[test]
+fn declining_successor_round_does_not_resurrect_predecessor() {
+    // Catches: declining a successor leaves its tool incomplete and revives an answered predecessor.
+    let request = empty_round_request();
+    let answer = QuestionAnswer::Round(ego_core::question::ElicitationAnswers {
+        confirmed: true,
+        responses: Default::default(),
+    });
+    let foreign = Arc::new(RecordingForeignQuestionPort::scripted(
+        vec![Ok(ToolExecution::InputRequired(
+            ForeignInputRequired::new(SUCCESSOR_CONTINUATION_ID, request.clone()).unwrap(),
+        ))],
+        None,
+    ));
+    with_foreign_turn_request(
+        request,
+        foreign_input_generator(),
+        Arc::new(RecordingElicitor::scripted(
+            vec![
+                Ok(QuestionOutcome::Answered(answer)),
+                Ok(QuestionOutcome::Declined),
+            ],
+            None,
+        )),
+        foreign.clone(),
+        (None, false),
+        None,
+        |mut turn, store| {
+            futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+            assert_eq!(
+                *foreign.cancelled.lock().unwrap(),
+                vec![SUCCESSOR_CONTINUATION_ID]
+            );
+            assert_eq!(foreign.calls().len(), 1);
+            let replay = SessionState::replay(store.events());
+            assert!(
+                replay.pending_question().is_none(),
+                "decline resurrected an answered predecessor"
+            );
+            assert!(
+                store.events().iter().any(|event| matches!(
+                    event.kind,
+                    EventKind::ToolCallCompleted { ok: false, .. }
+                )),
+                "cancelled original tool must be durably closed"
+            );
+        },
+    );
+}
+
+struct InterruptingElicitor(ego_core::turn::InteractiveIngress);
+impl Elicitor for InterruptingElicitor {
+    fn elicit<'a>(
+        &'a self,
+        _: ItemId,
+        _: QuestionRequest,
+    ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
+        Box::pin(async move {
+            self.0.interrupt().await.unwrap();
+            futures::future::pending().await
+        })
+    }
+}
+
+#[test]
+fn interrupted_foreign_round_has_no_pending_question_after_replay() {
+    // Catches: an interrupted elicitor cancels remote authority but leaves the local question pending.
+    let (ingress, mut control) = ego_core::turn::interactive_control();
+    let foreign = Arc::new(RecordingForeignQuestionPort::default());
+    with_foreign_turn_request(
+        empty_round_request(),
+        foreign_input_generator(),
+        Arc::new(InterruptingElicitor(ingress)),
+        foreign.clone(),
+        (None, false),
+        None,
+        |turn, store| {
+            let mut turn = turn.with_interactive_control(&mut control);
+            let outcome = futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+            assert!(matches!(outcome.exit_reason, ExitReason::Cancelled(_)));
+            assert_eq!(*foreign.cancelled.lock().unwrap(), vec![CONTINUATION_ID]);
+            let replay = SessionState::replay(store.events());
+            assert!(
+                replay.pending_question().is_none(),
+                "interruption left a pending foreign question after replay"
+            );
+            assert!(
+                store.events().iter().any(|event| matches!(
+                    event.kind,
+                    EventKind::ToolCallCompleted { ok: false, .. }
+                )),
+                "interrupted original tool must be durably closed"
+            );
+        },
+    );
+}
+
+#[test]
+fn reopened_foreign_round_keeps_question_identity_and_completed_members() {
+    // Catches: re-presentation mints a replacement question or drops durable member outcomes.
+    let mut request = empty_round_request();
+    let QuestionMode::Round(round) = &mut request.mode else {
+        unreachable!()
+    };
+    round.requests.insert(
+        "done".into(),
+        ego_core::question::ElicitationMember {
+            prompt: "Already completed".into(),
+            kind: ego_core::question::ElicitationKind::Url {
+                url: "https://example.test/done".into(),
+                elicitation_id: "done".into(),
+            },
+        },
+    );
+    let foreign = Arc::new(RecordingForeignQuestionPort::default());
+    let first = Arc::new(RecordingElicitor::scripted(
+        vec![
+            Ok(QuestionOutcome::MemberCompleted {
+                key: "done".into(),
+                answer: serde_json::json!({"completed":true}),
+            }),
+            Ok(QuestionOutcome::Unavailable),
+        ],
+        None,
+    ));
+    with_foreign_turn_request(
+        request,
+        foreign_input_generator(),
+        first,
+        foreign.clone(),
+        (None, false),
+        None,
+        |mut turn, store| {
+            futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+            let restored = SessionState::replay(store.events());
+            let pending = restored.pending_question().unwrap();
+            let question = pending.item_id();
+            let QuestionMode::Round(round) = &pending.request().mode else {
+                unreachable!()
+            };
+            let next = Arc::new(RecordingElicitor::answered(QuestionAnswer::Round(
+                ego_core::question::ElicitationAnswers {
+                    confirmed: true,
+                    responses: round.completed.clone(),
+                },
+            )));
+            let mut reopened = turn.with_elicitor(next.clone());
+            let outcome =
+                futures::executor::block_on(reopened.present_foreign_question(question)).unwrap();
+            assert_eq!(outcome.exit_reason, ExitReason::Completed);
+            assert_eq!(
+                next.calls.lock().unwrap().as_slice(),
+                &[(question, pending.request().clone())]
+            );
+            assert_eq!(
+                store
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::QuestionRequested { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(foreign.calls().len(), 1);
+            assert!(
+                SessionState::replay(store.events())
+                    .pending_question()
+                    .is_none()
+            );
+        },
+    );
 }

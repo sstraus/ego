@@ -250,7 +250,9 @@ fn prepare_resume_phase<'store>(
         .as_ref()
         .expect("resume preparation observes resolved settings before materialization");
     let direct_ci_ready = resolved.ready.is_some();
-    let early_opened = if direct_ci_ready || !args.answers.is_empty() {
+    let terminal_resume = matches!(host.driver, Driver::Interactive { .. })
+        && matches!(args.session, crate::cli::SessionChoice::Resume(_));
+    let early_opened = if direct_ci_ready || !args.answers.is_empty() || terminal_resume {
         Some(Opened::Durable(Box::new(
             session::open(
                 scoped.jsonl_store.as_ref(),
@@ -303,7 +305,13 @@ fn prepare_resume_phase<'store>(
         )
     };
     let resume_plan = if args.answers.is_empty() {
-        None
+        if terminal_resume {
+            early_opened
+                .as_ref()
+                .and_then(|opened| plan_resume_answer(&opened.state(), &[]).ok())
+        } else {
+            None
+        }
     } else {
         let opened = early_opened
             .as_ref()

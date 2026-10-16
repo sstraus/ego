@@ -429,6 +429,94 @@ fn answer_question(
     surface: &mut ModalSurface<'_>,
     request: &QuestionRequest,
 ) -> QuestionOutcome {
+    if let QuestionMode::Round(round) = &request.mode {
+        if round.expired_at(host_now_ms()) {
+            return QuestionOutcome::Unavailable;
+        }
+        if request.validate().is_err() {
+            return QuestionOutcome::Unavailable;
+        }
+        if let Some((key, member)) = round.next_member() {
+            let answer = match &member.kind {
+                ego_core::question::ElicitationKind::Form { schema } => {
+                    match answer_question(editor, surface, &member.form_request(schema)) {
+                        QuestionOutcome::Answered(QuestionAnswer::Form(answer)) => {
+                            serde_json::Value::Object(answer)
+                        }
+                        outcome => return outcome,
+                    }
+                }
+                ego_core::question::ElicitationKind::Url { url, .. } => {
+                    let prompt = Question::new(
+                        format!(
+                            "{}\n{}\nDestination: {}\nOpen this page? Credentials stay on the page, never in chat. [y/N] ",
+                            request.prompt, member.prompt, url
+                        ),
+                        Arc::clone(surface.status),
+                    );
+                    let consent = match modal_line(editor, surface, &prompt) {
+                        Line::Submitted(value) => parse_trust(&value) == Some(Trust::Trusted),
+                        Line::HostCommand(HostCommand::ModalEscape) => {
+                            return QuestionOutcome::Cancelled;
+                        }
+                        Line::Ended | Line::ExternalBreak(_) => {
+                            return QuestionOutcome::Unavailable;
+                        }
+                        _ => false,
+                    };
+                    if !consent {
+                        return QuestionOutcome::Declined;
+                    }
+                    if round.expired_at(host_now_ms()) || !launch_elicitation_url(url) {
+                        surface.status.lock().expect("surface status lock").notice = Some(
+                            "The browser could not be opened; the request remains pending"
+                                .to_owned(),
+                        );
+                        return QuestionOutcome::Unavailable;
+                    }
+                    let prompt = Question::new(
+                        "Complete the action on the page. Never paste a password or code. Type completed, decline, or cancel.\n> ".to_owned(),
+                        Arc::clone(surface.status),
+                    );
+                    loop {
+                        match modal_line(editor, surface, &prompt) {
+                            Line::Submitted(value) => match value.trim() {
+                                "completed" => break serde_json::json!({"completed":true}),
+                                "decline" => return QuestionOutcome::Declined,
+                                "cancel" => return QuestionOutcome::Cancelled,
+                                _ => surface.status.lock().expect("surface status lock").notice = Some("Use completed, decline, or cancel; never provide credentials".to_owned()),
+                            },
+                            Line::HostCommand(HostCommand::ModalEscape) => return QuestionOutcome::Cancelled,
+                            Line::Interrupted | Line::Blank => return QuestionOutcome::Declined,
+                            Line::Ended | Line::ExternalBreak(_) => return QuestionOutcome::Unavailable,
+                            _ => {},
+                        }
+                    }
+                }
+            };
+            return QuestionOutcome::MemberCompleted {
+                key: key.to_owned(),
+                answer,
+            };
+        }
+        let confirm = QuestionRequest::new(
+            "Retry the original MCP operation with these completed inputs?",
+            QuestionMode::Single,
+            vec![QuestionOption::new("retry", "Retry the original operation")],
+            false,
+        );
+        return match answer_question(editor, surface, &confirm) {
+            QuestionOutcome::Answered(QuestionAnswer::Single(value)) if value == "retry" => {
+                QuestionOutcome::Answered(QuestionAnswer::Round(
+                    ego_core::question::ElicitationAnswers {
+                        confirmed: true,
+                        responses: round.completed.clone(),
+                    },
+                ))
+            }
+            outcome => outcome,
+        };
+    }
     let cursor_selectors = surface
         .status
         .lock()
@@ -465,6 +553,7 @@ fn answer_question_selector(
     let kind = match request.mode {
         QuestionMode::Single => SelectorKind::Single,
         QuestionMode::Multiple => SelectorKind::Multiple,
+        QuestionMode::Round(_) => unreachable!("rounds present their members separately"),
         QuestionMode::FreeText => unreachable!("free text retains the editor grammar"),
         QuestionMode::Form { .. } => {
             unreachable!("form answers retain the raw JSON editor grammar")
@@ -776,6 +865,7 @@ fn parse_question_answer(
             selected.extend(free_text);
             QuestionAnswer::multiple(selected)
         }
+        QuestionMode::Round(_) => return QuestionAnswer::from_json(request, raw),
         QuestionMode::FreeText => {
             let mut selector = Selector::free_text();
             selector.insert(raw);
@@ -811,6 +901,19 @@ fn permission_line(
 }
 
 fn modal_line(editor: &mut Reedline, surface: &mut ModalSurface<'_>, prompt: &dyn Prompt) -> Line {
+    #[cfg(test)]
+    if let Some(line) = TERMINAL_SCRIPT.with_borrow_mut(|script| {
+        script.as_mut().map(|script| {
+            script.prompts.push(
+                prompt
+                    .render_prompt_indicator(PromptEditMode::Emacs)
+                    .to_string(),
+            );
+            script.lines.pop_front().expect("scripted terminal input")
+        })
+    }) {
+        return line;
+    }
     surface_line(
         editor,
         prompt,
@@ -1758,4 +1861,144 @@ mod permission_edit_form_tests {
             json!(["cargo", "test", "-p", "ego-core"])
         );
     }
+}
+
+/// The terminal owner invokes this only after fresh explicit human consent.
+fn launch_elicitation_url(url: &str) -> bool {
+    #[cfg(test)]
+    if let Some(opened) = TERMINAL_SCRIPT.with_borrow_mut(|script| {
+        script.as_mut().map(|script| {
+            script.launches.push(url.to_owned());
+            true
+        })
+    }) {
+        return opened;
+    }
+    if ego_core::question::validate_url(url).is_err() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn host_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TerminalScript {
+    lines: std::collections::VecDeque<Line>,
+    prompts: Vec<String>,
+    launches: Vec<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TERMINAL_SCRIPT: std::cell::RefCell<Option<TerminalScript>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_resumed_round_terminal(mut request: QuestionRequest) {
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Modal);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let asked_for_image = AtomicBool::new(false);
+    let (ingress, _control) = interactive_control();
+    let mut drafts = DraftStash::new(SessionId::new());
+    let mut surface = ModalSurface {
+        phase: &phase,
+        status: &status,
+        asked_for_image: &asked_for_image,
+        ingress: &ingress,
+        drafts: &mut drafts,
+    };
+    let script = |lines: &[&str]| {
+        TERMINAL_SCRIPT.set(Some(TerminalScript {
+            lines: lines
+                .iter()
+                .map(|line| {
+                    if line.is_empty() {
+                        Line::Blank
+                    } else {
+                        Line::Submitted((*line).into())
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        }))
+    };
+    // Reopening the same destination never inherits consent from a previous presentation.
+    script(&["n"]);
+    assert_eq!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::Declined
+    );
+    assert!(TERMINAL_SCRIPT.with_borrow(|script| script.as_ref().unwrap().launches.is_empty()));
+    script(&["y", "completed"]);
+    assert!(matches!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::MemberCompleted { .. }
+    ));
+    assert_eq!(
+        TERMINAL_SCRIPT.take().unwrap().launches,
+        ["https://example.test/remaining"]
+    );
+    // No member settlement was published: a resumed presentation must ask again.
+    script(&["n"]);
+    assert_eq!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::Declined
+    );
+    assert!(TERMINAL_SCRIPT.take().unwrap().launches.is_empty());
+    script(&["y", "completed"]);
+    let QuestionOutcome::MemberCompleted { key, answer } =
+        answer_question(&mut editor, &mut surface, &request)
+    else {
+        panic!("remaining member must be presented")
+    };
+    assert_eq!(key, "b");
+    let script_result = TERMINAL_SCRIPT.take().unwrap();
+    assert_eq!(script_result.launches, ["https://example.test/remaining"]);
+    assert!(script_result.prompts[0].contains("Destination: https://example.test/remaining"));
+    assert!(
+        script_result
+            .prompts
+            .iter()
+            .all(|prompt| !prompt.contains("https://example.test/done"))
+    );
+    let QuestionMode::Round(round) = &mut request.mode else {
+        panic!("round")
+    };
+    round.complete_member(&key, answer).unwrap();
+    script(&[""]);
+    assert_eq!(
+        answer_question(&mut editor, &mut surface, &request),
+        QuestionOutcome::Declined
+    );
+    assert!(TERMINAL_SCRIPT.with_borrow(|script| script.as_ref().unwrap().launches.is_empty()));
+    script(&["retry"]);
+    assert!(
+        matches!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Answered(QuestionAnswer::Round(answer)) if answer.confirmed && answer.responses.len() == 2)
+    );
+    assert!(TERMINAL_SCRIPT.take().unwrap().launches.is_empty());
 }

@@ -283,31 +283,95 @@ fn rmcp_form_elicitation_retains_message_schema_and_continuation_authority() {
     .expect("one accepted form elicitation");
     let question = mapped.question_request();
 
-    assert_eq!(mapped.correlation_key(), "human-answer");
     assert_eq!(mapped.request_state(), b"opaque-continuation");
-    assert_eq!(question.prompt, "Confirm the deployment target");
+    let QuestionMode::Round(round) = &question.mode else {
+        panic!("current MCP requests use durable rounds")
+    };
+    let member = &round.requests["human-answer"];
+    assert_eq!(member.prompt, "Confirm the deployment target");
     assert_eq!(
-        question.mode,
-        QuestionMode::Form {
+        member.kind,
+        ego_core::question::ElicitationKind::Form {
             schema: json!({
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string", "enum": ["staging", "production"]}
-                },
-                "required": ["target"]
+                "type":"object", "properties":{"target":{"type":"string","enum":["staging","production"]}},
+                "required":["target"]
             })
         }
     );
+    assert!(round.completed.is_empty());
     assert!(question.options.is_empty());
     assert!(!question.free_text);
+}
+
+#[test]
+fn url_and_form_members_keep_distinct_protocol_identity_and_one_complete_response_map() {
+    // Catches: URL elicitation identifiers replace correlation keys, or member answers cause separate retries.
+    let form = InputRequest::Elicitation(ElicitRequest::new(
+        ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "Public display name".to_owned(),
+            requested_schema: serde_json::from_slice(&schema()).unwrap(),
+        },
+    ));
+    let url = InputRequest::Elicitation(ElicitRequest::new(
+        ElicitRequestParams::UrlElicitationParams {
+            meta: None,
+            message: "Complete on the page".to_owned(),
+            url: "https://example.test/verify?private=secret".to_owned(),
+            elicitation_id: "page-42".to_owned(),
+        },
+    ));
+    let mapped = ego_mcp::McpInputMapping::from_rmcp(InputRequiredResult::new(
+        Some(BTreeMap::from([
+            ("form-key".to_owned(), form),
+            ("page-key".to_owned(), url),
+        ])),
+        Some("opaque-state".to_owned()),
+    ))
+    .unwrap();
+    let QuestionMode::Round(round) = &mapped.question_request().mode else {
+        panic!("round")
+    };
+    let ego_core::question::ElicitationKind::Url { elicitation_id, .. } =
+        &round.requests["page-key"].kind
+    else {
+        panic!("URL")
+    };
+    assert_eq!(elicitation_id, "page-42");
+    let answers = ego_core::question::ElicitationAnswers {
+        confirmed: true,
+        responses: BTreeMap::from([
+            ("form-key".to_owned(), json!({"answer":"Ada"})),
+            ("page-key".to_owned(), json!({"completed":true})),
+        ]),
+    };
     assert_eq!(
-        mapped.schema(),
-        &json!({
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "enum": ["staging", "production"]}
-            },
-            "required": ["target"]
+        round.input_responses(&answers).unwrap(),
+        json!({
+            "form-key":{"action":"accept","content":{"answer":"Ada"}},
+            "page-key":{"action":"accept"}
         })
     );
+    assert_eq!(mapped.request_state(), b"opaque-state");
+}
+
+#[test]
+fn state_only_rounds_still_require_explicit_retry_confirmation() {
+    // Catches: an opaque server state causes an automatic retry without a human question.
+    let mapped = ego_mcp::McpInputMapping::from_rmcp(InputRequiredResult::new(
+        None,
+        Some("opaque-poll-state".to_owned()),
+    ))
+    .unwrap();
+    let QuestionMode::Round(round) = &mapped.question_request().mode else {
+        panic!("round")
+    };
+    assert!(round.requests.is_empty());
+    let mut answers = ego_core::question::ElicitationAnswers {
+        confirmed: false,
+        responses: Default::default(),
+    };
+    assert!(round.input_responses(&answers).is_err());
+    answers.confirmed = true;
+    assert_eq!(round.input_responses(&answers).unwrap(), json!({}));
 }

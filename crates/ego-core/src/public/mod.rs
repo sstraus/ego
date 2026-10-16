@@ -62,8 +62,22 @@ impl QuestionReport {
         Self {
             id,
             target: target.clone(),
-            prompt: request.prompt.clone(),
-            mode: request.mode.clone(),
+            prompt: if matches!(request.mode, QuestionMode::Round(_)) {
+                format!(
+                    "{}; private member details are omitted from public output. Use an interactive terminal or a host with the required elicitation capability",
+                    request.prompt
+                )
+            } else {
+                request.prompt.clone()
+            },
+            mode: match &request.mode {
+                QuestionMode::Round(_) => QuestionMode::Round(crate::question::ElicitationRound {
+                    expires_at_ms: None,
+                    requests: Default::default(),
+                    completed: Default::default(),
+                }),
+                mode => mode.clone(),
+            },
             options: request.options.clone(),
             free_text: request.free_text,
         }
@@ -575,8 +589,11 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
                     .expect("a validated question report always serializes"),
             ),
         }),
+        EventKind::QuestionMemberSettled { .. } => None,
         EventKind::QuestionSettled {
-            outcome: crate::question::QuestionOutcome::Unavailable,
+            outcome:
+                crate::question::QuestionOutcome::Unavailable
+                | crate::question::QuestionOutcome::MemberCompleted { .. },
         } => None,
         EventKind::QuestionSettled { outcome } => Some(PublicEvent::ItemCompleted {
             turn,

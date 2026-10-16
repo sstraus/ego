@@ -226,7 +226,7 @@ pub(super) enum RuntimeResume {
     Model(TurnId),
     Foreign {
         question: ItemId,
-        answer: QuestionAnswer,
+        answer: Option<QuestionAnswer>,
         policy: Arc<PolicyEngine>,
     },
 }

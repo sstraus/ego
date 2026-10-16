@@ -1676,6 +1676,9 @@ mod turn {
     }
 
     impl ForeignQuestionPort for RecordingForeignPort<'_> {
+        fn cancel(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
         fn resume<'a>(
             &'a self,
             _continuation_id: &'a str,

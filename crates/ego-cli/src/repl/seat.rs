@@ -2178,3 +2178,6 @@ pub(super) fn await_permission_printer_release() {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use question::test_resumed_round_terminal;
