@@ -357,7 +357,11 @@ fn output_lines(call: &Finished<'_>) -> Vec<String> {
             _ if !call.ok && line.starts_with(EXIT_PREFIX) => {}
             _ => {
                 let text = printable(line);
-                lines.push(if stderr { format!("stderr: {text}") } else { text });
+                lines.push(if stderr {
+                    format!("stderr: {text}")
+                } else {
+                    text
+                });
             }
         }
     }
@@ -476,19 +480,43 @@ mod tests {
     fn rendered_failed_exec_identifies_stderr() {
         for width in [80, 120, 200] {
             for (ok, result, expected, hidden) in [
-                (false, "[stderr]\nrg: missing.txt\n\nprocess exited unsuccessfully with code Some(2)", "stderr: rg: missing.txt", None),
-                (false, "[stdout]\none\ntwo\nthree\nfour\n[stderr]\nrg: missing.txt\n\nprocess exited unsuccessfully with code Some(2)", "stderr: rg: missing.txt", Some("2 more lines")),
-                (true, "[stderr]\nwarning: check input", "stderr: warning: check input", None),
+                (
+                    false,
+                    "[stderr]\nrg: missing.txt\n\nprocess exited unsuccessfully with code Some(2)",
+                    "stderr: rg: missing.txt",
+                    None,
+                ),
+                (
+                    false,
+                    "[stdout]\none\ntwo\nthree\nfour\n[stderr]\nrg: missing.txt\n\nprocess exited unsuccessfully with code Some(2)",
+                    "stderr: rg: missing.txt",
+                    Some("2 more lines"),
+                ),
+                (
+                    true,
+                    "[stderr]\nwarning: check input",
+                    "stderr: warning: check input",
+                    None,
+                ),
             ] {
-                let rendered = record(&call("exec", r#"{"argv":["rg","missing.txt"]}"#, ok, result), at(width));
+                let rendered = record(
+                    &call("exec", r#"{"argv":["rg","missing.txt"]}"#, ok, result),
+                    at(width),
+                );
                 let mut terminal = vt100::Parser::new(12, width as u16, 0);
                 terminal.process(rendered.rows.replace('\n', "\r\n").as_bytes());
                 let grid = terminal.screen().contents();
                 assert!(grid.contains(expected), "width={width}: {grid}");
-                assert!(grid.contains(if ok { "exit 0" } else { "exit 2" }), "{grid}");
+                assert!(
+                    grid.contains(if ok { "exit 0" } else { "exit 2" }),
+                    "{grid}"
+                );
                 assert!(rendered.rows.lines().count() <= 5);
                 if let Some(hidden) = hidden {
-                    assert!(grid.contains(hidden) && grid.contains("/expand shows all"), "{grid}");
+                    assert!(
+                        grid.contains(hidden) && grid.contains("/expand shows all"),
+                        "{grid}"
+                    );
                 }
                 assert!(rendered.detail.contains("[stderr]"));
                 assert!(rendered.detail.contains("rg: missing.txt") || ok);
