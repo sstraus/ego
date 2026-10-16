@@ -311,3 +311,30 @@ fn context_beyond_the_window_is_reported_as_over_one_hundred_percent() {
         "{extreme}"
     );
 }
+
+// Catches: missing occupancy renders unexplained punctuation or a fabricated zero.
+#[test]
+fn rendered_status_explains_unmeasured_context() {
+    let names = [StatusSegmentName::Context, StatusSegmentName::Cost];
+    for (used, window, expected) in [
+        (None, None, "ctx unmeasured"),
+        (None, Some(1_000_000), "ctx unmeasured/1M"),
+        (Some(7_010), Some(1_000_000), "ctx 0.7%/1M"),
+    ] {
+        let facts = state(used, window, CumulativeCost::Unstarted);
+        for width in [80, 120, 200] {
+            let shown = row(&facts, &names, width);
+            let mut terminal = vt100::Parser::new(4, width as u16, 0);
+            terminal.process(shown.as_bytes());
+            assert_eq!(terminal.screen().contents(), expected, "width={width}");
+            println!("status width={width} grid={:?}", terminal.screen().contents());
+        }
+        for width in 1..25 {
+            let shown = row(&facts, &names, width);
+            assert!(shown.is_empty() || shown == expected, "width={width}: {shown}");
+        }
+    }
+    // A resumed log without any occupancy event has no measurement to invent.
+    let resumed = SessionState::replay(Vec::<DomainEvent>::new());
+    assert_eq!(row(&resumed, &names, 80), "ctx unmeasured");
+}
