@@ -807,7 +807,7 @@ fn exporter_redacts_goal_fallback_and_permission_material_but_keeps_decisions() 
     let (mut fixture, target, _) = fixture();
     fixture.lineages.insert(target, None);
     let id = GoalId::new();
-    let request = RequestId::new();
+    let request = RequestId::from_uuid(uuid::Uuid::new_v4());
     let secret = "PRIVATE-POLICY-MATERIAL";
     let mut seq = Seq::ZERO;
     let kinds = vec![
