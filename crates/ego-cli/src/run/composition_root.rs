@@ -113,7 +113,108 @@ pub(super) const fn spent_bare(captured: Trust, requested: Trust) -> bool {
     matches!((captured, requested), (Trust::Trusted, Trust::Untrusted))
 }
 
+fn apply_preparation_selections(
+    args: &mut Args,
+    selections: &RunSelections,
+) -> Result<(), RunTermination> {
+    if let Some(model) = selections.model() {
+        args.model = Some(model.0.clone());
+    }
+    if let Some(thinking) = selections.thinking() {
+        args.thinking = Some(thinking);
+    }
+    if let Some(mode) = selections.mode() {
+        args.mode = Some(mode);
+    }
+    // Before `rooted_settings` below, which is the point: the confinement
+    // this becomes is what the MCP admission, the effect scope and the
+    // child authority ceiling are all derived from, and none of them can
+    // be re-decided once they exist.
+    if let Some(sandbox) = selections.sandbox() {
+        args.sandbox = Some(sandbox);
+    }
+    if let Some(budget) = selections.budget() {
+        args.budget = Some(run_budget_spec(budget)?);
+    }
+    apply_preparation_prompt(args, selections);
+    Ok(())
+}
+
+fn apply_preparation_prompt(args: &mut Args, selections: &RunSelections) {
+    if let Some(profile) = selections.profile() {
+        args.profile = Some(profile.to_owned());
+        args.profile_source = Some(ego_core::config::Source::Flags);
+    }
+    if let Some(path) = selections.read_only_dir() {
+        args.read_only_dir = Some(path.to_path_buf());
+    }
+    args.ceiling_profile = selections.ceiling_profile().map(str::to_owned);
+    if let Some(options) = selections.prompt_options() {
+        args.session_prompt = options.system_prompt.clone();
+        // A host cannot undo a launch-wide bare selection.
+        args.bare |= options.bare.unwrap_or(false);
+    }
+}
+
 impl CliPrepared {
+    fn apply_operator_seat(&mut self, bindings: &RunExecutionBindings) {
+        // The operator seat speaks before anything reads the configuration.
+        //
+        // A protocol session continues one run across prompts, so its
+        // selections were admitted once and cannot change; the seat is the
+        // only channel a live picker has. Applying it here — ahead of the
+        // model preflight and the policy selection below — is what makes a
+        // change land at the next generation boundary rather than at the next
+        // session. Only what the operator explicitly chose is applied: an
+        // inherited configuration default is not a decision to re-record.
+        let Some(controls) = bindings.controls() else {
+            return;
+        };
+        match controls.state(self.session_id) {
+            Ok(state) => apply_seat(&state, &mut self.effective, &mut self.slug),
+            // An unreadable seat leaves the configured values in force.
+            // Refusing the turn would let a poisoned picker lock a
+            // session out of running at all.
+            Err(error) => {
+                tracing::warn!(%error, "the operator seat could not be read");
+            }
+        }
+    }
+
+    async fn refresh_orchestrator_tool(&mut self) -> Result<(), RunExecutorError> {
+        if !self
+            .registry
+            .iter()
+            .any(|tool| tool.descriptor().name == "orchestrator_active")
+        {
+            return Ok(());
+        }
+        use futures::StreamExt;
+        let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
+            .map_err(|e| RunExecutorError::new(e.to_string()))?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RunExecutorError::new(e.to_string()))?;
+        let limits = ego_tools::orchestrator_active::rework_limits(&entries)
+            .map_err(RunExecutorError::new)?;
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
+        let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
+            ego_core::orchestrator::Mode::Active,
+            std::path::Path::new(&home),
+            std::env::var("TUIC_SESSION").ok(),
+            limits,
+        );
+        for entry in &mut self.registry {
+            if entry.descriptor().name == "orchestrator_active" {
+                *entry = RegisteredTool::Effect(Arc::clone(&tool));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn prepare(
         mut args: Args,
         store: Arc<JsonlStore>,
@@ -132,38 +233,7 @@ impl CliPrepared {
         let usage = |error: UsageError| RunTermination::UsageError {
             message: error.to_string(),
         };
-        if let Some(model) = request.selections.model() {
-            args.model = Some(model.0.clone());
-        }
-        if let Some(thinking) = request.selections.thinking() {
-            args.thinking = Some(thinking);
-        }
-        if let Some(mode) = request.selections.mode() {
-            args.mode = Some(mode);
-        }
-        // Before `rooted_settings` below, which is the point: the confinement
-        // this becomes is what the MCP admission, the effect scope and the
-        // child authority ceiling are all derived from, and none of them can
-        // be re-decided once they exist.
-        if let Some(sandbox) = request.selections.sandbox() {
-            args.sandbox = Some(sandbox);
-        }
-        if let Some(budget) = request.selections.budget() {
-            args.budget = Some(run_budget_spec(budget)?);
-        }
-        if let Some(profile) = request.selections.profile() {
-            args.profile = Some(profile.to_owned());
-            args.profile_source = Some(ego_core::config::Source::Flags);
-        }
-        if let Some(path) = request.selections.read_only_dir() {
-            args.read_only_dir = Some(path.to_path_buf());
-        }
-        args.ceiling_profile = request.selections.ceiling_profile().map(str::to_owned);
-        if let Some(options) = request.selections.prompt_options() {
-            args.session_prompt = options.system_prompt.clone();
-            // A host cannot undo a launch-wide bare selection.
-            args.bare |= options.bare.unwrap_or(false);
-        }
+        apply_preparation_selections(&mut args, &request.selections)?;
         ego_core::config::validate_prompt_options(args.bare, args.instructions.is_some())
             .map_err(|message| usage(UsageError(message.to_owned())))?;
         if args.profile.as_deref() == Some("ci") {
@@ -208,8 +278,11 @@ impl CliPrepared {
             &Stderr,
         )
         .map_err(usage)?;
-        let system = if child { None } else { system };
-        let compiled = if child { None } else { compiled };
+        let (system, compiled) = if child {
+            (None, None)
+        } else {
+            (system, compiled)
+        };
         let Settings {
             run_deadline,
             root,
@@ -283,55 +356,8 @@ impl CliPrepared {
         cancel: &CancelToken,
         pause: &PauseToken,
     ) -> Result<RunSettlement, RunExecutorError> {
-        // The operator seat speaks before anything reads the configuration.
-        //
-        // A protocol session continues one run across prompts, so its
-        // selections were admitted once and cannot change; the seat is the
-        // only channel a live picker has. Applying it here — ahead of the
-        // model preflight and the policy selection below — is what makes a
-        // change land at the next generation boundary rather than at the next
-        // session. Only what the operator explicitly chose is applied: an
-        // inherited configuration default is not a decision to re-record.
-        if let Some(controls) = bindings.controls() {
-            match controls.state(self.session_id) {
-                Ok(state) => apply_seat(&state, &mut self.effective, &mut self.slug),
-                // An unreadable seat leaves the configured values in force.
-                // Refusing the turn would let a poisoned picker lock a
-                // session out of running at all.
-                Err(error) => {
-                    tracing::warn!(%error, "the operator seat could not be read");
-                }
-            }
-        }
-        if self
-            .registry
-            .iter()
-            .any(|tool| tool.descriptor().name == "orchestrator_active")
-        {
-            use futures::StreamExt;
-            let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
-                .map_err(|e| RunExecutorError::new(e.to_string()))?
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| RunExecutorError::new(e.to_string()))?;
-            let limits = ego_tools::orchestrator_active::rework_limits(&entries)
-                .map_err(RunExecutorError::new)?;
-            let home = std::env::var_os("HOME")
-                .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
-            let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
-                ego_core::orchestrator::Mode::Active,
-                std::path::Path::new(&home),
-                std::env::var("TUIC_SESSION").ok(),
-                limits,
-            );
-            for entry in &mut self.registry {
-                if entry.descriptor().name == "orchestrator_active" {
-                    *entry = RegisteredTool::Effect(Arc::clone(&tool));
-                }
-            }
-        }
+        self.apply_operator_seat(&bindings);
+        self.refresh_orchestrator_tool().await?;
         let run_id = self.run_id;
         let artifacts = self.artifacts.clone();
         let child_root = RunRoot::new(self.root.clone())
@@ -547,24 +573,33 @@ impl CliPrepared {
             Err(termination) => return settlement(termination),
         };
         active.replace_state(state);
-        let settlement = settlement(termination)?;
-        if matches!(&settlement, RunSettlement::Completed)
-            && let Some(artifacts) = artifacts
+        settle_run_artifact(termination, artifacts, run_id, result)
+    }
+}
+
+fn settle_run_artifact(
+    termination: RunTermination,
+    artifacts: Option<Arc<dyn RunArtifactStore>>,
+    run_id: RunId,
+    result: Value,
+) -> Result<RunSettlement, RunExecutorError> {
+    let settlement = settlement(termination)?;
+    if matches!(&settlement, RunSettlement::Completed)
+        && let Some(artifacts) = artifacts
+    {
+        match artifacts
+            .publish(run_id, public_result_artifact(result)?)
+            .map_err(|error| RunExecutorError::new(error.to_string()))?
         {
-            match artifacts
-                .publish(run_id, public_result_artifact(result)?)
-                .map_err(|error| RunExecutorError::new(error.to_string()))?
-            {
-                ArtifactPublication::PublishedDurably => {}
-                ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => {
-                    return Err(RunExecutorError::new(format!(
-                        "run artifact is visible but its durability is uncertain: {diagnostic}"
-                    )));
-                }
+            ArtifactPublication::PublishedDurably => {}
+            ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => {
+                return Err(RunExecutorError::new(format!(
+                    "run artifact is visible but its durability is uncertain: {diagnostic}"
+                )));
             }
         }
-        Ok(settlement)
     }
+    Ok(settlement)
 }
 
 /// The exact interactive guard for the clean-session transition.
