@@ -28,6 +28,7 @@ pub mod auth;
 pub mod budget;
 pub mod build_info;
 pub mod catalogue;
+pub(crate) mod capability_roots;
 pub mod cli;
 pub mod config;
 pub(crate) mod confinement_diagnostics;
