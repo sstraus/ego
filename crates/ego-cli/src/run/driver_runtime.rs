@@ -768,7 +768,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     policy_selection: &policy_selection,
                                     selection: &selection,
                                     between: between,
-                                    cancel: cancel,
+                                    cancel: &cancel,
                                     last: &mut last,
                                     mcp_errors: &mcp_errors,
                                 },
@@ -2164,7 +2164,12 @@ fn rescan_session_skills(
     pending_work: bool,
     skills: Option<&crate::skill::SkillCatalogue>,
     seat: &dyn InteractiveSeat,
-    inputs: (&Args, &Effective, &JsonlStore, ego_core::permit::EnvPolicy),
+    inputs: (
+        &Args,
+        &Effective,
+        &Arc<JsonlStore>,
+        ego_core::permit::EnvPolicy,
+    ),
     diagnostics: &dyn Diagnostics,
 ) -> Result<Option<Vec<RegisteredTool>>, RunTermination> {
     let (args, effective, jsonl_store, exec_environment) = inputs;
@@ -2255,7 +2260,8 @@ struct InteractiveCommand<'a, 'session, 'store> {
     state: &'a mut SessionState,
     diagnostics: &'a dyn Diagnostics,
     interactive_metadata: &'a SessionMetadata<JsonlStore>,
-    leased_session_journal: &'a LeasedSharedJournal<'session, JsonlStore>,
+    leased_session_journal:
+        &'a LeasedSharedJournal<'session, ego_tools::store::SessionWriter<'store>>,
     session_journal: &'a SharedJournal<'session>,
     interactive_metadata_ceilings: &'a Ceilings,
     status: &'a Option<InteractiveStatus>,
@@ -2737,9 +2743,9 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
     }
 }
 
-struct SessionMetadataCommand<'a, 'session> {
+struct SessionMetadataCommand<'a, 'session, 'store> {
     metadata: &'a SessionMetadata<JsonlStore>,
-    leased: &'a LeasedSharedJournal<'session, JsonlStore>,
+    leased: &'a LeasedSharedJournal<'session, ego_tools::store::SessionWriter<'store>>,
     journal: &'a SharedJournal<'session>,
     ceilings: &'a Ceilings,
     state: &'a mut SessionState,
@@ -2750,7 +2756,7 @@ struct SessionMetadataCommand<'a, 'session> {
 }
 
 fn update_session_metadata<'store>(
-    input: SessionMetadataCommand<'_, '_>,
+    input: SessionMetadataCommand<'_, '_, '_>,
     operation: crate::cli::SessionMetadataOperation,
     pending_work: bool,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
@@ -2934,7 +2940,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         request_id,
         source: source_id,
     };
-    let receipt = CompactionTransitionService::new(clock)
+    let receipt = CompactionTransitionService::new(*clock)
         .compact(request, &mut preparation, jsonl_store.as_ref())
         .await;
     drop(preparation);
@@ -3024,15 +3030,14 @@ async fn end_session_epoch(
                 None => session_hooks.bind_current(policy_source),
             };
             match runtime {
-                Ok(runtime) => {
-                    dispatch_session_hook(
-                        &runtime,
-                        session_id,
-                        session_hooks.turn,
-                        HookLifecycle::SessionEnd,
-                    )
-                    .await
-                }
+                Ok(runtime) => dispatch_session_hook(
+                    &runtime,
+                    session_id,
+                    session_hooks.turn,
+                    HookLifecycle::SessionEnd,
+                )
+                .await
+                .map(|_| ()),
                 Err(error) => Err(error),
             }
         }
@@ -3457,7 +3462,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         run_deadline,
         cwd: cwd,
         blobs: active.evidence().blob_store(),
-        seat: seat.as_ref(),
+        seat,
         diagnostics,
     })
     .await?
@@ -3543,13 +3548,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         return Ok((false, perimeter));
     };
     between();
-    report_interactive_turn_end(
-        &termination,
-        cancel,
-        seat.as_ref(),
-        turn_started,
-        diagnostics,
-    );
+    report_interactive_turn_end(&termination, cancel, seat, turn_started, diagnostics);
     *last = Ended {
         termination,
         session: active.id(),
