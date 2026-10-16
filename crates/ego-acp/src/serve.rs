@@ -2739,7 +2739,7 @@ async fn selected_trust(
             );
             selections
         }
-        QuestionOutcome::Unavailable => {
+        QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => {
             trust_unanswered(
                 "unavailable",
                 "this host cannot render the workspace trust form",

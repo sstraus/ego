@@ -157,6 +157,12 @@ impl AcpQuestionAdapter {
             ),
             QuestionMode::FreeText => ElicitationSchema::new().string("answer", true),
             QuestionMode::Form { schema } => map_form_schema(question, schema)?,
+            QuestionMode::Round(_) => {
+                return Err(invalid_request_reason(
+                    question,
+                    "a round must be presented member by member",
+                ));
+            }
         };
         let scope = ElicitationSessionScope::new(session.clone());
         Ok(CreateElicitationRequest::new(
@@ -176,6 +182,12 @@ impl AcpQuestionAdapter {
                     invalid_answer(question, "accepted elicitation has no content")
                 })?;
                 let answer = match &request.mode {
+                    QuestionMode::Round(_) => {
+                        return Err(invalid_answer(
+                            question,
+                            "a round requires correlated member answers",
+                        ));
+                    }
                     QuestionMode::Single => match content.get("answer") {
                         Some(ElicitationContentValue::String(value)) => {
                             QuestionAnswer::single(value.clone())
@@ -265,6 +277,63 @@ impl AcpQuestionAdapter {
         question: ItemId,
         request: QuestionRequest,
     ) -> Result<QuestionOutcome, ElicitorError> {
+        if let QuestionMode::Round(round) = &request.mode {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(u64::MAX, |duration| {
+                    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+                });
+            if round.expired_at(now_ms) {
+                return Ok(QuestionOutcome::Unavailable);
+            }
+            request
+                .validate()
+                .map_err(|_| ElicitorError::new("invalid elicitation round"))?;
+            if let Some((key, member)) = round.next_member() {
+                let ego_core::question::ElicitationKind::Form { schema } = &member.kind else {
+                    // The pinned ACP form capability does not grant a browser-launch effect.
+                    tracing::warn!(
+                        "ACP host has no admitted URL elicitation capability; round remains pending"
+                    );
+                    return Ok(QuestionOutcome::Unavailable);
+                };
+                let outcome =
+                    Box::pin(self.elicit_live(question, member.form_request(schema))).await?;
+                return Ok(match outcome {
+                    QuestionOutcome::Answered(QuestionAnswer::Form(value)) => {
+                        QuestionOutcome::MemberCompleted {
+                            key: key.to_owned(),
+                            answer: serde_json::Value::Object(value),
+                        }
+                    }
+                    outcome => outcome,
+                });
+            }
+            let confirmation = QuestionRequest::new(
+                "Retry the original MCP operation with these completed inputs?",
+                QuestionMode::Single,
+                vec![ego_core::question::QuestionOption::new(
+                    "retry",
+                    "Retry the original operation",
+                )],
+                false,
+            );
+            return Ok(
+                match Box::pin(self.elicit_live(question, confirmation)).await? {
+                    QuestionOutcome::Answered(QuestionAnswer::Single(value))
+                        if value == "retry" =>
+                    {
+                        QuestionOutcome::Answered(QuestionAnswer::Round(
+                            ego_core::question::ElicitationAnswers {
+                                confirmed: true,
+                                responses: round.completed.clone(),
+                            },
+                        ))
+                    }
+                    outcome => outcome,
+                },
+            );
+        }
         if !self.capabilities.form_available() {
             return Ok(QuestionOutcome::Unavailable);
         }

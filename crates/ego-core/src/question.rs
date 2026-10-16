@@ -8,6 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+mod round;
+pub use round::*;
+
 use crate::event::id::ItemId;
 use crate::generator::types::ToolDescriptor;
 
@@ -18,7 +21,11 @@ pub enum QuestionMode {
     Single,
     Multiple,
     FreeText,
-    Form { schema: Value },
+    Form {
+        schema: Value,
+    },
+    #[schemars(skip)]
+    Round(ElicitationRound),
 }
 
 /// The durable consumer of one human answer.
@@ -128,6 +135,12 @@ impl QuestionRequest {
             }
         }
         match &self.mode {
+            QuestionMode::Round(round) => {
+                if !self.options.is_empty() || self.free_text {
+                    return Err(QuestionError::InvalidRound);
+                }
+                round.validate()
+            }
             QuestionMode::Single | QuestionMode::Multiple if self.options.is_empty() => {
                 Err(QuestionError::OptionsRequired)
             }
@@ -166,6 +179,7 @@ pub enum QuestionAnswer {
     Multiple(Vec<String>),
     FreeText(String),
     Form(Map<String, Value>),
+    Round(ElicitationAnswers),
 }
 
 impl QuestionAnswer {
@@ -196,6 +210,9 @@ impl QuestionAnswer {
         let value: Value = serde_json::from_str(json)
             .map_err(|error| QuestionError::MalformedJson(error.to_string()))?;
         let answer = match &request.mode {
+            QuestionMode::Round(_) => Self::Round(
+                serde_json::from_value(value).map_err(|_| QuestionError::WrongAnswerType)?,
+            ),
             QuestionMode::Single => Self::Single(non_empty_string(value)?),
             QuestionMode::Multiple => {
                 let Value::Array(values) = value else {
@@ -230,6 +247,7 @@ impl QuestionAnswer {
     pub fn validate_for(&self, request: &QuestionRequest) -> Result<(), QuestionError> {
         request.validate()?;
         match (&request.mode, self) {
+            (QuestionMode::Round(round), Self::Round(answers)) => round.validate_answers(answers),
             (QuestionMode::Single, Self::Single(value))
             | (QuestionMode::FreeText, Self::FreeText(value)) => validate_value(request, value),
             (QuestionMode::Multiple, Self::Multiple(values)) => {
@@ -262,6 +280,9 @@ impl QuestionAnswer {
     /// The complete pure result returned to the model-visible tool call.
     pub fn model_text(&self) -> String {
         match self {
+            Self::Round(answers) => {
+                serde_json::to_string(answers).expect("round answers serialize")
+            }
             Self::Single(value) | Self::FreeText(value) => value.clone(),
             Self::Multiple(values) => serde_json::to_string(values)
                 .expect("a vector of strings always serializes to JSON"),
@@ -300,6 +321,11 @@ pub enum QuestionOutcome {
     Declined,
     Cancelled,
     Unavailable,
+    /// One member becomes durable before asking another or approving a retry.
+    MemberCompleted {
+        key: String,
+        answer: Value,
+    },
 }
 
 /// Validation failures are usage errors and never mutate reducer state.
@@ -326,6 +352,7 @@ pub enum QuestionError {
     AlreadySettled,
     ForeignContinuationRequired,
     InvalidTarget,
+    InvalidRound,
 }
 
 impl std::fmt::Display for QuestionError {
@@ -357,6 +384,7 @@ impl std::fmt::Display for QuestionError {
             Self::ForeignContinuationRequired => {
                 f.write_str("the foreign question requires its continuation adapter")
             }
+            Self::InvalidRound => f.write_str("the elicitation round is invalid or incomplete"),
             Self::InvalidTarget => f.write_str("the question target is invalid"),
         }
     }
@@ -383,6 +411,9 @@ impl HumanInputTool for AskQuestionTool {
         let request: QuestionRequest =
             serde_json::from_value(raw).map_err(|error| error.to_string())?;
         request.validate().map_err(|error| error.to_string())?;
+        if matches!(request.mode, QuestionMode::Round(_)) {
+            return Err("external elicitation rounds cannot originate from model tools".to_owned());
+        }
         Ok(request)
     }
 }
