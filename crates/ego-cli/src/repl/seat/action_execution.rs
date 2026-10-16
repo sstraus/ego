@@ -836,7 +836,8 @@ pub(super) fn apply_surface_effect(
                 }
             }
             editor.run_edit_commands(&[EditCommand::Clear]);
-            status.lock().expect("surface status lock").notice = None;
+            status.lock().expect("surface status lock").notice =
+                Some("Composer cleared; transcript, context and history unchanged".to_owned());
         }
         SurfaceActionEffect::Statusline => {
             let segments = match choose_statusline_preset(editor, phase, status, busy) {

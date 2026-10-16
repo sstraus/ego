@@ -9308,3 +9308,64 @@ fn interactive_usage_keeps_cost_with_its_session_row_at_80_columns() {
         );
     }
 }
+
+/// Catches: typed clear silently leaves the transcript and export omits format/destination receipts.
+#[test]
+fn typed_clear_reports_its_scope() {
+    let mut captures = Vec::new();
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/clear\r").unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(&reader, &mut output, start, "clear", SLASH_ACTION_DEADLINE);
+        submit_local_action(
+            &reader,
+            &mut output,
+            &mut input,
+            &stub,
+            "help",
+            Some(HELP_END),
+        );
+        submit_local_action(&reader, &mut output, &mut input, &stub, "export", None);
+        drain_until_quiet(&reader, &mut output);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).unwrap();
+        }
+        captures.push(normalized(&output[start..]));
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        assert!(stub.generations().is_empty());
+    }
+    for capture in captures {
+        assert!(
+            capture.contains("Composer cleared; transcript, context and history unchanged"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("Exported sanitized evidence bundle as md to this transcript"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("# ego sanitized export"),
+            "export bytes unchanged: {capture}"
+        );
+    }
+}

@@ -2652,7 +2652,18 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 directory: args.directory.clone(),
             };
             match exported(&args) {
-                Ok(rendered) => diagnostics.note(&rendered),
+                Ok(rendered) => {
+                    diagnostics.note(&rendered);
+                    diagnostics.note(&format!(
+                        "Exported {} as {} to this transcript; no file written.",
+                        if selection.sanitize {
+                            "sanitized evidence bundle"
+                        } else {
+                            "local session"
+                        },
+                        selection.format
+                    ));
+                }
                 Err(termination) => diagnostics.note(&format!(
                     "the session could not be exported: {}",
                     termination.exit_reason()

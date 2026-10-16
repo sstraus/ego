@@ -25,8 +25,11 @@ its reason. Exact registered slash commands execute with one Enter. Partial
 completion does not submit. Slash text in bracketed paste remains ordinary
 prompt text; it does not execute a pasted control command.
 
-`/clear` clears composer/menu state, not durable history. `/expand` pages the
-retained last-tool output. `/refresh` applies current instructions through a
+`/clear` clears composer/menu state and confirms that transcript, context, and
+durable history are unchanged. `/expand` pages the
+retained last-tool output. `/export` prints to this transcript, not a file, and
+reports its disclosure and format. The default remains a sanitized JSON evidence
+bundle in a markdown fence; export serialization is unchanged. `/refresh` applies current instructions through a
 new prompt epoch when source work is idle.
 
 `/name [show|set TEXT|clear]` reads or changes display metadata.
