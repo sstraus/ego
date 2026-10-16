@@ -1208,206 +1208,42 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         let future: CompactionFuture<
                                             '_,
                                             Result<PreparedCompaction, CompactionError>,
-                                        > = Box::pin(async {
-                                            let target_system = instructions(
-                                                &effective,
-                                                &args,
-                                                &root,
-                                                &cwd,
+                                        > = Box::pin(prepare_interactive_compaction(
+                                            InteractiveCompaction {
+                                                args: &args,
+                                                effective: &effective,
+                                                root: &root,
+                                                cwd: &cwd,
                                                 diagnostics,
-                                            )
-                                            .map_err(|error| {
-                                                CompactionError::Internal(error.to_string())
-                                            })?;
-                                            let prepared_skills = skills
-                                                .as_ref()
-                                                .map(|catalogue| catalogue.prepare_rescan())
-                                                .transpose()
-                                                .map_err(|error| {
-                                                    CompactionError::Internal(error.to_string())
-                                                })?;
-                                            let target_skills = prepared_skills
-                                                .as_ref()
-                                                .map(crate::skill::PreparedSkillRescan::capture);
-                                            let mut target_registry =
-                                                super::composition::tools_with_mode(
-                                                    args.tools.as_ref(),
-                                                    target_skills.as_ref().map(
-                                                        crate::skill::SkillCatalogueCapture::core,
-                                                    ),
-                                                    effective
-                                                        .active_profile
-                                                        .as_ref()
-                                                        .map(|profile| profile.name.as_str()),
-                                                    Some(Arc::new(jsonl_store.history())),
-                                                    effective.exec.policy().map_err(|error| {
-                                                        CompactionError::Internal(error.to_string())
-                                                    })?,
-                                                    super::composition::orchestration_mode(
-                                                        &effective,
-                                                    ),
-                                                )
-                                                .map_err(|error| {
-                                                    CompactionError::Internal(error.to_string())
-                                                })?;
-                                            if !args.no_context_tool && args.tools.is_none() {
-                                                target_registry.push(RegisteredTool::Context);
-                                            }
-                                            let target_tools: Vec<ToolDescriptor> = target_registry
-                                                .iter()
-                                                .map(RegisteredTool::descriptor)
-                                                .collect();
-                                            let (ports, observation, probe_evidence) =
-                                                effect_scope(
-                                                    &confinement,
-                                                    active.evidence(),
-                                                    &compaction_cancel,
-                                                    run_deadline,
-                                                    None,
-                                                )
-                                                .await
-                                                .map_err(compaction_termination)?;
-                                            let http = Arc::new(ProviderHttpAdapter::new(
-                                                Arc::clone(&ports),
-                                            ))
-                                                as Arc<dyn ego_ai::http::Http>;
-                                            let runtime = GenerationRuntime {
-                                                source: source.bind(
-                                                    http,
-                                                    compaction_cancel.clone(),
-                                                    run_deadline,
-                                                ),
-                                                policy_source: Arc::clone(&policy_source),
-                                                gate: gate.clone(),
-                                                config: config.clone(),
-                                                admission: Arc::clone(&evidence),
+                                                skills: &skills,
+                                                jsonl_store,
+                                                confinement: &confinement,
+                                                active: &active,
+                                                cancel: &compaction_cancel,
+                                                run_deadline,
+                                                source: &source,
+                                                policy_source: &policy_source,
+                                                gate: &gate,
+                                                config: &config,
+                                                evidence: &evidence,
                                                 invocation,
-                                                retry_pause: Arc::new(TokioRetryPause),
-                                            };
-                                            let effect_ports = ToolEffectPorts::new(
-                                                &fs,
-                                                ports.process(),
-                                                active.evidence(),
-                                                ports.resolver_handle(),
-                                                ports.one_hop_handle(),
-                                                ports.duplex_handle(),
-                                            )
-                                            .with_secret_values(ego_tools::secrets::from_env())
-                                            .with_cancel(compaction_cancel.clone());
-                                            let compaction_tools = match admitted_tools.as_ref() {
-                                                Some(source) => Tools::from_registry_with_source(
-                                                    &target_registry,
-                                                    Arc::clone(source),
-                                                    effect_ports,
-                                                    CanonPath::new(&cwd),
-                                                )
-                                                .map_err(|error| {
-                                                    CompactionError::Internal(error.to_string())
-                                                })?,
-                                                None => Tools::from_registry(
-                                                    &target_registry,
-                                                    effect_ports,
-                                                    CanonPath::new(&cwd),
-                                                ),
-                                            };
-                                            let compaction_tools =
-                                                match McpRuntimeBinding::resume_sealer(
-                                                    mcp_runtime.as_ref(),
-                                                ) {
-                                                    Some(resume) => {
-                                                        compaction_tools.with_resume(resume)
-                                                    }
-                                                    None => compaction_tools,
-                                                };
-                                            let compaction_tools =
-                                                match skill_resource_roots.as_ref() {
-                                                    Some(roots) => compaction_tools
-                                                        .with_skill_resource_roots(roots.clone()),
-                                                    None => compaction_tools,
-                                                };
-                                            let mut compaction = TurnLoop::from_shared_journal(
-                                                active.id(),
-                                                session_journal.clone(),
-                                                active.run_evidence(),
-                                                compaction_cancel.clone(),
-                                                runtime,
-                                                compaction_tools,
-                                            )
-                                            .map_err(|error| {
-                                                CompactionError::Internal(error.to_string())
-                                            })?
-                                            .with_context_policy(
-                                                args.context_clear,
-                                                args.context_interval,
-                                            )
-                                            .with_last_generation_request(
-                                                last_generation_request.clone(),
-                                            )
-                                            .with_hook_binding(
-                                                session_hooks.state.clone(),
-                                                Arc::clone(&session_hooks.binding),
-                                                session_hooks.mcp.as_ref().map(Arc::clone),
-                                            )
-                                            .map_err(|error| {
-                                                CompactionError::Internal(error.to_string())
-                                            })?;
-                                            if let Some(replayed) = active.replayed() {
-                                                compaction =
-                                                    compaction.with_replayed_context(replayed);
-                                            }
-                                            if let Some(elicitor) = elicitor.as_ref() {
-                                                compaction =
-                                                    compaction.with_elicitor(Arc::clone(elicitor));
-                                            }
-                                            if judge_available {
-                                                compaction = compaction.with_judge(JudgeContext {
-                                                    confinement: confinement.clone(),
-                                                    exec_caps: observation.capabilities(),
-                                                });
-                                            }
-                                            let mut compaction =
-                                                super::composition::with_permission_analysis(
-                                                    compaction,
-                                                    skill_trust,
-                                                )
-                                                .with_execution_observation(
-                                                    observation,
-                                                    probe_evidence,
-                                                )
-                                                .with_interactive_control(&mut control);
-                                            let prepared = compaction
-                                                .prepare_compaction(
-                                                    target_system.clone(),
-                                                    target_tools,
-                                                )
-                                                .await;
-                                            drop(compaction);
-                                            state = session_hooks.state.state();
-                                            seat.refresh_queue(control.status());
-                                            if !state.unacknowledged_prompts().is_empty()
-                                                || state.pending_question().is_some()
-                                                || !state.live_attempts.is_empty()
-                                                || (model_compaction
-                                                    && state
-                                                        .detached_execs
-                                                        .values()
-                                                        .any(Option::is_none))
-                                            {
-                                                return Err(CompactionError::Internal(
-                                        "compaction stopped before target creation because new source work became pending"
-                                            .to_owned(),
-                                    ));
-                                            }
-                                            let prepared = prepared?;
-                                            *prepared_runtime
-                                                .lock()
-                                                .expect("interactive compaction runtime") = Some((
-                                                target_system,
-                                                target_registry,
-                                                prepared_skills,
-                                            ));
-                                            Ok(prepared)
-                                        });
+                                                admitted_tools: &admitted_tools,
+                                                mcp_runtime: mcp_runtime.as_ref(),
+                                                skill_resource_roots: &skill_resource_roots,
+                                                session_journal: &session_journal,
+                                                session_hooks: &session_hooks,
+                                                last_generation_request: last_generation_request
+                                                    .clone(),
+                                                elicitor: &elicitor,
+                                                judge_available,
+                                                skill_trust,
+                                                control: &mut control,
+                                                state: &mut state,
+                                                seat: seat.as_ref(),
+                                                model_compaction,
+                                                prepared_runtime: prepared_runtime.as_ref(),
+                                            },
+                                        ));
                                         let mut preparation = DeferredCompactionPreparation {
                                             source: source_id,
                                             future: Some(future),
@@ -2875,7 +2711,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
             args.provider_recovery
                 .then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
         )
-        .with_skill_invocation_portskill_owner;
+        .with_skill_invocation_port(skill_owner);
     let loop_ = match active.replayed() {
         Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
@@ -2896,4 +2732,214 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         super::composition::with_permission_analysis(loop_, skill_trust)
             .with_execution_observation(observation, probe_evidence),
     )
+}
+
+struct InteractiveCompaction<'a, 'session> {
+    args: &'a Args,
+    effective: &'a Effective,
+    root: &'a Path,
+    cwd: &'a Path,
+    diagnostics: &'a dyn Diagnostics,
+    skills: &'a Option<Arc<crate::skill::SkillCatalogue>>,
+    jsonl_store: &'a Arc<JsonlStore>,
+    confinement: &'a RunConfinement,
+    active: &'session ActiveSession<'session>,
+    cancel: &'a CancelToken,
+    run_deadline: Option<std::time::Instant>,
+    source: &'a Arc<model::CliGenerationModelSource>,
+    policy_source: &'a Arc<dyn GenerationPolicySource>,
+    gate: &'a SharedBudgetGate,
+    config: &'a TurnConfig,
+    evidence: &'a Arc<EvidenceAdmissionService>,
+    invocation: RunInvocationId,
+    admitted_tools: &'a Option<Arc<dyn AdmittedToolSource>>,
+    mcp_runtime: &'a dyn McpRuntimeBinding,
+    skill_resource_roots: &'a Option<ego_core::skill::SkillResourceRoots>,
+    session_journal: &'a SharedJournal<'session>,
+    session_hooks: &'a SessionHookComposition<'session>,
+    last_generation_request: Option<GenRequest>,
+    elicitor: &'a Option<Arc<dyn Elicitor>>,
+    judge_available: bool,
+    skill_trust: Trust,
+    control: &'a mut InteractiveControl,
+    state: &'a mut SessionState,
+    seat: &'a dyn InteractiveSeat,
+    model_compaction: bool,
+    prepared_runtime: &'a Mutex<Option<CompactionRuntime>>,
+}
+
+async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
+    input: InteractiveCompaction<'turn, 'session>,
+) -> Result<PreparedCompaction, CompactionError> {
+    let InteractiveCompaction {
+        args,
+        effective,
+        root,
+        cwd,
+        diagnostics,
+        skills,
+        jsonl_store,
+        confinement,
+        active,
+        cancel: compaction_cancel,
+        run_deadline,
+        source,
+        policy_source,
+        gate,
+        config,
+        evidence,
+        invocation,
+        admitted_tools,
+        mcp_runtime,
+        skill_resource_roots,
+        session_journal,
+        session_hooks,
+        last_generation_request,
+        elicitor,
+        judge_available,
+        skill_trust,
+        control,
+        state,
+        seat,
+        model_compaction,
+        prepared_runtime,
+    } = input;
+    let fs = OsFs;
+
+    let target_system = instructions(effective, args, root, cwd, diagnostics)
+        .map_err(|error| CompactionError::Internal(error.to_string()))?;
+    let prepared_skills = skills
+        .as_ref()
+        .map(|catalogue| catalogue.prepare_rescan())
+        .transpose()
+        .map_err(|error| CompactionError::Internal(error.to_string()))?;
+    let target_skills = prepared_skills
+        .as_ref()
+        .map(crate::skill::PreparedSkillRescan::capture);
+    let mut target_registry = super::composition::tools_with_mode(
+        args.tools.as_ref(),
+        target_skills
+            .as_ref()
+            .map(crate::skill::SkillCatalogueCapture::core),
+        effective
+            .active_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
+        Some(Arc::new(jsonl_store.history())),
+        effective
+            .exec
+            .policy()
+            .map_err(|error| CompactionError::Internal(error.to_string()))?,
+        super::composition::orchestration_mode(effective),
+    )
+    .map_err(|error| CompactionError::Internal(error.to_string()))?;
+    if !args.no_context_tool && args.tools.is_none() {
+        target_registry.push(RegisteredTool::Context);
+    }
+    let target_tools: Vec<ToolDescriptor> = target_registry
+        .iter()
+        .map(RegisteredTool::descriptor)
+        .collect();
+    let (ports, observation, probe_evidence) = effect_scope(
+        confinement,
+        active.evidence(),
+        compaction_cancel,
+        run_deadline,
+        None,
+    )
+    .await
+    .map_err(compaction_termination)?;
+    let http =
+        Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
+    let runtime = GenerationRuntime {
+        source: source.bind(http, compaction_cancel.clone(), run_deadline),
+        policy_source: Arc::clone(policy_source),
+        gate: gate.clone(),
+        config: config.clone(),
+        admission: Arc::clone(evidence),
+        invocation,
+        retry_pause: Arc::new(TokioRetryPause),
+    };
+    let effect_ports = ToolEffectPorts::new(
+        &fs,
+        ports.process(),
+        active.evidence(),
+        ports.resolver_handle(),
+        ports.one_hop_handle(),
+        ports.duplex_handle(),
+    )
+    .with_secret_values(ego_tools::secrets::from_env())
+    .with_cancel(compaction_cancel.clone());
+    let compaction_tools = match admitted_tools.as_ref() {
+        Some(source) => Tools::from_registry_with_source(
+            &target_registry,
+            Arc::clone(source),
+            effect_ports,
+            CanonPath::new(&cwd),
+        )
+        .map_err(|error| CompactionError::Internal(error.to_string()))?,
+        None => Tools::from_registry(&target_registry, effect_ports, CanonPath::new(&cwd)),
+    };
+    let compaction_tools = match McpRuntimeBinding::resume_sealer(mcp_runtime) {
+        Some(resume) => compaction_tools.with_resume(resume),
+        None => compaction_tools,
+    };
+    let compaction_tools = match skill_resource_roots.as_ref() {
+        Some(roots) => compaction_tools.with_skill_resource_roots(roots.clone()),
+        None => compaction_tools,
+    };
+    let mut compaction = TurnLoop::from_shared_journal(
+        active.id(),
+        session_journal.clone(),
+        active.run_evidence(),
+        compaction_cancel.clone(),
+        runtime,
+        compaction_tools,
+    )
+    .map_err(|error| CompactionError::Internal(error.to_string()))?
+    .with_context_policy(args.context_clear, args.context_interval)
+    .with_last_generation_request(last_generation_request.clone())
+    .with_hook_binding(
+        session_hooks.state.clone(),
+        Arc::clone(&session_hooks.binding),
+        session_hooks.mcp.as_ref().map(Arc::clone),
+    )
+    .map_err(|error| CompactionError::Internal(error.to_string()))?;
+    if let Some(replayed) = active.replayed() {
+        compaction = compaction.with_replayed_context(replayed);
+    }
+    if let Some(elicitor) = elicitor.as_ref() {
+        compaction = compaction.with_elicitor(Arc::clone(elicitor));
+    }
+    if judge_available {
+        compaction = compaction.with_judge(JudgeContext {
+            confinement: confinement.clone(),
+            exec_caps: observation.capabilities(),
+        });
+    }
+    let mut compaction = super::composition::with_permission_analysis(compaction, skill_trust)
+        .with_execution_observation(observation, probe_evidence)
+        .with_interactive_control(control);
+    let prepared = compaction
+        .prepare_compaction(target_system.clone(), target_tools)
+        .await;
+    drop(compaction);
+    *state = session_hooks.state.state();
+    seat.refresh_queue(control.status());
+    if !state.unacknowledged_prompts().is_empty()
+        || state.pending_question().is_some()
+        || !state.live_attempts.is_empty()
+        || (model_compaction && state.detached_execs.values().any(Option::is_none))
+    {
+        return Err(CompactionError::Internal(
+            "compaction stopped before target creation because new source work became pending"
+                .to_owned(),
+        ));
+    }
+    let prepared = prepared?;
+    *prepared_runtime
+        .lock()
+        .expect("interactive compaction runtime") =
+        Some((target_system, target_registry, prepared_skills));
+    Ok(prepared)
 }
