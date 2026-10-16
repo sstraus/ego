@@ -224,3 +224,38 @@ fn external_import_disclosure_requires_content_bound_workspace_consent() {
             .contains("EXTERNAL-maintainer-477")
     );
 }
+
+// Catches: --trust-workspace approves ambient files but silently drops imports
+// from the instruction file the operator explicitly selected.
+#[test]
+fn explicit_instruction_file_external_import_survives_explicit_workspace_grant() {
+    let places = Places::new();
+    places.file("AGENTS.md", "Ambient workspace instructions.\n");
+    let selected = places.file("selected.md", "@~/shared.md\n");
+    std::fs::write(places.home_path().join("shared.md"), "REGRESSION-MARKER").unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK"))],
+        ..Plan::default()
+    });
+    let result = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--trust-workspace",
+            "--instructions",
+            selected.to_str().unwrap(),
+            "task",
+        ])
+        .run();
+    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]["messages"].to_string().contains("REGRESSION-MARKER"),
+        "explicitly granted import omitted from provider request; diagnostics: {}",
+        result.stderr
+    );
+}
