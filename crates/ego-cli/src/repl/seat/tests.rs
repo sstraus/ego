@@ -1021,3 +1021,46 @@ fn retry_row_is_bounded_and_expired_countdown_saturates() {
             .contains("retrying in 0.0s")
     );
 }
+
+#[test]
+fn persistent_instruction_actions_487_route_menus_and_refuse_busy_ingress() {
+    // Catches: menu actions lack an owner or busy slash input mutates persistent state.
+    let pending = Arc::new(Mutex::new(None));
+    let mut sink = SurfaceActionSink {
+        pending: Arc::clone(&pending),
+    };
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    for (id, effect, dispatch, expected) in [
+        (
+            ActionId::Memory,
+            SurfaceActionEffect::Memory,
+            Dispatch::Memory(String::new()),
+            HostCommand::Memory(String::new()),
+        ),
+        (
+            ActionId::Init,
+            SurfaceActionEffect::Init,
+            Dispatch::Init(String::new()),
+            HostCommand::Init(String::new()),
+        ),
+    ] {
+        assert_eq!(
+            sink.invoke(LocalAction { id, busy: false }),
+            LocalActionOutcome::Completed
+        );
+        assert_eq!(
+            pending
+                .lock()
+                .unwrap()
+                .take()
+                .map(|value| std::mem::discriminant(&value)),
+            Some(std::mem::discriminant(&effect))
+        );
+        assert!(super::action_execution::busy_dispatch_refusal(&dispatch).is_some());
+        assert!(
+            matches!(apply_surface_effect(&mut editor, &phase, &status, effect, false), Some(Line::HostCommand(command)) if command == expected)
+        );
+    }
+}

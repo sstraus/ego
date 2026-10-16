@@ -2551,6 +2551,64 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             .await;
             Ok(CommandOutcome::Continue)
         }
+        repl::Line::HostCommand(repl::HostCommand::Memory(arguments)) => {
+            let confirm = |preview: String| {
+                status
+                    .as_ref()
+                    .filter(|status| status.human)
+                    .is_some_and(|status| {
+                        matches!(
+                            status.seat.confirm_setup(preview),
+                            repl::Confirmation::Confirmed
+                        )
+                    })
+            };
+            let user = crate::config::ego_home();
+            match crate::memory::command(
+                &arguments,
+                root,
+                user.as_deref(),
+                effective,
+                skill_trust,
+                &confirm,
+            )
+            .await
+            {
+                Ok(report) => diagnostics.note(&ego_core::permit::terminal_safe(&report)),
+                Err(error) => diagnostics.note(&format!("Memory: {error}")),
+            }
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Init(arguments)) => {
+            if !arguments.is_empty() {
+                diagnostics
+                    .note("usage: /init (review a deterministic project instruction proposal)");
+            } else {
+                let admitted = crate::memory::init_admitted(effective, root, skill_trust);
+                let confirm = |preview: String| {
+                    status
+                        .as_ref()
+                        .filter(|status| status.human)
+                        .is_some_and(|status| {
+                            matches!(
+                                status.seat.confirm_setup(preview),
+                                repl::Confirmation::Confirmed
+                            )
+                        })
+                };
+                let result = if admitted {
+                    crate::memory::InitProposal::prepare(root)
+                        .and_then(|proposal| proposal.apply(admitted, &confirm))
+                } else {
+                    Err("instruction initialization denied by effective write policy or workspace trust".into())
+                };
+                match result {
+                    Ok(report) => diagnostics.note(&report),
+                    Err(error) => diagnostics.note(&format!("Init: {error}")),
+                }
+            }
+            Ok(CommandOutcome::Continue)
+        }
         repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
             run_interactive_setup(prompt, root, status.as_ref(), diagnostics).await;
             Ok(CommandOutcome::Continue)

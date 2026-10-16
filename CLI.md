@@ -1086,7 +1086,7 @@ echo. The first starts a turn; further submitted lines enter the busy FIFO.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
-/name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
+/name /goal /tasks /tools /expand /skills /hooks /memory /init /setup /retry /version`. These 32 canonical commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1096,11 +1096,42 @@ partial completion remains inert until explicitly submitted, and pasted slash
 text remains ordinary prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
-25-command action registry: a typed complete slash is classified as an action,
+32-command action registry: a typed complete slash is classified as an action,
 while bracketed paste and non-command text remain ordinary prompts. Completion,
 menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
+
+### Reviewed persistent memory and project initialization
+
+`/memory [project|user] [list | show ID | set ID TITLE CONTENT | disable ID | delete ID]`
+uses the native MDKB index in the workspace or ego user directory. The selected
+scope must already have a `.mdkb` index; initialize it explicitly with `mdkb init`.
+Quote a title or content that contains spaces. `set` creates or replaces the
+record as an operator-authored `topic` with `user_statement` provenance and the
+`ego-reviewed` tag. `list` and `show` expose native provenance and lifecycle
+metadata. Every mutation requires review of the exact proposed content and
+scope. Disable preserves the record and source provenance, adds `ego-disabled`,
+and sets native TTL to zero so ordinary MDKB retrieval excludes it. Native
+MDKB expiry and archive rules still apply. Delete uses native MDKB removal;
+native archive and history may retain content. It is not secure erasure.
+
+These actions require workspace trust. Plan mode, read-only confinement, root
+limits, and explicit write denies remain effective. No model response, tool
+result, or conversation is automatically saved. Review must exclude secrets and
+untrusted tool instructions. Memory bodies are not automatically promoted to
+system instructions. This surface adds no second memory store.
+
+`/init` builds a deterministic, local `AGENTS.md` proposal and shows the diff
+before confirmation. It creates `CLAUDE.md` only as the relative sibling symlink
+`AGENTS.md`. Existing `AGENTS.md` content is preserved. An independent
+`CLAUDE.md`, an unexpected symlink, denied write, or changed reviewed state is
+refused. No model call is required. This explicit operator control-file workflow
+does not grant general directory-write authority to tools or setup. Partial I/O
+failures are reported and existing files are never overwritten. Use `/refresh`
+after initialization to request the normal trust admission in a new prompt epoch.
+Both commands are refused while a turn is running; a non-human seat cannot
+confirm a mutation.
 
 Arguments that do not belong to a selected local action are usage errors, not
 model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;

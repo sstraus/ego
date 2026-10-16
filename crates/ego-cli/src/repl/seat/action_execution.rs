@@ -47,6 +47,8 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::Tools,
                 ActionId::Skills,
                 ActionId::Hooks,
+                ActionId::Memory,
+                ActionId::Init,
             ],
         ),
         (
@@ -150,7 +152,7 @@ pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> Strin
 }
 
 /// Both submission paths enforce the same busy-command boundary.
-fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
+pub(super) fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
     match dispatch {
         Dispatch::History(_) | Dispatch::Resume(_) => {
             Some("history is unavailable while a turn is running")
@@ -161,6 +163,9 @@ fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
         Dispatch::Fork(_) => Some("switching forks is unavailable while a turn is running"),
         Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
+        Dispatch::Memory(_) | Dispatch::Init(_) => {
+            Some("memory and init are unavailable while a turn is running")
+        }
         Dispatch::Config(_) => Some("config is unavailable while a turn is running"),
         Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
         _ => None,
@@ -237,6 +242,8 @@ fn submit_busy_line(
         | Dispatch::Fork(_)
         | Dispatch::Mcp(_)
         | Dispatch::Setup(_)
+        | Dispatch::Memory(_)
+        | Dispatch::Init(_)
         | Dispatch::Config(_)
         | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
         Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
@@ -388,6 +395,12 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Setup(arguments) => {
                     return (Line::HostCommand(HostCommand::Setup(arguments)), failed);
+                }
+                Dispatch::Memory(arguments) => {
+                    return (Line::HostCommand(HostCommand::Memory(arguments)), failed);
+                }
+                Dispatch::Init(arguments) => {
+                    return (Line::HostCommand(HostCommand::Init(arguments)), failed);
                 }
                 Dispatch::Config(arguments) => {
                     return (Line::HostCommand(HostCommand::Config(arguments)), failed);
@@ -888,6 +901,14 @@ pub(super) fn apply_surface_effect(
                     Some("hook inspection is unavailable while a turn is running".to_owned());
             } else {
                 return Some(Line::HostCommand(HostCommand::Hooks));
+            }
+        }
+        SurfaceActionEffect::Memory | SurfaceActionEffect::Init => {
+            if !busy {
+                return Some(Line::HostCommand(match effect {
+                    SurfaceActionEffect::Memory => HostCommand::Memory(String::new()),
+                    _ => HostCommand::Init(String::new()),
+                }));
             }
         }
         SurfaceActionEffect::Config => {
