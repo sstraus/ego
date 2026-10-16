@@ -213,3 +213,39 @@ fn executable_change_summary_names_only_changed_entries_without_environment_valu
     );
     assert!(!summary.contains("unchanged"), "{summary}");
 }
+
+/// Catches sharing executable trust without binding external disclosure bytes.
+#[test]
+fn external_instruction_consent_is_bound_to_target_and_content() {
+    let mut ledger = TrustLedger::default();
+    let mut offered = ExecutableSurface::default();
+    offered
+        .external_instructions
+        .insert("/home/shared.md".into(), "digest-a".into());
+    ledger.remember("/workspace", offered.clone(), Trust::Trusted);
+    let persisted = serde_json::to_vec(&ledger).unwrap();
+    let loaded: TrustLedger = serde_json::from_slice(&persisted).unwrap();
+    assert_eq!(
+        loaded.remembered("/workspace", &offered),
+        Some(Trust::Trusted)
+    );
+    let original = offered.clone();
+    offered
+        .external_instructions
+        .insert("/home/shared.md".into(), "digest-b".into());
+    assert_eq!(loaded.remembered("/workspace", &offered), None);
+    assert!(offered.changes_from(&original).contains("/home/shared.md"));
+    let digest = offered
+        .external_instructions
+        .remove("/home/shared.md")
+        .unwrap();
+    offered
+        .external_instructions
+        .insert("/other/shared.md".into(), digest);
+    assert_eq!(loaded.remembered("/workspace", &offered), None);
+    ledger.remember("/workspace", offered.clone(), Trust::Untrusted);
+    assert_eq!(
+        ledger.remembered("/workspace", &offered),
+        Some(Trust::Untrusted)
+    );
+}

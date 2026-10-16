@@ -72,6 +72,9 @@ pub struct TrustInventory {
 pub struct ExecutableSurface {
     pub declarations: BTreeMap<String, ExecutableDeclaration>,
     pub programs: BTreeMap<String, ProgramEvidence>,
+    /// Exact external instruction targets and SHA-256 bytes approved for disclosure.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_instructions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +169,16 @@ impl ExecutableSurface {
                     "  after: size={} executable={} target={:?}",
                     after.bytes, after.executable, after.link_target
                 ));
+            }
+        }
+        for (path, digest) in &self.external_instructions {
+            if old.external_instructions.get(path) != Some(digest) {
+                lines.push(format!("external instruction {path:?}: SHA-256 {digest}"));
+            }
+        }
+        for path in old.external_instructions.keys() {
+            if !self.external_instructions.contains_key(path) {
+                lines.push(format!("external instruction {path:?}: removed"));
             }
         }
         lines.join("\n")
@@ -269,7 +282,7 @@ impl TrustLedger {
             .get(root)
             .filter(|record| match &record.executable_surface {
                 Some(stored) => stored == surface,
-                None => record.digest.is_some(),
+                None => record.digest.is_some() && surface.external_instructions.is_empty(),
             })
             .map(|record| record.decision)
     }

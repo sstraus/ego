@@ -22,63 +22,32 @@ pub struct OsInstructionIo;
 
 impl InstructionIo for OsInstructionIo {
     fn load(&self, path: &Path, max_bytes: u64) -> Found {
-        // An import may be lexically inside its allowed tree while a parent
-        // directory redirects it elsewhere. Reject static redirections before
-        // opening the leaf; the remaining concurrent-swap window is P23.
-        for parent in path.ancestors().skip(1) {
-            if parent.as_os_str().is_empty() {
-                break;
+        let file = match open_no_links(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
+            Err(error) if error.raw_os_error() == Some(nix_symlink_error()) => {
+                return Found::Refused(Refusal::Symlink);
             }
-            match fs::symlink_metadata(parent) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    return Found::Refused(Refusal::Symlink);
-                }
-                Ok(_) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
-                Err(err) => {
-                    return Found::Refused(Refusal::Unreadable {
-                        message: err.to_string(),
-                    });
-                }
-            }
-        }
-        // `symlink_metadata`, not `metadata`: the whole point is to see the
-        // link itself rather than what it points at. A symlinked instruction
-        // file is refused, not resolved — see `Refusal::Symlink`.
-        let meta = match fs::symlink_metadata(path) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
-            Err(err) => {
+            Err(error) => {
                 return Found::Refused(Refusal::Unreadable {
-                    message: err.to_string(),
+                    message: error.to_string(),
                 });
             }
         };
-
-        if meta.file_type().is_symlink() {
-            return Found::Refused(Refusal::Symlink);
-        }
+        let meta = match file.metadata() {
+            Ok(meta) => meta,
+            Err(error) => {
+                return Found::Refused(Refusal::Unreadable {
+                    message: error.to_string(),
+                });
+            }
+        };
         if !meta.is_file() {
             return Found::Refused(Refusal::NotAFile);
         }
-        // Checked here as well as below, so an oversized file is refused
-        // without being opened at all. The read still enforces it, because
-        // this answer is stale the moment it is given.
         if meta.len() > max_bytes {
             return Found::Refused(Refusal::TooLarge { limit: max_bytes });
         }
-
-        let file = match fs::File::open(path) {
-            Ok(file) => file,
-            // The path was there for `symlink_metadata` and is gone now: a
-            // race, and "absent" is the honest report of it.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
-            Err(err) => {
-                return Found::Refused(Refusal::Unreadable {
-                    message: err.to_string(),
-                });
-            }
-        };
 
         // One byte past the limit, and no further: enough to tell "exactly at
         // the limit" from "over it" without pulling an arbitrarily large file
@@ -95,4 +64,56 @@ impl InstructionIo for OsInstructionIo {
 
         Found::Read { bytes }
     }
+}
+
+#[cfg(unix)]
+fn nix_symlink_error() -> i32 {
+    nix::libc::ELOOP
+}
+#[cfg(not(unix))]
+fn nix_symlink_error() -> i32 {
+    -1
+}
+
+/// Every lookup is relative to an already opened directory. Substituting a
+/// parent or leaf symlink cannot redirect the read between check and open.
+#[cfg(unix)]
+fn open_no_links(path: &Path) -> std::io::Result<fs::File> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::path::Component;
+    if !path.is_absolute() {
+        return Err(std::io::Error::other("instruction path must be absolute"));
+    }
+    let mut directory = fs::File::open("/")?;
+    let parts: Vec<_> = path
+        .components()
+        .filter(|part| !matches!(part, Component::RootDir))
+        .collect();
+    for (index, part) in parts.iter().enumerate() {
+        let Component::Normal(name) = part else {
+            return Err(std::io::Error::other("instruction path must be normalized"));
+        };
+        let mut flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
+        if index + 1 < parts.len() {
+            flags |= OFlag::O_DIRECTORY;
+        }
+        let fd = openat(&directory, Path::new(name), flags, Mode::empty()).map_err(|error| {
+            // Platforms can report ENOTDIR for a no-follow parent link.
+            std::io::Error::from_raw_os_error(if error == nix::errno::Errno::ENOTDIR {
+                nix::libc::ELOOP
+            } else {
+                error as i32
+            })
+        })?;
+        directory = fs::File::from(fd);
+    }
+    Ok(directory)
+}
+
+#[cfg(not(unix))]
+fn open_no_links(_path: &Path) -> std::io::Result<fs::File> {
+    Err(std::io::Error::other(
+        "race-safe instruction reads are unsupported on this platform",
+    ))
 }
