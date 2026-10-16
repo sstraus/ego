@@ -242,6 +242,34 @@ pub struct Reedline {
     idle_callback: Option<Box<dyn FnMut() + Send>>,
 }
 
+/// A submitted host receipt has no composer indicator or live status prefix.
+struct ReceiptPrompt;
+
+impl Prompt for ReceiptPrompt {
+    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+
+    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+
+    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        _search: PromptHistorySearch,
+    ) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+}
+
 struct BufferEditor {
     command: Command,
     temp_file: PathBuf,
@@ -2739,8 +2767,16 @@ impl Reedline {
     fn submit_buffer(&mut self, prompt: &dyn Prompt) -> io::Result<EventStatus> {
         let buffer = self.editor.get_buffer().to_string();
         self.hide_hints = true;
-        // Additional repaint to show the content without hints etc.
-        if let Some(transient_prompt) = self.transient_prompt.take() {
+        // Receipt rendering belongs to the same transition as ordinary echo:
+        // no host-side erase or second terminal writer can race the next read.
+        if let Some(receipt) =
+            prompt.render_prompt_submission(&buffer, self.painter.screen_width())
+        {
+            self.editor.set_buffer(receipt, UndoBehavior::NoOp);
+            let painted = self.repaint(&ReceiptPrompt);
+            self.editor.set_buffer(buffer.clone(), UndoBehavior::NoOp);
+            painted?;
+        } else if let Some(transient_prompt) = self.transient_prompt.take() {
             self.repaint(transient_prompt.as_ref())?;
             self.transient_prompt = Some(transient_prompt);
         } else {
