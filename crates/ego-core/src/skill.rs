@@ -999,10 +999,6 @@ impl SkillInvocation {
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "exact command admission evidence"
-    )]
     fn admit_rendered_in_turn(
         catalogue_generation: SkillCatalogueGeneration,
         spec: SkillSpec,
