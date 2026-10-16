@@ -727,8 +727,7 @@ impl<'a> Announce<'a> {
     /// writing zero bytes.
     pub(super) fn emit(&self, sequence: String) {
         if !sequence.is_empty() {
-            self.out.write(&sequence);
-            self.out.finish();
+            self.out.signal(&sequence);
         }
     }
 

@@ -496,6 +496,7 @@ struct TerminalOwner {
     ingress: InteractiveIngress,
     cancel: CancelToken,
     startup_output: Receiver<String>,
+    signals: Receiver<String>,
 }
 
 struct ComposerDraft {
@@ -680,6 +681,7 @@ pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
+    signals: Option<Sender<String>>,
     cancel: CancelToken,
     reply_started: Arc<AtomicBool>,
 }
@@ -690,6 +692,7 @@ impl SurfaceOutput {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
+            signals: None,
             cancel,
             reply_started: Arc::new(AtomicBool::new(false)),
         }
@@ -729,11 +732,19 @@ impl SurfaceOutput {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
+                signals: None,
                 cancel,
                 reply_started,
             },
             owner,
         )
+    }
+
+    pub(crate) fn signal(&self, sequence: &str) -> Result<(), SendError<String>> {
+        match &self.signals {
+            Some(signals) => signals.send(sequence.to_owned()),
+            None => self.send(sequence.to_owned()),
+        }
     }
 
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
@@ -986,8 +997,19 @@ impl Seat {
         }
         let printer = ExternalPrinter::new(CHANNEL_CAPACITY);
         let reply_started = Arc::clone(&status.lock().expect("surface status lock").reply_started);
-        let (output, output_owner) =
+        let (mut output, output_owner) =
             SurfaceOutput::pumped(printer.sender(), cancel.clone(), reply_started);
+        // Host metadata never waits for the row printer or consumes a row.
+        let (signal_sender, signals) = crossbeam::channel::unbounded();
+        output.signals = Some(signal_sender);
+        let active_signals = signals.clone();
+        editor = editor.with_idle_callback(Box::new(move || {
+            let mut out = std::io::stdout().lock();
+            for sequence in active_signals.try_iter() {
+                let _ = out.write_all(sequence.as_bytes());
+            }
+            let _ = out.flush();
+        }));
         if let SurfaceSender::Pumped(sender) = &output.sender {
             status.lock().expect("surface status lock").transcript = Some(sender.clone());
         }
@@ -1018,6 +1040,7 @@ impl Seat {
                         ingress,
                         cancel,
                         startup_output,
+                        signals,
                     },
                 );
             })?;
@@ -1844,6 +1867,7 @@ fn own_terminal(
         ingress,
         cancel,
         startup_output,
+        signals,
     } = owner;
     let mut pending_control = None;
     let mut active = false;
@@ -1867,6 +1891,15 @@ fn own_terminal(
             // Before activation Reedline is not reading, so this same owner
             // drains its bounded printer queue without opening an input prompt.
             let request = crossbeam::channel::select_biased! {
+                recv(signals) -> sequence => {
+                    let Ok(sequence) = sequence else { break };
+                    let mut out = std::io::stdout().lock();
+                    if out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).is_err() {
+                        cancel.cancel(CancelCause::Host);
+                        break;
+                    }
+                    continue;
+                }
                 recv(startup_output) -> row => {
                     let Ok(row) = row else { break };
                     if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() {

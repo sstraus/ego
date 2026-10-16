@@ -51,6 +51,10 @@ pub trait TextOutput: Diagnostics {
         self.write(text);
     }
     fn line(&self, text: &str);
+    /// Publish nonprinting host control bytes without committing a text row.
+    fn signal(&self, sequence: &str) {
+        self.write(sequence);
+    }
     fn finish(&self) {}
 }
 
@@ -231,6 +235,14 @@ impl TextOutput for InteractiveOutput {
         let mut output = self.inner.lock().expect("surface output lock");
         let _ = output.write(text);
         let _ = output.write("\n");
+    }
+
+    fn signal(&self, sequence: &str) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .signal(sequence);
     }
 
     fn finish(&self) {
