@@ -220,8 +220,13 @@ async fn scenario(name: &str, assertion: u8) {
                 .iter()
                 .find(|message| message["role"] == "user")
                 .unwrap();
+            let content = user["content"]
+                .as_array()
+                .expect("Anthropic content blocks");
+            assert_eq!(content.len(), 1, "queued keys must not add content blocks");
+            assert_eq!(content[0]["type"], "text");
             assert_eq!(
-                user["content"], "draft",
+                content[0]["text"], "draft",
                 "literal CR or Ctrl+V polluted submission"
             );
         }
