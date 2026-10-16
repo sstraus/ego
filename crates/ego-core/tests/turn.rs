@@ -11336,6 +11336,7 @@ mod turn {
             } else {
                 let invocation = request
                     .messages
+                    .messages()
                     .iter()
                     .flat_map(|message| &message.content)
                     .find_map(|block| {
