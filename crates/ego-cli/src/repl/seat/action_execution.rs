@@ -298,6 +298,15 @@ pub(super) fn surface_line(
     drafts: &mut DraftStash,
 ) -> (Line, bool) {
     loop {
+        if phase.get() == EditPhase::Idle {
+            question::tell_host(status, |osc, _| {
+                [
+                    osc.state(crate::render::osc::State::Idle),
+                    osc.progress(crate::render::osc::Progress::Cleared),
+                ]
+                .concat()
+            });
+        }
         let signal = editor.read_line(prompt);
         // Hold only the isolated PTY child at the real suspended-read boundary.
         #[cfg(test)]
