@@ -47,6 +47,14 @@ use crate::state::SessionState;
 /// `&self` left them no other choice — so this states a property the port had
 /// all along and could not be relied on.
 pub trait EventSink: Send + Sync {
+    /// Refresh user context command completion from the admitted runtime.
+    fn context_commands(
+        &self,
+        _commands: Vec<crate::permit::ToolDescriptor>,
+        _state: &SessionState,
+    ) {
+    }
+
     /// Take one event, with the reduction it produced.
     ///
     /// Called once per event, after it is durable and after it has been folded
@@ -69,6 +77,10 @@ pub trait EventSink: Send + Sync {
 /// `&dyn EventSink` can go through the same generic entry point without one of
 /// them wrapping the other in a newtype whose only job is to forward.
 impl<T: EventSink + ?Sized> EventSink for &T {
+    fn context_commands(&self, commands: Vec<crate::permit::ToolDescriptor>, state: &SessionState) {
+        (**self).context_commands(commands, state);
+    }
+
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         (**self).publish(event, state);
     }

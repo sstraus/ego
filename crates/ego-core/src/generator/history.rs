@@ -240,6 +240,19 @@ fn conversation_from_inner(
             // between would describe a conversation in which the model saw
             // the first result before choosing the second — five turns where
             // three happened. See `POTENTIALS.md` P22.
+            ItemKind::ToolCall if item.context_command => {
+                if let Some(result) = &item.tool_result {
+                    push(
+                        &mut messages,
+                        Role::User,
+                        text_block(&format!(
+                            "MCP context from {}:\n{}",
+                            item.tool_name.as_deref().unwrap_or("server"),
+                            result.model_text()
+                        )),
+                    );
+                }
+            }
             ItemKind::ToolCall => {
                 let run = generation_run(&items[next - 1..]);
                 next += run.len() - 1;
@@ -342,7 +355,11 @@ fn generation_run<'a, 'b>(items: &'b [&'a ItemState]) -> &'b [&'a ItemState] {
     };
     let len = items
         .iter()
-        .take_while(|item| item.kind == ItemKind::ToolCall && item.generation == Some(generation))
+        .take_while(|item| {
+            item.kind == ItemKind::ToolCall
+                && !item.context_command
+                && item.generation == Some(generation)
+        })
         .count();
     &items[..len]
 }
@@ -376,6 +393,45 @@ mod ordered_prompt_tests {
     use crate::event::time::Timestamp;
     use crate::generator::types::{ImageMediaType, ImageRef};
     use crate::store::blob::BlobId;
+
+    #[test]
+    fn user_context_attachment_is_not_a_provider_call_or_history_truncation() {
+        // Catches MCP attachments truncating future history for lack of a provider call id.
+        let mut state = SessionState::default();
+        let item = ItemId::new();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        for kind in [
+            EventKind::ContextCommandStarted {
+                name: "mcp_resource__docs__guide".into(),
+                args: "{}".into(),
+            },
+            EventKind::ToolCallCompleted {
+                ok: true,
+                result: crate::permit::ToolResult::builtin("guide contents"),
+            },
+        ] {
+            state.apply(&DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn,
+                    item: Some(item),
+                    parent: None,
+                    ts: Timestamp::from_millis(0),
+                    producer: Producer::Main,
+                },
+                kind,
+            });
+        }
+        let (conversation, repairs) = conversation_from(&state).expect("history");
+        assert!(repairs.is_empty());
+        assert_eq!(conversation.messages().len(), 1);
+        assert_eq!(conversation.messages()[0].role, Role::User);
+        assert!(
+            matches!(&conversation.messages()[0].content[0], ContentBlock::Text { text } if text.contains("guide contents"))
+        );
+    }
 
     // Catches corrupt durable positions panicking or silently reordering UTF-8 text.
     #[test]

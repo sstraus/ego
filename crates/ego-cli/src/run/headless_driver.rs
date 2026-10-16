@@ -218,6 +218,28 @@ pub(super) async fn drive_headless_turn(
     ));
     // Headless CLI and ACP prompts are explicit command input adapters. Ordinary
     // interactive/queued prompt data never passes through this selection.
+    let actions = repl::actions::ActionRegistry::final_surface();
+    if let Some(runtime) = mcp_runtime.as_ref() {
+        actions.bind_mcp_view(Arc::clone(runtime));
+    }
+    let mcp_command = match &input {
+        HeadlessInput::Prompt(prompt)
+            if prompt.text().starts_with("/mcp__")
+                || prompt.text().starts_with("/mcp_resource__") =>
+        {
+            match actions.classify(actions.submit(prompt.text(), repl::actions::InputOrigin::Typed))
+            {
+                repl::actions::Dispatch::McpContext(command) => Some(command),
+                _ => {
+                    return Err(RunTermination::UsageError {
+                        message: "MCP context command is unavailable or its arguments are invalid"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        _ => None,
+    };
     let command = match &input {
         HeadlessInput::Prompt(prompt) => prompt.text().strip_prefix('/').and_then(|named| {
             let end = named.find(char::is_whitespace).unwrap_or(named.len());
@@ -235,7 +257,7 @@ pub(super) async fn drive_headless_turn(
         }),
         HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => None,
     };
-    if command.is_some() && !images.is_empty() {
+    if (command.is_some() || mcp_command.is_some()) && !images.is_empty() {
         return Err(RunTermination::UsageError {
             message: "custom commands do not accept image attachments".to_owned(),
         });
@@ -309,7 +331,32 @@ pub(super) async fn drive_headless_turn(
         Some(control) => loop_.with_interactive_control(control),
         None => loop_,
     };
+    let context_descriptors = mcp_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.context_commands().ok())
+        .map(|capture| {
+            capture
+                .tools()
+                .iter()
+                .filter_map(|tool| match tool {
+                    RegisteredTool::Effect(tool) => Some(tool.descriptor()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    sink.context_commands(context_descriptors, &loop_.state());
     let (termination, result) = match input {
+        HeadlessInput::Prompt(_) if mcp_command.is_some() => {
+            turns
+                .drive_mcp_context(
+                    &mut loop_,
+                    mcp_command.expect("selected context command"),
+                    cancel,
+                    diagnostics,
+                )
+                .await
+        }
         HeadlessInput::Prompt(prompt) => match command {
             Some(operation) => {
                 turns

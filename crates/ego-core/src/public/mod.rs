@@ -559,7 +559,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // surface identifies a tool call by the harness's own `ItemId`, and
         // adding a second identity to a versioned schema would be a
         // compatibility-governed change with no consumer asking for it.
-        EventKind::ToolCallStarted { name, args, .. } => Some(PublicEvent::ItemStarted {
+        EventKind::ToolCallStarted { name, args, .. }
+        | EventKind::ContextCommandStarted { name, args } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,
             kind: ItemKind::Tool,

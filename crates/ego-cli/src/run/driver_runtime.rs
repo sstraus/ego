@@ -1375,6 +1375,11 @@ async fn drive_interactive_input<'session: 'turn, 'turn>(
                     .await;
                 Some((termination, result))
             }
+            Some(InteractiveTurnInput::McpContext(command)) => Some(
+                turns
+                    .drive_mcp_context(loop_, command, turn_cancel, diagnostics)
+                    .await,
+            ),
             Some(InteractiveTurnInput::Skill(operation)) => {
                 let (termination, result) = turns
                     .drive_admitted_skill(loop_, operation, turn_cancel, diagnostics)
@@ -2433,6 +2438,16 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 operation,
                 pending_work,
             )
+        }
+        repl::Line::HostCommand(repl::HostCommand::McpContext(command)) => {
+            if pending_work {
+                diagnostics
+                    .note("MCP context commands are unavailable while source work is pending");
+                return Ok(CommandOutcome::Continue);
+            }
+            Ok(CommandOutcome::Input(InteractiveTurnInput::McpContext(
+                command,
+            )))
         }
         repl::Line::HostCommand(repl::HostCommand::Skill(operation)) => {
             if pending_work {

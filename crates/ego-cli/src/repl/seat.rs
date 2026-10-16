@@ -197,6 +197,11 @@ impl Completer for ActionCompleter {
             && (self.registry.resolve_slash(filter).is_some()
                 || self
                     .registry
+                    .mcp_menu(filter)
+                    .iter()
+                    .any(|(name, _)| name == filter)
+                || self
+                    .registry
                     .skill_menu(filter)
                     .iter()
                     .any(|(name, _)| name == filter))
@@ -229,6 +234,15 @@ impl Completer for ActionCompleter {
                 value: format!("/{name}"),
                 display_override: Some(format!("/{name}")),
                 description: Some(format!("{description} — skill")),
+                span: Span::new(0, position),
+                append_whitespace: true,
+                ..Suggestion::default()
+            },
+        ));
+        suggestions.extend(self.registry.mcp_menu(filter).into_iter().map(
+            |(name, description)| Suggestion {
+                value: format!("/{name}"),
+                description: Some(description),
                 span: Span::new(0, position),
                 append_whitespace: true,
                 ..Suggestion::default()
@@ -1202,6 +1216,9 @@ impl Seat {
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
+                    Dispatch::McpContext(command) => {
+                        Line::HostCommand(HostCommand::McpContext(command))
+                    }
                     Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
                     Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
                     Dispatch::Config(arguments) => {

@@ -31,6 +31,13 @@ use ego_mcp::{
 struct FakeFactory {
     prepares: Mutex<Vec<usize>>,
     executions: AtomicUsize,
+    operations: Mutex<
+        Vec<(
+            ego_core::mcp::McpOperationKind,
+            ego_core::mcp::McpSubject,
+            Value,
+        )>,
+    >,
 }
 
 impl McpOperationFactory for FakeFactory {
@@ -39,6 +46,11 @@ impl McpOperationFactory for FakeFactory {
         _: Arc<McpServerAdmission>,
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
+        self.operations.lock().expect("operations").push((
+            operation.operation(),
+            operation.subject().clone(),
+            operation.parameters().clone(),
+        ));
         let invocation_count = operation.invocations().len();
         self.prepares
             .lock()
@@ -487,5 +499,145 @@ fn captured_operation_is_empty_after_successor_removes_server() {
             .tools()
             .iter()
             .all(|tool| tool.descriptor().name != "weather")
+    );
+}
+
+#[test]
+fn prompt_only_capture_keeps_required_schema_and_removes_revoked_commands() {
+    // Catches prompt-only servers being hidden by a tools-only projection.
+    let factory = Arc::new(FakeFactory::default());
+    let (admission, provenance) = alpha_admission();
+    let prompt = serde_json::from_value(json!({"name":"review", "description":"Review changes", "arguments":[{"name":"target", "required":true}]})).expect("prompt descriptor");
+    let candidate = McpAdmittedCandidate::new(
+        Arc::clone(&admission),
+        McpCandidateIdentity::validated("alpha"),
+        McpCandidateInventory::new(
+            McpCapabilities::new(false, false, true),
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![prompt],
+            McpCacheMetadata::default(),
+            None,
+        ),
+        factory.clone(),
+    )
+    .expect("prompt-only candidate");
+    let controller = McpRegistryController::new(
+        Arc::new(FakeJournal::default()),
+        Arc::new(FakeAdmission::one(candidate)),
+    )
+    .expect("controller");
+    let published = futures::executor::block_on(controller.reconcile(refresh_for(
+        &admission,
+        &provenance,
+        RegistryTrigger::Add,
+    )))
+    .expect("admit");
+    let catalogue = published.capture().context_commands().expect("commands");
+    assert_eq!(catalogue.tools().len(), 1);
+    let ego_core::turn::RegisteredTool::Effect(command) = &catalogue.tools()[0] else {
+        panic!("context effect");
+    };
+    assert_eq!(command.descriptor().name, "mcp__alpha__review");
+    let fs = ego_core::permit::fake::FakeFs::default();
+    let ctx = ego_core::permit::PrepareCtx {
+        cwd: ego_core::permit::CanonPath::new("/fixture"),
+        resolver: &fs,
+    };
+    assert!(command.prepare(json!({}), &ctx).is_err());
+    assert!(command.prepare(json!({"target": 7}), &ctx).is_err());
+    assert!(
+        command
+            .prepare(json!({"target":"src", "unknown":"x"}), &ctx)
+            .is_err()
+    );
+    assert!(command.prepare(json!({"target":"src"}), &ctx).is_ok());
+    assert_eq!(
+        factory.operations.lock().expect("operations").last(),
+        Some(&(
+            ego_core::mcp::McpOperationKind::GetPrompt,
+            ego_core::mcp::McpSubject::Prompt {
+                server: "alpha".into(),
+                name: "review".into()
+            },
+            json!({"target":"src"})
+        ))
+    );
+    futures::executor::block_on(controller.reconcile(empty_refresh(RegistryTrigger::Remove)))
+        .expect("revoke");
+    assert!(
+        controller
+            .capture()
+            .expect("capture")
+            .context_commands()
+            .expect("commands")
+            .tools()
+            .is_empty()
+    );
+}
+
+#[test]
+fn resource_attachment_uses_read_resource_and_rejects_prompt_arguments() {
+    // Catches resources being dispatched as prompts or accepting invented arguments.
+    let factory = Arc::new(FakeFactory::default());
+    let (admission, provenance) = alpha_admission();
+    let resource = serde_json::from_value(json!({"uri":"file:///guide", "name":"guide"}))
+        .expect("resource descriptor");
+    let candidate = McpAdmittedCandidate::new(
+        Arc::clone(&admission),
+        McpCandidateIdentity::validated("alpha"),
+        McpCandidateInventory::new(
+            McpCapabilities::new(false, true, false),
+            None,
+            Vec::new(),
+            vec![resource],
+            Vec::new(),
+            McpCacheMetadata::default(),
+            None,
+        ),
+        factory.clone(),
+    )
+    .expect("resource candidate");
+    let controller = McpRegistryController::new(
+        Arc::new(FakeJournal::default()),
+        Arc::new(FakeAdmission::one(candidate)),
+    )
+    .expect("controller");
+    let published = futures::executor::block_on(controller.reconcile(refresh_for(
+        &admission,
+        &provenance,
+        RegistryTrigger::Add,
+    )))
+    .expect("admit");
+    let catalogue = published.capture().context_commands().expect("commands");
+    let ego_core::turn::RegisteredTool::Effect(command) = &catalogue.tools()[0] else {
+        panic!("context effect");
+    };
+    assert_eq!(
+        command.descriptor().name,
+        "mcp_resource__alpha__file_3a_2f_2f_2fguide"
+    );
+    let fs = ego_core::permit::fake::FakeFs::default();
+    let ctx = ego_core::permit::PrepareCtx {
+        cwd: ego_core::permit::CanonPath::new("/fixture"),
+        resolver: &fs,
+    };
+    assert!(command.prepare(json!({}), &ctx).is_ok());
+    assert_eq!(
+        factory.operations.lock().expect("operations").last(),
+        Some(&(
+            ego_core::mcp::McpOperationKind::ReadResource,
+            ego_core::mcp::McpSubject::Resource {
+                server: "alpha".into(),
+                uri: "file:///guide".into()
+            },
+            json!({})
+        ))
+    );
+    assert!(
+        command
+            .prepare(json!({"uri":"file:///other"}), &ctx)
+            .is_err()
     );
 }

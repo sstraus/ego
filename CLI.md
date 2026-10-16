@@ -1084,6 +1084,18 @@ The live seat enters raw mode before startup discovery, so lines typed before
 the composer appears retain their Enter boundaries without cooked terminal
 echo. The first starts a turn; further submitted lines enter the busy FIFO.
 
+Admitted MCP prompts also appear as `/mcp__SERVER__PROMPT` commands. Supply
+prompt arguments as a JSON object of strings, for example
+`/mcp__docs__review {"target":"src"}`. Required arguments and allowed keys
+come from the captured prompt descriptor. Admitted resources appear as
+`/mcp_resource__SERVER__URI` and take no arguments. Completion shows the
+captured server and resource names. In command names, bytes other than ASCII
+letters, digits and hyphens use `_hh` hexadecimal escapes (including underscores).
+These commands attach the captured MCP result to the conversation without a
+model call. They use the existing effect permission path and refuse a command
+from a generation that is no longer admitted. ACP announces the same commands
+and their JSON argument schemas when the admitted runtime opens a prompt.
+
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
 /name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
