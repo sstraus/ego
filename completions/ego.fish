@@ -293,7 +293,7 @@ complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcomm
 complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcommand_from add rm ls login reload" -f -a "add" -d 'Add or replace one complete server entry'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcommand_from add rm ls login reload" -f -a "rm" -d 'Remove, mask, or reveal one configured server entry'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcommand_from add rm ls login reload" -f -a "ls" -d 'List configured and admitted MCP state'
-complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcommand_from add rm ls login reload" -f -a "login" -d 'Authorize one configured HTTP server through the product CIMD binding'
+complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcommand_from add rm ls login reload" -f -a "login" -d 'Authorize a public OAuth client with an explicit registration strategy'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcommand_from add rm ls login reload" -f -a "reload" -d 'Reconcile every configured server, or one named server'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l http -d 'Configure a Streamable HTTP transport' -r
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l cwd -d 'Working directory for the stdio child' -r -F
@@ -306,6 +306,13 @@ complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from rm" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from ls" -l json -d 'Emit the typed machine-readable projection'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -l client-id -d 'Operator-issued public client ID' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -l cimd -d 'Published HTTPS client metadata document URL' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -l callback-port -d 'Loopback port registered with the authorization server (0 selects a free port)' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -l issuer -r
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -l account -r
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -l dcr -d 'Explicitly use issuer-advertised dynamic registration'
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -l refresh -d 'Refresh an existing issuer/resource/account-bound credential without interaction'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from login" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from reload" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand config; and not __fish_seen_subcommand_from capabilities snapshot batch get set unset ls edit" -s h -l help -d 'Print help'

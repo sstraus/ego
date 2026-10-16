@@ -398,7 +398,7 @@ Manage configured MCP servers.
 - `mcp add` — Add or replace one complete server entry
 - `mcp rm` — Remove, mask, or reveal one configured server entry
 - `mcp ls` — List configured and admitted MCP state
-- `mcp login` — Authorize one configured HTTP server through the product CIMD binding
+- `mcp login` — Authorize a public OAuth client with an explicit registration strategy
 - `mcp reload` — Reconcile every configured server, or one named server
 
 - `-h, --help` — Print help
