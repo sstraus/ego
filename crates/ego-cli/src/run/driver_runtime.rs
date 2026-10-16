@@ -706,602 +706,71 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     perimeter = perimeter.with_residual_grants(&residual.grants());
                                 }
 
-                                match line {
-                                    repl::Line::HostCommand(
-                                        repl::HostCommand::RemovePasteImage,
-                                    ) => {
-                                        if staged_images.pop().is_some() {
-                                            seat.set_image_chips(paste_chips(&staged_images));
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::ClipboardPaste) => {
-                                        stage_clipboard_image(
-                                            seat.as_ref(),
-                                            pending_work,
-                                            &source,
-                                            (&confinement, active.evidence(), run_deadline),
-                                            &mut staged_images,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::PastePath(path)) => {
-                                        stage_image_path(
-                                            seat.as_ref(),
-                                            pending_work,
-                                            path,
-                                            &source,
-                                            (&confinement, active.evidence(), run_deadline),
-                                            &mut staged_images,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    repl::Line::Submitted(text) => {
-                                        Some(InteractiveTurnInput::Prompt(text))
-                                    }
-                                    repl::Line::Blank => continue,
-                                    // Ctrl+C at an idle prompt drops the line and nothing
-                                    // else. Someone who pressed it to stop a turn must not
-                                    // lose the session by pressing it once more.
-                                    repl::Line::Interrupted => continue,
-                                    repl::Line::Ended => {
-                                        // The last turn's provider/model refusal was already shown.
-                                        // Preserve cancellation, permission, and other outcomes.
-                                        if matches!(
-                                            &last.termination,
-                                            RunTermination::Provider { .. }
-                                                | RunTermination::ProviderUncertain { .. }
-                                                | RunTermination::UsageError { .. }
-                                        ) {
-                                            last.termination = RunTermination::Done;
-                                        }
-                                        break 'epoch EpochTransition::Exit;
-                                    }
-                                    repl::Line::Refused(why) => {
-                                        diagnostics.note(why);
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(
-                                        repl::HostCommand::SessionMetadata(operation),
-                                    ) => {
-                                        if pending_work {
-                                            diagnostics.note(
-                                                "session metadata is unavailable while source work is pending",
-                                            );
-                                            continue;
-                                        }
-                                        if let Err(error) = crate::metadata::execute_interactive(
-                                            &interactive_metadata,
-                                            &leased_session_journal,
-                                            &session_journal,
-                                            &operation,
+                                match dispatch_interactive_command(
+                                    InteractiveCommand {
+                                        args: &args,
+                                        active: &active,
+                                        seat: &seat,
+                                        source: &source,
+                                        confinement: &confinement,
+                                        run_deadline: run_deadline,
+                                        staged_images: &mut staged_images,
+                                        last: &mut last,
+                                        state: &mut state,
+                                        diagnostics: diagnostics,
+                                        interactive_metadata: &interactive_metadata,
+                                        leased_session_journal: &leased_session_journal,
+                                        session_journal: &session_journal,
+                                        interactive_metadata_ceilings:
                                             &interactive_metadata_ceilings,
-                                            &mut |message| diagnostics.note(message),
-                                        ) {
-                                            diagnostics.note(&format!(
-                                                "session metadata operation failed: {error}"
-                                            ));
-                                        }
-                                        state = match session_journal.inspect(Clone::clone) {
-                                            Ok(state) => state,
-                                            Err(error) => {
-                                                last.termination = hook_journal_termination(error);
-                                                break 'epoch EpochTransition::Exit;
-                                            }
-                                        };
-                                        last.state = state.clone();
-                                        if let Some(status) = status.as_ref()
-                                            && status.human
-                                        {
-                                            match selection.snapshot() {
-                                                Ok(selected) => {
-                                                    status.seat.refresh_status(&state, selected)
-                                                }
-                                                Err(error) => diagnostics.note(&format!(
-                                                    "the metadata status selection could not be refreshed: {error}"
-                                                )),
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Skill(
-                                        operation,
-                                    )) => {
-                                        if pending_work {
-                                            diagnostics.note(
-                                                "a skill cannot be invoked while source work is pending",
-                                            );
-                                            continue;
-                                        }
-                                        Some(InteractiveTurnInput::Skill(operation))
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Skills(
-                                        repl::actions::SkillSurfaceAction::List,
-                                    )) => {
-                                        render_skill_catalogue(
-                                            skills.as_deref(),
-                                            false,
-                                            diagnostics,
-                                        );
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Skills(
-                                        repl::actions::SkillSurfaceAction::Diagnose,
-                                    )) => {
-                                        render_skill_catalogue(
-                                            skills.as_deref(),
-                                            true,
-                                            diagnostics,
-                                        );
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Skills(
-                                        repl::actions::SkillSurfaceAction::Rescan,
-                                    )) => {
-                                        match rescan_session_skills(
-                                            pending_work,
-                                            skills.as_deref(),
-                                            seat.as_ref(),
-                                            (
-                                                &args,
-                                                &effective,
-                                                jsonl_store.as_ref(),
-                                                exec_environment.clone(),
-                                            ),
-                                            diagnostics,
-                                        ) {
-                                            Ok(Some(next_registry)) => registry = next_registry,
-                                            Ok(None) => {}
-                                            Err(termination) => {
-                                                last.termination = termination;
-                                                break 'epoch EpochTransition::Exit;
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Hooks) => {
-                                        render_session_hooks(&session_hooks.state, diagnostics);
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::ModelSwitch(
-                                        request,
-                                    )) => {
-                                        switch_session_model(
-                                            request,
-                                            model_switch_owner.clone(),
-                                            seat.as_ref(),
-                                            status.as_ref(),
-                                            &selection,
-                                            &state,
-                                            diagnostics,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
-                                        if handle_interactive_policy(
-                                            request,
-                                            policy_application.as_deref(),
-                                            status.as_ref(),
-                                            text_output,
-                                            diagnostics,
-                                        ) {
-                                            break 'epoch EpochTransition::Exit;
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Tasks(
-                                        arguments,
-                                    )) => {
-                                        diagnostics.note(&background_tasks(
-                                            &arguments,
-                                            &state,
-                                            session_hook_ports.process(),
-                                        ));
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Help,
-                                    )) => {
-                                        diagnostics.note(&seat.action_help());
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Expand,
-                                    )) => {
-                                        diagnostics.expand_last_tool();
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Config,
-                                    )) => {
-                                        diagnostics.note(&crate::config::repl_text(
-                                            &effective,
-                                            skill_profile_layers.as_deref().unwrap_or_default(),
-                                            &perimeter,
-                                        ));
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Mcp(arguments)) => {
-                                        {
-                                            let controller = mcp_registry;
-                                            let result = crate::mcp::session_command(
-                                                &arguments,
-                                                controller,
-                                                &mut session_mcp,
-                                                &mut disabled_mcp,
-                                            )
-                                            .await;
-                                            match result {
-                                                Ok(receipt) => diagnostics.note(&receipt),
-                                                Err(error) => diagnostics.note(&format!(
-                                                    "MCP control failed: {error:?}"
-                                                )),
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Config(
-                                        arguments,
-                                    )) => {
-                                        run_interactive_config(
-                                            &arguments,
-                                            &effective,
-                                            skill_profile_layers.as_deref(),
-                                            &perimeter,
-                                            diagnostics,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-                                        run_interactive_setup(
-                                            prompt,
-                                            &root,
-                                            status.as_ref(),
-                                            diagnostics,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    // The same snapshot `ego doctor` prints,
-                                    // built by the same probes. Two renderings
-                                    // of one value is the whole contract; two
-                                    // implementations would be two diagnoses.
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Doctor,
-                                    )) => {
-                                        diagnostics.note(&crate::doctor::observed_session(
-                                            root.clone(),
-                                            seat.width(),
-                                            &perimeter,
-                                        ));
-                                        continue;
-                                    }
-                                    // To the transcript rather than to a file
-                                    // this action would have had to invent a
-                                    // name for. `ego export ID --file` is where
-                                    // a file is asked for by name; the two
-                                    // disclosure modes and the three formats
-                                    // are the same ones, carried by the slash
-                                    // grammar — `/export local json`.
-                                    repl::Line::HostCommand(repl::HostCommand::Export(
-                                        selection,
-                                    )) => {
-                                        // The same workspace and store the
-                                        // session was opened against, so
-                                        // `ego --directory X` exports X and not
-                                        // whatever the process happens to sit in.
-                                        let args = crate::cli::ExportArgs {
-                                            source: active.id(),
-                                            sanitize: selection.sanitize,
-                                            format: selection.format,
-                                            file: None,
-                                            session_dir: args.session_dir.clone(),
-                                            directory: args.directory.clone(),
-                                        };
-                                        match exported(&args) {
-                                            Ok(rendered) => diagnostics.note(&rendered),
-                                            Err(termination) => diagnostics.note(&format!(
-                                                "the session could not be exported: {}",
-                                                termination.exit_reason()
-                                            )),
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(
-                                        command @ (repl::HostCommand::Action(
-                                            repl::actions::ActionId::Sessions,
-                                        )
-                                        | repl::HostCommand::History(_)
-                                        | repl::HostCommand::Resume(_)),
-                                    ) => {
-                                        if let Some(transition) = select_session_transition(
-                                            command,
-                                            seat.as_ref(),
-                                            pending_work,
-                                            jsonl_store,
-                                            &root,
-                                            active.id(),
-                                            (&clock, diagnostics),
-                                        )
-                                        .await
-                                        {
-                                            break 'epoch transition;
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Usage,
-                                    )) => {
-                                        report_session_usage(
-                                            jsonl_store.as_ref(),
-                                            &root,
-                                            active.id(),
-                                            &clock,
-                                            state.context,
-                                            diagnostics,
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Refresh,
-                                    )) => {
-                                        if pending_work {
-                                            diagnostics.note("instructions cannot be refreshed while source work is pending");
-                                            continue;
-                                        }
-                                        match instructions(
-                                            &effective,
-                                            &args,
-                                            &root,
-                                            &cwd,
-                                            diagnostics,
-                                        ) {
-                                            Ok(system) => {
-                                                config.system = system;
-                                                refresh_prompt = true;
-                                                diagnostics.note("instructions refreshed; the next generation opens a new prompt epoch");
-                                            }
-                                            Err(error) => diagnostics.note(&format!(
-                                                "instructions were not refreshed: {error}"
-                                            )),
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::New,
-                                    )) => {
-                                        if let Some(transition) = new_session_transition(
-                                            seat.as_ref(),
-                                            pending_work,
-                                            jsonl_store,
-                                            &clock,
-                                            diagnostics,
-                                        )
-                                        .await
-                                        {
-                                            break 'epoch transition;
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(
-                                        command @ (repl::HostCommand::Action(
-                                            repl::actions::ActionId::Fork,
-                                        )
-                                        | repl::HostCommand::Fork(_)),
-                                    ) => {
-                                        if let Some(transition) = fork_session_transition(
-                                            command,
-                                            pending_work,
-                                            jsonl_store,
-                                            active.id(),
-                                            &state,
-                                            &clock,
-                                            diagnostics,
-                                        )
-                                        .await
-                                        {
-                                            break 'epoch transition;
-                                        }
-                                        continue;
-                                    }
-                                    repl::Line::HostCommand(repl::HostCommand::Action(
-                                        repl::actions::ActionId::Compact,
-                                    )) => {
-                                        if compaction_availability(pending_work)
-                                            != repl::actions::Availability::Enabled
-                                        {
-                                            continue;
-                                        }
-                                        if !automatic_compaction
-                                            && !seat.confirm_compaction(active.id())
-                                        {
-                                            continue;
-                                        }
-                                        // One automatic attempt per source epoch; failure remains visible.
-                                        automatic_compaction_failed = automatic_compaction;
-                                        seat.busy();
-
-                                        let target_runtime = Arc::new(Mutex::new(None));
-                                        let prepared_runtime = Arc::clone(&target_runtime);
-                                        let source_id = active.id();
-                                        let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
-                                        let pre_compact = match dispatch_request_hook(
-                                            &session_hooks.runtime,
-                                            request_id,
-                                            session_hooks.turn,
-                                            None,
-                                            HookLifecycle::PreCompact,
-                                        )
-                                        .await
-                                        {
-                                            Ok(result) => result,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "compaction was blocked before preparation: {}",
-                                                    error.exit_reason()
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let compaction_cancel = CancelToken::new();
-                                        let future: CompactionFuture<
-                                            '_,
-                                            Result<PreparedCompaction, CompactionError>,
-                                        > = Box::pin(prepare_interactive_compaction(
-                                            InteractiveCompaction {
-                                                args: &args,
-                                                effective: &effective,
-                                                root: &root,
-                                                cwd: &cwd,
-                                                diagnostics,
-                                                skills: &skills,
-                                                jsonl_store,
-                                                confinement: &confinement,
-                                                active: &active,
-                                                cancel: &compaction_cancel,
-                                                run_deadline,
-                                                source: &source,
-                                                policy_source: &policy_source,
-                                                gate: &gate,
-                                                config: &config,
-                                                evidence: &evidence,
-                                                invocation,
-                                                admitted_tools: &admitted_tools,
-                                                mcp_runtime: mcp_runtime.as_ref(),
-                                                skill_resource_roots: &skill_resource_roots,
-                                                session_journal: &session_journal,
-                                                session_hooks: &session_hooks,
-                                                last_generation_request: last_generation_request
-                                                    .clone(),
-                                                elicitor: &elicitor,
-                                                judge_available,
-                                                skill_trust,
-                                                control: &mut control,
-                                                state: &mut state,
-                                                seat: seat.as_ref(),
-                                                model_compaction,
-                                                prepared_runtime: prepared_runtime.as_ref(),
-                                            },
-                                        ));
-                                        let mut preparation = DeferredCompactionPreparation {
-                                            source: source_id,
-                                            future: Some(future),
-                                        };
-                                        let request = CompactionTransitionRequest {
-                                            request_id,
-                                            source: source_id,
-                                        };
-                                        let receipt = CompactionTransitionService::new(clock)
-                                            .compact(
-                                                request,
-                                                &mut preparation,
-                                                jsonl_store.as_ref(),
-                                            )
-                                            .await;
-                                        drop(preparation);
-
-                                        let receipt = match receipt {
-                                            Ok(receipt) => receipt,
-                                            Err(error) => {
-                                                diagnostics
-                                                    .note(&format!("compaction failed: {error}"));
-                                                if model_compaction {
-                                                    session_journal
-                                                        .append(
-                                                            TurnId::new(),
-                                                            None,
-                                                            None,
-                                                            EventKind::ContextRequestConsumed,
-                                                        )
-                                                        .map_err(|error| {
-                                                            RunTermination::Failed {
-                                                                message: error.to_string(),
-                                                            }
-                                                        })?;
-                                                    state = session_hooks.state.state();
-                                                }
-                                                if let Some(status) = status.as_ref()
-                                                    && status.human
-                                                    && let Ok(selected) = selection.snapshot()
-                                                {
-                                                    status.seat.refresh_status(&state, selected);
-                                                }
-                                                continue;
-                                            }
-                                        };
-                                        if model_compaction {
-                                            session_journal
-                                                .append(
-                                                    TurnId::new(),
-                                                    None,
-                                                    None,
-                                                    EventKind::ContextRequestConsumed,
-                                                )
-                                                .map_err(|error| RunTermination::Failed {
-                                                    message: error.to_string(),
-                                                })?;
-                                            state = session_hooks.state.state();
-                                        }
-                                        let target = receipt.target;
-                                        let target_opened = match session::open(
-                                            jsonl_store.as_ref(),
-                                            &target,
-                                            &clock,
-                                        ) {
-                                            Ok(opened) => Opened::Durable(Box::new(opened)),
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "compaction target could not be opened: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let target_state = target_opened.state();
-                                        let target_owner = match ActiveSession::durable(
-                                            target_opened,
-                                            target_state,
-                                            EVIDENCE_CAP,
-                                        ) {
-                                            Ok(owner) => owner,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                        "compaction target evidence could not be opened: {error}"
-                                    ));
-                                                continue;
-                                            }
-                                        };
-                                        let diagnostic =
-                                            receipt.publication.diagnostic().map(str::to_string);
-                                        if matches!(
-                                            &receipt.publication,
-                                            ego_core::session::TargetPublication::NotPublished { .. }
-                                        ) {
-                                            diagnostics.note("compaction target was not published");
-                                            continue;
-                                        }
-                                        let runtime = target_runtime
-                                            .lock()
-                                            .expect("interactive compaction runtime")
-                                            .take();
-                                        checkpoint_pending = automatic_compaction;
-                                        automatic_compaction_failed = false;
-                                        break 'epoch EpochTransition::Compact {
-                                            target: target_owner,
-                                            publication: receipt.publication,
-                                            diagnostic,
-                                            runtime,
-                                            request: request_id,
-                                            parent: pre_compact.closure_event(),
-                                        };
-                                    }
-                                    repl::Line::HostCommand(_) => continue,
-                                    repl::Line::ExternalBreak(_) => {
-                                        break 'epoch EpochTransition::Exit;
+                                        status: &status,
+                                        selection: &selection,
+                                        skills: &skills,
+                                        effective: &effective,
+                                        jsonl_store: jsonl_store,
+                                        exec_environment: exec_environment.clone(),
+                                        registry: &mut registry,
+                                        session_hooks: &session_hooks,
+                                        model_switch_owner: model_switch_owner.clone(),
+                                        policy_application: &policy_application,
+                                        text_output: text_output,
+                                        session_hook_ports: &session_hook_ports,
+                                        skill_profile_layers: &skill_profile_layers,
+                                        perimeter: &perimeter,
+                                        mcp_registry: mcp_registry,
+                                        session_mcp: &mut session_mcp,
+                                        disabled_mcp: &mut disabled_mcp,
+                                        root: &root,
+                                        cwd: &cwd,
+                                        clock: &clock,
+                                        config: &mut config,
+                                        refresh_prompt: &mut refresh_prompt,
+                                        automatic_compaction_failed:
+                                            &mut automatic_compaction_failed,
+                                        policy_source: &policy_source,
+                                        gate: &gate,
+                                        evidence: &evidence,
+                                        invocation: invocation,
+                                        admitted_tools: &admitted_tools,
+                                        mcp_runtime: &(mcp_runtime.clone()
+                                            as Arc<dyn McpRuntimeBinding>),
+                                        skill_resource_roots: &skill_resource_roots,
+                                        last_generation_request: &last_generation_request,
+                                        elicitor: &elicitor,
+                                        judge_available: judge_available,
+                                        skill_trust: skill_trust,
+                                        control: &mut control,
+                                        checkpoint_pending: &mut checkpoint_pending,
+                                    },
+                                    line,
+                                    (pending_work, model_compaction, automatic_compaction),
+                                )
+                                .await?
+                                {
+                                    CommandOutcome::Continue => continue,
+                                    CommandOutcome::Input(input) => Some(input),
+                                    CommandOutcome::Transition(transition) => {
+                                        break 'epoch transition;
                                     }
                                 }
                             };
@@ -3006,4 +2475,616 @@ fn rescan_session_skills(
         diagnostics.note(&capture.render_diagnostics());
     }
     Ok(Some(registry))
+}
+
+enum CommandOutcome<'store> {
+    Continue,
+    Input(InteractiveTurnInput),
+    Transition(EpochTransition<'store>),
+}
+
+struct InteractiveCommand<'a, 'session, 'store> {
+    args: &'a Args,
+    active: &'session ActiveSession<'store>,
+    seat: &'a Arc<dyn InteractiveSeat>,
+    source: &'a Arc<model::CliGenerationModelSource>,
+    confinement: &'a RunConfinement,
+    run_deadline: Option<std::time::Instant>,
+    staged_images: &'a mut Vec<StagedPasteImage>,
+    last: &'a mut Ended,
+    state: &'a mut SessionState,
+    diagnostics: &'a dyn Diagnostics,
+    interactive_metadata: &'a SessionMetadata<JsonlStore>,
+    leased_session_journal: &'a LeasedSharedJournal<'session, JsonlStore>,
+    session_journal: &'a SharedJournal<'session>,
+    interactive_metadata_ceilings: &'a Ceilings,
+    status: &'a Option<InteractiveStatus>,
+    selection: &'a Arc<model::GenerationSelection>,
+    skills: &'a Option<Arc<crate::skill::SkillCatalogue>>,
+    effective: &'a Effective,
+    jsonl_store: &'store Arc<JsonlStore>,
+    exec_environment: ego_core::permit::EnvPolicy,
+    registry: &'a mut Vec<RegisteredTool>,
+    session_hooks: &'a SessionHookComposition<'session>,
+    model_switch_owner: Option<RunModelSwitchOwner<'session>>,
+    policy_application: &'a Option<Arc<PolicyApplicationOwner>>,
+    text_output: Option<&'a dyn TextOutput>,
+    session_hook_ports: &'a Arc<RunEffectPorts>,
+    skill_profile_layers: &'a Option<Vec<Sourced<ConfigLayer>>>,
+    perimeter: &'a crate::perimeter::Perimeter,
+    mcp_registry: &'a Arc<McpRegistryController>,
+    session_mcp: &'a mut Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>,
+    disabled_mcp: &'a mut BTreeSet<McpServerName>,
+    root: &'a Path,
+    cwd: &'a Path,
+    clock: &'a SystemClock,
+    config: &'a mut TurnConfig,
+    refresh_prompt: &'a mut bool,
+    automatic_compaction_failed: &'a mut bool,
+    policy_source: &'a Arc<dyn GenerationPolicySource>,
+    gate: &'a SharedBudgetGate,
+    evidence: &'a Arc<EvidenceAdmissionService>,
+    invocation: RunInvocationId,
+    admitted_tools: &'a Option<Arc<dyn AdmittedToolSource>>,
+    mcp_runtime: &'a Arc<dyn McpRuntimeBinding>,
+    skill_resource_roots: &'a Option<ego_core::skill::SkillResourceRoots>,
+    last_generation_request: &'a Option<GenRequest>,
+    elicitor: &'a Option<Arc<dyn Elicitor>>,
+    judge_available: bool,
+    skill_trust: Trust,
+    control: &'a mut InteractiveControl,
+    checkpoint_pending: &'a mut bool,
+}
+
+async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
+    input: InteractiveCommand<'a, 'session, 'store>,
+    line: repl::Line,
+    posture: (bool, bool, bool),
+) -> Result<CommandOutcome<'store>, RunTermination> {
+    let InteractiveCommand {
+        args,
+        active,
+        seat,
+        source,
+        confinement,
+        run_deadline,
+        staged_images,
+        last,
+        state,
+        diagnostics,
+        interactive_metadata,
+        leased_session_journal,
+        session_journal,
+        interactive_metadata_ceilings,
+        status,
+        selection,
+        skills,
+        effective,
+        jsonl_store,
+        exec_environment,
+        registry,
+        session_hooks,
+        model_switch_owner,
+        policy_application,
+        text_output,
+        session_hook_ports,
+        skill_profile_layers,
+        perimeter,
+        mcp_registry,
+        session_mcp,
+        disabled_mcp,
+        root,
+        cwd,
+        clock,
+        config,
+        refresh_prompt,
+        automatic_compaction_failed,
+        policy_source,
+        gate,
+        evidence,
+        invocation,
+        admitted_tools,
+        mcp_runtime,
+        skill_resource_roots,
+        last_generation_request,
+        elicitor,
+        judge_available,
+        skill_trust,
+        control,
+        checkpoint_pending,
+    } = input;
+    let (pending_work, model_compaction, automatic_compaction) = posture;
+    match line {
+        repl::Line::HostCommand(repl::HostCommand::RemovePasteImage) => {
+            if staged_images.pop().is_some() {
+                seat.set_image_chips(paste_chips(&staged_images));
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::ClipboardPaste) => {
+            stage_clipboard_image(
+                seat.as_ref(),
+                pending_work,
+                source,
+                (confinement, active.evidence(), run_deadline),
+                staged_images,
+            )
+            .await;
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::PastePath(path)) => {
+            stage_image_path(
+                seat.as_ref(),
+                pending_work,
+                path,
+                source,
+                (confinement, active.evidence(), run_deadline),
+                staged_images,
+            )
+            .await;
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::Submitted(text) => {
+            Ok(CommandOutcome::Input(InteractiveTurnInput::Prompt(text)))
+        }
+        repl::Line::Blank => Ok(CommandOutcome::Continue),
+        // Ctrl+C at an idle prompt drops the line and nothing
+        // else. Someone who pressed it to stop a turn must not
+        // lose the session by pressing it once more.
+        repl::Line::Interrupted => Ok(CommandOutcome::Continue),
+        repl::Line::Ended => {
+            // The last turn's provider/model refusal was already shown.
+            // Preserve cancellation, permission, and other outcomes.
+            if matches!(
+                &last.termination,
+                RunTermination::Provider { .. }
+                    | RunTermination::ProviderUncertain { .. }
+                    | RunTermination::UsageError { .. }
+            ) {
+                last.termination = RunTermination::Done;
+            }
+            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+        }
+        repl::Line::Refused(why) => {
+            diagnostics.note(why);
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::SessionMetadata(operation)) => {
+            if pending_work {
+                diagnostics.note("session metadata is unavailable while source work is pending");
+                return Ok(CommandOutcome::Continue);
+            }
+            if let Err(error) = crate::metadata::execute_interactive(
+                interactive_metadata,
+                leased_session_journal,
+                session_journal,
+                &operation,
+                interactive_metadata_ceilings,
+                &mut |message| diagnostics.note(message),
+            ) {
+                diagnostics.note(&format!("session metadata operation failed: {error}"));
+            }
+            *state = match session_journal.inspect(Clone::clone) {
+                Ok(state) => state,
+                Err(error) => {
+                    last.termination = hook_journal_termination(error);
+                    return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+                }
+            };
+            last.state = state.clone();
+            if let Some(status) = status.as_ref()
+                && status.human
+            {
+                match selection.snapshot() {
+                    Ok(selected) => status.seat.refresh_status(state, selected),
+                    Err(error) => diagnostics.note(&format!(
+                        "the metadata status selection could not be refreshed: {error}"
+                    )),
+                }
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Skill(operation)) => {
+            if pending_work {
+                diagnostics.note("a skill cannot be invoked while source work is pending");
+                return Ok(CommandOutcome::Continue);
+            }
+            Ok(CommandOutcome::Input(InteractiveTurnInput::Skill(
+                operation,
+            )))
+        }
+        repl::Line::HostCommand(repl::HostCommand::Skills(
+            repl::actions::SkillSurfaceAction::List,
+        )) => {
+            render_skill_catalogue(skills.as_deref(), false, diagnostics);
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Skills(
+            repl::actions::SkillSurfaceAction::Diagnose,
+        )) => {
+            render_skill_catalogue(skills.as_deref(), true, diagnostics);
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Skills(
+            repl::actions::SkillSurfaceAction::Rescan,
+        )) => {
+            match rescan_session_skills(
+                pending_work,
+                skills.as_deref(),
+                seat.as_ref(),
+                (
+                    args,
+                    effective,
+                    jsonl_store.as_ref(),
+                    exec_environment.clone(),
+                ),
+                diagnostics,
+            ) {
+                Ok(Some(next_registry)) => *registry = next_registry,
+                Ok(None) => {}
+                Err(termination) => {
+                    last.termination = termination;
+                    return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+                }
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Hooks) => {
+            render_session_hooks(session_hooks.state, diagnostics);
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
+            switch_session_model(
+                request,
+                model_switch_owner.clone(),
+                seat.as_ref(),
+                status.as_ref(),
+                selection,
+                state,
+                diagnostics,
+            )
+            .await;
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
+            if handle_interactive_policy(
+                request,
+                policy_application.as_deref(),
+                status.as_ref(),
+                text_output,
+                diagnostics,
+            ) {
+                return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Tasks(arguments)) => {
+            diagnostics.note(&background_tasks(
+                &arguments,
+                state,
+                session_hook_ports.process(),
+            ));
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Help)) => {
+            diagnostics.note(&seat.action_help());
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Expand)) => {
+            diagnostics.expand_last_tool();
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Config)) => {
+            diagnostics.note(&crate::config::repl_text(
+                effective,
+                skill_profile_layers.as_deref().unwrap_or_default(),
+                perimeter,
+            ));
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Mcp(arguments)) => {
+            {
+                let controller = mcp_registry;
+                let result =
+                    crate::mcp::session_command(&arguments, controller, session_mcp, disabled_mcp)
+                        .await;
+                match result {
+                    Ok(receipt) => diagnostics.note(&receipt),
+                    Err(error) => diagnostics.note(&format!("MCP control failed: {error:?}")),
+                }
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Config(arguments)) => {
+            run_interactive_config(
+                &arguments,
+                effective,
+                skill_profile_layers.as_deref(),
+                perimeter,
+                diagnostics,
+            )
+            .await;
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
+            run_interactive_setup(prompt, root, status.as_ref(), diagnostics).await;
+            return Ok(CommandOutcome::Continue);
+        }
+        // The same snapshot `ego doctor` prints,
+        // built by the same probes. Two renderings
+        // of one value is the whole contract; two
+        // implementations would be two diagnoses.
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Doctor)) => {
+            diagnostics.note(&crate::doctor::observed_session(
+                root.clone(),
+                seat.width(),
+                perimeter,
+            ));
+            return Ok(CommandOutcome::Continue);
+        }
+        // To the transcript rather than to a file
+        // this action would have had to invent a
+        // name for. `ego export ID --file` is where
+        // a file is asked for by name; the two
+        // disclosure modes and the three formats
+        // are the same ones, carried by the slash
+        // grammar — `/export local json`.
+        repl::Line::HostCommand(repl::HostCommand::Export(selection)) => {
+            // The same workspace and store the
+            // session was opened against, so
+            // `ego --directory X` exports X and not
+            // whatever the process happens to sit in.
+            let args = crate::cli::ExportArgs {
+                source: active.id(),
+                sanitize: selection.sanitize,
+                format: selection.format,
+                file: None,
+                session_dir: args.session_dir.clone(),
+                directory: args.directory.clone(),
+            };
+            match exported(args) {
+                Ok(rendered) => diagnostics.note(&rendered),
+                Err(termination) => diagnostics.note(&format!(
+                    "the session could not be exported: {}",
+                    termination.exit_reason()
+                )),
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Sessions)
+            | repl::HostCommand::History(_)
+            | repl::HostCommand::Resume(_)),
+        ) => {
+            if let Some(transition) = select_session_transition(
+                command,
+                seat.as_ref(),
+                pending_work,
+                jsonl_store,
+                root,
+                active.id(),
+                (clock, diagnostics),
+            )
+            .await
+            {
+                return Ok(CommandOutcome::Transition(transition));
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Usage)) => {
+            report_session_usage(
+                jsonl_store.as_ref(),
+                root,
+                active.id(),
+                clock,
+                state.context,
+                diagnostics,
+            )
+            .await;
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Refresh)) => {
+            if pending_work {
+                diagnostics.note("instructions cannot be refreshed while source work is pending");
+                return Ok(CommandOutcome::Continue);
+            }
+            match instructions(effective, args, root, cwd, diagnostics) {
+                Ok(system) => {
+                    config.system = system;
+                    *refresh_prompt = true;
+                    diagnostics.note(
+                        "instructions refreshed; the next generation opens a new prompt epoch",
+                    );
+                }
+                Err(error) => {
+                    diagnostics.note(&format!("instructions were not refreshed: {error}"))
+                }
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::New)) => {
+            if let Some(transition) =
+                new_session_transition(seat.as_ref(), pending_work, jsonl_store, clock, diagnostics)
+                    .await
+            {
+                return Ok(CommandOutcome::Transition(transition));
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Fork)
+            | repl::HostCommand::Fork(_)),
+        ) => {
+            if let Some(transition) = fork_session_transition(
+                command,
+                pending_work,
+                jsonl_store,
+                active.id(),
+                state,
+                clock,
+                diagnostics,
+            )
+            .await
+            {
+                return Ok(CommandOutcome::Transition(transition));
+            }
+            return Ok(CommandOutcome::Continue);
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Compact)) => {
+            if compaction_availability(pending_work) != repl::actions::Availability::Enabled {
+                return Ok(CommandOutcome::Continue);
+            }
+            if !automatic_compaction && !seat.confirm_compaction(active.id()) {
+                return Ok(CommandOutcome::Continue);
+            }
+            // One automatic attempt per source epoch; failure remains visible.
+            *automatic_compaction_failed = automatic_compaction;
+            seat.busy();
+
+            let target_runtime = Arc::new(Mutex::new(None));
+            let prepared_runtime = Arc::clone(&target_runtime);
+            let source_id = active.id();
+            let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
+            let pre_compact = match dispatch_request_hook(
+                session_hooks.runtime,
+                request_id,
+                session_hooks.turn,
+                None,
+                HookLifecycle::PreCompact,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    diagnostics.note(&format!(
+                        "compaction was blocked before preparation: {}",
+                        error.exit_reason()
+                    ));
+                    return Ok(CommandOutcome::Continue);
+                }
+            };
+            let compaction_cancel = CancelToken::new();
+            let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
+                Box::pin(prepare_interactive_compaction(InteractiveCompaction {
+                    args: args,
+                    effective: effective,
+                    root: root,
+                    cwd: cwd,
+                    diagnostics,
+                    skills: skills,
+                    jsonl_store,
+                    confinement: confinement,
+                    active: &active,
+                    cancel: &compaction_cancel,
+                    run_deadline,
+                    source: source,
+                    policy_source: policy_source,
+                    gate: gate,
+                    config: config,
+                    evidence: evidence,
+                    invocation,
+                    admitted_tools: admitted_tools,
+                    mcp_runtime: mcp_runtime.as_ref(),
+                    skill_resource_roots: skill_resource_roots,
+                    session_journal: session_journal,
+                    session_hooks: session_hooks,
+                    last_generation_request: last_generation_request.clone(),
+                    elicitor: elicitor,
+                    judge_available,
+                    skill_trust,
+                    control: control,
+                    state: state,
+                    seat: seat.as_ref(),
+                    model_compaction,
+                    prepared_runtime: prepared_runtime.as_ref(),
+                }));
+            let mut preparation = DeferredCompactionPreparation {
+                source: source_id,
+                future: Some(future),
+            };
+            let request = CompactionTransitionRequest {
+                request_id,
+                source: source_id,
+            };
+            let receipt = CompactionTransitionService::new(clock)
+                .compact(request, &mut preparation, jsonl_store.as_ref())
+                .await;
+            drop(preparation);
+
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    diagnostics.note(&format!("compaction failed: {error}"));
+                    if model_compaction {
+                        session_journal
+                            .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)
+                            .map_err(|error| RunTermination::Failed {
+                                message: error.to_string(),
+                            })?;
+                        *state = session_hooks.state.state();
+                    }
+                    if let Some(status) = status.as_ref()
+                        && status.human
+                        && let Ok(selected) = selection.snapshot()
+                    {
+                        status.seat.refresh_status(state, selected);
+                    }
+                    return Ok(CommandOutcome::Continue);
+                }
+            };
+            if model_compaction {
+                session_journal
+                    .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)
+                    .map_err(|error| RunTermination::Failed {
+                        message: error.to_string(),
+                    })?;
+                *state = session_hooks.state.state();
+            }
+            let target = receipt.target;
+            let target_opened = match session::open(jsonl_store.as_ref(), &target, clock) {
+                Ok(opened) => Opened::Durable(Box::new(opened)),
+                Err(error) => {
+                    diagnostics.note(&format!("compaction target could not be opened: {error}"));
+                    return Ok(CommandOutcome::Continue);
+                }
+            };
+            let target_state = target_opened.state();
+            let target_owner =
+                match ActiveSession::durable(target_opened, target_state, EVIDENCE_CAP) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        diagnostics.note(&format!(
+                            "compaction target evidence could not be opened: {error}"
+                        ));
+                        return Ok(CommandOutcome::Continue);
+                    }
+                };
+            let diagnostic = receipt.publication.diagnostic().map(str::to_string);
+            if matches!(
+                &receipt.publication,
+                ego_core::session::TargetPublication::NotPublished { .. }
+            ) {
+                diagnostics.note("compaction target was not published");
+                return Ok(CommandOutcome::Continue);
+            }
+            let runtime = target_runtime
+                .lock()
+                .expect("interactive compaction runtime")
+                .take();
+            *checkpoint_pending = automatic_compaction;
+            *automatic_compaction_failed = false;
+            return Ok(CommandOutcome::Transition(EpochTransition::Compact {
+                target: target_owner,
+                publication: receipt.publication,
+                diagnostic,
+                runtime,
+                request: request_id,
+                parent: pre_compact.closure_event(),
+            }));
+        }
+        repl::Line::HostCommand(_) => Ok(CommandOutcome::Continue),
+        repl::Line::ExternalBreak(_) => {
+            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+        }
+    }
 }
