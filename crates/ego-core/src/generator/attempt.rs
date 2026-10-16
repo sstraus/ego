@@ -396,10 +396,26 @@ pub fn settled_cost(
             },
             None => CostDelta::Unknown(UnknownCost::ProviderReportedCostMissing),
         },
-        Metering::Subscription { revision } | Metering::Unmetered { revision } => CostDelta::free(
+        Metering::Subscription {
+            revision,
+            equivalent,
+        } => CostDelta::free(
             settlement,
             CostAttribution::MeteringPolicy {
                 revision: revision.clone(),
+                equivalent: match usage {
+                    UsageReport::Reported(usage) => {
+                        equivalent.as_ref().and_then(|price| price.estimate(&usage))
+                    }
+                    UsageReport::Missing => None,
+                },
+            },
+        ),
+        Metering::Unmetered { revision } => CostDelta::free(
+            settlement,
+            CostAttribution::MeteringPolicy {
+                revision: revision.clone(),
+                equivalent: None,
             },
         ),
     }

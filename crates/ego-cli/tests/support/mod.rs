@@ -1539,6 +1539,10 @@ impl Ego {
         for (key, value) in &self.env {
             command.env(key, value);
         }
+        // Keep coverage from the real binary visible after clearing the fixture environment.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
         command.current_dir(&self.workspace);
         if !self.subcommand.is_empty() {
             command.arg(&self.subcommand);

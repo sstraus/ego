@@ -568,3 +568,89 @@ fn exact_secret_name(value: &str) -> Option<&str> {
         .and_then(|value| value.strip_suffix('}'))
         .filter(|name| !name.is_empty() && !name.contains('{') && !name.contains('}'))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ego_core::config::{Mode, Ruleset};
+    use ego_core::event::hook::{
+        HookActivation, HookContentDigest, HookId, HookInvocationId, HookLifecycle,
+        HookSourceAuthority, HookSourceLocation,
+    };
+    use ego_core::event::id::{EventId, SessionId};
+    use ego_core::hook::{HookCausality, HookEvent, HookStartedEvidence};
+    use ego_core::permit::CanonPath;
+    use ego_core::turn::CancelToken;
+    use ego_tools::fs::OsFs;
+    use ego_tools::store::SessionEvidenceStore;
+    use std::time::Duration;
+
+    struct NoGeneration;
+
+    impl ToollessGenerationService for NoGeneration {
+        fn generate(&self, _: ToollessGenerationRequest) -> GenerationFuture<'_> {
+            panic!("a missing MCP backend must not fall back to generation")
+        }
+    }
+
+    // Catches: missing MCP authority succeeds or exposes handler input as public diagnostic feedback.
+    #[tokio::test]
+    async fn missing_mcp_backend_refuses_without_exposing_handler_input() {
+        let owner = tempfile::tempdir().unwrap();
+        let scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let ports = scope.ports();
+        let evidence = SessionEvidenceStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = ToolEffectPorts::new(
+            &OsFs,
+            ports.process(),
+            &evidence,
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
+        );
+        let adapter = HookPortAdapter::new(
+            Arc::new(PolicyEngine::new(
+                CanonPath::new(owner.path()),
+                Mode::Default,
+                Ruleset::default(),
+            )),
+            effects,
+            None,
+            Arc::new(NoGeneration),
+        );
+        let hook = HookId::derive(
+            HookSourceAuthority::User,
+            &HookSourceLocation::parse("config.toml").unwrap(),
+            &HookContentDigest::parse(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
+            0,
+        );
+        let request = HookInvocationRequest::new(
+            HookStartedEvidence::new(
+                EventId::new(),
+                EventId::new(),
+                hook,
+                HookInvocationId::new(),
+                HookActivation::Persistent,
+            ),
+            HookCausality::session(SessionId::new(), TurnId::new()),
+            HookHandlerConfig::McpTool {
+                server: "absent".into(),
+                tool: "inspect".into(),
+                input: serde_json::json!({"private": "never-publish-hook-input"}),
+                timeout_seconds: None,
+            },
+            HookEvent::session(HookLifecycle::UserPromptSubmit),
+            EffectScope::new(Duration::from_secs(3)),
+        );
+        let failure = adapter.invoke(request).await.unwrap_err();
+        assert_eq!(
+            serde_json::to_value(failure).unwrap(),
+            serde_json::json!({"kind": "backend_unavailable", "feedback": null}),
+        );
+    }
+}

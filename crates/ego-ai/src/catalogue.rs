@@ -998,6 +998,7 @@ pub fn unmetered() -> Metering {
 pub fn subscription(revision: &str) -> Metering {
     Metering::Subscription {
         revision: MeteringRevision(revision.to_string()),
+        equivalent: None,
     }
 }
 

@@ -163,6 +163,39 @@ impl Fs for OsFs {
         fs::read(path.as_path()).map_err(|err| Self::error(path.as_path(), &err))
     }
 
+    fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, FsError> {
+        use std::io::Read;
+        for component in path.as_path().ancestors() {
+            let metadata =
+                fs::symlink_metadata(component).map_err(|e| Self::error(component, &e))?;
+            if metadata.file_type().is_symlink() {
+                return Err(FsError::Io {
+                    path: path.clone(),
+                    message: "command import crosses a symlink".into(),
+                });
+            }
+        }
+        let file = fs::File::open(path.as_path()).map_err(|e| Self::error(path.as_path(), &e))?;
+        if !file
+            .metadata()
+            .map_err(|e| Self::error(path.as_path(), &e))?
+            .is_file()
+        {
+            return Err(FsError::NotAFile { path: path.clone() });
+        }
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| Self::error(path.as_path(), &e))?;
+        if bytes.len() > limit {
+            return Err(FsError::Io {
+                path: path.clone(),
+                message: "file exceeds import byte limit".into(),
+            });
+        }
+        Ok(bytes)
+    }
+
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), FsError> {
         PreparedReplacement::new(path.as_path(), bytes)
             .and_then(PreparedReplacement::commit)

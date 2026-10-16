@@ -653,6 +653,13 @@ pub enum SessionTrustStatus {
 }
 
 pub trait SessionTrustAdmission: Send + Sync {
+    /// The admitted user catalogue after this session's trust answer.
+    fn available_commands(
+        &self,
+        _root: &RunRoot,
+    ) -> Vec<ego_core::event::skill::SkillDescriptorEvidence> {
+        Vec::new()
+    }
     /// The adapter decides whether the process has a host-selected profile.
     /// Default ports never accept client self-attestation.
     fn attest_trusted(&self, _root: &RunRoot) {}
@@ -854,7 +861,7 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
             v1::PromptCapabilities::new()
                 .image(true)
                 .audio(false)
-                .embedded_context(false),
+                .embedded_context(true),
         )
         .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false).acp(true));
     let capabilities = if lifecycle {
@@ -1777,33 +1784,105 @@ where
 
 /// Read one client's blocks into the prompt this build can run.
 ///
-/// Text and resource links flatten into one string, and images become the
-/// validated [`Image`] the rest of the system already speaks — the same value
-/// `--attach` produces, so what arrives over ACP and what arrives from a path
-/// are admitted, bounded and published by one set of rules rather than two.
-///
-/// **The blocks are not kept interleaved**, because the conversation model they
-/// are read into is `{ text, images }`: that is the shape of `PromptQueued` and
-/// `UserPrompt`, fixed by `docs/decisions/2026-08-29-images-are-session-blobs-
-/// before-they-are-wire-parts.md`, and it predates this reader. A client that
-/// sandwiches text around a picture gets its text joined in order and its
-/// images in order; it does not get the sandwich back.
+/// Read host-supplied context without fetching its acquisition URI. Raw URIs,
+/// annotations and metadata never enter durable or provider-facing content.
+/// Images carry UTF-8 offsets into the joined text, retained by the blob metadata.
 fn prompt_content(blocks: &[v1::ContentBlock]) -> Result<RunPrompt, String> {
-    let mut parts = Vec::new();
+    const MAX_TEXT_BYTES: usize = 1024 * 1024;
+    const MAX_URI_BYTES: usize = 4096;
+    let mut text = String::new();
     let mut images = Vec::new();
+    let mut total_image_bytes = 0_u64;
     for block in blocks {
-        match block {
-            v1::ContentBlock::Text(text) => parts.push(text.text.clone()),
-            v1::ContentBlock::ResourceLink(link) => parts.push(link.uri.clone()),
-            v1::ContentBlock::Image(image) => images.push(admit_image(image, images.len() + 1)?),
-            v1::ContentBlock::Audio(_) => return Err(unsupported_block("audio")),
-            v1::ContentBlock::Resource(_) => {
-                return Err(unsupported_block("an embedded resource"));
+        let part = match block {
+            v1::ContentBlock::Text(part) => Some(part.text.clone()),
+            v1::ContentBlock::ResourceLink(link) => Some(link.uri.clone()),
+            v1::ContentBlock::Image(image) => {
+                images.push(admit_image(image, images.len() + 1)?.with_text_offset(text.len()));
+                None
             }
+            v1::ContentBlock::Resource(resource) => {
+                let (uri, mime, payload) = match &resource.resource {
+                    v1::EmbeddedResourceResource::TextResourceContents(resource) => (
+                        &resource.uri,
+                        resource.mime_type.as_deref(),
+                        Some(&resource.text),
+                    ),
+                    v1::EmbeddedResourceResource::BlobResourceContents(resource) => {
+                        (&resource.uri, resource.mime_type.as_deref(), None)
+                    }
+                    _ => return Err(unsupported_block("an unknown embedded resource")),
+                };
+                if uri.is_empty() || uri.len() > MAX_URI_BYTES || uri.chars().any(char::is_control)
+                {
+                    return Err("embedded resource URI must be nonempty and at most 4096 bytes without control characters".into());
+                }
+                // The digest preserves source identity without copying credentials,
+                // query parameters or private host paths into the conversation.
+                let provenance =
+                    RequestDigest::of(uri).map_err(|_| "invalid resource provenance")?;
+                if let Some(payload) = payload {
+                    if !matches!(
+                        mime,
+                        None | Some(
+                            "text/plain"
+                                | "text/markdown"
+                                | "text/html"
+                                | "text/csv"
+                                | "application/json"
+                        )
+                    ) {
+                        return Err("embedded text resource has an unsupported media type".into());
+                    }
+                    if payload.len() > MAX_TEXT_BYTES {
+                        return Err("embedded resource text exceeds 1048576 bytes".into());
+                    }
+                    Some(format!(
+                        "[ACP embedded resource {}]\n{payload}",
+                        provenance.as_str()
+                    ))
+                } else {
+                    let v1::EmbeddedResourceResource::BlobResourceContents(resource) =
+                        &resource.resource
+                    else {
+                        unreachable!("text payload handled above")
+                    };
+                    let marker = format!("[ACP embedded resource {}]", provenance.as_str());
+                    append_prompt_text(&mut text, &marker)?;
+                    let image =
+                        v1::ImageContent::new(resource.blob.clone(), mime.unwrap_or_default());
+                    images
+                        .push(admit_image(&image, images.len() + 1)?.with_text_offset(text.len()));
+                    None
+                }
+            }
+            v1::ContentBlock::Audio(_) => return Err(unsupported_block("audio")),
             _ => return Err(unsupported_block("a content block this build cannot read")),
+        };
+        if let Some(part) = part {
+            append_prompt_text(&mut text, &part)?;
+        } else if let Some(image) = images.last() {
+            total_image_bytes += image.bytes().len() as u64;
+            if images.len() > ego_core::generator::types::MAX_IMAGES_PER_PROMPT
+                || total_image_bytes > ego_core::generator::types::MAX_TOTAL_IMAGE_BYTES
+            {
+                return Err("prompt exceeds product image count or byte limits".into());
+            }
         }
     }
-    Ok(RunPrompt::new(parts.join("\n"), images))
+    Ok(RunPrompt::new(text, images))
+}
+
+fn append_prompt_text(text: &mut String, part: &str) -> Result<(), String> {
+    let separator = usize::from(!text.is_empty());
+    if part.len() > (1024 * 1024_usize).saturating_sub(text.len() + separator) {
+        return Err("prompt text exceeds 1048576 bytes".into());
+    }
+    if separator != 0 {
+        text.push('\n');
+    }
+    text.push_str(part);
+    Ok(())
 }
 
 /// One image block, decoded and proved against its own declared media type.
@@ -1834,6 +1913,10 @@ fn admit_image(image: &v1::ImageContent, index: usize) -> Result<Image, String> 
             )));
         }
     };
+    let max_bytes = ego_core::generator::types::MAX_IMAGE_BYTES as usize;
+    if image.data.len() > max_bytes.div_ceil(3) * 4 {
+        return Err(refuse("exceeds the product image byte limit".into()));
+    }
     let bytes = BASE64
         .decode(image.data.as_bytes())
         .map_err(|error| refuse(format!("is not valid base64: {error}")))?;
@@ -3301,6 +3384,16 @@ where
                             ),
                     )?;
                     notices.register(id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
+                    if let Some(trust) = &trust {
+                        let commands = trust.available_commands(&attachment_root).into_iter().map(|descriptor| {
+                            let command = v1::AvailableCommand::new(descriptor.name, descriptor.description);
+                            match descriptor.argument_hint {
+                                Some(hint) => command.input(v1::AvailableCommandInput::Unstructured(v1::UnstructuredCommandInput::new(hint))),
+                                None => command,
+                            }
+                        }).collect();
+                        cx.send_notification(v1::SessionNotification::new(id.clone(), v1::SessionUpdate::AvailableCommandsUpdate(v1::AvailableCommandsUpdate::new(commands))))?;
+                    }
                     if let Some(meta) = announcement {
                         emit_info(&cx, &id, &meta, lifecycle.as_deref())?;
                     }

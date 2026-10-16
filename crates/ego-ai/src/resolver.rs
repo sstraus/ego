@@ -228,6 +228,11 @@ impl ModelResolver for SubscriptionSupplied {
         Box::pin(async move {
             let mut resolved = at.catalogue.resolve_hosted(at.slug, self.wire)?;
             resolved.metering = crate::catalogue::subscription(self.revision);
+            if let ego_core::budget::Metering::Subscription { equivalent, .. } =
+                &mut resolved.metering
+            {
+                *equivalent = crate::subscription_pricing::standard(&at.slug.to_string());
+            }
             resolved.rates = None;
             Ok(resolved)
         })

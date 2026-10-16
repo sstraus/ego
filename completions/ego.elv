@@ -349,7 +349,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand add 'Add or replace one complete server entry'
             cand rm 'Remove, mask, or reveal one configured server entry'
             cand ls 'List configured and admitted MCP state'
-            cand login 'Authorize one configured HTTP server through the product CIMD binding'
+            cand login 'Authorize a public OAuth client with an explicit registration strategy'
             cand reload 'Reconcile every configured server, or one named server'
         }
         &'ego;mcp;add'= {
@@ -372,6 +372,13 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --help 'Print help'
         }
         &'ego;mcp;login'= {
+            cand --client-id 'Operator-issued public client ID'
+            cand --cimd 'Published HTTPS client metadata document URL'
+            cand --callback-port 'Loopback port registered with the authorization server (0 selects a free port)'
+            cand --issuer 'issuer'
+            cand --account 'account'
+            cand --dcr 'Explicitly use issuer-advertised dynamic registration'
+            cand --refresh 'Refresh an existing issuer/resource/account-bound credential without interaction'
             cand -h 'Print help'
             cand --help 'Print help'
         }

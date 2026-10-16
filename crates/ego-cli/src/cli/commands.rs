@@ -581,8 +581,29 @@ pub(super) enum McpSubcommand {
         #[arg(long)]
         json: bool,
     },
-    /// Authorize one configured HTTP server through the product CIMD binding.
-    Login { name: String },
+    /// Authorize a public OAuth client with an explicit registration strategy.
+    Login {
+        name: String,
+        /// Operator-issued public client ID.
+        #[arg(long, conflicts_with_all = ["cimd", "dcr"])]
+        client_id: Option<String>,
+        /// Published HTTPS client metadata document URL.
+        #[arg(long, conflicts_with_all = ["client_id", "dcr"])]
+        cimd: Option<String>,
+        /// Explicitly use issuer-advertised dynamic registration.
+        #[arg(long, conflicts_with_all = ["client_id", "cimd"])]
+        dcr: bool,
+        /// Loopback port registered with the authorization server (0 selects a free port).
+        #[arg(long, default_value_t = 0)]
+        callback_port: u16,
+        /// Refresh an existing issuer/resource/account-bound credential without interaction.
+        #[arg(long, requires = "issuer")]
+        refresh: bool,
+        #[arg(long, requires = "refresh")]
+        issuer: Option<String>,
+        #[arg(long, requires = "refresh")]
+        account: Option<String>,
+    },
     /// Reconcile every configured server, or one named server.
     Reload { name: Option<String> },
 }

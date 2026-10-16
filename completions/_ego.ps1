@@ -373,7 +373,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('add', 'add', [CompletionResultType]::ParameterValue, 'Add or replace one complete server entry')
             [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Remove, mask, or reveal one configured server entry')
             [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List configured and admitted MCP state')
-            [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Authorize one configured HTTP server through the product CIMD binding')
+            [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Authorize a public OAuth client with an explicit registration strategy')
             [CompletionResult]::new('reload', 'reload', [CompletionResultType]::ParameterValue, 'Reconcile every configured server, or one named server')
             break
         }
@@ -400,6 +400,13 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;mcp;login' {
+            [CompletionResult]::new('--client-id', '--client-id', [CompletionResultType]::ParameterName, 'Operator-issued public client ID')
+            [CompletionResult]::new('--cimd', '--cimd', [CompletionResultType]::ParameterName, 'Published HTTPS client metadata document URL')
+            [CompletionResult]::new('--callback-port', '--callback-port', [CompletionResultType]::ParameterName, 'Loopback port registered with the authorization server (0 selects a free port)')
+            [CompletionResult]::new('--issuer', '--issuer', [CompletionResultType]::ParameterName, 'issuer')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'account')
+            [CompletionResult]::new('--dcr', '--dcr', [CompletionResultType]::ParameterName, 'Explicitly use issuer-advertised dynamic registration')
+            [CompletionResult]::new('--refresh', '--refresh', [CompletionResultType]::ParameterName, 'Refresh an existing issuer/resource/account-bound credential without interaction')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

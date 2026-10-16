@@ -1209,6 +1209,47 @@ mod tests {
             ego_core::budget::Metering::Subscription { .. }
         ));
 
+        let charge = ego_core::generator::attempt::settled_cost(
+            &resolved.metering,
+            None,
+            ego_core::generator::attempt::UsageReport::Reported(ego_core::state::Usage {
+                uncached_input_tokens: 1_000,
+                output_tokens: 100,
+                ..ego_core::state::Usage::IDENTITY
+            }),
+            None,
+            ego_core::cost::CurrencyCode::new("USD").unwrap(),
+        );
+        let ego_core::cost::CostDelta::Known {
+            amount,
+            attribution:
+                ego_core::cost::CostAttribution::MeteringPolicy {
+                    equivalent: Some(estimate),
+                    ..
+                },
+            ..
+        } = charge
+        else {
+            panic!("Codex resolution lost the sourced API equivalent");
+        };
+        assert!(
+            amount.amount.is_zero(),
+            "the comparison is never a budget charge"
+        );
+        let ego_core::cost::SubscriptionEquivalent::V1 {
+            model,
+            source,
+            amount,
+            ..
+        } = *estimate;
+        assert_eq!(model, "openai-codex/gpt-6.1-sol");
+        assert_eq!(amount.amount.to_string(), "0.003");
+        assert!(
+            source
+                .0
+                .contains("developers.openai.com/api/docs/models/gpt-6.1-sol")
+        );
+
         let headers = credential.headers();
         let target = RequestTarget::new(resolved.row.base(), &headers);
         let built = resolved

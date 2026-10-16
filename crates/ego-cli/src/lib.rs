@@ -30,6 +30,7 @@ pub mod build_info;
 pub(crate) mod capability_roots;
 pub mod catalogue;
 pub mod cli;
+pub(crate) mod command;
 pub mod config;
 pub(crate) mod confinement_diagnostics;
 pub mod diagnostics;

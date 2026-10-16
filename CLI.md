@@ -46,7 +46,7 @@ ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
         add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
         rm NAME | ls [--json] | login NAME | reload [NAME]
                               shared configuration and live admission service;
-                              login refuses until product CIMD is published
+                              login NAME --client-id ID | --cimd URL | --dcr
 ego mcp-server --max-concurrent-runs N --retained-requests N
                --max-resource-bytes N [-C DIR] [--session-dir DIR]
                               serve ego AS an MCP server on stdio: scoped
@@ -158,7 +158,7 @@ omitted when empty: two states, identical bytes.
 | `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |
 | `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
 | `ego export` | **yes** | local transcript export plus the producer-only version-1 structural bundle under `--sanitize`; Markdown, JSON, JSONL, stdout, and atomic file publication follow §2.1 |
-| `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME` is typed but refuses before network access until the product CIMD origin and loopback redirect are published |
+| `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME --client-id ID`, `login NAME --cimd URL`, or `login NAME --dcr` selects an explicit public-client registration strategy, prints a copyable authorization URL, and waits up to 120 seconds on an exact loopback callback; `--callback-port PORT` selects a registered callback port |
 | `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status`/`compact` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
@@ -2154,3 +2154,64 @@ Deletion uses the same durable tombstone as ACP `session/delete`. It hides
 only the target from `ego ls` and ACP session lists. It retains history for
 fork descendants and does not remove shared storage or resolve uncertain
 external effects. Repeated deletion succeeds.
+
+
+## Markdown custom commands
+
+Markdown files under `commands/` in the shared capability roots define `/name`
+prompts. Project namespaces are `.ego`, `.agents`, `.claude`, then `.opencode`;
+nearest trusted project wins over ancestors, user roots, and `/etc/ego/commands`.
+User roots include `$EGO_HOME/commands`, `~/.agents/commands`,
+`~/.claude/commands`, `~/.opencode/commands`, and `~/.config/opencode/commands`.
+A nested `git/review.md` is `/git:review`. Built-ins and skill-name collisions
+are refused visibly rather than shadowed.
+
+`$ARGUMENTS` inserts raw arguments; `$1`, `$2`, and later positions use shell-like
+argument grouping. Pi `$@`, `${1:-default}`, `${@:-default}`, `${@:N}` and `${@:N:L}`
+expressions are also supported in prompt text; malformed expressions fail visibly.
+With no placeholder, raw arguments are appended. `@path`
+inlines a workspace file under the instruction byte and file-count limits.
+`!` followed by a backtick-delimited shell command captures stdout before the
+prompt is sent. Shell execution uses the existing exec permission, approval,
+process identity, timeout, cancellation, and sandbox path. A failed, refused,
+truncated, or non-UTF-8 result refuses the complete prompt with a visible error.
+Arguments, imports and output cannot introduce additional shell markers.
+Use positional parameters inside shell markers; raw `$ARGUMENTS` there is refused.
+
+Optional strict YAML frontmatter accepts string `description` and `argument-hint`.
+`model`, `allowed-tools`, and all other behavioral fields are rejected visibly;
+they never silently grant foreign authority. Commands appear with admitted
+skills in help, completion, `/skills`, and ACP `available_commands_update`.
+See the [command contract](ARCHITECTURE.md)
+for bounds, ordering, and the distinction between atomic prompt publication and
+non-transactional shell side effects.
+
+### MCP OAuth registration and refresh
+
+Use an operator-issued **public** client with
+`ego mcp login NAME --client-id ID --callback-port PORT`, or select
+`--cimd https://example.org/ego-client.json` for an already published client
+metadata document. `--dcr` explicitly requests dynamic public-client registration
+from the selected issuer. Ego never falls back from one strategy to another.
+Confidential clients and client secrets are not accepted.
+
+The command prints a copyable authorization URL. On SSH, forward the callback
+port to the machine running ego before completing authorization. The exact
+callback is `http://127.0.0.1:PORT/callback`; port zero selects a free port.
+Login expires after 120 seconds; Ctrl-C cancels the listener and login future.
+Credentials are persisted through the existing native credential-store adapter.
+A failed or denied login does not write a credential.
+
+Refresh an existing credential with
+`ego mcp login NAME --client-id ID --refresh --issuer ISSUER [--account ACCOUNT]`.
+Use the same registration choice as login; `--dcr --refresh` restores the stored
+DCR identity and does not register a second client. The issuer and optional
+account identify the exact stored credential. Refresh does not open an
+authorization interaction, and a failed refresh leaves the old credential intact.
+
+OAuth login writes tokens only through the native credential store and writes a
+private non-secret resource/account locator under `EGO_HOME/mcp`. Runtime uses
+this locator after restart. Expired access tokens refresh before MCP dispatch.
+HTTP 401 triggers refresh without replaying the operation; retry the operation
+when requested. Missing or revoked credentials require a new explicit login.
+Servers that advertise only confidential-client authentication are not supported.

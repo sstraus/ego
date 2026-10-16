@@ -1010,3 +1010,47 @@ async fn unknown_provider_names_cannot_bypass_aliases_and_select_catalogue_tools
         );
     }
 }
+
+// Catches: diagnostic request projection leaks prompt/schema/credentials instead of only tool names.
+#[test]
+fn request_diagnostics_include_wire_tool_names_without_private_request_data() {
+    use tracing::field::{Field, Visit};
+
+    struct Recorder(Arc<Mutex<Vec<String>>>);
+    impl Visit for Recorder {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "request_tool_names" {
+                self.0.lock().unwrap().push(format!("{value:?}"));
+            }
+        }
+    }
+    struct Collector(Arc<Mutex<Vec<String>>>);
+    impl tracing::Subscriber for Collector {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            event.record(&mut Recorder(Arc::clone(&self.0)));
+        }
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+    }
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let _registered = tracing::Dispatch::new(Collector(Arc::clone(&captured)));
+    let _guard = tracing::subscriber::set_default(Collector(Arc::clone(&captured)));
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = generator(http);
+    let mut req = request();
+    req.tools = vec![ego_core::generator::types::ToolDescriptor {
+        name: "read_file".into(),
+        description: "private tool description".into(),
+        parameters: serde_json::json!({"type":"object", "description":"private schema"}),
+    }];
+    generator.ensure_expressible(&req).unwrap();
+    assert_eq!(*captured.lock().unwrap(), ["[Some(String(\"read_file\"))]"]);
+}

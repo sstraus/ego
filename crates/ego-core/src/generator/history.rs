@@ -176,7 +176,26 @@ fn conversation_from_inner(
                         ),
                     });
                 }
+                let mut previous = 0;
+                for image in &item.images {
+                    let offset = image.text_offset().unwrap_or(0);
+                    if item.text.get(previous..offset).is_none() {
+                        return Err(HistoryError::ImagePromptInvalid {
+                            cause: "image text offsets are not ordered UTF-8 boundaries"
+                                .to_string(),
+                        });
+                    }
+                    previous = offset;
+                }
+                let mut text_cursor = 0;
                 for durable in &item.images {
+                    let offset = durable.text_offset().unwrap_or(0);
+                    // All offsets were validated before any blob read above.
+                    let text = &item.text[text_cursor..offset];
+                    if !text.is_empty() {
+                        push(&mut messages, Role::User, text_block(text));
+                    }
+                    text_cursor = offset;
                     let read_blob =
                         read_blob.ok_or_else(|| HistoryError::ImageBlobStoreRequired {
                             reference: durable.reference().to_string(),
@@ -196,7 +215,10 @@ fn conversation_from_inner(
                             })?;
                     push(&mut messages, Role::User, ContentBlock::Image { image });
                 }
-                push(&mut messages, Role::User, text_block(&item.text));
+                let tail = &item.text[text_cursor..];
+                if !tail.is_empty() || item.images.is_empty() {
+                    push(&mut messages, Role::User, text_block(tail));
+                }
             }
             ItemKind::HostContext => {
                 messages.push(Message::text(Role::User, &item.text));
@@ -343,5 +365,60 @@ fn push(messages: &mut Vec<Message>, role: Role, block: ContentBlock) {
             role,
             content: vec![block],
         }),
+    }
+}
+
+#[cfg(test)]
+mod ordered_prompt_tests {
+    use super::*;
+    use crate::event::domain::{DomainEvent, Envelope, EventKind};
+    use crate::event::id::{EventId, ItemId, Producer, Seq, TurnId};
+    use crate::event::time::Timestamp;
+    use crate::generator::types::{ImageMediaType, ImageRef};
+    use crate::store::blob::BlobId;
+
+    // Catches corrupt durable positions panicking or silently reordering UTF-8 text.
+    #[test]
+    fn embedded_prompt_invalid_offsets_are_refused_before_blob_reads() {
+        for offsets in [vec![1], vec![99], vec![2, 0]] {
+            let mut state = SessionState::default();
+            let images = offsets
+                .into_iter()
+                .map(|offset| {
+                    ImageRef::new(
+                        BlobRef::new(BlobId::parse("0".repeat(64)).unwrap(), 1),
+                        ImageMediaType::Png,
+                        1,
+                        1,
+                    )
+                    .unwrap()
+                    .with_text_offset(offset)
+                })
+                .collect();
+            let mut seq = Seq::ZERO;
+            let event = DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: Some(ItemId::new()),
+                    parent: None,
+                    ts: Timestamp::from_millis(0),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::UserPrompt {
+                    text: "é".to_owned(),
+                    images,
+                    queued_prompt: None,
+                },
+            };
+            let encoded = serde_json::to_string(&event).unwrap();
+            state.apply(&serde_json::from_str::<DomainEvent>(&encoded).unwrap());
+            let error = conversation_from_with_blob_reader(&state, &|_| {
+                panic!("invalid positions must fail before image hydration")
+            })
+            .unwrap_err();
+            assert!(matches!(error, HistoryError::ImagePromptInvalid { .. }));
+        }
     }
 }

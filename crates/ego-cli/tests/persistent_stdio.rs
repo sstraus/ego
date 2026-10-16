@@ -115,6 +115,7 @@ fn mcp_server_processes_three_requests_before_piped_stdin_eof() {
         .env("EGO_MODEL", "ollama/qwen3")
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .env("PATH", "/usr/bin:/bin")
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|profile| ("LLVM_PROFILE_FILE", profile)))
         .current_dir(&workspace)
         .args([
             "mcp-server",
@@ -255,6 +256,7 @@ fn mcp_server_negotiates_claude_protocol_revision() {
         .env("EGO_MODEL", "ollama/qwen3")
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .env("PATH", "/usr/bin:/bin")
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|profile| ("LLVM_PROFILE_FILE", profile)))
         .current_dir(&workspace)
         .args([
             "mcp-server",

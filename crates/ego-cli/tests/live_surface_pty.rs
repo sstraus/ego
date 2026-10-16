@@ -388,7 +388,8 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     places.file("release", "continue\n");
     gate.release();
     until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
-    until_prompt_from(&reader, &mut output, start);
+    let answer_end = output.len();
+    until_prompt_from(&reader, &mut output, answer_end);
     drain_until_quiet(&reader, &mut output);
     let launch_output = normalized(&output[start..]);
     let launch_history =
@@ -2603,7 +2604,31 @@ fn until_from(
 
 #[cfg(not(windows))]
 fn rendered_prompt_count(output: &[u8]) -> usize {
-    output.windows(2).filter(|window| *window == b"> ").count()
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+    output
+        .windows(HIDE_CURSOR.len())
+        .enumerate()
+        .filter(|(_, window)| *window == HIDE_CURSOR)
+        .filter(|(start, _)| {
+            let frame = &output[*start..];
+            let Some(end) = frame
+                .windows(SHOW_CURSOR.len())
+                .position(|window| window == SHOW_CURSOR)
+            else {
+                return false;
+            };
+            let frame = &frame[..end + SHOW_CURSOR.len()];
+            let mut terminal = vt100::Parser::new(24, 120, 0);
+            terminal.process(frame);
+            let contents = terminal.screen().contents();
+            let last_row = contents.trim_end().lines().last().unwrap_or_default();
+            !contents.contains("Esc to interrupt")
+                && (last_row.trim() == ">"
+                    || last_row.trim_start().starts_with("> ")
+                    || last_row.trim_end().ends_with(" | >"))
+        })
+        .count()
 }
 
 #[cfg(windows)]
@@ -4134,6 +4159,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             .expect("pasted slash");
         input.flush().expect("pasted slash flush");
         until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
+        until_prompt_from(&reader, &mut output, pasted_start);
         drain_until_quiet(&reader, &mut output);
         assert!(
             rendered_prompt_count(&output[pasted_start..]) > 0,
@@ -4353,7 +4379,11 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
         .position(|line| line.contains("> layout check"))
         .expect("user line");
     assert!(
-        lines[user + 1].contains("ANSWER-ON-REPLY-ROW"),
+        lines[user + 1].trim().is_empty(),
+        "prompt boundary: {visible:?}"
+    );
+    assert!(
+        lines[user + 2].contains("ANSWER-ON-REPLY-ROW"),
         "reply replaces thinking at the same row: {visible:?}"
     );
     assert!(
@@ -4424,7 +4454,11 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
         .position(|line| line.contains("tailmarker"))
         .expect("wrapped prompt tail");
     assert!(
-        lines[tail + 1].contains("WRAPPED-ANSWER"),
+        lines[tail + 1].trim().is_empty(),
+        "wrapped prompt boundary: {visible:?}"
+    );
+    assert!(
+        lines[tail + 2].contains("WRAPPED-ANSWER"),
         "answer must replace thinking after wrapped prompt: {visible:?}"
     );
 
@@ -4472,11 +4506,15 @@ fn streamed_reply_keeps_one_working_line_below_the_partial_text() {
         .position(|line| line.contains("> stream check"))
         .expect("user line");
     assert!(
-        lines[user + 1].contains("PARTIAL-ANSWER"),
+        lines[user + 1].trim().is_empty(),
+        "prompt boundary: {visible:?}"
+    );
+    assert!(
+        lines[user + 2].contains("PARTIAL-ANSWER"),
         "partial text must occupy the reply row: {visible:?}"
     );
     assert!(
-        lines[user + 2].contains("Working") && lines[user + 2].contains("Esc to interrupt"),
+        lines[user + 3].contains("Working") && lines[user + 3].contains("Esc to interrupt"),
         "the working line must stay on its own row below the partial text: {visible:?}"
     );
     assert_eq!(
@@ -4612,7 +4650,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     session.quit(input);
 }
 
-/// Catches: cancelling an unmetered stream marks known session cost unknown and hides its status cell.
+/// Catches: cancelling an unmetered stream loses token usage or its noncurrency cost status.
 #[test]
 fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let stub = Stub::start(Plan {
@@ -4645,7 +4683,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
         .expect("submit completed turn");
     input.flush().expect("completed turn flush");
     until_normalized(&reader, &mut output, 0, "KNOWN-USAGE");
-    until_normalized(&reader, &mut output, 0, "$0.000");
+    until_normalized(&reader, &mut output, 0, "unpriced");
     let turn_start = output.len();
     input.write_all(b"cancel check\r").expect("submit turn");
     input.flush().expect("submit flush");
@@ -4688,8 +4726,8 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
         .find(|line| line.contains("qwen3 · "))
         .expect("idle status row");
     assert!(
-        status.contains("$0.000"),
-        "cancel must retain status cost: {visible:?}"
+        status.contains("unpriced"),
+        "cancel must retain noncurrency cost status: {visible:?}"
     );
     let usage_start = output.len();
     input.write_all(b"/usage\r").expect("usage command");
@@ -5327,6 +5365,8 @@ fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
         .expect("post-cancel prompt");
     input.flush().expect("post-cancel prompt flush");
     until_normalized(&reader, &mut output, cancel_start, "AFTER-CANCEL");
+    let answer_end = output.len();
+    until_prompt_from(&reader, &mut output, answer_end);
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"\x03").expect("first idle Ctrl-C");
     input.flush().expect("first idle Ctrl-C flush");
@@ -5666,7 +5706,7 @@ fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
     // These frames preserve the observed /clear ordering from the live PTY:
     // the first prompt was painted before the command echo and Enter cycle.
     let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
-    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[4;1H\x1b[J\x1b[96m> ";
+    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
     let (sender, receiver) = mpsc::channel();
     let (done, result) = mpsc::channel();
     sender.send(redraw.to_vec()).expect("first PTY frame");
@@ -5712,7 +5752,10 @@ fn silent_slash_action_waits_for_a_driver_reply() {
     };
     assert_eq!(next_write(), b"/clear\r");
     frames
-        .send(b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> ".to_vec())
+        .send(
+            b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[96m> \x1b[?25h"
+                .to_vec(),
+        )
         .expect("clear terminal frame");
     assert_eq!(next_write(), b"/help\r");
     assert!(
@@ -8710,14 +8753,24 @@ for line in sys.stdin:
 #[test]
 fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
     // Captured in high-parallelism run 6 of regression-load.log on rb.
-    let busy = b"\x1b[4;1H\x1b[JWorking 0s \xc2\xb7 Esc to interrupt\r\n> \x1b[?25h";
+    let busy = b"\x1b[?25l\x1b[4;1H\x1b[JWorking 0s \xc2\xb7 Esc to interrupt\r\n> \x1b[?25h";
     assert!(
         !mcp_composer_is_idle(busy),
         "busy composer was accepted as idle"
     );
     let mut idle = busy.to_vec();
-    idle.extend_from_slice(b"\x1b[4;1H\x1b[J> \x1b[?25h");
+    idle.extend_from_slice(b"\x1b[?25l\x1b[4;1H\x1b[J> \x1b[?25h");
+    let mut incomplete = busy.to_vec();
+    incomplete.extend_from_slice(b"\x1b[?25l\x1b[4;1H\x1b[J");
+    assert!(
+        !mcp_composer_is_idle(&incomplete),
+        "incomplete repaint was accepted before its busy status arrived"
+    );
     assert!(mcp_composer_is_idle(&idle), "idle repaint was not accepted");
+    assert!(
+        mcp_composer_is_idle(b"\x1b[?25l\x1b[4;1H\x1b[J> retained draft\x1b[?25h"),
+        "completed idle composer with retained draft was rejected"
+    );
     assert!(!mcp_composer_is_idle(b""), "empty output was accepted");
     assert!(
         !mcp_composer_is_idle(b"\x1b[4;1H\x1b[J> second with mcp on"),
@@ -8726,14 +8779,14 @@ fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
 }
 
 fn mcp_composer_is_idle(output: &[u8]) -> bool {
-    let mut terminal = vt100::Parser::new(24, 120, 0);
-    terminal.process(output);
-    let screen = terminal.screen();
-    let (row, _) = screen.cursor_position();
-    let rows: Vec<_> = screen.rows(0, 120).collect();
-    let composer = &rows[usize::from(row)];
-    composer.trim_end().ends_with('>')
-        && (row == 0 || !rows[usize::from(row - 1)].contains("Esc to interrupt"))
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    let Some(start) = output
+        .windows(HIDE_CURSOR.len())
+        .rposition(|window| window == HIDE_CURSOR)
+    else {
+        return false;
+    };
+    rendered_prompt_count(&output[start..]) > 0
 }
 
 fn until_mcp_composer_is_idle(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {

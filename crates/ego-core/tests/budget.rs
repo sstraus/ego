@@ -1283,7 +1283,10 @@ mod budget {
     #[test]
     fn a_row_that_is_not_metered_in_currency_reserves_nothing() {
         for metering in [
-            Metering::Subscription { revision: policy() },
+            Metering::Subscription {
+                revision: policy(),
+                equivalent: None,
+            },
             Metering::Unmetered { revision: policy() },
         ] {
             // A tenth of a cent: three orders of magnitude below the
@@ -1336,7 +1339,10 @@ mod budget {
             amount("10"),
             CurrencyCode::new("JPY").expect("JPY is valid"),
         ));
-        let metering = Metering::Subscription { revision: policy() };
+        let metering = Metering::Subscription {
+            revision: policy(),
+            equivalent: None,
+        };
         let reservation = gate
             .reserve(&metering, None, &request(Some(1_024)), &standard_caps())
             .expect("a policy row states no currency of its own to clash");
@@ -1353,7 +1359,10 @@ mod budget {
                 reservation,
                 &CostDelta::free(
                     CurrencyCode::new("JPY").expect("JPY is valid"),
-                    CostAttribution::MeteringPolicy { revision: policy() },
+                    CostAttribution::MeteringPolicy {
+                        revision: policy(),
+                        equivalent: None,
+                    },
                 ),
             )
             .expect("its own gate");
@@ -1398,7 +1407,10 @@ mod budget {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
             .reserve(
-                &Metering::Subscription { revision: policy() },
+                &Metering::Subscription {
+                    revision: policy(),
+                    equivalent: None,
+                },
                 None,
                 &request(Some(1_024)),
                 &standard_caps(),
@@ -1411,6 +1423,7 @@ mod budget {
                     usd("0").currency,
                     CostAttribution::MeteringPolicy {
                         revision: MeteringRevision("someone/elses-plan".to_string()),
+                        equivalent: None,
                     },
                 ),
             )
@@ -1906,7 +1919,10 @@ mod budget {
         let reservation = reserve_standard(&mut gate);
         assert!(matches!(
             reservation.authorises(
-                &Metering::Subscription { revision: policy() },
+                &Metering::Subscription {
+                    revision: policy(),
+                    equivalent: None
+                },
                 None,
                 &request(Some(1_024)),
                 &standard_caps()
@@ -1947,7 +1963,10 @@ mod budget {
         // cannot change a single decision.
         for metered_by_policy in [
             Metering::Unmetered { revision: policy() },
-            Metering::Subscription { revision: policy() },
+            Metering::Subscription {
+                revision: policy(),
+                equivalent: None,
+            },
         ] {
             assert!(
                 !metered_by_policy.ceiling_needs_rates(limited.ledger()),

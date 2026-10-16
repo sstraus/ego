@@ -60,6 +60,7 @@ pub trait TextOutput: Diagnostics {
     }
     /// Replace a live retry row; ordinary outputs remain append-only.
     fn retry_status(&self, _message: Option<(&str, u64)>) {}
+    fn begin_block(&self) {}
     fn finish(&self) {}
 }
 
@@ -209,7 +210,10 @@ impl Diagnostics for InteractiveOutput {
     }
 
     fn tool_row(&self, rows: &str, detail: String) {
-        self.line(rows);
+        {
+            let mut output = self.inner.lock().expect("surface output lock");
+            let _ = output.write_tool(rows);
+        }
         let mut tools = self.tools.lock().expect("tool detail lock");
         if tools.len() == EXPANDABLE_CALLS {
             tools.pop_front();
@@ -238,6 +242,7 @@ impl TextOutput for InteractiveOutput {
 
     fn line(&self, text: &str) {
         let mut output = self.inner.lock().expect("surface output lock");
+        let _ = output.begin_block();
         let _ = output.write(text);
         let _ = output.write("\n");
     }
@@ -259,6 +264,14 @@ impl TextOutput for InteractiveOutput {
             .lock()
             .expect("surface output lock")
             .retry_status(message);
+    }
+
+    fn begin_block(&self) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .begin_block();
     }
 
     fn finish(&self) {
@@ -966,11 +979,11 @@ mod tests {
         output.tool_row("row two", "detail two".to_owned());
         assert_eq!(
             rows.try_iter().collect::<Vec<_>>(),
-            ["row one\n", "row two\n"]
+            ["\n", "row one\n", "\n", "row two\n"]
         );
 
         output.expand_last_tool();
-        assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["detail two\n"]);
+        assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["\n", "detail two\n"]);
     }
 
     #[test]

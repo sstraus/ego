@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+getrandom = "0.3.4"
 ego-core.workspace = true
 futures = "0.3.34"
 http = "1"

@@ -42,7 +42,8 @@ fn message(output: &dyn TextOutput, text: &str, capabilities: Capabilities) {
     let mut answer = Answer::new(capabilities);
     let mut rendered = answer.push(text);
     rendered.push_str(&answer.finish());
-    output.write(&rendered);
+    output.begin_block();
+    output.answer(&rendered);
     if !rendered.ends_with('\n') {
         output.line("");
     }
@@ -215,6 +216,190 @@ mod tests {
             !text.contains("15.9s"),
             "approval pause is not execution: {text}"
         );
+    }
+
+    // Catches: replay merges persisted marker lines or hard-wraps their tails.
+    #[test]
+    fn rendered_host_markers_survive_replay() {
+        let text = format!(
+            "TUICommander v1.8.0 is connected.\nintent: {} (Replay check)\nsuggest: [ A | B | C ]",
+            "long replay marker ".repeat(30)
+        );
+        for width in [80, 120, 200] {
+            let output = Recorded::default();
+            let mut seq = Seq::ZERO;
+            let events = [DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: Some(ItemId::new()),
+                    parent: None,
+                    ts: Timestamp::from_millis(1),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::AssistantMessage { text: text.clone() },
+            }];
+            render(
+                &events,
+                &output,
+                Capabilities {
+                    width,
+                    depth: super::super::Depth::TrueColor,
+                    osc: super::super::OscProfile::Standard,
+                    ..Capabilities::plain()
+                },
+            );
+            assert_eq!(*output.0.lock().unwrap(), format!("{text}\n"));
+        }
+    }
+
+    // Catches: live and resumed semantic blocks touch instead of sharing one blank row.
+    #[cfg(unix)]
+    #[test]
+    fn rendered_turn_block_boundaries() {
+        use crate::output::InteractiveOutput;
+        use crate::repl::SurfaceOutput;
+        use ego_core::turn::CancelToken;
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+        fn capture(text: &str, width: usize) -> String {
+            let pair = NativePtySystem::default()
+                .openpty(PtySize {
+                    rows: 40,
+                    cols: width as u16,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.args(["-c", "printf '%s' \"$1\"", "rhythm-capture", text]);
+            let mut child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
+            let mut bytes = Vec::new();
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let mut buffer = [0; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                    Err(error) if error.raw_os_error() == Some(5) => break,
+                    Err(error) => panic!("PTY read: {error}"),
+                }
+            }
+            assert!(child.wait().unwrap().success());
+            let mut terminal = vt100::Parser::new(40, width as u16, 0);
+            terminal.process(&bytes);
+            terminal.screen().contents()
+        }
+        for width in [80, 120, 200] {
+            let (sender, receiver) = crossbeam::channel::unbounded();
+            let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+            output.line("> first");
+            output.answer("Prose\n");
+            output.tool_row("✓ read first\n  tail one\n  tail two", String::new());
+            output.tool_row("✗ read second", String::new());
+            output.answer("Done\n");
+            output.line("> second");
+            output.answer("• item one\n• item two\n\n  code one\n  code two\n");
+            output.finish();
+            let live = receiver.try_iter().collect::<String>();
+            let expected = "> first\n\nProse\n\n✓ read first\n  tail one\n  tail two\n\n✗ read second\n\nDone\n\n> second\n\n• item one\n• item two\n\n  code one\n  code two";
+            let grid = capture(&live, width);
+            assert_eq!(grid, expected, "width={width}");
+            println!("rhythm live width={width} grid={grid:?}");
+
+            let (sender, receiver) = crossbeam::channel::unbounded();
+            let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+            let mut seq = Seq::ZERO;
+            let turn = TurnId::new();
+            let tool_item = ItemId::new();
+            let events = [
+                EventKind::UserPrompt {
+                    text: "first".into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+                EventKind::AssistantMessage {
+                    text: "Prose".into(),
+                },
+                EventKind::ToolCallStarted {
+                    name: "read".into(),
+                    args: r#"{"path":"first"}"#.into(),
+                    call_id: None,
+                },
+                EventKind::ToolCallCompleted {
+                    ok: true,
+                    result: ego_core::permit::ToolResult::builtin("tail"),
+                },
+                EventKind::AssistantMessage {
+                    text: "Done".into(),
+                },
+                EventKind::UserPrompt {
+                    text: "second".into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+                EventKind::AssistantMessage {
+                    text: "Final".into(),
+                },
+            ]
+            .into_iter()
+            .map(|kind| DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn,
+                    item: Some(
+                        if matches!(
+                            kind,
+                            EventKind::ToolCallStarted { .. } | EventKind::ToolCallCompleted { .. }
+                        ) {
+                            tool_item
+                        } else {
+                            ItemId::new()
+                        },
+                    ),
+                    parent: None,
+                    ts: Timestamp::from_millis(1),
+                    producer: Producer::Main,
+                },
+                kind,
+            })
+            .collect::<Vec<_>>();
+            render(
+                &events,
+                &output,
+                Capabilities {
+                    width,
+                    osc: super::super::OscProfile::Standard,
+                    ..Capabilities::plain()
+                },
+            );
+            output.finish();
+            let replayed = receiver.try_iter().collect::<String>();
+            let grid = capture(&replayed, width);
+            assert_eq!(
+                grid,
+                "> first\n\nProse\n\n✓ read first · 1 line · duration unavailable\n\nDone\n\n> second\n\nFinal"
+            );
+            println!("rhythm replay width={width} grid={grid:?}");
+
+            for (prose, expected) in [(true, "\nOnly prose"), (false, "\n✓ read only\n  tail")] {
+                let (sender, receiver) = crossbeam::channel::unbounded();
+                let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+                if prose {
+                    for delta in ["Only ", "pro", "se", "\n"] {
+                        output.answer(delta);
+                    }
+                } else {
+                    output.tool_row("✓ read only\n  tail", String::new());
+                }
+                output.finish();
+                let bytes = receiver.try_iter().collect::<String>();
+                assert_eq!(capture(&bytes, width), expected);
+            }
+        }
     }
 
     #[derive(Default)]

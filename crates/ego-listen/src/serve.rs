@@ -119,9 +119,13 @@ fn retain_first(first: &mut Option<io::Error>, later: io::Error) {
     if first.is_none() {
         *first = Some(later);
     } else {
-        tracing::warn!(
-            error = %later,
-            "an additional listener failure occurred during shutdown"
-        );
+        warn_additional_failure(&later);
     }
+}
+
+fn warn_additional_failure(later: &io::Error) {
+    tracing::warn!(
+        error = %later,
+        "an additional listener failure occurred during shutdown"
+    );
 }

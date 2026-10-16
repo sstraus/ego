@@ -218,3 +218,123 @@ fn an_image_the_resolved_model_cannot_read_is_refused_before_the_provider() {
         "a model that reads no pictures was sent one. stderr: {stderr}"
     );
 }
+
+fn embedded_picture() -> serde_json::Value {
+    serde_json::json!({"type":"resource", "resource":{
+        "uri":"untitled://user:PRIVATE@editor/image?token=PRIVATE",
+        "mimeType":"image/png", "blob":base64(PNG_1X1), "_meta":{"private":"PRIVATE"}
+    }})
+}
+
+/// Catches embedded binary resources bypassing selected-model admission.
+#[test]
+fn embedded_image_unsupported_model_refuses_before_provider() {
+    let stub = Stub::start(Plan::default());
+    let (mut host, ego) = Host::start(&stub, READS_NO_PICTURES);
+    let session = host.open(ego.workspace_path().to_str().unwrap());
+    let answered = host.request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId":session, "prompt":[embedded_picture()]
+        }),
+    );
+    let stderr = host.finish();
+    assert!(
+        answered.get("error").is_some() || answered["result"]["stopReason"] != "end_turn",
+        "{answered}"
+    );
+    assert!(stub.generations().is_empty(), "{stderr}");
+}
+
+/// Catches flattened prompt order, lost durable offsets, and leaked source metadata.
+#[test]
+fn embedded_prompt_order_survives_durable_replay_into_provider_requests() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            support::Reply::Sse(text("first")),
+            support::Reply::Sse(text("second")),
+        ],
+        ..Plan::default()
+    });
+    let (mut host, ego) = Host::start(&stub, READS_PICTURES);
+    let session = host.open(ego.workspace_path().to_str().unwrap());
+    let answered = host.request("session/prompt", serde_json::json!({
+        "sessionId":session, "prompt":[
+            {"type":"text","text":"before é"}, embedded_picture(),
+            {"type":"resource","resource":{"uri":"untitled:unsaved", "mimeType":"text/plain", "text":"after host buffer"}},
+            one_picture(), {"type":"text","text":"tail"}
+        ]
+    }));
+    assert_eq!(answered["result"]["stopReason"], "end_turn", "{answered}");
+    let answered = host.request(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId":session, "prompt":[{"type":"text","text":"next turn"}]
+        }),
+    );
+    assert_eq!(answered["result"]["stopReason"], "end_turn", "{answered}");
+    let stderr = host.finish();
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 2, "{stderr}");
+    for request in &requests {
+        let blocks = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .collect::<Vec<_>>();
+        let before = blocks
+            .iter()
+            .position(|block| {
+                block["text"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("before é"))
+            })
+            .unwrap();
+        let image = blocks
+            .iter()
+            .position(|block| block["type"] == "image")
+            .unwrap();
+        let after = blocks
+            .iter()
+            .position(|block| {
+                block["text"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("after host buffer"))
+            })
+            .unwrap();
+        let last_image = blocks
+            .iter()
+            .rposition(|block| block["type"] == "image")
+            .unwrap();
+        let tail = blocks
+            .iter()
+            .position(|block| block["text"].as_str().is_some_and(|s| s.contains("tail")))
+            .unwrap();
+        assert!(
+            before < image && image < after && after < last_image && last_image < tail,
+            "{request}"
+        );
+        assert!(!request.to_string().contains("PRIVATE"));
+    }
+    assert!(!ego.workspace_path().join("unsaved").exists());
+    let events = std::fs::read_dir(ego.home_path().join("sessions"))
+        .unwrap()
+        .flat_map(|entry| {
+            std::fs::read_dir(entry.unwrap().path())
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension()?.to_str()? == "jsonl")
+                .then(|| std::fs::read_to_string(path).ok())
+                .flatten()
+        })
+        .collect::<String>();
+    assert!(
+        events.contains("text_offset"),
+        "durable events did not retain image positions"
+    );
+    assert!(!events.contains("PRIVATE"));
+}

@@ -193,7 +193,14 @@ impl Completer for ActionCompleter {
         if filter.contains(char::is_whitespace) {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         }
-        if position == line.len() && self.registry.resolve_slash(filter).is_some() {
+        if position == line.len()
+            && (self.registry.resolve_slash(filter).is_some()
+                || self
+                    .registry
+                    .skill_menu(filter)
+                    .iter()
+                    .any(|(name, _)| name == filter))
+        {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         }
         let mut suggestions = self
@@ -684,6 +691,9 @@ pub struct SurfaceOutput {
     pending: String,
     pending_answer: bool,
     status: Option<SharedStatus>,
+    answer_block: bool,
+    wrote: bool,
+    blank: bool,
     signals: Option<Sender<String>>,
     cancel: CancelToken,
     reply_started: Arc<AtomicBool>,
@@ -696,6 +706,9 @@ impl SurfaceOutput {
             pending: String::new(),
             pending_answer: false,
             status: None,
+            answer_block: false,
+            wrote: false,
+            blank: false,
             signals: None,
             cancel,
             reply_started: Arc::new(AtomicBool::new(false)),
@@ -737,6 +750,9 @@ impl SurfaceOutput {
                 pending: String::new(),
                 pending_answer: false,
                 status: None,
+                answer_block: false,
+                wrote: false,
+                blank: false,
                 signals: None,
                 cancel,
                 reply_started,
@@ -764,7 +780,40 @@ impl SurfaceOutput {
         self.write_with_kind(text, false)
     }
 
+    pub(crate) fn begin_block(&mut self) -> Result<(), SendError<String>> {
+        if !self.pending.is_empty() {
+            self.write_with_kind("\n", false)?;
+        }
+        if self.wrote && !self.blank {
+            self.write_with_kind("\n", false)?;
+        }
+        self.answer_block = false;
+        Ok(())
+    }
+
+    pub(crate) fn write_tool(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.begin_block()?;
+        if !self.wrote {
+            self.write_with_kind("\n", false)?;
+        }
+        self.write_with_kind(text, false)?;
+        self.write_with_kind("\n", false)
+    }
+
     pub(crate) fn write_answer(&mut self, text: &str) -> Result<(), SendError<String>> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let text = if !self.answer_block {
+            self.begin_block()?;
+            if !self.wrote {
+                self.write_with_kind("\n", false)?;
+            }
+            self.answer_block = true;
+            text.trim_start_matches('\n')
+        } else {
+            text
+        };
         self.write_with_kind(text, true)
     }
 
@@ -776,6 +825,8 @@ impl SurfaceOutput {
         self.pending_answer |= answer;
         while let Some(end) = self.pending.find('\n').map(|index| index + 1) {
             let row: String = self.pending.drain(..end).collect();
+            self.blank = row.trim().is_empty();
+            self.wrote = true;
             self.send(row)?;
             if self.pending_answer {
                 self.mark_reply_started();
@@ -790,8 +841,11 @@ impl SurfaceOutput {
     }
 
     pub fn finish(&mut self) -> Result<(), SendError<String>> {
+        self.answer_block = false;
         if !self.pending.is_empty() {
             let row = std::mem::take(&mut self.pending);
+            self.blank = row.trim().is_empty();
+            self.wrote = true;
             self.send(row)?;
             if self.pending_answer {
                 self.mark_reply_started();

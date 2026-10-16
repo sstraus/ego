@@ -206,6 +206,92 @@ mod tests {
         out
     }
 
+    // Catches: delta boundaries or pipe rendering alter host marker line boundaries.
+    #[test]
+    fn rendered_host_markers_survive_split_deltas_and_pipes() {
+        let source = "TUICommander v1.8.0 is connected.\nintent: Checking **output** (Output check)\n\nordinary\nprose\nsuggest: [ A | B | C ]\n";
+        let expected = "TUICommander v1.8.0 is connected.\nintent: Checking output (Output check)\n\nordinary prose\nsuggest: [ A | B | C ]\n";
+        let chars: Vec<String> = source.chars().map(|ch| ch.to_string()).collect();
+        let deltas: Vec<&str> = chars.iter().map(String::as_str).collect();
+        for width in [80, 120, 200] {
+            let caps = Capabilities { width, ..screen() };
+            assert_eq!(bare(&drain(caps, &[source])), expected);
+            assert_eq!(bare(&drain(caps, &deltas)), expected);
+        }
+        assert_eq!(drain(Capabilities::plain(), &deltas), source);
+    }
+
+    // Catches: real PTY output inserts hard row boundaries in a marker's tail.
+    #[cfg(unix)]
+    #[test]
+    fn rendered_host_markers_keep_pty_soft_wraps() {
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+
+        let source = format!(
+            "TUICommander v1.8.0 is connected.\nintent: {} (PTY check)\nsuggest: [ A | B | C ]\n",
+            "long marker text ".repeat(30)
+        );
+        let chars: Vec<String> = source.chars().map(|ch| ch.to_string()).collect();
+        let deltas: Vec<&str> = chars.iter().map(String::as_str).collect();
+        for width in [80, 120, 200] {
+            for (mode, chunks) in [("whole", vec![source.as_str()]), ("split", deltas.clone())] {
+                let rendered = drain(Capabilities { width, ..screen() }, &chunks);
+                let pair = NativePtySystem::default()
+                    .openpty(PtySize {
+                        rows: 24,
+                        cols: width as u16,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .unwrap();
+                let mut command = CommandBuilder::new("/bin/sh");
+                command.args(["-c", "printf '%s' \"$1\"", "marker-capture", &rendered]);
+                let mut child = pair.slave.spawn_command(command).unwrap();
+                drop(pair.slave);
+                let mut reader = pair.master.try_clone_reader().unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                        Err(error) if error.raw_os_error() == Some(5) => break,
+                        Err(error) => panic!("PTY read: {error}"),
+                    }
+                }
+                assert!(child.wait().unwrap().success());
+                let mut terminal = vt100::Parser::new(24, width as u16, 0);
+                terminal.process(&bytes);
+                let grid = terminal.screen();
+                assert_eq!(
+                    grid.contents().lines().next(),
+                    Some("TUICommander v1.8.0 is connected.")
+                );
+                assert!(
+                    grid.contents()
+                        .lines()
+                        .nth(1)
+                        .unwrap()
+                        .starts_with("intent: ")
+                );
+                assert!(
+                    grid.row_wrapped(1),
+                    "marker tail must be a terminal soft wrap"
+                );
+                assert!(
+                    grid.contents()
+                        .lines()
+                        .any(|row| row == "suggest: [ A | B | C ]")
+                );
+                println!(
+                    "PTY {mode} width={width} bytes={bytes:?} grid={:?}",
+                    grid.contents()
+                );
+            }
+        }
+    }
+
     /// §2's promise about redirection, and the one that must not regress:
     /// `ego run … > answer.md` is unchanged from before any of this existed.
     #[test]

@@ -233,6 +233,7 @@ pub trait McpCandidateAdmission: Send + Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpCandidateError {
+    CredentialRequired,
     Invalid {
         cause: String,
     },
@@ -246,6 +247,7 @@ pub enum McpCandidateError {
 impl McpCandidateError {
     pub fn failure(&self) -> McpFailure {
         match self {
+            Self::CredentialRequired => McpFailure::Credential,
             Self::Invalid { .. } => McpFailure::InvalidValue,
             Self::AuthorizationRequired { .. } => McpFailure::Authorization,
         }
@@ -275,6 +277,7 @@ impl CandidateFailure {
 
     fn admission(error: McpCandidateError) -> Self {
         match error {
+            McpCandidateError::CredentialRequired => Self::materialization(McpFailure::Credential),
             McpCandidateError::Invalid { cause } => Self {
                 detail: Some(cause),
                 ..Self::materialization(McpFailure::InvalidValue)
@@ -1303,7 +1306,7 @@ fn failed_server_status(
         authorization,
         diagnostic: Some(McpServerDiagnostic {
             failure: failure.failure,
-            message: Arc::from(failure.diagnostic_message()),
+            message: Arc::from(failure.diagnostic_message().replace("NAME", name.as_str())),
         }),
     }
 }
@@ -1366,8 +1369,12 @@ fn failure_message(failure: McpFailure) -> &'static str {
         McpFailure::Authority => "server authority was rejected",
         McpFailure::Transport => "server transport is unavailable",
         McpFailure::Protocol => "server protocol failed",
-        McpFailure::Authorization => "authorization is required",
-        McpFailure::Credential => "server credential is unavailable",
+        McpFailure::Authorization => {
+            "authorization is required; run ego mcp login NAME with an explicit registration strategy"
+        }
+        McpFailure::Credential => {
+            "server credential is unavailable; run ego mcp login NAME with an explicit registration strategy"
+        }
         McpFailure::Cancelled => "server admission was cancelled",
     }
 }

@@ -11,6 +11,7 @@
 //! decision inside it is a pure function it calls.
 
 mod catalogue;
+mod commands;
 mod context_capacity;
 pub use context_capacity::compaction_due;
 mod control;
@@ -2267,14 +2268,45 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
         let selector = operation.name().to_owned();
         let item = ItemId::new();
-        let (invocation, admitted) = crate::skill::SkillInvocation::admit_user_in_turn_with_origin(
-            &catalogue,
-            operation,
-            self.tools.blob_store(),
-            &self.journal,
-            turn,
-            item,
-        )
+        let template = catalogue
+            .authorize_user_operation(&operation)
+            .map_err(skill_store_error)?
+            .command_template()
+            .map(str::to_owned);
+        let (invocation, admitted) = if let Some(template) = template {
+            let rendered = match self
+                .expand_command(&template, operation.raw_arguments(), turn)
+                .await
+            {
+                Ok(rendered) => rendered,
+                Err(message) => {
+                    let driven = self.refuse_drive(
+                        turn,
+                        format!("command expansion failed: {message}"),
+                        ExitReason::Usage,
+                    )?;
+                    return self.finish_turn(turn, driven).await;
+                }
+            };
+            crate::skill::SkillInvocation::admit_command_in_turn(
+                &catalogue,
+                operation,
+                rendered,
+                self.tools.blob_store(),
+                &self.journal,
+                turn,
+                item,
+            )
+        } else {
+            crate::skill::SkillInvocation::admit_user_in_turn_with_origin(
+                &catalogue,
+                operation,
+                self.tools.blob_store(),
+                &self.journal,
+                turn,
+                item,
+            )
+        }
         .map_err(skill_store_error)?;
         if invocation.fork_wait().is_some() {
             let effect_tools = next_scope
@@ -2366,28 +2398,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 QuestionTarget::ModelTool { .. } => None,
             });
         if let Some((turn, parent, request, tool_call, continuation_id)) = foreign {
-            if let Err(error) = answer.validate_for(&request) {
-                return Err(self.abandon(
-                    turn,
-                    StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
-                ));
-            }
-            let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
-                let reason =
-                    "the captured policy binding for this foreign continuation is unavailable";
-                tracing::warn!("foreign question resume has no captured policy binding");
-                let driven = match self.refuse_drive(turn, reason.to_owned(), ExitReason::Internal)
-                {
-                    Ok(driven) => driven,
-                    Err(cause) => return Err(self.abandon(turn, cause)),
-                };
-                return match self.finish_turn(turn, driven).await {
-                    Ok(outcome) => Ok(outcome),
-                    Err(cause) => Err(self.abandon(turn, cause)),
-                };
-            };
-            let progress = match self
-                .settle_foreign_question(
+            return self
+                .resume_foreign_question(
                     ForeignQuestionSettlement {
                         turn,
                         question,
@@ -2395,57 +2407,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         tool_call,
                         continuation_id,
                     },
+                    request,
                     answer,
-                    port,
                 )
-                .await
-            {
-                Ok(progress) => progress,
-                Err(cause) => return Err(self.abandon(turn, cause)),
-            };
-            match progress {
-                ForeignQuestionProgress::Completed => return self.resume_turn(turn).await,
-                ForeignQuestionProgress::Successor { required, parent } => {
-                    let outcome = match self
-                        .run_foreign_question(turn, tool_call, parent, required)
-                        .await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(cause) => return Err(self.abandon(turn, cause)),
-                    };
-                    return match outcome {
-                        ToolOutcome::Recorded => self.resume_turn(turn).await,
-                        ToolOutcome::QuestionRequired => {
-                            self.close_control();
-                            self.refresh_control_status();
-                            Ok(TurnOutcome {
-                                turn,
-                                ok: false,
-                                exit_reason: ExitReason::PermissionRequired,
-                                denied: None,
-                                skill: None,
-                                provider_failure: None,
-                                usage_error: None,
-                            })
-                        }
-                        ToolOutcome::Ended(exit_reason) => Ok(TurnOutcome {
-                            turn,
-                            ok: false,
-                            exit_reason,
-                            denied: None,
-                            skill: None,
-                            provider_failure: None,
-                            usage_error: None,
-                        }),
-                        ToolOutcome::Answered { .. }
-                        | ToolOutcome::Executed { .. }
-                        | ToolOutcome::Refused { .. }
-                        | ToolOutcome::Unanswerable { .. } => unreachable!(
-                            "foreign question continuation returns only recorded, pending, or ended"
-                        ),
-                    };
-                }
-            }
+                .await;
         }
         let prepared = self.state().resume_question(question, answer.clone());
         let continuation = match prepared {
@@ -2526,6 +2491,103 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
         };
         self.resume_turn(continuation.turn).await
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
+    async fn resume_foreign_question(
+        &mut self,
+        settlement: ForeignQuestionSettlement,
+        request: crate::question::QuestionRequest,
+        answer: QuestionAnswer,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
+        let ForeignQuestionSettlement {
+            turn,
+            question,
+            request_event: parent,
+            tool_call,
+            continuation_id,
+        } = settlement;
+        if let Err(error) = answer.validate_for(&request) {
+            return Err(self.abandon(
+                turn,
+                StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
+            ));
+        }
+        let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
+            let reason = "the captured policy binding for this foreign continuation is unavailable";
+            tracing::warn!("foreign question resume has no captured policy binding");
+            let driven = match self.refuse_drive(turn, reason.to_owned(), ExitReason::Internal) {
+                Ok(driven) => driven,
+                Err(cause) => return Err(self.abandon(turn, cause)),
+            };
+            return match self.finish_turn(turn, driven).await {
+                Ok(outcome) => Ok(outcome),
+                Err(cause) => Err(self.abandon(turn, cause)),
+            };
+        };
+        let progress = match self
+            .settle_foreign_question(
+                ForeignQuestionSettlement {
+                    turn,
+                    question,
+                    request_event: parent,
+                    tool_call,
+                    continuation_id,
+                },
+                answer,
+                port,
+            )
+            .await
+        {
+            Ok(progress) => progress,
+            Err(cause) => return Err(self.abandon(turn, cause)),
+        };
+        match progress {
+            ForeignQuestionProgress::Completed => self.resume_turn(turn).await,
+            ForeignQuestionProgress::Successor { required, parent } => {
+                let outcome = match self
+                    .run_foreign_question(turn, tool_call, parent, required)
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(cause) => return Err(self.abandon(turn, cause)),
+                };
+                match outcome {
+                    ToolOutcome::Recorded => self.resume_turn(turn).await,
+                    ToolOutcome::QuestionRequired => {
+                        self.close_control();
+                        self.refresh_control_status();
+                        Ok(TurnOutcome {
+                            turn,
+                            ok: false,
+                            exit_reason: ExitReason::PermissionRequired,
+                            denied: None,
+                            skill: None,
+                            provider_failure: None,
+                            usage_error: None,
+                        })
+                    }
+                    ToolOutcome::Ended(exit_reason) => Ok(TurnOutcome {
+                        turn,
+                        ok: false,
+                        exit_reason,
+                        denied: None,
+                        skill: None,
+                        provider_failure: None,
+                        usage_error: None,
+                    }),
+                    ToolOutcome::Answered { .. }
+                    | ToolOutcome::Executed { .. }
+                    | ToolOutcome::Refused { .. }
+                    | ToolOutcome::Unanswerable { .. } => unreachable!(
+                        "foreign question continuation returns only recorded, pending, or ended"
+                    ),
+                }
+            }
+        }
     }
 
     /// Continue an already-settled pure question result on its original turn.

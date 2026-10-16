@@ -372,6 +372,11 @@ impl SkillSpec {
             .map_err(|_| SkillError::new("admitted skill body is not UTF-8"))?;
         render_once(body, arguments, &self.arguments)
     }
+
+    pub fn command_template(&self) -> Option<&str> {
+        (self.metadata.get("ego-command").map(String::as_str) == Some("true"))
+            .then(|| std::str::from_utf8(&self.body).expect("validated UTF-8"))
+    }
 }
 
 // Interpret only source tokens: inserted argument bytes are never scanned again.
@@ -953,6 +958,27 @@ impl SkillInvocation {
         )
     }
 
+    pub(crate) fn admit_command_in_turn(
+        catalogue: &SkillCatalogue,
+        operation: AdmittedSkillOperation,
+        rendered: String,
+        blobs: &dyn BlobStore,
+        journal: &SharedJournal<'_>,
+        turn: TurnId,
+        item: ItemId,
+    ) -> Result<(Self, EventId), SkillError> {
+        let spec = catalogue.authorize_user_operation(&operation)?.clone();
+        Self::admit_rendered_in_turn(
+            catalogue.generation,
+            spec,
+            rendered,
+            operation.into_operation(),
+            blobs,
+            journal,
+            SkillAdmissionOrigin::user(turn, item),
+        )
+    }
+
     fn admit_authorized_in_turn(
         catalogue_generation: SkillCatalogueGeneration,
         spec: SkillSpec,
@@ -962,6 +988,26 @@ impl SkillInvocation {
         origin: SkillAdmissionOrigin,
     ) -> Result<(Self, EventId), SkillError> {
         let rendered = spec.render(&operation)?;
+        Self::admit_rendered_in_turn(
+            catalogue_generation,
+            spec,
+            rendered,
+            operation,
+            blobs,
+            journal,
+            origin,
+        )
+    }
+
+    fn admit_rendered_in_turn(
+        catalogue_generation: SkillCatalogueGeneration,
+        spec: SkillSpec,
+        rendered: String,
+        operation: SkillOperation,
+        blobs: &dyn BlobStore,
+        journal: &SharedJournal<'_>,
+        origin: SkillAdmissionOrigin,
+    ) -> Result<(Self, EventId), SkillError> {
         let id = SkillInvocationId::new();
         let admission = invocation_admission(id, catalogue_generation, &spec, operation.bare())?;
         let admission_bytes = encode_admission(&admission)?;

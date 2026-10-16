@@ -7034,6 +7034,7 @@ mod turn {
     fn subscription() -> Metering {
         Metering::Subscription {
             revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
+            equivalent: None,
         }
     }
 
@@ -7374,6 +7375,7 @@ mod turn {
                 amount: usd("0"),
                 attribution: CostAttribution::MeteringPolicy {
                     revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
+                    equivalent: None,
                 },
                 fx: None,
             }]

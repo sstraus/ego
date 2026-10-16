@@ -63,6 +63,7 @@ pub struct AcpSink {
     reported: Mutex<bool>,
     /// Whether a provider retry status is showing and must be cleared.
     retrying: Mutex<bool>,
+    commands_generation: Mutex<Option<ego_core::event::skill::SkillCatalogueGeneration>>,
 }
 
 impl AcpSink {
@@ -79,6 +80,7 @@ impl AcpSink {
             root,
             reported: Mutex::new(false),
             retrying: Mutex::new(false),
+            commands_generation: Mutex::new(None),
         }
     }
 }
@@ -89,6 +91,38 @@ impl EventSink for AcpSink {
         // That is why `publish` carries the reduction. See
         // `ARCHITECTURE.md`.
         let mut updates = Vec::new();
+        {
+            let mut generation = self
+                .commands_generation
+                .lock()
+                .expect("command catalogue lock");
+            if state.skill_catalogue_generation().is_some()
+                && *generation != state.skill_catalogue_generation()
+            {
+                *generation = state.skill_catalogue_generation();
+                let commands = state
+                    .skill_catalogue()
+                    .descriptors()
+                    .iter()
+                    .filter(|descriptor| descriptor.user_invocable)
+                    .map(|descriptor| {
+                        let command = v1::AvailableCommand::new(
+                            descriptor.name.clone(),
+                            descriptor.description.clone(),
+                        );
+                        match &descriptor.argument_hint {
+                            Some(hint) => command.input(v1::AvailableCommandInput::Unstructured(
+                                v1::UnstructuredCommandInput::new(hint.clone()),
+                            )),
+                            None => command,
+                        }
+                    })
+                    .collect();
+                updates.push(v1::SessionUpdate::AvailableCommandsUpdate(
+                    v1::AvailableCommandsUpdate::new(commands),
+                ));
+            }
+        }
         {
             let mut retrying = self
                 .retrying

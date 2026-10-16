@@ -707,7 +707,8 @@ fn a_policy_metered_row_names_the_policy_that_produced_it_not_a_date() {
     assert_eq!(
         subscription("acme/pro-plan/2026-08"),
         Metering::Subscription {
-            revision: MeteringRevision("acme/pro-plan/2026-08".to_string())
+            revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
+            equivalent: None
         }
     );
 }

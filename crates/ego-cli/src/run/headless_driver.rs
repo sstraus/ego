@@ -216,6 +216,30 @@ pub(super) async fn drive_headless_turn(
         cancel.clone(),
         hook_trust,
     ));
+    // Headless CLI and ACP prompts are explicit command input adapters. Ordinary
+    // interactive/queued prompt data never passes through this selection.
+    let command = match &input {
+        HeadlessInput::Prompt(prompt) => prompt.text().strip_prefix('/').and_then(|named| {
+            let end = named.find(char::is_whitespace).unwrap_or(named.len());
+            registry.iter().find_map(|tool| {
+                let RegisteredTool::Skill(catalogue) = tool else {
+                    return None;
+                };
+                let spec = catalogue.authorize_user(&named[..end]).ok()?;
+                spec.command_template()?;
+                Some(AdmittedSkillOperation::invoke(
+                    spec.descriptor(),
+                    named[end..].trim_start(),
+                ))
+            })
+        }),
+        HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => None,
+    };
+    if command.is_some() && !images.is_empty() {
+        return Err(RunTermination::UsageError {
+            message: "custom commands do not accept image attachments".to_owned(),
+        });
+    }
     let tools = match admitted_tools {
         Some(source) => {
             Tools::from_registry_with_source(registry, source, effect_ports, CanonPath::new(cwd))
@@ -286,11 +310,18 @@ pub(super) async fn drive_headless_turn(
         None => loop_,
     };
     let (termination, result) = match input {
-        HeadlessInput::Prompt(prompt) => {
-            turns
-                .drive_with_images(&mut loop_, prompt.text(), images, cancel, diagnostics)
-                .await
-        }
+        HeadlessInput::Prompt(prompt) => match command {
+            Some(operation) => {
+                turns
+                    .drive_admitted_skill(&mut loop_, operation, cancel, diagnostics)
+                    .await
+            }
+            None => {
+                turns
+                    .drive_with_images(&mut loop_, prompt.text(), images, cancel, diagnostics)
+                    .await
+            }
+        },
         HeadlessInput::Resumed(turn) => {
             turns
                 .drive_resumed(&mut loop_, turn, cancel, diagnostics)

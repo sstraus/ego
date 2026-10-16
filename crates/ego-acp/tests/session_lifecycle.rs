@@ -388,12 +388,12 @@ async fn initialize_advertises_exactly_the_composed_v1_lifecycle_surface() {
         capabilities["promptCapabilities"]["image"], true,
         "image prompts are served but not advertised: {response}"
     );
-    for absent in ["audio", "embeddedContext"] {
-        assert_ne!(
-            capabilities["promptCapabilities"][absent], true,
-            "unsupported prompt capability {absent} was advertised"
-        );
-    }
+    assert_eq!(capabilities["promptCapabilities"]["embeddedContext"], true);
+
+    assert_ne!(
+        capabilities["promptCapabilities"]["audio"], true,
+        "unsupported prompt capability audio was advertised"
+    );
 
     connection.finish().await;
 }
