@@ -2466,7 +2466,7 @@ mod stdio_fingerprint_tests {
             ego_core::generator::types::ToolDescriptor {
                 name: "search_tools".into(),
                 description: "search".into(),
-                parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
+                parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}),
             },
             ego_core::generator::types::ToolDescriptor {
                 name: "get_tool_schema".into(),

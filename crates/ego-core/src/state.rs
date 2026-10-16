@@ -1750,6 +1750,28 @@ impl SessionState {
         references
     }
 
+    fn complete_turn(&mut self, turn_id: TurnId, ok: bool, exit_reason: ExitReason) {
+        if self.items.values().any(|item| {
+            item.turn == turn_id
+                && matches!(
+                    item.kind,
+                    ItemKind::UserPrompt | ItemKind::Assistant | ItemKind::ToolCall
+                )
+        }) {
+            self.context_cooldown = self.context_cooldown.saturating_sub(1);
+        }
+        if let Some(goal) = &mut self.goal {
+            goal.clear_blocker_after_completed_turn(turn_id);
+        }
+        let turn = self.turns.entry(turn_id).or_default();
+        turn.completed = true;
+        turn.ok = ok;
+        turn.exit_reason = Some(exit_reason);
+        if ok {
+            self.refresh_synopsis(turn_id);
+        }
+    }
+
     fn apply_goal(&mut self, ev: &DomainEvent) {
         match &ev.kind {
             EventKind::GoalSet {
@@ -2096,25 +2118,7 @@ impl SessionState {
                 };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {
-                if self.items.values().any(|item| {
-                    item.turn == ev.env.turn
-                        && matches!(
-                            item.kind,
-                            ItemKind::UserPrompt | ItemKind::Assistant | ItemKind::ToolCall
-                        )
-                }) {
-                    self.context_cooldown = self.context_cooldown.saturating_sub(1);
-                }
-                if let Some(goal) = &mut self.goal {
-                    goal.clear_blocker_after_completed_turn(ev.env.turn);
-                }
-                let turn = self.turns.entry(ev.env.turn).or_default();
-                turn.completed = true;
-                turn.ok = *ok;
-                turn.exit_reason = Some(*exit_reason);
-                if *ok {
-                    self.refresh_synopsis(ev.env.turn);
-                }
+                self.complete_turn(ev.env.turn, *ok, *exit_reason);
             }
             EventKind::CompactionSeeded {
                 source,
