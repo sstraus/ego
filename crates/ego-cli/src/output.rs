@@ -55,6 +55,7 @@ pub trait TextOutput: Diagnostics {
     fn signal(&self, sequence: &str) {
         self.write(sequence);
     }
+    fn begin_block(&self) {}
     fn finish(&self) {}
 }
 
@@ -233,6 +234,7 @@ impl TextOutput for InteractiveOutput {
 
     fn line(&self, text: &str) {
         let mut output = self.inner.lock().expect("surface output lock");
+        let _ = output.begin_block();
         let _ = output.write(text);
         let _ = output.write("\n");
     }
@@ -243,6 +245,10 @@ impl TextOutput for InteractiveOutput {
             .lock()
             .expect("surface output lock")
             .signal(sequence);
+    }
+
+    fn begin_block(&self) {
+        let _ = self.inner.lock().expect("surface output lock").begin_block();
     }
 
     fn finish(&self) {
@@ -919,11 +925,11 @@ mod tests {
         output.tool_row("row two", "detail two".to_owned());
         assert_eq!(
             rows.try_iter().collect::<Vec<_>>(),
-            ["row one\n", "row two\n"]
+            ["row one\n", "\n", "row two\n"]
         );
 
         output.expand_last_tool();
-        assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["detail two\n"]);
+        assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["\n", "detail two\n"]);
     }
 
     #[test]

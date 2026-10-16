@@ -42,7 +42,8 @@ fn message(output: &dyn TextOutput, text: &str, capabilities: Capabilities) {
     let mut answer = Answer::new(capabilities);
     let mut rendered = answer.push(text);
     rendered.push_str(&answer.finish());
-    output.write(&rendered);
+    output.begin_block();
+    output.answer(&rendered);
     if !rendered.ends_with('\n') {
         output.line("");
     }
@@ -298,6 +299,31 @@ mod tests {
             terminal.process(&bytes);
             assert_eq!(terminal.screen().contents(), expected, "width={width}");
             println!("rhythm live width={width} grid={:?}", terminal.screen().contents());
+
+            let (sender, receiver) = crossbeam::channel::unbounded();
+            let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
+            let mut seq = Seq::ZERO;
+            let turn = TurnId::new();
+            let events = [
+                EventKind::UserPrompt { text: "first".into(), images: Vec::new(), queued_prompt: None },
+                EventKind::AssistantMessage { text: "Prose".into() },
+                EventKind::AssistantMessage { text: "Done".into() },
+                EventKind::UserPrompt { text: "second".into(), images: Vec::new(), queued_prompt: None },
+                EventKind::AssistantMessage { text: "Final".into() },
+            ].into_iter().map(|kind| DomainEvent {
+                env: Envelope { seq: seq.next(), id: EventId::new(), turn,
+                    item: Some(ItemId::new()), parent: None, ts: Timestamp::from_millis(1), producer: Producer::Main },
+                kind,
+            }).collect::<Vec<_>>();
+            render(&events, &output, Capabilities {
+                width, osc: super::super::OscProfile::Standard, ..Capabilities::plain()
+            });
+            output.finish();
+            let replayed = receiver.try_iter().collect::<String>();
+            let mut terminal = vt100::Parser::new(40, width as u16, 0);
+            terminal.process(replayed.replace('\n', "\r\n").as_bytes());
+            assert_eq!(terminal.screen().contents(), "> first\n\nProse\n\nDone\n\n> second\n\nFinal");
+            println!("rhythm replay width={width} grid={:?}", terminal.screen().contents());
         }
     }
 
