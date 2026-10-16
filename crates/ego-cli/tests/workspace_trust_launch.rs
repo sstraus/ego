@@ -295,7 +295,14 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
         }
         let result = support::Ego::at(places.home_path(), &nested, Some(&stub))
             .conversing()
-            .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--thinking",
+                "off",
+            ])
             .run_pty_trusting("yes", "/skills");
         assert_eq!(result.code, Some(0), "{}", result.stdout);
         assert_eq!(
