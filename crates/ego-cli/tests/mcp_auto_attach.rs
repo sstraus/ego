@@ -85,6 +85,10 @@ fn configured_server_is_attached_without_the_mcp_flag() {
         "the configured server's tools were not offered: {generations:?}; {finished:?}"
     );
     assert!(
+        offers_tool(&generations[0], "web_fetch"),
+        "native web retrieval must coexist with discovered MCP tools: {generations:?}"
+    );
+    assert!(
         !finished.stderr.contains("not attached"),
         "a healthy server drew a notice: {finished:?}"
     );

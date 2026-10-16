@@ -450,6 +450,24 @@ confined execs. The launcher was subsequently fixed.
 -q / --no-color / --plain
 ```
 
+**Native web tools**
+
+`web_fetch` retrieves public HTTP(S) UTF-8 HTML, text, Markdown, or JSON through
+the same network permission rules as other connections. It sends no credentials,
+cookies, or proxy authorization. It rejects private and special-use resolved
+addresses before connect. Each call has a 30-second deadline, a 1 MiB response
+limit, and a 32 KiB rendered-content limit. Results identify their source and
+mark web content as untrusted. Redirects return a destination for a new
+`web_fetch` call; they do not transfer the original network permission.
+
+`web_search` is present only when `EXA_API_KEY` is nonempty in the process
+environment. It sends queries to Exa, uses account credits, and can incur paid
+charges. Each call requires `allow_paid: true` and normal network permission.
+There is no fallback backend. Results contain at most five cited URLs, titles,
+and highlights. Search never forwards its key through a redirect. An explicit
+`--tools web_search` without a key gives a configuration error. Provider-native
+hosted search is not enabled by this change.
+
 **Attachments and tools**
 
 ```
