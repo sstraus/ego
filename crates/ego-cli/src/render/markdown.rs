@@ -610,7 +610,7 @@ mod tests {
     fn marked_answers_keep_boundaries_and_word_wrapped_styled_tails() {
         let source = format!(
             "💬 **{}**\n💬 second answer",
-            "accented perché l’eseguibile ".repeat(10)
+            "accented perché l’eseguibile ".repeat(10).trim_end()
         );
         let rows = text(&source, 80);
         let second = rows
