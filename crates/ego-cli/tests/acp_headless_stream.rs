@@ -7,10 +7,9 @@ use serde_json::json;
 use support::{AcpHost, Ego, Places, Plan, Reply, Stub, text};
 
 fn configure(places: &Places) {
-    std::fs::create_dir_all(places.home_path().join("Gits")).expect("isolated default roots");
     std::fs::write(
         places.home_path().join("config.toml"),
-        "model = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'workspace'\n",
+        "model = 'ollama/qwen3'\nthinking = 'off'\nroots = []\nsandbox = 'workspace'\n",
     )
     .expect("isolated ACP configuration");
 }
