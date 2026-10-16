@@ -7287,8 +7287,7 @@ fn the_pickers_open_on_the_current_value_name_it_and_hint_the_session_key_at_ste
                 .unwrap_or_else(|| panic!("no {needle:?} row:\n{}", screen.join("\n")))
         };
         // Catches: the cursor fixed on row 1 and no marker on the current model.
-        assert!(row("2. ollama/qwen3").starts_with("> "), "{screen:#?}");
-        assert!(row("2. ollama/qwen3").contains("✓ current"), "{screen:#?}");
+        assert_eq!(row("2. ollama/qwen3"), "> 2. ollama/qwen3 current");
         assert!(row("1. ollama/aaa-first").starts_with("  "), "{screen:#?}");
         assert!(
             !row("1. ollama/aaa-first").contains("current"),
