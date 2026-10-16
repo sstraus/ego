@@ -232,7 +232,11 @@ fn explicit_instruction_file_external_import_survives_explicit_workspace_grant()
     let places = Places::new();
     places.file("AGENTS.md", "Ambient workspace instructions.\n");
     let selected = places.file("selected.md", "@~/shared.md\n");
-    std::fs::write(places.home_path().join("shared.md"), "REGRESSION-MARKER").unwrap();
+    std::fs::write(
+        places.home_path().join("shared.md"),
+        "REGRESSION-MARKER",
+    )
+    .unwrap();
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(text("OK"))],
         ..Plan::default()
@@ -254,7 +258,9 @@ fn explicit_instruction_file_external_import_survives_explicit_workspace_grant()
     let requests = stub.generations();
     assert_eq!(requests.len(), 1);
     assert!(
-        requests[0]["messages"].to_string().contains("REGRESSION-MARKER"),
+        requests[0]["messages"]
+            .to_string()
+            .contains("REGRESSION-MARKER"),
         "explicitly granted import omitted from provider request; diagnostics: {}",
         result.stderr
     );
