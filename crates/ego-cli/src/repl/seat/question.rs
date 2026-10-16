@@ -916,7 +916,7 @@ fn read_permission_parameter(
     value: String,
     blank: &str,
     mut set: impl FnMut(String) -> Result<(), String>,
-) -> Result<(), PermissionEditOutcome> {
+) -> Result<(), Box<PermissionEditOutcome>> {
     loop {
         editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(value.clone())]);
         let prompt = Question::new(prompt.clone(), Arc::clone(status));
@@ -924,11 +924,11 @@ fn read_permission_parameter(
             Line::Submitted(raw) => set(raw),
             Line::Blank => set(blank.to_owned()),
             line @ (Line::Ended | Line::ExternalBreak(_)) => {
-                return Err(PermissionEditOutcome::Propagate(line));
+                return Err(Box::new(PermissionEditOutcome::Propagate(line)));
             }
             Line::Interrupted
             | Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
-                return Err(PermissionEditOutcome::Cancelled);
+                return Err(Box::new(PermissionEditOutcome::Cancelled));
             }
             Line::Refused(_) | Line::HostCommand(_) => continue,
         };
@@ -943,7 +943,7 @@ fn read_permission_form(
     editor: &mut Reedline,
     status: &SharedStatus,
     form: &mut PermissionEditForm,
-) -> Result<serde_json::Map<String, serde_json::Value>, PermissionEditOutcome> {
+) -> Result<serde_json::Map<String, serde_json::Value>, Box<PermissionEditOutcome>> {
     loop {
         for index in 0..form.fields.len() {
             let field = &form.fields[index];
@@ -1004,7 +1004,7 @@ pub(super) fn edit_permission_parameters(
     );
     match outcome {
         Ok(parameters) => PermissionEditOutcome::Value(parameters),
-        Err(outcome) => outcome,
+        Err(outcome) => *outcome,
     }
 }
 
