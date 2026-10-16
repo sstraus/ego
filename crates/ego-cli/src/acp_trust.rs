@@ -58,7 +58,14 @@ impl SessionTrustAdmission for CliSessionTrustAdmission {
         }
         let content = match crate::trust::executable_changes(path, home, &surface) {
             Some(changes) => {
-                format!("{content}\nAuthority changes since the last answer:\n{changes}\n")
+                let mut disclosure = String::new();
+                for (path, digest) in &surface.external_instructions {
+                    disclosure.push_str(&format!("- {path:?} SHA-256 {digest}\n"));
+                }
+                format!(
+                    "Authority changes since the last answer:\n{changes}\n\
+                         External instructions offered for disclosure to the model:\n{disclosure}"
+                )
             }
             None => content,
         };
