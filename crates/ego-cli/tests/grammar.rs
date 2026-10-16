@@ -64,6 +64,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
         Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
         Invocation::SessionMetadata(_) => panic!("metadata is covered by metadata grammar tests"),
+        Invocation::Worktree(_) => panic!("worktree lifecycle does not construct a run"),
         Invocation::Orchestrator(_) => {
             panic!("orchestration inspection is covered by its process tests")
         }

@@ -88,6 +88,7 @@ ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               credential in EGO_A2A_TOKEN. An address reachable
                               from outside this machine is refused by name
                               unless the operator asks for it
+ego worktree show|cleanup RECEIPT_UUID   inspect or safely remove a retained local checkout
 ego orchestrator brief [--root PATH]  read-only TUIC children and unread results
 ego doctor [--json]           read-only redacted health snapshot
 ego setup [PROMPT] [--profile NAME] [--directory PATH]
@@ -424,6 +425,46 @@ confined execs. The launcher was subsequently fixed.
     --goal OP           resume only; show|set=TEXT|achieve|block=REASON,
                         metadata-only
 ```
+
+### Managed worktree launch
+
+`ego --worktree BRANCH [PROMPT]` and `ego run --worktree BRANCH [PROMPT]`
+create a new Git branch and linked worktree before session admission. The exact
+branch argument is the operator's approval; ego never invents a branch name.
+This option conflicts with resume, named sessions and caller-supplied session IDs.
+`-C` selects the source repository, including an existing linked worktree or a
+submodule. Tracked files come from HEAD, not from uncommitted source changes.
+Submodules are not initialized or fetched automatically.
+
+Standalone launches retain worktrees on every exit, including startup failure.
+Versioned receipts live under `$EGO_HOME/worktrees` (default `~/.ego/worktrees`),
+and identify the Git common directory, exact checkout, branch, source ref and
+creation state. Standalone processes hold a checkout lease until shutdown; local
+cleanup refuses an active lease. The receipt is durable before Git creation; an interrupted launch
+can be inspected without starting a model:
+
+```
+ego worktree show RECEIPT_UUID
+ego worktree cleanup RECEIPT_UUID
+```
+
+Cleanup is explicit, receipt-targeted and never forced. It refuses dirty state,
+changed repository/branch identity, and commits not reachable from the recorded
+source branch (or the initial commit when the source was detached). It also refuses new commits without upstream reachability evidence from the
+recorded source branch. It retains the branch, never discards unpushed commits,
+and records successful removal. Ignored files also prevent local cleanup.
+Pending receipts survive failures for inspection and recovery. A repeated cleanup
+of a removed receipt is unchanged success. No background or exit cleanup runs.
+Do not edit a checkout concurrently with cleanup; Git performs the final
+non-forced removal check. A cleanup refusal never grants force authority.
+
+With `TUIC_SOCKET` set, launch uses TUIC `repo.worktree_create` and its receipt,
+not a second local ownership record. No fallback to local Git occurs on host
+failure. Hosted cleanup stays with TUIC `repo.worktree_remove` and its lifecycle
+checks; the local receipt commands refuse under TUIC. Launch receipts and retained
+paths are written to stderr, never to protocol or headless result stdout.
+ACP hosts keep their existing explicit workspace ownership; `ego acp` does not
+accept `--worktree` or create a hidden second checkout.
 
 **Scripting contract**
 
