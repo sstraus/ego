@@ -2618,8 +2618,12 @@ fn rendered_prompt_count(output: &[u8]) -> usize {
                 return false;
             };
             let frame = &frame[..end + SHOW_CURSOR.len()];
-            !normalized(frame).contains("Esc to interrupt")
-                && support::ready_prompt_count_with_status(frame) > 0
+            let mut terminal = vt100::Parser::new(24, 120, 0);
+            terminal.process(frame);
+            let contents = terminal.screen().contents();
+            let last_row = contents.trim_end().lines().last().unwrap_or_default();
+            !contents.contains("Esc to interrupt")
+                && (last_row.trim() == ">" || last_row.trim_end().ends_with(" | >"))
         })
         .count()
 }
@@ -8740,13 +8744,19 @@ for line in sys.stdin:
 #[test]
 fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
     // Captured in high-parallelism run 6 of regression-load.log on rb.
-    let busy = b"\x1b[4;1H\x1b[JWorking 0s \xc2\xb7 Esc to interrupt\r\n> \x1b[?25h";
+    let busy = b"\x1b[?25l\x1b[4;1H\x1b[JWorking 0s \xc2\xb7 Esc to interrupt\r\n> \x1b[?25h";
     assert!(
         !mcp_composer_is_idle(busy),
         "busy composer was accepted as idle"
     );
     let mut idle = busy.to_vec();
-    idle.extend_from_slice(b"\x1b[4;1H\x1b[J> \x1b[?25h");
+    idle.extend_from_slice(b"\x1b[?25l\x1b[4;1H\x1b[J> \x1b[?25h");
+    let mut incomplete = busy.to_vec();
+    incomplete.extend_from_slice(b"\x1b[?25l\x1b[4;1H\x1b[J");
+    assert!(
+        !mcp_composer_is_idle(&incomplete),
+        "incomplete repaint was accepted before its busy status arrived"
+    );
     assert!(mcp_composer_is_idle(&idle), "idle repaint was not accepted");
     assert!(!mcp_composer_is_idle(b""), "empty output was accepted");
     assert!(
@@ -8756,14 +8766,14 @@ fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
 }
 
 fn mcp_composer_is_idle(output: &[u8]) -> bool {
-    let mut terminal = vt100::Parser::new(24, 120, 0);
-    terminal.process(output);
-    let screen = terminal.screen();
-    let (row, _) = screen.cursor_position();
-    let rows: Vec<_> = screen.rows(0, 120).collect();
-    let composer = &rows[usize::from(row)];
-    composer.trim_end().ends_with('>')
-        && (row == 0 || !rows[usize::from(row - 1)].contains("Esc to interrupt"))
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    let Some(start) = output
+        .windows(HIDE_CURSOR.len())
+        .rposition(|window| window == HIDE_CURSOR)
+    else {
+        return false;
+    };
+    rendered_prompt_count(&output[start..]) > 0
 }
 
 fn until_mcp_composer_is_idle(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
