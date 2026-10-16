@@ -3067,16 +3067,17 @@ async fn cli_drain_failed_child_does_not_abandon_later_children() {
     let first = fixture.add(false, false).await;
     let second = fixture.add(false, false).await;
     // BTreeMap order, not insertion order, determines the first child drained.
-    let mut pending = fixture.owner.background.lock().unwrap();
-    let earlier = *pending.keys().next().unwrap();
-    let task = pending.get_mut(&earlier).unwrap().execution.take().unwrap();
-    pending.get_mut(&earlier).unwrap().execution = Some(tokio::spawn(async move {
-        task.await.expect("child executor task")?;
-        Err(ChildServiceError::Result {
-            diagnostic: "drain execution failure".to_owned(),
-        })
-    }));
-    drop(pending);
+    {
+        let mut pending = fixture.owner.background.lock().unwrap();
+        let earlier = *pending.keys().next().unwrap();
+        let task = pending.get_mut(&earlier).unwrap().execution.take().unwrap();
+        pending.get_mut(&earlier).unwrap().execution = Some(tokio::spawn(async move {
+            task.await.expect("child executor task")?;
+            Err(ChildServiceError::Result {
+                diagnostic: "drain execution failure".to_owned(),
+            })
+        }));
+    }
     let error = fixture.drain().await.unwrap_err().to_string();
     assert!(error.contains("drain execution failure"), "{error}");
     let mut settled = fixture.settled().await;
