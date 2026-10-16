@@ -122,7 +122,6 @@ enum EpochStart {
     Compact {
         diagnostic: Option<String>,
         request: RequestId,
-        parent: Option<EventId>,
     },
 }
 
@@ -146,7 +145,6 @@ enum EpochTransition<'store> {
         diagnostic: Option<String>,
         runtime: Option<CompactionRuntime>,
         request: RequestId,
-        parent: Option<EventId>,
     },
 }
 
@@ -847,13 +845,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                         diagnostic,
                         runtime,
                         request,
-                        parent,
                     } => {
                         epoch_start = activate_compaction_transition(
                             &mut active,
                             source_state,
                             session_end,
-                            (target, publication, diagnostic, runtime, request, parent),
+                            (target, publication, diagnostic, runtime, request),
                             CompactionActivation {
                                 evidence: &evidence,
                                 run_context: &run_context,
@@ -2885,7 +2882,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     let prepared_runtime = Arc::clone(&target_runtime);
     let source_id = active.id();
     let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
-    let pre_compact = match dispatch_request_hook(
+    if let Err(error) = dispatch_request_hook(
         &session_hooks.runtime,
         request_id,
         session_hooks.turn,
@@ -2894,15 +2891,12 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     )
     .await
     {
-        Ok(result) => result,
-        Err(error) => {
-            diagnostics.note(&format!(
-                "compaction was blocked before preparation: {}",
-                error.exit_reason()
-            ));
-            return Ok(CommandOutcome::Continue);
-        }
-    };
+        diagnostics.note(&format!(
+            "compaction was blocked before preparation: {}",
+            error.exit_reason()
+        ));
+        return Ok(CommandOutcome::Continue);
+    }
     let compaction_cancel = CancelToken::new();
     let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
         Box::pin(prepare_interactive_compaction(InteractiveCompaction {
@@ -3019,7 +3013,6 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
             diagnostic,
             runtime,
             request: request_id,
-            parent: pre_compact.closure_event(),
         },
     )))
 }
@@ -3232,14 +3225,15 @@ async fn dispatch_post_compact_hook(
     session_hooks: &SessionHookComposition<'_>,
     diagnostics: &dyn Diagnostics,
 ) {
-    if let EpochStart::Compact {
-        request, parent, ..
-    } = epoch_start
+    if let EpochStart::Compact { request, .. } = epoch_start
         && let Err(error) = dispatch_request_hook(
             &session_hooks.runtime,
             *request,
             session_hooks.turn,
-            *parent,
+            // Compaction starts a clean event stream. The source PreCompact
+            // closure is not a parent in this session; lineage retains the
+            // source boundary and the request identifies this lifecycle.
+            None,
             HookLifecycle::PostCompact,
         )
         .await
@@ -3306,11 +3300,10 @@ fn activate_compaction_transition<'store>(
         Option<String>,
         Option<CompactionRuntime>,
         RequestId,
-        Option<EventId>,
     ),
     input: CompactionActivation<'_>,
 ) -> Result<EpochStart, RunTermination> {
-    let (target, publication, diagnostic, runtime, request, parent) = target;
+    let (target, publication, diagnostic, runtime, request) = target;
     let CompactionActivation {
         evidence,
         run_context,
@@ -3346,7 +3339,6 @@ fn activate_compaction_transition<'store>(
     Ok(EpochStart::Compact {
         diagnostic,
         request,
-        parent,
     })
 }
 
