@@ -151,6 +151,16 @@ pub(super) fn surface_line(
 ) -> (Line, bool) {
     loop {
         let signal = editor.read_line(prompt);
+        // Hold only the isolated PTY child at the real suspended-read boundary.
+        #[cfg(test)]
+        if asked_for_image.load(Ordering::Relaxed) && std::env::var_os("EGO_REGRESSION_HOLD").is_some() {
+            std::fs::write("paste-inspected", "ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !Path::new("paste-release").exists() {
+                assert!(Instant::now() < deadline, "paste suspension release");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         let failed = signal.is_err();
         let line = answer(asked_for_image.swap(false, Ordering::Relaxed), signal);
         if matches!(

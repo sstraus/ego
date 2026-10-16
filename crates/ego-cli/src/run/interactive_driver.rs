@@ -957,3 +957,7 @@ pub(super) async fn run_with_registry<S: EventSink>(
 #[cfg(test)]
 #[path = "../../tests/live_surface_pty/held_permission_receipt.rs"]
 mod held_permission_receipt;
+
+#[cfg(all(test, unix))]
+#[path = "../../tests/live_surface_pty/image_symptoms.rs"]
+mod image_symptoms;

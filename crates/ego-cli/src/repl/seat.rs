@@ -1623,6 +1623,10 @@ impl crate::run::Reads for Seat {
 
 impl crate::run::InteractiveSeat for Seat {
     fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
+        #[cfg(test)]
+        if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
+            return Ok(crate::run::PasteboardKind::Image);
+        }
         super::clipboard::kind()
     }
 
