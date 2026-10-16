@@ -6418,13 +6418,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 request: request.clone(),
             },
         )?;
-        return Ok(answered(
+        Ok(answered(
             true,
             format!(
                 "Model-authored {:?} requested: {}. Runs only at idle after this batch; work then continues in the successor.",
                 request.action, request.reason
             ),
-        ));
+        ))
     }
 
     fn run_model_goal(
