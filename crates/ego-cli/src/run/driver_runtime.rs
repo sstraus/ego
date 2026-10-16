@@ -666,11 +666,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         seat: &seat,
                                         source: &source,
                                         confinement: &confinement,
-                                        run_deadline: run_deadline,
+                                        run_deadline,
                                         staged_images: &mut staged_images,
                                         last: &mut last,
                                         state: &mut state,
-                                        diagnostics: diagnostics,
+                                        diagnostics,
                                         interactive_metadata: &interactive_metadata,
                                         leased_session_journal: &leased_session_journal,
                                         session_journal: &session_journal,
@@ -680,17 +680,17 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         selection: &selection,
                                         skills: &skills,
                                         effective: &effective,
-                                        jsonl_store: jsonl_store,
+                                        jsonl_store,
                                         exec_environment: exec_environment.clone(),
                                         registry: &mut registry,
                                         session_hooks: &session_hooks,
                                         model_switch_owner: model_switch_owner.clone(),
                                         policy_application: &policy_application,
-                                        text_output: text_output,
+                                        text_output,
                                         session_hook_ports: &session_hook_ports,
                                         skill_profile_layers: &skill_profile_layers,
                                         perimeter: &perimeter,
-                                        mcp_registry: mcp_registry,
+                                        mcp_registry,
                                         session_mcp: &mut session_mcp,
                                         disabled_mcp: &mut disabled_mcp,
                                         root: &root,
@@ -703,15 +703,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         policy_source: &policy_source,
                                         gate: &gate,
                                         evidence: &evidence,
-                                        invocation: invocation,
+                                        invocation,
                                         admitted_tools: &admitted_tools,
                                         mcp_runtime: &(mcp_runtime.clone()
                                             as Arc<dyn McpRuntimeBinding>),
                                         skill_resource_roots: &skill_resource_roots,
                                         last_generation_request: &last_generation_request,
                                         elicitor: &elicitor,
-                                        judge_available: judge_available,
-                                        skill_trust: skill_trust,
+                                        judge_available,
+                                        skill_trust,
                                         control: &mut control,
                                         checkpoint_pending: &mut checkpoint_pending,
                                     },
@@ -723,7 +723,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     CommandOutcome::Continue => continue,
                                     CommandOutcome::Input(input) => Some(input),
                                     CommandOutcome::Transition(transition) => {
-                                        break 'epoch transition;
+                                        break 'epoch *transition;
                                     }
                                 }
                             };
@@ -734,15 +734,15 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     status: status.as_ref(),
                                     confinement: &confinement,
                                     active: &active,
-                                    run_deadline: run_deadline,
+                                    run_deadline,
                                     residual: residual.clone(),
-                                    perimeter: perimeter,
+                                    perimeter,
                                     session_hook_ports: &session_hook_ports,
                                     pending_attachments: &mut pending_attachments,
                                     staged_images: &mut staged_images,
                                     source: &source,
                                     cwd: &cwd,
-                                    diagnostics: diagnostics,
+                                    diagnostics,
                                     state: &mut state,
                                     args: &args,
                                     effective: &effective,
@@ -750,14 +750,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     gate: &gate,
                                     config: &config,
                                     evidence: &evidence,
-                                    invocation: invocation,
+                                    invocation,
                                     registry: &registry,
                                     admitted_tools: &admitted_tools,
                                     mcp_runtime: mcp_runtime.as_ref(),
                                     skill_resource_roots: &skill_resource_roots,
                                     elicitor: &elicitor,
-                                    judge_available: judge_available,
-                                    skill_trust: skill_trust,
+                                    judge_available,
+                                    skill_trust,
                                     session_hooks: &session_hooks,
                                     session_journal: &session_journal,
                                     skill_owner: skill_owner.clone(),
@@ -767,7 +767,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     last_generation_request: &mut last_generation_request,
                                     policy_selection: &policy_selection,
                                     selection: &selection,
-                                    between: between,
+                                    between,
                                     cancel: &cancel,
                                     last: &mut last,
                                     mcp_errors: &mcp_errors,
@@ -1773,10 +1773,10 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
     let runtime = GenerationRuntime {
         source: source.bind(http, cancel.clone(), run_deadline),
-        policy_source: Arc::clone(&policy_source),
+        policy_source: Arc::clone(policy_source),
         gate: gate.clone(),
         config: config.clone(),
-        admission: Arc::clone(&evidence),
+        admission: Arc::clone(evidence),
         invocation,
         retry_pause: Arc::new(TokioRetryPause),
     };
@@ -1792,15 +1792,15 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     .with_cancel(cancel.clone());
     let tools = match admitted_tools.as_ref() {
         Some(source) => Tools::from_registry_with_source(
-            &registry,
+            registry,
             Arc::clone(source),
             effect_ports,
-            CanonPath::new(&cwd),
+            CanonPath::new(cwd),
         )
         .map_err(|error| RunTermination::Failed {
             message: format!("the admitted MCP tool catalogue is invalid: {error}"),
         })?,
-        None => Tools::from_registry(&registry, effect_ports, CanonPath::new(&cwd)),
+        None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
     let tools = match McpRuntimeBinding::resume_sealer(mcp_runtime) {
         Some(resume) => tools.with_resume(resume),
@@ -2002,10 +2002,10 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
             &target_registry,
             Arc::clone(source),
             effect_ports,
-            CanonPath::new(&cwd),
+            CanonPath::new(cwd),
         )
         .map_err(|error| CompactionError::Internal(error.to_string()))?,
-        None => Tools::from_registry(&target_registry, effect_ports, CanonPath::new(&cwd)),
+        None => Tools::from_registry(&target_registry, effect_ports, CanonPath::new(cwd)),
     };
     let compaction_tools = match McpRuntimeBinding::resume_sealer(mcp_runtime) {
         Some(resume) => compaction_tools.with_resume(resume),
@@ -2245,7 +2245,7 @@ fn rescan_session_skills(
 enum CommandOutcome<'store> {
     Continue,
     Input(InteractiveTurnInput),
-    Transition(EpochTransition<'store>),
+    Transition(Box<EpochTransition<'store>>),
 }
 
 struct InteractiveCommand<'a, 'session, 'store> {
@@ -2359,13 +2359,13 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         control,
         checkpoint_pending,
     } = input;
-    let (pending_work, model_compaction, automatic_compaction) = posture;
+    let (pending_work, _, _) = posture;
     match line {
         repl::Line::HostCommand(repl::HostCommand::RemovePasteImage) => {
             if staged_images.pop().is_some() {
-                seat.set_image_chips(paste_chips(&staged_images));
+                seat.set_image_chips(paste_chips(staged_images));
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::ClipboardPaste) => {
             stage_clipboard_image(
@@ -2376,7 +2376,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 staged_images,
             )
             .await;
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::PastePath(path)) => {
             stage_image_path(
@@ -2388,7 +2388,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 staged_images,
             )
             .await;
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::Submitted(text) => {
             Ok(CommandOutcome::Input(InteractiveTurnInput::Prompt(text)))
@@ -2409,11 +2409,11 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             ) {
                 last.termination = RunTermination::Done;
             }
-            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+            Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)))
         }
         repl::Line::Refused(why) => {
             diagnostics.note(why);
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::SessionMetadata(operation)) => {
             update_session_metadata(
@@ -2445,13 +2445,13 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             repl::actions::SkillSurfaceAction::List,
         )) => {
             render_skill_catalogue(skills.as_deref(), false, diagnostics);
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::Diagnose,
         )) => {
             render_skill_catalogue(skills.as_deref(), true, diagnostics);
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::Rescan,
@@ -2467,14 +2467,14 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 Ok(None) => {}
                 Err(termination) => {
                     last.termination = termination;
-                    return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+                    return Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)));
                 }
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Hooks) => {
             render_session_hooks(&session_hooks.state, diagnostics);
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
             switch_session_model(
@@ -2487,7 +2487,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 diagnostics,
             )
             .await;
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
             if handle_interactive_policy(
@@ -2497,9 +2497,9 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 text_output,
                 diagnostics,
             ) {
-                return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+                return Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)));
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Tasks(arguments)) => {
             diagnostics.note(&background_tasks(
@@ -2507,15 +2507,15 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 state,
                 session_hook_ports.process(),
             ));
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Help)) => {
             diagnostics.note(&seat.action_help());
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Expand)) => {
             diagnostics.expand_last_tool();
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Config)) => {
             diagnostics.note(&crate::config::repl_text(
@@ -2523,7 +2523,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 skill_profile_layers.as_deref().unwrap_or_default(),
                 perimeter,
             ));
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Mcp(arguments)) => {
             {
@@ -2536,7 +2536,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                     Err(error) => diagnostics.note(&format!("MCP control failed: {error:?}")),
                 }
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Config(arguments)) => {
             run_interactive_config(
@@ -2547,11 +2547,11 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 diagnostics,
             )
             .await;
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
             run_interactive_setup(prompt, root, status.as_ref(), diagnostics).await;
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         // The same snapshot `ego doctor` prints,
         // built by the same probes. Two renderings
@@ -2563,7 +2563,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 seat.width(),
                 perimeter,
             ));
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         // To the transcript rather than to a file
         // this action would have had to invent a
@@ -2592,7 +2592,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                     termination.exit_reason()
                 )),
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(
             command @ (repl::HostCommand::Action(repl::actions::ActionId::Sessions)
@@ -2612,7 +2612,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             {
                 return Ok(CommandOutcome::Transition(transition));
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Usage)) => {
             report_session_usage(
@@ -2624,7 +2624,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 diagnostics,
             )
             .await;
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Refresh)) => {
             if pending_work {
@@ -2643,7 +2643,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                     diagnostics.note(&format!("instructions were not refreshed: {error}"))
                 }
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::New)) => {
             if let Some(transition) =
@@ -2652,7 +2652,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             {
                 return Ok(CommandOutcome::Transition(transition));
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(
             command @ (repl::HostCommand::Action(repl::actions::ActionId::Fork)
@@ -2671,7 +2671,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             {
                 return Ok(CommandOutcome::Transition(transition));
             }
-            return Ok(CommandOutcome::Continue);
+            Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Compact)) => {
             compact_session_command(
@@ -2733,7 +2733,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         }
         repl::Line::HostCommand(_) => Ok(CommandOutcome::Continue),
         repl::Line::ExternalBreak(_) => {
-            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+            Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)))
         }
     }
 }
@@ -2785,7 +2785,7 @@ fn update_session_metadata<'store>(
         Ok(state) => state,
         Err(error) => {
             last.termination = hook_journal_termination(error);
-            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+            return Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)));
         }
     };
     last.state = state.clone();
@@ -2799,7 +2799,7 @@ fn update_session_metadata<'store>(
             )),
         }
     }
-    return Ok(CommandOutcome::Continue);
+    Ok(CommandOutcome::Continue)
 }
 
 async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
@@ -2879,34 +2879,34 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     let compaction_cancel = CancelToken::new();
     let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
         Box::pin(prepare_interactive_compaction(InteractiveCompaction {
-            args: args,
-            effective: effective,
-            root: root,
-            cwd: cwd,
+            args,
+            effective,
+            root,
+            cwd,
             diagnostics,
-            skills: skills,
+            skills,
             jsonl_store,
-            confinement: confinement,
-            active: &active,
+            confinement,
+            active: active,
             cancel: &compaction_cancel,
             run_deadline,
-            source: source,
-            policy_source: policy_source,
-            gate: gate,
-            config: config,
-            evidence: evidence,
+            source,
+            policy_source,
+            gate,
+            config,
+            evidence,
             invocation,
-            admitted_tools: admitted_tools,
+            admitted_tools,
             mcp_runtime: mcp_runtime.as_ref(),
-            skill_resource_roots: skill_resource_roots,
-            session_journal: session_journal,
-            session_hooks: session_hooks,
+            skill_resource_roots,
+            session_journal,
+            session_hooks,
             last_generation_request: last_generation_request.clone(),
-            elicitor: elicitor,
+            elicitor,
             judge_available,
             skill_trust,
-            control: control,
-            state: state,
+            control,
+            state,
             seat: seat.as_ref(),
             model_compaction,
             prepared_runtime: prepared_runtime.as_ref(),
@@ -2985,14 +2985,16 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         .take();
     *checkpoint_pending = automatic_compaction;
     *automatic_compaction_failed = false;
-    return Ok(CommandOutcome::Transition(EpochTransition::Compact {
-        target: target_owner,
-        publication: receipt.publication,
-        diagnostic,
-        runtime,
-        request: request_id,
-        parent: pre_compact.closure_event(),
-    }));
+    Ok(CommandOutcome::Transition(Box::new(
+        EpochTransition::Compact {
+            target: target_owner,
+            publication: receipt.publication,
+            diagnostic,
+            runtime,
+            request: request_id,
+            parent: pre_compact.closure_event(),
+        },
+    )))
 }
 
 async fn end_session_epoch(
@@ -3433,13 +3435,13 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     let ports = Arc::new(ports.with_session_processes(session_hook_ports));
     let Some(images) = acquire_interactive_images(InteractiveImages {
         asked: asked.as_ref(),
-        pending_attachments: pending_attachments,
-        staged_images: staged_images,
-        source: source,
+        pending_attachments,
+        staged_images,
+        source,
         ports: &ports,
         cancel: &turn_cancel,
         run_deadline,
-        cwd: cwd,
+        cwd,
         blobs: active.evidence().blob_store(),
         seat,
         diagnostics,
@@ -3455,25 +3457,25 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         .collect::<std::collections::HashSet<_>>();
     let loop_ = build_interactive_turn(
         InteractiveTurnBuild {
-            args: args,
-            effective: effective,
-            source: source,
-            policy_source: policy_source,
-            gate: gate,
-            config: config,
-            evidence: evidence,
+            args,
+            effective,
+            source,
+            policy_source,
+            gate,
+            config,
+            evidence,
             invocation,
             run_deadline,
-            registry: registry,
-            admitted_tools: admitted_tools,
-            cwd: cwd,
+            registry,
+            admitted_tools,
+            cwd,
             mcp_runtime,
-            skill_resource_roots: skill_resource_roots,
-            elicitor: elicitor,
+            skill_resource_roots,
+            elicitor,
             judge_available,
-            confinement: confinement,
+            confinement,
             skill_trust,
-            active: active,
+            active,
             hooks: session_hooks,
             journal: session_journal,
             skill_owner,
