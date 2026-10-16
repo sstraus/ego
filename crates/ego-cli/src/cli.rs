@@ -513,6 +513,8 @@ pub struct ExportArgs {
     pub source: SessionId,
     pub sanitize: bool,
     pub format: ExportFormat,
+    pub follow: bool,
+    pub after: Option<u64>,
     pub file: Option<PathBuf>,
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
@@ -524,6 +526,7 @@ pub enum ExportFormat {
     Md,
     Json,
     Jsonl,
+    Transcript,
 }
 
 impl std::fmt::Display for ExportFormat {
@@ -532,6 +535,7 @@ impl std::fmt::Display for ExportFormat {
             Self::Md => "md",
             Self::Json => "json",
             Self::Jsonl => "jsonl",
+            Self::Transcript => "transcript",
         })
     }
 }
@@ -1649,10 +1653,22 @@ fn into_export_invocation(parsed: ExportCommand) -> Result<Invocation, UsageErro
             "ego export --format jsonl cannot be combined with --file".to_owned(),
         ));
     }
+    if (parsed.follow || parsed.after.is_some()) && parsed.format != ExportFormat::Transcript {
+        return Err(UsageError(
+            "--follow and --after require --format transcript".to_owned(),
+        ));
+    }
+    if parsed.format == ExportFormat::Transcript && (parsed.sanitize || parsed.file.is_some()) {
+        return Err(UsageError(
+            "transcript cannot be combined with --sanitize or --file".to_owned(),
+        ));
+    }
     Ok(Invocation::Export(Box::new(ExportArgs {
         source,
         sanitize: parsed.sanitize,
         format: parsed.format,
+        follow: parsed.follow,
+        after: parsed.after,
         file: parsed.file,
         session_dir: parsed.places.session_dir,
         directory: parsed.places.directory,

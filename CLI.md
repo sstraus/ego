@@ -39,7 +39,8 @@ ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
 ego fork <ID> [--at ITEM_ID]   branch after a completed turn
 ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
                               publish one idempotent checkpoint target
-ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
+ego export <ID> [--sanitize] [--format md|json|jsonl|transcript] [--file PATH]
+                [--follow] [--after SEQ]
                 [-C DIR] [--session-dir DIR]
                               render a session; Markdown is the default
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
@@ -113,6 +114,9 @@ Notes:
   is appended as a delimited context block.
 - `ego export --sanitize` emits the producer-only version-1 structural bundle;
   unsanitized export is an explicit local transcript with no safety claim.
+  `--format transcript` emits [local transcript v1](docs/reference/transcript.md),
+  with stable event identity, lineage, goals, `--follow`, and `--after SEQ` replay.
+  Transcript mode excludes `--sanitize` and `--file`.
   Canonical JSON ends in one newline, JSONL is the same single bundle line, and
   Markdown embeds that same bundle. `--file` suppresses stdout; JSONL with a
   file is a usage error. Relative files resolve from canonical `-C`. Existing

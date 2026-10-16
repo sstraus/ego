@@ -248,10 +248,12 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;export' {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'format')
+            [CompletionResult]::new('--after', '--after', [CompletionResultType]::ParameterName, 'Only emit transcript events after this session-local sequence')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'file')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--sanitize', '--sanitize', [CompletionResultType]::ParameterName, 'sanitize')
+            [CompletionResult]::new('--follow', '--follow', [CompletionResultType]::ParameterName, 'Follow committed local transcript events until stopped')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

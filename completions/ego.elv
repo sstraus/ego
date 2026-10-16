@@ -238,10 +238,12 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;export'= {
             cand --format 'format'
+            cand --after 'Only emit transcript events after this session-local sequence'
             cand --file 'file'
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
             cand --sanitize 'sanitize'
+            cand --follow 'Follow committed local transcript events until stopped'
             cand -h 'Print help'
             cand --help 'Print help'
         }
