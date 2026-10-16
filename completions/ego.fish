@@ -95,6 +95,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l plan -d 'Shorthand for -
 complete -c ego -n "__fish_ego_using_subcommand run" -l yolo -d 'Shorthand for --mode yolo'
 complete -c ego -n "__fish_ego_using_subcommand run" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
+complete -c ego -n "__fish_ego_using_subcommand run" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_using_subcommand run" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
@@ -145,6 +146,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l plan -d 'Shorthand fo
 complete -c ego -n "__fish_ego_using_subcommand resume" -l yolo -d 'Shorthand for --mode yolo'
 complete -c ego -n "__fish_ego_using_subcommand resume" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_using_subcommand resume" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
@@ -195,6 +197,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l plan -d 'Shorthand 
 complete -c ego -n "__fish_ego_using_subcommand continue" -l yolo -d 'Shorthand for --mode yolo'
 complete -c ego -n "__fish_ego_using_subcommand continue" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_using_subcommand continue" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand fork" -l at -r
 complete -c ego -n "__fish_ego_using_subcommand fork" -l session-dir -d 'Override the store location' -r -F

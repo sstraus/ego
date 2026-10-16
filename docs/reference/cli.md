@@ -38,6 +38,7 @@ Run an agent from a prompt, headless.
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
+- `--plain` — Append plain output without terminal styling or live retry updates
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
@@ -92,6 +93,7 @@ Continue a session; no ID = latest in this workspace.
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
+- `--plain` — Append plain output without terminal styling or live retry updates
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
@@ -177,6 +179,7 @@ Continue a session; no ID = latest in this workspace.
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
+- `--plain` — Append plain output without terminal styling or live retry updates
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected
