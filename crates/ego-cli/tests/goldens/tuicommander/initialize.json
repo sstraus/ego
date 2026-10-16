@@ -5,7 +5,7 @@
     "promptCapabilities": {
       "image": true,
       "audio": false,
-      "embeddedContext": false
+      "embeddedContext": true
     },
     "mcpCapabilities": {
       "http": true,
