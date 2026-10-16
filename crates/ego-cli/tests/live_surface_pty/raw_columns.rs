@@ -64,10 +64,20 @@ fn raw_terminal_startup_resume_and_exit_keep_column_zero() {
         "the second replayed line starts where the first one ended:\n{shown}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(MODEL_CHANGE) && line.chars().count() > usize::from(COLS)),
-        "the wrapped diagnostic lost word spacing or did not wrap:\n{shown}"
+        shown
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(MODEL_CHANGE),
+        "the wrapped diagnostic lost word spacing:\n{shown}"
+    );
+    let diagnostic = lines
+        .iter()
+        .position(|line| line.contains("Resume model changed"))
+        .unwrap();
+    assert!(
+        !lines[diagnostic].contains("ollama/qwen3"),
+        "the diagnostic must explicitly wrap at the live width:\n{shown}"
     );
 }
 

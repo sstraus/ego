@@ -235,7 +235,10 @@ pub(super) fn answer_control(
             reply,
         } => {
             let prompt = Question::new(
-                format!("{context}\nTrust project files in {workspace}? [y/N] "),
+                crate::output::wrap_notice(
+                    &format!("{context}\nTrust project files in {workspace}? [y/N] "),
+                    Some(picker_capabilities(surface.status).width.saturating_sub(1)),
+                ),
                 Arc::clone(surface.status),
             );
             let trust = loop {
@@ -257,9 +260,12 @@ pub(super) fn answer_control(
         }
         Control::WindowsUnconfined { workspace, reply } => {
             let prompt = Question::new(
-                format!(
-                    "Windows execution is unconfined in {workspace}; filesystem and network \
-                     isolation are not enforced. Continue? [y/N] "
+                crate::output::wrap_notice(
+                    &format!(
+                        "Windows execution is unconfined in {workspace}; filesystem and network \
+                         isolation are not enforced. Continue? [y/N] "
+                    ),
+                    Some(picker_capabilities(surface.status).width.saturating_sub(1)),
                 ),
                 Arc::clone(surface.status),
             );
@@ -1547,6 +1553,7 @@ pub(super) fn commit_to_transcript(status: &SharedStatus, row: &str) {
         .expect("surface status lock")
         .transcript
         .clone();
+    let row = crate::output::wrap_notice(row, Some(picker_capabilities(status).width));
     if let Some(transcript) = transcript
         && transcript
             .send(SurfaceMessage::Row(format!("{row}\n")))
