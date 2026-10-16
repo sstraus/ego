@@ -1,0 +1,30 @@
+[
+  {
+    "type": "text",
+    "text": "Review this selection and the proposed change. Do not apply edits yet."
+  },
+  {
+    "type": "resource",
+    "resource": {
+      "uri": "untitled://editor/selection/1",
+      "mimeType": "text/plain",
+      "text": "Editor selection snapshot (host assertion, not a disk read)\nPath: src/example.rs\nBuffer revision: 7; unsaved: true\nRange: lines 12-13 inclusive; columns 1-18 inclusive; one-based Unicode scalar positions\nSelected text:\nlet mut total = 0;\nreturn total;"
+    }
+  },
+  {
+    "type": "resource",
+    "resource": {
+      "uri": "untitled://editor/diagnostics/1",
+      "mimeType": "text/plain",
+      "text": "Editor diagnostic snapshot (host assertion)\nSource: local language server; buffer revision: 7\nPath: src/example.rs; line 12; column 5; one-based\nSeverity: warning; code: unused_mut\nMessage: variable does not need to be mutable"
+    }
+  },
+  {
+    "type": "resource",
+    "resource": {
+      "uri": "untitled://editor/review/1",
+      "mimeType": "text/plain",
+      "text": "Editor edit-review snapshot (host assertion, not permission)\nPath: src/example.rs; base buffer revision: 7\nStatus: proposed, not applied, not approved\nDiff:\n- let mut total = 0;\n+ let total = compute_total();"
+    }
+  }
+]

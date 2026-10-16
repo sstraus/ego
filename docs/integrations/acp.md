@@ -4,6 +4,9 @@ ACP lets a host own the conversation UI while εgo owns durable execution, polic
 and evidence. TUICommander is one host; an ACP connection itself is not proof of
 full compatibility with every host capability.
 
+For an installation-free custom-agent setup and editor context recipe, see
+[IDE setup over native ACP](ide.md).
+
 For wire shapes, fallback rules, source citations, and planned features, see
 [ego extensions to ACP](acp-extensions.md).
 
