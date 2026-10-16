@@ -1043,6 +1043,9 @@ impl Seat {
         let asked_for_image = mode.asked_for_image();
         let mut editor = Reedline::create()
             .with_edit_mode(Box::new(mode))
+            .with_highlighter(Box::new(background_notice::NoticeHighlighter(Arc::clone(
+                &status,
+            ))))
             .with_completer(Box::new(ActionCompleter {
                 registry: Arc::clone(&registry),
             }))
@@ -2108,6 +2111,7 @@ fn write_printer_message(output: &mut impl std::io::Write, message: &str) -> std
 }
 
 mod action_execution;
+mod background_notice;
 mod edit_mode;
 mod permission;
 mod permission_modal;

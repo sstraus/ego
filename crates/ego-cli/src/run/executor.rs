@@ -494,11 +494,6 @@ impl CliCompactionCommand {
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         let source_admission = latest_main_admission(&records);
         let source_catalogue = compaction_source_catalogue(&records, source_admission)?;
-        if source_catalogue.is_none() {
-            eprintln!(
-                "Warning: source has no durable tool catalogue; cold compaction uses the current catalogue (best effort, cache prefix may differ)."
-            );
-        }
         let args = compaction_source_args(self.args.clone(), source_admission);
         let settings = settings(&args, |_| Trust::Untrusted, &Stderr)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
@@ -676,24 +671,24 @@ fn compaction_source_catalogue(
     records: &[EvidenceRecord],
     source_admission: Option<&ego_core::evidence::GenerationAdmissionEvidence>,
 ) -> Result<Option<Vec<ToolDescriptor>>, CompactionError> {
-    source_admission
-        .and_then(|admission| admission.tool_catalogue())
-        .map(|digest| {
-            records
-                .iter()
-                .find_map(|record| match record {
-                    EvidenceRecord::ToolCatalogue(catalogue) if &catalogue.digest == digest => {
-                        Some(catalogue.tools.clone())
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    CompactionError::Internal(
-                        "source tool catalogue evidence is missing".to_owned(),
-                    )
-                })
+    let Some(digest) = source_admission.and_then(|admission| admission.tool_catalogue()) else {
+        eprintln!(
+            "Warning: source has no durable tool catalogue; cold compaction uses the current catalogue (best effort, cache prefix may differ)."
+        );
+        return Ok(None);
+    };
+    records
+        .iter()
+        .find_map(|record| match record {
+            EvidenceRecord::ToolCatalogue(catalogue) if &catalogue.digest == digest => {
+                Some(catalogue.tools.clone())
+            }
+            _ => None,
         })
-        .transpose()
+        .map(Some)
+        .ok_or_else(|| {
+            CompactionError::Internal("source tool catalogue evidence is missing".to_owned())
+        })
 }
 
 fn compaction_source_args(

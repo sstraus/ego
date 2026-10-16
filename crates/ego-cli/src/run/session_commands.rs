@@ -441,7 +441,12 @@ async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> 
     .map_err(|error| RunTermination::Failed {
         message: format!("the fork failed: {error}"),
     })?;
-    render_fork_result(created.id, &created.publication, args.output, out)
+    Ok(render_fork_result(
+        created.id,
+        &created.publication,
+        args.output,
+        out,
+    ))
 }
 
 fn render_fork_result(
@@ -449,7 +454,7 @@ fn render_fork_result(
     publication: &LifecyclePublication,
     output: Output,
     out: &Stdout,
-) -> Result<Ended, RunTermination> {
+) -> Ended {
     match publication {
         LifecyclePublication::PublishedWithProjectionWarning { diagnostic }
         | LifecyclePublication::PublishedDurabilityUncertain { diagnostic } => out.note(&format!(
@@ -476,7 +481,7 @@ fn render_fork_result(
     if let Err(termination) = rendered {
         ended.termination = termination;
     }
-    Ok(ended)
+    ended
 }
 
 /// [`ls`], with the endings as an error so each step can be one line.

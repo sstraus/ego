@@ -269,6 +269,8 @@ impl ego_core::run::EventSinkFactory for LaunchBarrierSink {
 
 struct LaunchBarrierExecutor {
     crossed: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Option<Arc<tokio::sync::Notify>>,
+    interrupt_failure: bool,
 }
 
 impl LaunchBarrierExecutor {
@@ -333,7 +335,12 @@ impl RunExecutor for LaunchBarrierExecutor {
                 .send(())
                 .expect("launch barrier receiver remains alive");
         }
-        Box::pin(std::future::ready(Ok(RunSettlement::Completed)))
+        Box::pin(async move {
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            Ok(RunSettlement::Completed)
+        })
     }
 
     /// A no-op for the same reason `interrupt` is one: this double never
@@ -350,7 +357,14 @@ impl RunExecutor for LaunchBarrierExecutor {
         &'a self,
         _handle: &'a RunHandle,
     ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
-        Box::pin(std::future::ready(Ok(())))
+        if let Some(release) = &self.release {
+            release.notify_one();
+        }
+        Box::pin(std::future::ready(if self.interrupt_failure {
+            Err(RunExecutorError::new("drain cancellation failure"))
+        } else {
+            Ok(())
+        }))
     }
 }
 
@@ -438,6 +452,8 @@ async fn cli_background_launch_crosses_execution_barrier_without_collection_futu
     let store: &'static LaunchBarrierStore = Box::leak(Box::new(LaunchBarrierStore::default()));
     let executor = Arc::new(LaunchBarrierExecutor {
         crossed: Mutex::new(None),
+        release: None,
+        interrupt_failure: false,
     });
     let crossed = executor.arm();
     let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
@@ -2681,4 +2697,445 @@ fn resumed_terminal_round_prompts_remaining_members_and_fresh_retry_consent() {
     );
     let pending = state.pending_question().unwrap();
     crate::repl::test_resumed_round_terminal(pending.request().clone());
+}
+
+/// The child service and parent journal are real; only the child's result reader
+/// and executor are controlled so failures can overlap without timing races.
+struct DrainHost {
+    store: Arc<JsonlStore>,
+    session: SessionId,
+    blobs: SessionEvidenceStore,
+    unreadable: Arc<Mutex<BTreeSet<RunId>>>,
+}
+
+impl ChildHost for DrainHost {
+    fn read_journal(
+        &self,
+        _invocation: SubagentInvocationId,
+    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+        let mut entries = SessionStore::read(self.store.as_ref(), &self.session)
+            .map_err(|error| ChildJournalError::new(error.to_string()))?;
+        let mut events = Vec::new();
+        while let Some(entry) = entries.next().now_or_never().expect("eager JSONL reader") {
+            if let SessionEntry::Event(event) =
+                entry.map_err(|error| ChildJournalError::new(error.to_string()))?
+            {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
+    fn read_rendered_task(&self, _reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError> {
+        Ok(b"background launch task".to_vec())
+    }
+
+    fn read_final_assistant(
+        &self,
+        run: RunId,
+    ) -> Result<ChildResultEvidence, ChildResultReaderError> {
+        if self.unreadable.lock().unwrap().contains(&run) {
+            return Err(ChildResultReaderError::Read {
+                diagnostic: "drain collection failure".to_owned(),
+            });
+        }
+        let bytes = b"completed child answer".to_vec();
+        Ok(ChildResultEvidence::new(
+            BlobRef::new(
+                BlobId::parse(ego_core::digest::sha256_hex(&bytes)).unwrap(),
+                bytes.len() as u64,
+            ),
+            bytes,
+        ))
+    }
+
+    fn copy_to_parent(
+        &self,
+        _child: RunId,
+        evidence: &ChildResultEvidence,
+    ) -> Result<BlobRef, ChildResultReaderError> {
+        use ego_core::store::blob::BlobStore;
+        let mut writer = self.blobs.begin().map_err(CliChildHost::blob_error)?;
+        writer
+            .append(evidence.bytes())
+            .map_err(CliChildHost::blob_error)?;
+        writer.commit().map_err(CliChildHost::blob_error)
+    }
+
+    fn resolve_profile(&self, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn admit_selections(
+        &self,
+        request: &ChildRequest,
+        bindings: &RunExecutionBindings,
+    ) -> Result<(RunSelections, RunExecutionBindings), String> {
+        Ok((request.selections().clone(), bindings.clone()))
+    }
+}
+
+struct DrainFixture<'a> {
+    owner: CliSkillInvocationOwner<'a>,
+    store: &'a Arc<JsonlStore>,
+    session: SessionId,
+    unreadable: Arc<Mutex<BTreeSet<RunId>>>,
+}
+
+impl<'a> DrainFixture<'a> {
+    fn new(root: &Path, store: &'a Arc<JsonlStore>, executor: Arc<LaunchBarrierExecutor>) -> Self {
+        let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
+        let session = parent_run.session_id();
+        let journal = SharedJournal::new(Journal::new(
+            session,
+            store.as_ref(),
+            &LaunchBarrierClock,
+            &NullSink,
+            Producer::Main,
+            SessionState::default(),
+        ));
+        let hooks = SessionHookState::new(
+            HookLifecycleDispatcher::new(
+                HookRunner::new(),
+                HookCatalogue::admit_typed(&[], &[], Trust::Trusted).unwrap(),
+            ),
+            journal,
+            CancelToken::new(),
+            Instant::now() + Duration::from_secs(30),
+        )
+        .bind(Arc::new(HookCaptureInvoker));
+        let gate = SharedBudgetGate::new(ego_core::budget::BudgetGate::unlimited(
+            CurrencyCode::new("USD").unwrap(),
+        ));
+        let unreadable = Arc::new(Mutex::new(BTreeSet::new()));
+        let service = ChildRunService::new(
+            Arc::new(RunController::new(
+                Arc::clone(store),
+                executor,
+                Arc::new(LaunchBarrierClock),
+                Arc::new(LaunchBarrierIds),
+                RunRetention::new(NonZeroUsize::new(8).unwrap()).unwrap(),
+            )),
+            gate.clone(),
+            RunRoot::new(root.to_path_buf()).unwrap(),
+            RunExecutionBindings::new(Arc::new(LaunchBarrierSink), None).with_budget_gate(gate),
+            ChildServicePorts::new(
+                parent_run,
+                Arc::new(DrainHost {
+                    store: Arc::clone(store),
+                    session,
+                    blobs: SessionEvidenceStore::open(root, session, 1024 * 1024).unwrap(),
+                    unreadable: Arc::clone(&unreadable),
+                }),
+            ),
+        );
+        Self {
+            owner: CliSkillInvocationOwner::new(
+                service,
+                hooks,
+                CancelToken::new(),
+                Trust::Untrusted,
+            ),
+            store,
+            session,
+            unreadable,
+        }
+    }
+
+    async fn add(&self, execution_failure: bool, collection_failure: bool) -> SubagentInvocationId {
+        use ego_core::event::skill::{
+            SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillSourceLocation,
+        };
+        use ego_core::skill::{SkillOperation, SkillSpec};
+        let body = b"background launch task";
+        let location = SkillSourceLocation::parse("skills/drain/SKILL.md").unwrap();
+        let digest = SkillContentDigest::parse(&ego_core::digest::sha256_hex(body)).unwrap();
+        let descriptor = SkillDescriptorEvidence {
+            id: SkillId::derive(SkillSourceAuthority::User, &location, "drain", &digest),
+            name: "drain".to_owned(),
+            description: "Drain lifecycle fixture".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: SkillSourceAuthority::User,
+            location,
+            source_digest: digest,
+            user_invocable: true,
+            model_invocable: true,
+        };
+        let invocation = SkillInvocation::admit_for_service(
+            SkillSpec::new(descriptor, body.to_vec())
+                .unwrap()
+                .with_fork(ChildWait::Background)
+                .with_hook_entries(vec![HookConfigEntry::new(
+                    HookLifecycle::SubagentStop,
+                    None,
+                    HookHandlerConfig::Prompt {
+                        prompt: "observe child completion".to_owned(),
+                        model: None,
+                        timeout_seconds: None,
+                    },
+                )]),
+            SkillOperation::Invoke {
+                name: "drain".to_owned(),
+                arguments: String::new(),
+                bare: false,
+            },
+        )
+        .unwrap();
+        let id = invocation.subagent_invocation();
+        let turn = TurnId::new();
+        let item = ItemId::new();
+        let parent_event = self
+            .owner
+            .hooks
+            .hook_state()
+            .journal()
+            .append(
+                turn,
+                Some(item),
+                None,
+                EventKind::ToolCallStarted {
+                    name: "skill".to_owned(),
+                    args: "{}".to_owned(),
+                    call_id: None,
+                },
+            )
+            .unwrap();
+        let admitted = self
+            .owner
+            .service
+            .start(
+                ChildRequest::new(
+                    id,
+                    ChildRequestOrigin::new(
+                        self.owner.service.parent_run(),
+                        turn,
+                        item,
+                        parent_event,
+                    ),
+                    invocation.rendered_ref().unwrap().clone(),
+                    RunSelections::empty(),
+                    ChildWait::Background,
+                )
+                .with_requested_tools(["read"]),
+                &self.owner.hooks,
+            )
+            .await
+            .unwrap();
+        if collection_failure {
+            self.unreadable.lock().unwrap().insert(admitted.child_run());
+        }
+        let execution = self.owner.launch(id).unwrap().unwrap();
+        let execution = tokio::spawn(async move {
+            let result = execution.await.expect("child executor task");
+            if execution_failure {
+                result?;
+                Err(ChildServiceError::Result {
+                    diagnostic: "drain execution failure".to_owned(),
+                })
+            } else {
+                result
+            }
+        });
+        self.owner.background.lock().unwrap().insert(
+            id,
+            BackgroundSkill {
+                service: self.owner.service.clone(),
+                invocation,
+                turn,
+                execution: Some(execution),
+            },
+        );
+        id
+    }
+
+    async fn events(&self) -> Vec<DomainEvent> {
+        SessionStore::read(self.store.as_ref(), &self.session)
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .filter_map(|entry| match entry {
+                SessionEntry::Event(event) => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn settled(&self) -> Vec<SubagentInvocationId> {
+        self.events()
+            .await
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::SubagentSettled { invocation, .. } => Some(invocation),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn drain(&self) -> Result<(), SkillError> {
+        tokio::time::timeout(Duration::from_secs(5), self.owner.drain())
+            .await
+            .expect("drain cannot abandon or deadlock an admitted child")
+    }
+}
+
+fn drain_executor() -> Arc<LaunchBarrierExecutor> {
+    Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: None,
+        interrupt_failure: false,
+    })
+}
+
+#[tokio::test]
+async fn cli_drain_cancellation_error_wins_without_losing_child_settlement() {
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(Arc::new(tokio::sync::Notify::new())),
+        interrupt_failure: true,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.add(true, false).await;
+    tokio::time::timeout(Duration::from_secs(5), crossed)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.owner.parent_cancel.cancel(CancelCause::User);
+    let error = fixture.drain().await.unwrap_err().to_string();
+    assert!(
+        error.contains("drain cancellation failure"),
+        "cancellation precedes execution: {error}"
+    );
+    assert_eq!(
+        fixture.settled().await,
+        [id],
+        "execution failure must not skip collection"
+    );
+    assert!(fixture.owner.background.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cli_drain_execution_error_wins_over_collection_error_and_clears_scope() {
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let empty_catalogue = fixture.owner.hooks.catalogue_evidence();
+    fixture.add(true, true).await;
+    let error = fixture.drain().await.unwrap_err().to_string();
+    assert!(
+        error.contains("drain execution failure"),
+        "execution precedes collection: {error}"
+    );
+    let admissions: Vec<_> = fixture
+        .events()
+        .await
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::HookCatalogueAdmitted { descriptors } => Some(descriptors),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        admissions.len(),
+        2,
+        "collection must install and clear skill hooks even after execution fails"
+    );
+    assert_ne!(admissions[0], empty_catalogue);
+    assert_eq!(admissions[1], empty_catalogue);
+    assert_eq!(fixture.owner.hooks.catalogue_evidence(), empty_catalogue);
+}
+
+#[tokio::test]
+async fn cli_drain_failed_child_does_not_abandon_later_children() {
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let first = fixture.add(false, false).await;
+    let second = fixture.add(false, false).await;
+    // BTreeMap order, not insertion order, determines the first child drained.
+    let mut pending = fixture.owner.background.lock().unwrap();
+    let earlier = *pending.keys().next().unwrap();
+    let task = pending.get_mut(&earlier).unwrap().execution.take().unwrap();
+    pending.get_mut(&earlier).unwrap().execution = Some(tokio::spawn(async move {
+        task.await.expect("child executor task")?;
+        Err(ChildServiceError::Result {
+            diagnostic: "drain execution failure".to_owned(),
+        })
+    }));
+    drop(pending);
+    let error = fixture.drain().await.unwrap_err().to_string();
+    assert!(error.contains("drain execution failure"), "{error}");
+    let mut settled = fixture.settled().await;
+    settled.sort();
+    let mut expected = vec![first, second];
+    expected.sort();
+    assert_eq!(
+        settled, expected,
+        "first child failure must not discard remaining invocations"
+    );
+    assert!(fixture.owner.background.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cli_drain_success_persists_settlement_and_removes_skill_hooks() {
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let empty_catalogue = fixture.owner.hooks.catalogue_evidence();
+    let id = fixture.add(false, false).await;
+    fixture.drain().await.unwrap();
+    assert_eq!(fixture.settled().await, [id]);
+    assert_eq!(
+        fixture.owner.hooks.catalogue_evidence(),
+        empty_catalogue,
+        "skill hooks must not leak into SessionEnd"
+    );
+    let events = fixture.events().await;
+    assert!(
+        events.iter().any(|event| matches!(&event.kind,
+        EventKind::HookCatalogueAdmitted { descriptors } if descriptors != &empty_catalogue)),
+        "the child hook scope was actually installed"
+    );
+    assert!(
+        matches!(&events.last().unwrap().kind,
+        EventKind::HookCatalogueAdmitted { descriptors } if descriptors == &empty_catalogue),
+        "scope is cleared after durable child settlement"
+    );
+}
+
+#[tokio::test]
+async fn cli_drain_repeated_empty_drain_does_not_duplicate_settlement() {
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let id = fixture.add(false, false).await;
+    fixture.drain().await.unwrap();
+    let before = fixture.events().await;
+    fixture.drain().await.unwrap();
+    assert_eq!(fixture.settled().await, [id]);
+    assert_eq!(
+        fixture.events().await,
+        before,
+        "an empty second drain must not rerun hooks or append another settlement"
+    );
 }

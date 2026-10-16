@@ -1617,6 +1617,10 @@ fn status_row(status: &SurfaceStatus) -> String {
 }
 
 impl Prompt for Waiting {
+    fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
+        background_notice::row(buffer, usize::from(width).saturating_sub(1))
+    }
+
     fn render_prompt_left(&self) -> Cow<'_, str> {
         Cow::Borrowed("")
     }

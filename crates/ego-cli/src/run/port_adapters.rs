@@ -752,7 +752,10 @@ impl<'a> CliSkillInvocationOwner<'a> {
         })))
     }
 
-    pub(super) async fn await_execution(task: ChildExecutionTask) -> Result<(), SkillError> {
+    async fn await_execution(task: Option<ChildExecutionTask>) -> Result<(), SkillError> {
+        let Some(task) = task else {
+            return Ok(());
+        };
         task.await
             .map_err(|error| SkillError::new(format!("child execution task failed: {error}")))?
             .map(|_| ())
@@ -788,33 +791,39 @@ impl<'a> CliSkillInvocationOwner<'a> {
             None => Ok(()),
         }
     }
+
     async fn settle_background_skill(
         id: SubagentInvocationId,
         background: BackgroundSkill,
         hooks: &SessionHookRuntime<'_>,
         cancel_children: bool,
     ) -> Result<(), SkillError> {
-        let mut first_error = None;
         let BackgroundSkill {
             service,
             invocation,
             turn,
             execution,
         } = background;
-        if cancel_children && let Err(error) = service.cancel_owned(id).await {
-            first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
+        let cancelled = Self::cancel_background_skill(&service, id, cancel_children).await;
+        let executed = Self::await_execution(execution).await;
+        // Complete every phase before selecting the first error.
+        let collected =
+            Self::collect_background_skill(&service, id, &invocation, turn, hooks).await;
+        cancelled.and(executed).and(collected)
+    }
+
+    async fn cancel_background_skill(
+        service: &ChildRunService,
+        id: SubagentInvocationId,
+        cancel_children: bool,
+    ) -> Result<(), SkillError> {
+        if !cancel_children {
+            return Ok(());
         }
-        if let Some(task) = execution
-            && let Err(error) = Self::await_execution(task).await
-        {
-            first_error.get_or_insert(error);
-        }
-        if let Err(error) =
-            Self::collect_background_skill(&service, id, &invocation, turn, hooks).await
-        {
-            first_error.get_or_insert(error);
-        }
-        first_error.map_or(Ok(()), Err)
+        service
+            .cancel_owned(id)
+            .await
+            .map_err(|error| SkillError::new(error.to_string()))
     }
 
     async fn collect_background_skill(

@@ -182,33 +182,34 @@ impl CliPrepared {
     }
 
     async fn refresh_orchestrator_tool(&mut self) -> Result<(), RunExecutorError> {
-        if self
+        if !self
             .registry
             .iter()
             .any(|tool| tool.descriptor().name == "orchestrator_active")
         {
-            use futures::StreamExt;
-            let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
-                .map_err(|e| RunExecutorError::new(e.to_string()))?
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| RunExecutorError::new(e.to_string()))?;
-            let limits = ego_tools::orchestrator_active::rework_limits(&entries)
-                .map_err(RunExecutorError::new)?;
-            let home = std::env::var_os("HOME")
-                .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
-            let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
-                ego_core::orchestrator::Mode::Active,
-                std::path::Path::new(&home),
-                std::env::var("TUIC_SESSION").ok(),
-                limits,
-            );
-            for entry in &mut self.registry {
-                if entry.descriptor().name == "orchestrator_active" {
-                    *entry = RegisteredTool::Effect(Arc::clone(&tool));
-                }
+            return Ok(());
+        }
+        use futures::StreamExt;
+        let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
+            .map_err(|e| RunExecutorError::new(e.to_string()))?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RunExecutorError::new(e.to_string()))?;
+        let limits = ego_tools::orchestrator_active::rework_limits(&entries)
+            .map_err(RunExecutorError::new)?;
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
+        let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
+            ego_core::orchestrator::Mode::Active,
+            std::path::Path::new(&home),
+            std::env::var("TUIC_SESSION").ok(),
+            limits,
+        );
+        for entry in &mut self.registry {
+            if entry.descriptor().name == "orchestrator_active" {
+                *entry = RegisteredTool::Effect(Arc::clone(&tool));
             }
         }
         Ok(())
@@ -572,24 +573,33 @@ impl CliPrepared {
             Err(termination) => return settlement(termination),
         };
         active.replace_state(state);
-        let settlement = settlement(termination)?;
-        if matches!(&settlement, RunSettlement::Completed)
-            && let Some(artifacts) = artifacts
+        settle_run_artifact(termination, artifacts, run_id, result)
+    }
+}
+
+fn settle_run_artifact(
+    termination: RunTermination,
+    artifacts: Option<Arc<dyn RunArtifactStore>>,
+    run_id: RunId,
+    result: Value,
+) -> Result<RunSettlement, RunExecutorError> {
+    let settlement = settlement(termination)?;
+    if matches!(&settlement, RunSettlement::Completed)
+        && let Some(artifacts) = artifacts
+    {
+        match artifacts
+            .publish(run_id, public_result_artifact(result)?)
+            .map_err(|error| RunExecutorError::new(error.to_string()))?
         {
-            match artifacts
-                .publish(run_id, public_result_artifact(result)?)
-                .map_err(|error| RunExecutorError::new(error.to_string()))?
-            {
-                ArtifactPublication::PublishedDurably => {}
-                ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => {
-                    return Err(RunExecutorError::new(format!(
-                        "run artifact is visible but its durability is uncertain: {diagnostic}"
-                    )));
-                }
+            ArtifactPublication::PublishedDurably => {}
+            ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => {
+                return Err(RunExecutorError::new(format!(
+                    "run artifact is visible but its durability is uncertain: {diagnostic}"
+                )));
             }
         }
-        Ok(settlement)
     }
+    Ok(settlement)
 }
 
 /// The exact interactive guard for the clean-session transition.
