@@ -1889,6 +1889,110 @@ mod turn {
 
     /// Everything a `TurnLoop` borrows, kept alive in one place so a test can
     /// build a loop in one line without fighting the borrow checker.
+    fn run_user_context(
+        fx: &Fixture,
+        generation: &str,
+        name: &str,
+        parameters: serde_json::Value,
+    ) -> (ExitReason, SessionState) {
+        let catalogue = ego_core::turn::CapturedToolCatalogue::new(
+            generation,
+            fx.registry
+                .iter()
+                .cloned()
+                .map(RegisteredTool::Effect)
+                .collect(),
+        )
+        .expect("context catalogue");
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let runtime = model_for(fx, &fx.generator, &mut gate);
+        let turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        );
+        let mut turn = turn.with_goal(Some("existing active goal".to_owned()), 1);
+        let outcome = block_on(turn.run_admitted_context(catalogue, name.to_owned(), parameters))
+            .expect("durable context command");
+        (
+            outcome.exit_reason,
+            turn.into_state().expect("unique journal"),
+        )
+    }
+
+    #[test]
+    fn user_context_refuses_revoked_generation_without_dispatch_or_model_call() {
+        // Catches a stale slash selection executing after the admitted generation changes.
+        let fx = Fixture::new(Vec::new()).with_read_tool();
+        fx.fs.file("/ws/guide", "guide contents");
+        let (reason, state) = run_user_context(
+            &fx,
+            "revoked-generation",
+            "read",
+            json!({"path":"/ws/guide"}),
+        );
+        assert_eq!(reason, ExitReason::Usage);
+        assert!(
+            state
+                .items
+                .values()
+                .all(|item| item.kind != ItemKind::ToolCall)
+        );
+        assert!(fx.generator.calls().is_empty());
+    }
+
+    #[test]
+    fn user_context_attaches_guarded_result_without_model_generation() {
+        // Catches attachments starting a model/goal-check call or corrupting subsequent history.
+        let fx = Fixture::new(Vec::new()).with_read_tool();
+        fx.fs.file("/ws/guide", "guide contents");
+        let (reason, state) = run_user_context(&fx, "static", "read", json!({"path":"/ws/guide"}));
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(fx.generator.calls().is_empty());
+        let (history, repairs) = conversation_from(&state).expect("sendable history");
+        assert!(repairs.is_empty());
+        assert!(history.messages().iter().any(|message| message.role == Role::User && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("guide contents")))));
+    }
+
+    #[test]
+    fn user_context_cannot_bypass_effect_permission_authority() {
+        // Catches direct context dispatch treating explicit user input as effect approval.
+        let fx = Fixture::new(Vec::new()).with_write_tool();
+        fx.fs.file("/ws/guide", "original");
+        let (reason, _) = run_user_context(
+            &fx,
+            "static",
+            "fake_write",
+            json!({"path":"/ws/guide", "contents":"replacement"}),
+        );
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert_eq!(
+            fx.fs
+                .read(&CanonPath::new("/ws/guide"))
+                .expect("original file"),
+            b"original"
+        );
+        assert!(fx.generator.calls().is_empty());
+    }
+
     struct Fixture {
         store: MemStore,
         clock: FixedClock,

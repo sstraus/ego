@@ -900,6 +900,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.hidden_reasoning += 1;
             ExportEvent::ReasoningState
         }
+        EventKind::ContextCommandStarted { .. } => {
+            redactions.tool_material += 2;
+            ExportEvent::ToolCallStarted
+        }
         EventKind::ToolCallStarted {
             name: _,
             args: _,

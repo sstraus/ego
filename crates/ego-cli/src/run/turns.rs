@@ -230,6 +230,7 @@ enum TurnStart {
         answer: QuestionAnswer,
     },
     Skill(AdmittedSkillOperation),
+    McpContext(repl::actions::McpContextCommand),
 }
 
 impl Turns<'_> {
@@ -266,6 +267,17 @@ impl Turns<'_> {
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
         self.drive_from(loop_, TurnStart::Skill(operation), cancel, diagnostics)
+            .await
+    }
+
+    pub(super) async fn drive_mcp_context<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        command: repl::actions::McpContextCommand,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(loop_, TurnStart::McpContext(command), cancel, diagnostics)
             .await
     }
 
@@ -348,6 +360,17 @@ impl Turns<'_> {
                     self.one_answered(loop_, question, answer, cancel).await
                 }
                 TurnStart::Skill(operation) => self.one_skill(loop_, operation, cancel).await,
+                TurnStart::McpContext(command) => {
+                    self.one_running(
+                        Box::pin(loop_.run_admitted_context(
+                            command.catalogue,
+                            command.name,
+                            command.parameters,
+                        )),
+                        cancel,
+                    )
+                    .await
+                }
             };
             let outcome = match outcome {
                 Ok(outcome) => outcome,

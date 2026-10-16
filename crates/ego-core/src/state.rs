@@ -401,6 +401,8 @@ pub struct ItemState {
     /// thing to rely on.
     pub seq: Seq,
     pub kind: ItemKind,
+    #[serde(default)]
+    pub context_command: bool,
     /// The exact event that admitted this item as a tool call.
     ///
     /// Kept separately from [`Self::seq`] because continuation causality
@@ -465,6 +467,7 @@ impl ItemState {
             turn,
             seq,
             kind,
+            context_command: false,
             tool_call_started: None,
             call_id: None,
             tool_name: None,
@@ -2022,6 +2025,14 @@ impl SessionState {
             EventKind::ReasoningState { state } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::Reasoning) {
                     item.reasoning_state = Some(state.clone());
+                }
+            }
+            EventKind::ContextCommandStarted { name, args } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
+                    item.tool_call_started.get_or_insert(ev.env.id);
+                    item.context_command = true;
+                    item.tool_name = Some(name.clone());
+                    item.args = args.clone();
                 }
             }
             EventKind::ToolCallStarted {

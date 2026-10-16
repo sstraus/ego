@@ -605,6 +605,7 @@ pub(super) enum InteractiveTurnInput {
     Checkpoint,
     Prompt(String),
     Skill(AdmittedSkillOperation),
+    McpContext(repl::actions::McpContextCommand),
 }
 
 pub(super) struct ExecutionPreflight {

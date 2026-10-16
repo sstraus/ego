@@ -121,6 +121,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         .map_err(|e| e.to_string())?;
                     let mut call = PendingCall {
                         timing: Default::default(),
+                        user_effect: None,
                         item,
                         started,
                         selected: Some(selected),

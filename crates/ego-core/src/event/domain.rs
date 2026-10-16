@@ -392,6 +392,8 @@ pub enum EventKind {
     /// reconstructing the one thing the provider checks.
     ReasoningState { state: ReasoningState },
     /// A tool call began, with its name and raw (unvalidated) arguments.
+    /// An explicit user MCP context selection, not a provider-issued tool call.
+    ContextCommandStarted { name: String, args: String },
     ToolCallStarted {
         name: String,
         args: String,
@@ -823,6 +825,7 @@ impl EventKind {
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::ReasoningDelta { .. } => "reasoning_delta",
             EventKind::ReasoningState { .. } => "reasoning_state",
+            EventKind::ContextCommandStarted { .. } => "context_command_started",
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
