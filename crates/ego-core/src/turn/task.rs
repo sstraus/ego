@@ -401,19 +401,35 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     continue;
                 }
             };
-            let definition = request.agent.as_ref().map(|name| {
-                self.tools.named_agents.iter().find(|agent| &agent.name == name).cloned()
-                    .ok_or_else(|| format!("unknown named agent `{name}`"))
-                    .and_then(|definition| {
-                        if definition.sandbox.is_some_and(|sandbox| self.config.identity.as_ref().is_none_or(|identity| sandbox != identity.sandbox)) {
-                            return Err("named agent sandbox must match the captured parent backend".into());
-                        }
-                        if definition.roots.as_ref().is_some_and(|roots| roots.len() != 1 || &roots[0] != snapshot.workspace()) {
-                            return Err("named agent roots must retain exactly the parent workspace; conflicting roots are not admitted".into());
-                        }
-                        Ok(definition)
-                    })
-            }).transpose();
+            let definition = request
+                .agent
+                .as_ref()
+                .map(|name| {
+                    self.tools
+                        .named_agents
+                        .iter()
+                        .find(|agent| &agent.name == name)
+                        .cloned()
+                        .ok_or_else(|| format!("unknown named agent `{name}`"))
+                        .and_then(|definition| {
+                            if definition.sandbox.is_some_and(|sandbox| {
+                                self.config
+                                    .identity
+                                    .as_ref()
+                                    .is_none_or(|identity| sandbox != identity.sandbox)
+                            }) {
+                                return Err(
+                                    "named agent sandbox must match the captured parent backend"
+                                        .into(),
+                                );
+                            }
+                            snapshot
+                                .validate_task_roots(definition.roots.as_deref())
+                                .map_err(str::to_owned)?;
+                            Ok(definition)
+                        })
+                })
+                .transpose();
             let definition = match definition {
                 Ok(definition) => definition,
                 Err(error) => {

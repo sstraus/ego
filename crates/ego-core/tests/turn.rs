@@ -12825,6 +12825,43 @@ mod turn {
             ceiling: Option<u64>,
             agents: Vec<ego_core::turn::NamedAgent>,
         ) -> (ExitReason, SessionState) {
+            run_named_tasks_with_roots(fx, generator, cancel, ceiling, agents, Vec::new())
+        }
+
+        struct RootedTaskPolicy {
+            owner: Arc<FixedPolicySource>,
+            roots: Vec<ego_core::permit::ProfileRoot>,
+        }
+        impl GenerationPolicySource for RootedTaskPolicy {
+            fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+                Ok(self.capture()?.policy())
+            }
+            fn capture(&self) -> Result<GenerationPolicyCapture, String> {
+                GenerationPolicyCapture::with_profile_roots(
+                    CanonPath::new("/ws"),
+                    self.roots.clone(),
+                    self.owner.mode,
+                    self.owner.permissions.clone(),
+                    self.owner.human.clone(),
+                )
+                .map_err(|error| error.to_string())
+            }
+            fn restore(
+                &self,
+                snapshot: Arc<GenerationPolicySnapshot>,
+            ) -> Result<GenerationPolicyCapture, String> {
+                self.owner.restore(snapshot)
+            }
+        }
+
+        fn run_named_tasks_with_roots<G: Generator + 'static>(
+            fx: &Fixture,
+            generator: &Arc<G>,
+            cancel: CancelToken,
+            ceiling: Option<u64>,
+            agents: Vec<ego_core::turn::NamedAgent>,
+            roots: Vec<ego_core::permit::ProfileRoot>,
+        ) -> (ExitReason, SessionState) {
             let mut registry: Vec<_> = fx
                 .registry
                 .iter()
@@ -12860,7 +12897,10 @@ mod turn {
                 ceiling,
                 settings,
             );
-            runtime.policy_source = fx.policy_source.clone();
+            runtime.policy_source = Arc::new(RootedTaskPolicy {
+                owner: fx.policy_source.clone(),
+                roots,
+            });
             runtime.config.identity = Some(ego_core::turn::AgentIdentity {
                 version: "test".into(),
                 sandbox: Confinement::Workspace,
@@ -13273,6 +13313,59 @@ mod turn {
                 run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
             assert_eq!(exit, ExitReason::Completed);
             assert!(fx.fs.read(&CanonPath::new("/ws/stolen")).is_err());
+        }
+
+        #[test]
+        fn named_workspace_roots_do_not_leave_exec_access_to_parent_extra_root() {
+            // Catches: a workspace-only policy ceiling retaining the parent's wider executor.
+            let extra =
+                std::env::temp_dir().join(format!("ego-named-root-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&extra).unwrap();
+            let extra = std::fs::canonicalize(extra).unwrap();
+            let root = ego_core::permit::ProfileRoot::new(
+                CanonPath::new(&extra),
+                ego_core::permit::RootAccess::ReadWrite,
+            );
+            let mut fx = Fixture::new(vec![]).with_exec_tool();
+            fx.set_mode(Mode::Yolo);
+            let mut definition = reviewer();
+            definition.mode = Some(Mode::Yolo);
+            definition.roots = Some(vec![CanonPath::new("/ws")]);
+            definition.tools = None;
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, state) = run_named_tasks_with_roots(
+                &fx,
+                &generator,
+                CancelToken::new(),
+                None,
+                vec![definition],
+                vec![root],
+            );
+            std::fs::remove_dir(&extra).unwrap();
+            assert_eq!(exit, ExitReason::Completed);
+            assert_eq!(
+                generator.calls().len(),
+                2,
+                "root narrowing must refuse before child generation"
+            );
+            let task = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(false));
+            assert!(tool_result_text(task).contains("inherited process confinement"));
         }
 
         #[test]
