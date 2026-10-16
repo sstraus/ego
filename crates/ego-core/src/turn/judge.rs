@@ -41,33 +41,7 @@ impl JudgeGeneration<'_, '_, '_> {
         let mut request = input.request_with_context(&config, context, main);
         request.thinking = profile.thinking;
 
-        let gaps = profile.capabilities.request_gaps(&request);
-        if !gaps.is_empty() {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: gaps
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
-            return Ok(JudgeGenerationResult::Unavailable);
-        }
-        if let Err(refused) = profile.generator.ensure_expressible(&request) {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: refused.to_string(),
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
+        if !self.admit_request(turn, profile, &request)? {
             return Ok(JudgeGenerationResult::Unavailable);
         }
         let budget = self
@@ -137,45 +111,13 @@ impl JudgeGeneration<'_, '_, '_> {
         )?;
 
         let mut stream = profile.generator.generate(request, attempt);
-        let mut decoder = JudgeDecoder::new();
-        let mut usage: Option<Usage> = None;
-        let mut provider_cost: Option<Money> = None;
-        let mut interrupted = false;
-        let mut failure = None;
-        loop {
-            let event = match await_controlled(
-                self.journal,
-                self.cancel,
-                self.control,
-                turn,
-                stream.next(),
-                InterruptDisposition::Return,
-                None,
-            )
-            .await
-            {
-                Controlled::Completed(Some(event)) => event,
-                Controlled::Completed(None) => break,
-                Controlled::Interrupted => {
-                    interrupted = true;
-                    break;
-                }
-                Controlled::Failed(cause) => {
-                    failure = Some(cause);
-                    break;
-                }
-            };
-            decoder.observe(&event);
-            match &event {
-                AiEvent::Usage(delta) => {
-                    let mut total = usage.unwrap_or(Usage::IDENTITY);
-                    total.add(delta);
-                    usage = Some(total);
-                }
-                AiEvent::ProviderCost { cost } => provider_cost = Some(*cost),
-                _ => {}
-            }
-        }
+        let JudgeObservation {
+            decoder,
+            usage,
+            provider_cost,
+            interrupted,
+            mut failure,
+        } = self.observe_stream(turn, &mut stream).await;
 
         if failure.is_none() && (usage.is_some() || provider_cost.is_some()) {
             let observed = usage.unwrap_or(Usage::IDENTITY);
@@ -245,4 +187,103 @@ impl JudgeGeneration<'_, '_, '_> {
             attempt: reference,
         })
     }
+    async fn observe_stream(
+        &mut self,
+        turn: TurnId,
+        stream: &mut AttemptStream,
+    ) -> JudgeObservation {
+        let mut decoder = JudgeDecoder::new();
+        let mut usage: Option<Usage> = None;
+        let mut provider_cost: Option<Money> = None;
+        let mut interrupted = false;
+        let mut failure = None;
+        loop {
+            let event = match await_controlled(
+                self.journal,
+                self.cancel,
+                self.control,
+                turn,
+                stream.next(),
+                InterruptDisposition::Return,
+                None,
+            )
+            .await
+            {
+                Controlled::Completed(Some(event)) => event,
+                Controlled::Completed(None) => break,
+                Controlled::Interrupted => {
+                    interrupted = true;
+                    break;
+                }
+                Controlled::Failed(cause) => {
+                    failure = Some(cause);
+                    break;
+                }
+            };
+            decoder.observe(&event);
+            match &event {
+                AiEvent::Usage(delta) => {
+                    let mut total = usage.unwrap_or(Usage::IDENTITY);
+                    total.add(delta);
+                    usage = Some(total);
+                }
+                AiEvent::ProviderCost { cost } => provider_cost = Some(*cost),
+                _ => {}
+            }
+        }
+
+        JudgeObservation {
+            decoder,
+            usage,
+            provider_cost,
+            interrupted,
+            failure,
+        }
+    }
+
+    fn admit_request(
+        &self,
+        turn: TurnId,
+        profile: &GenerationProfile,
+        request: &GenRequest,
+    ) -> Result<bool, StoreError> {
+        let gaps = profile.capabilities.request_gaps(request);
+        if !gaps.is_empty() {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message: gaps
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    kind: ErrorKind::Unclassified,
+                },
+            )?;
+            return Ok(false);
+        }
+        if let Err(refused) = profile.generator.ensure_expressible(request) {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message: refused.to_string(),
+                    kind: ErrorKind::Unclassified,
+                },
+            )?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+}
+
+struct JudgeObservation {
+    decoder: JudgeDecoder,
+    usage: Option<Usage>,
+    provider_cost: Option<Money>,
+    interrupted: bool,
+    failure: Option<StoreError>,
 }

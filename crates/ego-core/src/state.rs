@@ -1750,6 +1750,116 @@ impl SessionState {
         references
     }
 
+    fn complete_turn(&mut self, turn_id: TurnId, ok: bool, exit_reason: ExitReason) {
+        if self.items.values().any(|item| {
+            item.turn == turn_id
+                && matches!(
+                    item.kind,
+                    ItemKind::UserPrompt | ItemKind::Assistant | ItemKind::ToolCall
+                )
+        }) {
+            self.context_cooldown = self.context_cooldown.saturating_sub(1);
+        }
+        if let Some(goal) = &mut self.goal {
+            goal.clear_blocker_after_completed_turn(turn_id);
+        }
+        let turn = self.turns.entry(turn_id).or_default();
+        turn.completed = true;
+        turn.ok = ok;
+        turn.exit_reason = Some(exit_reason);
+        if ok {
+            self.refresh_synopsis(turn_id);
+        }
+    }
+
+    fn apply_goal(&mut self, ev: &DomainEvent) {
+        match &ev.kind {
+            EventKind::GoalSet {
+                id,
+                objective,
+                owner,
+                ceilings,
+                derived_from,
+            } => {
+                let may_set = self
+                    .goal
+                    .as_ref()
+                    .is_none_or(|goal| goal.state != GoalState::Active && goal.id != *id);
+                if may_set {
+                    self.goal = Some(GoalRecord {
+                        id: *id,
+                        objective: objective.clone(),
+                        owner: *owner,
+                        ceilings: ceilings.clone(),
+                        derived_from: *derived_from,
+                        created_seq: ev.env.seq,
+                        state: GoalState::Active,
+                        continuation_turns: 0,
+                        continuation_budget: None,
+                        check_stop: None,
+                        blocker_reason: None,
+                        blocker_observations: 0,
+                        achieved_by: None,
+                        achievement_evidence: None,
+                        blocker_turns: Vec::new(),
+                    });
+                }
+            }
+            EventKind::GoalAllowanceInherited {
+                id,
+                continuation_budget,
+                continuation_turns,
+            } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.continuation_budget = *continuation_budget;
+                    goal.continuation_turns = *continuation_turns;
+                }
+            }
+            EventKind::GoalCheckConfigured {
+                id,
+                continuation_budget,
+            } => {
+                if let Some(goal) = self
+                    .goal
+                    .as_mut()
+                    .filter(|goal| goal.id == *id && goal.continuation_budget.is_none())
+                {
+                    goal.continuation_budget = Some(*continuation_budget);
+                }
+            }
+            EventKind::GoalContinuation { id, text } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.continuation_turns = goal.continuation_turns.saturating_add(1);
+                    goal.check_stop = None;
+                }
+                if let Some(item) = self.item_mut(ev, ItemKind::GoalContinuation) {
+                    item.text = text.clone();
+                }
+            }
+            EventKind::GoalCheckStopped { id, reason } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
+                    goal.check_stop = Some(reason.clone());
+                }
+            }
+            EventKind::GoalUpdated { id, objective } => {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| {
+                    goal.id == *id
+                        && goal.state == GoalState::Active
+                        && goal.owner == crate::goal::GoalOwner::Automated
+                }) {
+                    goal.objective = objective.clone();
+                    goal.blocker_reason = None;
+                    goal.blocker_observations = 0;
+                    goal.blocker_turns.clear();
+                }
+            }
+            EventKind::GoalTransitioned { id, transition } => {
+                self.transition_goal(ev, id, transition)
+            }
+            _ => unreachable!("only goal events reach the goal reducer"),
+        }
+    }
+
     /// Apply one domain event to the state.
     ///
     /// Pure and sync: no I/O, no wall-clock reads, no randomness. Total: no
@@ -1817,59 +1927,13 @@ impl SessionState {
                 self.pause = PauseState::Running;
                 self.holds.resumed.insert(*request);
             }
-            EventKind::GoalSet {
-                id,
-                objective,
-                owner,
-                ceilings,
-                derived_from,
-            } => {
-                let may_set = self
-                    .goal
-                    .as_ref()
-                    .is_none_or(|goal| goal.state != GoalState::Active && goal.id != *id);
-                if may_set {
-                    self.goal = Some(GoalRecord {
-                        id: *id,
-                        objective: objective.clone(),
-                        owner: *owner,
-                        ceilings: ceilings.clone(),
-                        derived_from: *derived_from,
-                        created_seq: ev.env.seq,
-                        state: GoalState::Active,
-                        continuation_turns: 0,
-                        continuation_budget: None,
-                        check_stop: None,
-                        blocker_reason: None,
-                        blocker_observations: 0,
-                        achieved_by: None,
-                        achievement_evidence: None,
-                        blocker_turns: Vec::new(),
-                    });
-                }
-            }
-            EventKind::GoalAllowanceInherited {
-                id,
-                continuation_budget,
-                continuation_turns,
-            } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
-                    goal.continuation_budget = *continuation_budget;
-                    goal.continuation_turns = *continuation_turns;
-                }
-            }
-            EventKind::GoalCheckConfigured {
-                id,
-                continuation_budget,
-            } => {
-                if let Some(goal) = self
-                    .goal
-                    .as_mut()
-                    .filter(|goal| goal.id == *id && goal.continuation_budget.is_none())
-                {
-                    goal.continuation_budget = Some(*continuation_budget);
-                }
-            }
+            EventKind::GoalSet { .. }
+            | EventKind::GoalAllowanceInherited { .. }
+            | EventKind::GoalCheckConfigured { .. }
+            | EventKind::GoalContinuation { .. }
+            | EventKind::GoalCheckStopped { .. }
+            | EventKind::GoalUpdated { .. }
+            | EventKind::GoalTransitioned { .. } => self.apply_goal(ev),
             EventKind::ContextRequested { request } => {
                 self.context_request = Some(request.clone());
             }
@@ -1878,53 +1942,6 @@ impl SessionState {
             }
             EventKind::ContextCooldown { turns } => {
                 self.context_cooldown = *turns;
-            }
-            EventKind::GoalContinuation { id, text } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
-                    goal.continuation_turns = goal.continuation_turns.saturating_add(1);
-                    goal.check_stop = None;
-                }
-                if let Some(item) = self.item_mut(ev, ItemKind::GoalContinuation) {
-                    item.text = text.clone();
-                }
-            }
-            EventKind::GoalCheckStopped { id, reason } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
-                    goal.check_stop = Some(reason.clone());
-                }
-            }
-            EventKind::GoalUpdated { id, objective } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| {
-                    goal.id == *id
-                        && goal.state == GoalState::Active
-                        && goal.owner == crate::goal::GoalOwner::Automated
-                }) {
-                    goal.objective = objective.clone();
-                    goal.blocker_reason = None;
-                    goal.blocker_observations = 0;
-                    goal.blocker_turns.clear();
-                }
-            }
-            EventKind::GoalTransitioned { id, transition } => {
-                let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) else {
-                    return;
-                };
-                if goal.admits(transition).is_err() {
-                    return;
-                }
-                match transition {
-                    GoalTransition::BlockerObserved { reason } => {
-                        goal.observe_blocker(ev.env.turn, reason);
-                    }
-                    GoalTransition::Achieved {
-                        attested_by,
-                        evidence,
-                    } => {
-                        goal.state = GoalState::Achieved;
-                        goal.achieved_by = Some(*attested_by);
-                        goal.achievement_evidence = evidence.clone();
-                    }
-                }
             }
             EventKind::PromptQueued { id, text, images } => {
                 self.accept_prompt(ev, *id, text, images)
@@ -2026,60 +2043,9 @@ impl SessionState {
                 }
             }
             EventKind::QuestionRequested { request, target } => {
-                let Some(item) = ev.env.item else {
-                    return;
-                };
-                if request.validate().is_err()
-                    || target.validate().is_err()
-                    || self.pending_question.is_some()
-                    || self.settled_questions.contains_key(&item)
-                {
-                    return;
-                }
-                self.turns.entry(ev.env.turn).or_default();
-                let _ = self.item_mut(ev, ItemKind::Question);
-                self.pending_question = Some(PendingQuestion {
-                    item,
-                    turn: ev.env.turn,
-                    request_event: ev.env.id,
-                    target: target.clone(),
-                    request: request.clone(),
-                });
+                self.request_question(ev, request, target)
             }
-            EventKind::QuestionSettled { outcome } => {
-                let Some(item) = ev.env.item else {
-                    return;
-                };
-                let Some(pending) = self.pending_question.as_ref() else {
-                    return;
-                };
-                let valid = pending.item == item
-                    && pending.turn == ev.env.turn
-                    && ev.env.parent == Some(pending.request_event)
-                    && match outcome {
-                        QuestionOutcome::Answered(answer) => {
-                            answer.validate_for(&pending.request).is_ok()
-                        }
-                        QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
-                        // `Unavailable` is a host result, never a settlement:
-                        // it is exactly the state in which the request stays pending.
-                        QuestionOutcome::Unavailable => false,
-                    };
-                if valid && let Some(pending) = self.pending_question.take() {
-                    if let Some(question) = self.items.get_mut(&item) {
-                        question.completed = true;
-                        question.ok = Some(matches!(outcome, QuestionOutcome::Answered(_)));
-                    }
-                    self.settled_questions.insert(
-                        item,
-                        SettledQuestion {
-                            pending,
-                            settlement_event: ev.env.id,
-                            outcome: outcome.clone(),
-                        },
-                    );
-                }
-            }
+            EventKind::QuestionSettled { outcome } => self.settle_question(ev, outcome),
             EventKind::PermissionRequested { escalation, .. } => {
                 self.permissions.push(PermissionEvent::Requested {
                     item: ev.env.item,
@@ -2152,25 +2118,7 @@ impl SessionState {
                 };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {
-                if self.items.values().any(|item| {
-                    item.turn == ev.env.turn
-                        && matches!(
-                            item.kind,
-                            ItemKind::UserPrompt | ItemKind::Assistant | ItemKind::ToolCall
-                        )
-                }) {
-                    self.context_cooldown = self.context_cooldown.saturating_sub(1);
-                }
-                if let Some(goal) = &mut self.goal {
-                    goal.clear_blocker_after_completed_turn(ev.env.turn);
-                }
-                let turn = self.turns.entry(ev.env.turn).or_default();
-                turn.completed = true;
-                turn.ok = *ok;
-                turn.exit_reason = Some(*exit_reason);
-                if *ok {
-                    self.refresh_synopsis(ev.env.turn);
-                }
+                self.complete_turn(ev.env.turn, *ok, *exit_reason);
             }
             EventKind::CompactionSeeded {
                 source,
@@ -2293,6 +2241,93 @@ impl SessionState {
             // Adding a field no reader consults would be a second place for
             // the classification to drift from the log's own copy.
             EventKind::Error { message, .. } => self.errors.push(message.clone()),
+        }
+    }
+
+    fn request_question(
+        &mut self,
+        ev: &DomainEvent,
+        request: &crate::question::QuestionRequest,
+        target: &crate::question::QuestionTarget,
+    ) {
+        let Some(item) = ev.env.item else {
+            return;
+        };
+        if request.validate().is_err()
+            || target.validate().is_err()
+            || self.pending_question.is_some()
+            || self.settled_questions.contains_key(&item)
+        {
+            return;
+        }
+        self.turns.entry(ev.env.turn).or_default();
+        let _ = self.item_mut(ev, ItemKind::Question);
+        self.pending_question = Some(PendingQuestion {
+            item,
+            turn: ev.env.turn,
+            request_event: ev.env.id,
+            target: target.clone(),
+            request: request.clone(),
+        });
+    }
+
+    fn settle_question(&mut self, ev: &DomainEvent, outcome: &crate::question::QuestionOutcome) {
+        let Some(item) = ev.env.item else {
+            return;
+        };
+        let Some(pending) = self.pending_question.as_ref() else {
+            return;
+        };
+        let valid = pending.item == item
+            && pending.turn == ev.env.turn
+            && ev.env.parent == Some(pending.request_event)
+            && match outcome {
+                QuestionOutcome::Answered(answer) => answer.validate_for(&pending.request).is_ok(),
+                QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
+                // `Unavailable` is a host result, never a settlement:
+                // it is exactly the state in which the request stays pending.
+                QuestionOutcome::Unavailable => false,
+            };
+        if valid && let Some(pending) = self.pending_question.take() {
+            if let Some(question) = self.items.get_mut(&item) {
+                question.completed = true;
+                question.ok = Some(matches!(outcome, QuestionOutcome::Answered(_)));
+            }
+            self.settled_questions.insert(
+                item,
+                SettledQuestion {
+                    pending,
+                    settlement_event: ev.env.id,
+                    outcome: outcome.clone(),
+                },
+            );
+        }
+    }
+
+    fn transition_goal(
+        &mut self,
+        ev: &DomainEvent,
+        id: &crate::event::id::GoalId,
+        transition: &GoalTransition,
+    ) {
+        let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) else {
+            return;
+        };
+        if goal.admits(transition).is_err() {
+            return;
+        }
+        match transition {
+            GoalTransition::BlockerObserved { reason } => {
+                goal.observe_blocker(ev.env.turn, reason);
+            }
+            GoalTransition::Achieved {
+                attested_by,
+                evidence,
+            } => {
+                goal.state = GoalState::Achieved;
+                goal.achieved_by = Some(*attested_by);
+                goal.achievement_evidence = evidence.clone();
+            }
         }
     }
 
