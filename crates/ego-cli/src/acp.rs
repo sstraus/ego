@@ -791,6 +791,34 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
     }
 }
 
+fn map_http_mcp_server(
+    name: &str,
+    url: &str,
+    headers: impl Iterator<Item = (String, String)>,
+    profile: ego_core::config::McpHttpProfile,
+) -> Result<(McpServerName, McpServerConfig, McpTransportMaterial), McpSessionAdmissionError> {
+    let name = server_name(name)?;
+    let url = url
+        .parse::<ego_core::config::McpHttpUrl>()
+        .map_err(|error| safe_mcp_error(error.to_string()))?;
+    let allow_insecure_loopback = url.is_exact_plaintext_loopback();
+    let mut http =
+        ego_core::config::McpHttpConfig::new(url, McpHttpAuth::None, allow_insecure_loopback)
+            .map_err(|error| safe_mcp_error(error.to_string()))?;
+    http.profile = profile;
+    let headers = headers
+        .map(|(name, value)| {
+            McpHeaderBinding::new(name, SecretMaterial::new(value.into_bytes()))
+                .map_err(|_| safe_mcp_error("an ACP MCP HTTP header is invalid"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        name,
+        McpServerConfig::Http(http),
+        McpTransportMaterial::http(headers),
+    ))
+}
+
 fn map_mcp_servers(
     servers: Vec<v1::McpServer>,
 ) -> Result<Vec<McpRegistryCandidate>, McpSessionAdmissionError> {
@@ -826,34 +854,24 @@ fn map_mcp_servers(
                             .map_err(|error| safe_mcp_error(error.to_string()))?;
                     (name, config, McpTransportMaterial::stdio(environment))
                 }
-                v1::McpServer::Http(server) => {
-                    let name = server_name(&server.name)?;
-                    let url = server.url.parse::<ego_core::config::McpHttpUrl>().map_err(
-                        |error: ego_core::config::McpValueError| safe_mcp_error(error.to_string()),
-                    )?;
-                    let allow_insecure_loopback = url.is_exact_plaintext_loopback();
-                    let config = McpServerConfig::http(
-                        url.as_url().clone(),
-                        McpHttpAuth::None,
-                        allow_insecure_loopback,
-                    )
-                    .map_err(|error| safe_mcp_error(error.to_string()))?;
-                    let headers = server
+                v1::McpServer::Http(server) => map_http_mcp_server(
+                    &server.name,
+                    &server.url,
+                    server
                         .headers
                         .into_iter()
-                        .map(|header| {
-                            McpHeaderBinding::new(
-                                header.name,
-                                SecretMaterial::new(header.value.into_bytes()),
-                            )
-                            .map_err(|_| safe_mcp_error("an ACP MCP HTTP header is invalid"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    (name, config, McpTransportMaterial::http(headers))
-                }
-                v1::McpServer::Sse(_) => {
-                    return Err(safe_mcp_error("this build does not support MCP over SSE"));
-                }
+                        .map(|header| (header.name, header.value)),
+                    ego_core::config::McpHttpProfile::Current,
+                )?,
+                v1::McpServer::Sse(server) => map_http_mcp_server(
+                    &server.name,
+                    &server.url,
+                    server
+                        .headers
+                        .into_iter()
+                        .map(|header| (header.name, header.value)),
+                    ego_core::config::McpHttpProfile::LegacySse,
+                )?,
                 v1::McpServer::Acp(server) => {
                     let name = server_name(&server.name)?;
                     let config = McpServerConfig::Acp {
@@ -1306,6 +1324,19 @@ mod confinement_ceiling_tests {
             Confinement::Off,
             "a loopback endpoint adds no confinement cap"
         );
+    }
+
+    #[test]
+    fn explicit_acp_sse_does_not_become_a_current_http_server() {
+        let server = serde_json::from_value(serde_json::json!({
+            "type": "sse", "name": "events", "url": "https://example.test/sse", "headers": []
+        }))
+        .unwrap();
+        let candidates = map_mcp_servers(vec![server]).unwrap();
+        let ego_core::config::McpServerConfig::Http(http) = candidates[0].config() else {
+            panic!("HTTP");
+        };
+        assert_eq!(http.profile, ego_core::config::McpHttpProfile::LegacySse);
     }
 
     #[test]

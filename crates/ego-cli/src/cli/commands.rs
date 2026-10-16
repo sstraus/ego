@@ -642,6 +642,10 @@ pub(super) struct McpAddCommand {
     )]
     pub(super) inherit_env: Vec<String>,
 
+    /// Explicit HTTP wire profile; never selected by fallback.
+    #[arg(long, value_parser = ["current", "legacy-sse"], requires = "http", conflicts_with = "stdio")]
+    pub(super) profile: Option<String>,
+
     /// HTTP authentication mode.
     #[arg(
         long,

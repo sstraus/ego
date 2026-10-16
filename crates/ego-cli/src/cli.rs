@@ -996,7 +996,12 @@ fn into_mcp_args(
                     Some(_) => unreachable!("clap restricts MCP HTTP auth values"),
                 };
                 McpHttpConfig::new(url, auth, add.allow_insecure_loopback)
-                    .map(McpServerConfig::Http)
+                    .map(|mut config| {
+                        if add.profile.as_deref() == Some("legacy-sse") {
+                            config.profile = ego_core::config::McpHttpProfile::LegacySse;
+                        }
+                        McpServerConfig::Http(config)
+                    })
                     .map_err(|error| UsageError(error.to_string()))?
             };
             McpAction::Add { name, server }

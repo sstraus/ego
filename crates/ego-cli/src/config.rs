@@ -1246,6 +1246,8 @@ enum InvocationMcpServer {
         inherit_env: Vec<McpEnvironmentName>,
     },
     Http {
+        #[serde(default)]
+        profile: ego_core::config::McpHttpProfile,
         name: McpServerName,
         url: McpHttpUrl,
         #[serde(default)]
@@ -1268,12 +1270,16 @@ impl InvocationMcpServer {
                 .map(|server| (name, server))
                 .map_err(|error| UsageError(error.to_string())),
             Self::Http {
+                profile,
                 name,
                 url,
                 auth,
                 allow_insecure_loopback,
             } => McpHttpConfig::new(url, auth, allow_insecure_loopback)
-                .map(McpServerConfig::Http)
+                .map(|mut config| {
+                    config.profile = profile;
+                    McpServerConfig::Http(config)
+                })
                 .map(|server| (name, server))
                 .map_err(|error| UsageError(error.to_string())),
         }

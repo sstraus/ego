@@ -43,7 +43,7 @@ ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
                 [-C DIR] [--session-dir DIR]
                               render a session; Markdown is the default
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
-        add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
+        add NAME --http URL [--profile current|legacy-sse] [--auth none|oauth] [--allow-insecure-loopback]
         rm NAME | ls [--json] | login NAME | reload [NAME]
                               shared configuration and live admission service;
                               login NAME --client-id ID | --cimd URL | --dcr
@@ -104,7 +104,9 @@ Notes:
   [IDE setup](docs/integrations/ide.md); no `--ide` auto-connect flag is required.
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
-- An ACP host may supply a stateless HTTP MCP server in `session/new`. HTTPS
+- An ACP host may supply a stateless HTTP or explicit SSE MCP server in
+  `session/new`. The ACP `sse` variant selects the legacy profile; `http`
+  stays current-only. HTTPS
   remains the default. Plain HTTP is admitted only for the exact loopback
   hosts `localhost`, an IPv4 loopback literal, or an IPv6 loopback literal;
   other plaintext hosts are refused. The host does not send ego's
