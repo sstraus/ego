@@ -14,6 +14,7 @@ pub enum ActionId {
     Help,
     Model,
     Thinking,
+    Fast,
     Mode,
     Plan,
     Yolo,
@@ -112,6 +113,7 @@ pub enum Dispatch {
     Fork(ego_core::event::id::ItemId),
     Hooks,
     Config(String),
+    Fast(bool),
     Setup(String),
     Tasks(String),
     Mcp(String),
@@ -506,6 +508,11 @@ impl ActionRegistry {
                 .shortcut('p')
                 .shortcut_hint("models"),
             enabled(Thinking, "thinking", "Choose reasoning effort"),
+            enabled(
+                Fast,
+                "fast",
+                "Set fast tier: /fast on|off (premium token price)",
+            ),
             enabled(Mode, "mode", "Inspect or change execution mode")
                 .unavailable("the interactive mode controller"),
             enabled(Plan, "plan", "Enter plan mode").unavailable("the interactive mode controller"),
@@ -1041,6 +1048,15 @@ impl ActionRegistry {
         let id = self
             .resolve_slash(name)
             .or_else(|| self.resolve_alias(name))?;
+        if id == ActionId::Fast {
+            return Some(match raw_arguments.trim() {
+                "on" => Dispatch::Fast(true),
+                "off" => Dispatch::Fast(false),
+                _ => Dispatch::Refused {
+                    reason: "usage: /fast on|off; fast uses premium token pricing",
+                },
+            });
+        }
         if matches!(
             id,
             ActionId::Mode | ActionId::Plan | ActionId::Yolo | ActionId::Permissions

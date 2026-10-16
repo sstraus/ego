@@ -7,7 +7,7 @@ use support::{Ego, Plan, Stub};
 use ego_ai::catalogue::DiscoveryCacheV2;
 
 const MODEL_HEADER: &str =
-    "SLUG  CONTEXT  OUTPUT  REASONING  METERING  SOURCE  FRESHNESS  AVAILABILITY";
+    "SLUG  CONTEXT  OUTPUT  REASONING  METERING  FAST  SOURCE  FRESHNESS  AVAILABILITY";
 const SOURCE_HEADER: &str = "PROVIDER  SOURCE  FRESHNESS  AVAILABILITY";
 const CACHE_RELATIVE_PATH: &str = "model-catalogue/snapshot-v1.json";
 

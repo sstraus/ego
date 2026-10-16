@@ -14,7 +14,12 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
         ),
         (
             "Model",
-            &[ActionId::Model, ActionId::Thinking, ActionId::Usage],
+            &[
+                ActionId::Model,
+                ActionId::Thinking,
+                ActionId::Fast,
+                ActionId::Usage,
+            ],
         ),
         (
             "Control",
@@ -171,6 +176,7 @@ fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
         Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
         Dispatch::Config(_) => Some("config is unavailable while a turn is running"),
+        Dispatch::Fast(_) => Some("fast tier cannot change while a turn is running"),
         Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
         _ => None,
     }
@@ -248,6 +254,7 @@ fn submit_busy_line(
         | Dispatch::Mcp(_)
         | Dispatch::Setup(_)
         | Dispatch::Config(_)
+        | Dispatch::Fast(_)
         | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
         Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
     }
@@ -404,6 +411,9 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Config(arguments) => {
                     return (Line::HostCommand(HostCommand::Config(arguments)), failed);
+                }
+                Dispatch::Fast(enabled) => {
+                    return (Line::HostCommand(HostCommand::Fast(enabled)), failed);
                 }
                 Dispatch::Hooks => {
                     return (Line::HostCommand(HostCommand::Hooks), failed);
@@ -737,6 +747,11 @@ pub(super) fn apply_surface_effect(
     busy: bool,
 ) -> Option<Line> {
     match effect {
+        SurfaceActionEffect::Fast => {
+            status.lock().expect("surface status lock").notice =
+                Some("usage: /fast on|off".to_owned());
+            repaint_status(status);
+        }
         SurfaceActionEffect::Mode => {
             return choose_policy_mode(editor, phase, status, busy);
         }

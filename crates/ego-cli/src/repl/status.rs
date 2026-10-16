@@ -16,6 +16,7 @@ const SEPARATOR: &str = " · ";
 /// Facts selected by the operator rather than reduced from the event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionFacts {
+    fast: bool,
     model: ModelRef,
     effort: ThinkingLevel,
     mode: Mode,
@@ -28,7 +29,15 @@ impl SelectionFacts {
             model,
             effort,
             mode,
+            fast: false,
         }
+    }
+}
+
+impl SelectionFacts {
+    pub fn with_fast(mut self, fast: bool) -> Self {
+        self.fast = fast;
+        self
     }
 }
 
@@ -106,6 +115,7 @@ impl From<ego_core::config::StatusSegmentName> for StatusSegmentName {
         match name {
             ego_core::config::StatusSegmentName::Model => Self::Model,
             ego_core::config::StatusSegmentName::Effort => Self::Effort,
+            ego_core::config::StatusSegmentName::Fast => Self::Fast,
             ego_core::config::StatusSegmentName::Mode => Self::Mode,
             ego_core::config::StatusSegmentName::Context => Self::Context,
             ego_core::config::StatusSegmentName::Cost => Self::Cost,
@@ -228,6 +238,7 @@ impl GitFactsSource for GitCommand {
 /// One immutable set of facts shared by status and action availability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSnapshot {
+    fast: bool,
     revision: String,
     model: String,
     effort: String,
@@ -282,6 +293,7 @@ impl SurfaceSnapshot {
             CumulativeCost::Known { total } => format!("{} {}", total.amount, total.currency),
         };
         Self {
+            fast: selection.fast,
             revision: session.to_string(),
             model: selection.model.0,
             effort: selection.effort.as_str().to_owned(),
@@ -353,6 +365,11 @@ impl SurfaceSnapshot {
         self
     }
 
+    /// Fast status variable: empty when standard, `fast` when enabled.
+    pub fn fast(&self) -> &str {
+        if self.fast { "fast" } else { "" }
+    }
+
     /// Selected model spelling.
     pub fn model(&self) -> &str {
         &self.model
@@ -419,6 +436,7 @@ impl SurfaceSnapshot {
                 self.model.rsplit('/').next().unwrap_or(&self.model),
             )),
             StatusSegmentName::Effort => Some(SegmentValue::text(&self.effort)),
+            StatusSegmentName::Fast => self.fast.then(|| SegmentValue::text("fast")),
             StatusSegmentName::Mode => Some(SegmentValue::text(&self.mode)),
             StatusSegmentName::Context => Some(SegmentValue::text(self.context_display())),
             // An unpriced or unstarted session has no figure to show; a
@@ -465,6 +483,8 @@ impl SurfaceSnapshot {
 fn visible_cost(state: &SessionState) -> Option<String> {
     let mut equivalent: Option<Money> = None;
     let mut policies = 0;
+    let mut standard = false;
+    let mut fast = false;
     let mut unpriced = matches!(state.cost, CumulativeCost::Unknown(_));
     let mut monetary = false;
     for charge in &state.charges {
@@ -479,7 +499,13 @@ fn visible_cost(state: &SessionState) -> Option<String> {
             } => {
                 policies += 1;
                 match estimate.as_deref() {
-                    Some(SubscriptionEquivalent::V1 { amount, .. }) => {
+                    Some(SubscriptionEquivalent::V1 {
+                        amount,
+                        service_tier,
+                        ..
+                    }) => {
+                        fast |= service_tier == "fast";
+                        standard |= service_tier != "fast";
                         equivalent = match equivalent {
                             Some(total) => match total.checked_add(amount) {
                                 Ok(total) => Some(total),
@@ -501,8 +527,15 @@ fn visible_cost(state: &SessionState) -> Option<String> {
     if policies > 0 {
         let estimate = equivalent.map(|amount| {
             format!(
-                "{} subscription-equivalent (standard API)",
-                money_display(&amount)
+                "{} subscription-equivalent ({} API)",
+                money_display(&amount),
+                if fast && standard {
+                    "mixed standard/fast"
+                } else if fast {
+                    "fast"
+                } else {
+                    "standard"
+                }
             )
         });
         return Some(if unpriced || monetary {
@@ -545,6 +578,7 @@ impl ActionSnapshot {
 /// A configured built-in or extension status segment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StatusSegmentName {
+    Fast,
     Model,
     Effort,
     Mode,
@@ -569,6 +603,7 @@ impl StatusSegmentName {
         match self {
             Self::Model => "model",
             Self::Effort => "effort",
+            Self::Fast => "fast",
             Self::Mode => "mode",
             Self::Context => "context",
             Self::Cost => "cost",
@@ -586,7 +621,7 @@ impl StatusSegmentName {
     fn self_describing(&self) -> bool {
         matches!(
             self,
-            Self::Model | Self::Effort | Self::Mode | Self::Context | Self::Cost
+            Self::Model | Self::Effort | Self::Fast | Self::Mode | Self::Context | Self::Cost
         )
     }
 
@@ -600,7 +635,7 @@ impl StatusSegmentName {
             Self::Cwd => 1,
             Self::Cost => 2,
             Self::Mode => 3,
-            Self::Effort => 4,
+            Self::Effort | Self::Fast => 4,
             // An untrusted `trust` segment outranks every convenience but the
             // context share: regression case rules that the context field is never
             // the one width pressure removes while another optional field

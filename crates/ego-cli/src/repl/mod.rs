@@ -64,6 +64,7 @@ pub enum HostCommand {
     Export(ExportSelection),
     Hooks,
     Config(String),
+    Fast(bool),
     Setup(String),
     Tasks(String),
     Mcp(String),

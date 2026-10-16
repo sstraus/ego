@@ -115,6 +115,9 @@ struct Facts {
     /// operator's `--model` remedy.
     #[serde(default)]
     default_model: BTreeMap<String, String>,
+    /// Per-model execution defaults, separate from supplied capabilities.
+    #[serde(default)]
+    service_tier: BTreeMap<String, ego_ai::service_tier::ServiceTier>,
     /// Keyed by the full `provider/model` slug, because that is what
     /// `--model` says and what `Catalogue::resolve_hosted` looks up. Keying
     /// by the model half alone would make the same name under two providers
@@ -309,6 +312,25 @@ fn override_paths() -> Vec<String> {
 /// rather than have the typo become invisible on runs that do not read it.
 pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, UsageError> {
     supplied_with_defaults(ceilings).map(|(models, _)| models)
+}
+
+/// Resolve per-model execution defaults with the same authority order as facts.
+pub(crate) fn service_tier(slug: &str) -> Result<ego_ai::service_tier::ServiceTier, UsageError> {
+    let system = read(&PathBuf::from(SYSTEM_DIR).join(MODELS_FILE))?;
+    let user = match config::ego_home() {
+        Some(home) => read(&home.join(MODELS_FILE))?,
+        None => Facts::default(),
+    };
+    let tier = merge_layers(
+        builtin().service_tier,
+        system.service_tier,
+        user.service_tier,
+    )
+    .remove(slug)
+    .map(|(_, tier)| tier)
+    .unwrap_or_default();
+    tier.validate(slug).map_err(UsageError)?;
+    Ok(tier)
 }
 
 type SuppliedCatalogue = (Vec<(String, HostedModel)>, BTreeMap<String, ModelSlug>);
@@ -740,6 +762,33 @@ transport = "sse"
         assert!(
             retirement("anthropic/claude-opus-5-5").is_none(),
             "a current model must not be reported as retired"
+        );
+    }
+    #[test]
+    fn fast_contract_catches_unknown_configured_tier() {
+        let facts: Facts = toml::from_str(
+            r#"
+[service_tier]
+"openai/gpt-6.1-sol" = "fast"
+"anthropic/claude-opus-5-5" = "standard"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            facts.service_tier["openai/gpt-6.1-sol"],
+            ego_ai::service_tier::ServiceTier::Fast
+        );
+        assert_eq!(
+            facts.service_tier["anthropic/claude-opus-5-5"],
+            ego_ai::service_tier::ServiceTier::Standard
+        );
+        assert!(
+            toml::from_str::<Facts>(
+                r#"[service_tier]
+"openai/gpt-6.1-sol" = "turbo"
+"#
+            )
+            .is_err()
         );
     }
 }

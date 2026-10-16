@@ -1122,7 +1122,7 @@ model call. They use the existing effect permission path and refuse a command
 from a generation that is no longer admitted. ACP announces the same commands
 and their JSON argument schemas when the admitted runtime opens a prompt.
 
-Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
+Slash commands: `/help /model /thinking /fast on|off /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
 /name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
@@ -1814,6 +1814,25 @@ in this table reaches the credential store — `ego auth status` reports an id, 
 kind and an expiry, never a header.
 
 ### 7.2 `models.toml` — hosted model capabilities, in three layers
+
+Per-model execution tier defaults use a separate map in the system or user model
+file. `standard` is the default; `fast` is refused unless the shared catalogue
+has verified support and pricing for that full slug:
+
+```toml
+[service_tier]
+"openai/gpt-6.1-sol" = "fast"
+"openai-codex/gpt-6.1-sol" = "standard"
+```
+
+`/fast on` and `/fast off` override the current model's tier for this session at
+an idle boundary. The receipt names the token-price premium and any distinct
+included-subscription usage multiplier. The status snapshot exposes `fast`, and
+the default status row includes it when enabled. Token quotes and Codex's
+separate API-equivalent estimate use the selected tier; unavailable prices stay
+unknown, not zero. `ego models` lists verified fast support and its multiplier.
+See `ARCHITECTURE.md` for provider evidence and account limits.
+
 
 Hosted providers do not tell ego what their models can do, so those facts are
 *supplied*: stated by an authority rather than guessed. There are three, and
