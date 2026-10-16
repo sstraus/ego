@@ -109,6 +109,24 @@ mod tests {
         }
     }
 
+    // Catches: A2A startup serves an endpoint after workspace resolution fails.
+    #[tokio::test]
+    async fn missing_workspace_refuses_before_serving_a_local_endpoint() {
+        let owner = tempfile::tempdir().unwrap();
+        let endpoint = owner.path().join("must-not-open.sock");
+        let mut invocation = args(endpoint.to_str().unwrap(), false);
+        invocation.directory = Some(owner.path().join("missing-workspace"));
+        let outcome = serve(&invocation).await;
+        assert!(
+            matches!(outcome, RunTermination::UsageError { .. }),
+            "{outcome:?}"
+        );
+        assert!(
+            !endpoint.exists(),
+            "startup refusal created a listening endpoint"
+        );
+    }
+
     #[test]
     fn a_public_address_is_refused_until_the_operator_asks_for_it() {
         let refusal = admit_endpoint(&args("0.0.0.0:8080", false))
