@@ -471,6 +471,32 @@ mod tests {
         }
     }
 
+    // Catches: stderr becomes indistinguishable from stdout in a collapsed preview.
+    #[test]
+    fn rendered_failed_exec_identifies_stderr() {
+        for width in [80, 120, 200] {
+            for (ok, result, expected, hidden) in [
+                (false, "[stderr]\nrg: missing.txt\n\nprocess exited unsuccessfully with code Some(2)", "stderr: rg: missing.txt", None),
+                (false, "[stdout]\none\ntwo\nthree\nfour\n[stderr]\nrg: missing.txt\n\nprocess exited unsuccessfully with code Some(2)", "stderr: rg: missing.txt", Some("2 more lines")),
+                (true, "[stderr]\nwarning: check input", "stderr: warning: check input", None),
+            ] {
+                let rendered = record(&call("exec", r#"{"argv":["rg","missing.txt"]}"#, ok, result), at(width));
+                let mut terminal = vt100::Parser::new(12, width as u16, 0);
+                terminal.process(rendered.rows.replace('\n', "\r\n").as_bytes());
+                let grid = terminal.screen().contents();
+                assert!(grid.contains(expected), "width={width}: {grid}");
+                assert!(grid.contains(if ok { "exit 0" } else { "exit 2" }), "{grid}");
+                assert!(rendered.rows.lines().count() <= 5);
+                if let Some(hidden) = hidden {
+                    assert!(grid.contains(hidden) && grid.contains("/expand shows all"), "{grid}");
+                }
+                assert!(rendered.detail.contains("[stderr]"));
+                assert!(rendered.detail.contains("rg: missing.txt") || ok);
+                println!("exec width={width} ok={ok} grid={grid:?}");
+            }
+        }
+    }
+
     #[test]
     fn durations_switch_unit_at_a_second_and_at_a_minute() {
         assert_eq!(duration(Duration::from_millis(12)), "12ms");
