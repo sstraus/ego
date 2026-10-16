@@ -102,6 +102,9 @@ Notes:
   (Codex split them and had to add `--include-non-interactive` to re-merge).
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
+  Headless multi-turn streaming uses this same ACP stdio connection, not an
+  `--input-format stream-json` selector. See [the headless transcript](docs/integrations/acp.md#headless-multi-turn-stdio)
+  for framing, attachments, cancellation, and permission answers.
 - An ACP host may supply a stateless HTTP MCP server in `session/new`. HTTPS
   remains the default. Plain HTTP is admitted only for the exact loopback
   hosts `localhost`, an IPv4 loopback literal, or an IPv6 loopback literal;
@@ -123,6 +126,34 @@ Notes:
   `ego resume ID --goal show|set=TEXT|achieve|block=REASON` with optional
   `--output text|json|jsonl`. They do not accept a prompt or `--answer` in the
   same invocation.
+
+### Headless ACP stdio example
+
+Launch `ego acp`. Each line below is a separate host-to-agent JSON-RPC frame,
+not one batch to paste into a pipe. Wait for initialization and session creation;
+replace `SESSION` with the returned `sessionId`. Wait for prompt 3 to settle
+before sending prompt 4. While prompt 4 runs, the host can answer an incoming
+permission request and send cancellation:
+
+```jsonl
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[]}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Summarize this repository"}]}}
+{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Check the summary"}]}}
+{"jsonrpc":"2.0","id":"PERMISSION_ID","result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"SESSION"}}
+```
+
+The permission response is conditional: copy the exact ID (including its JSON
+type) from the agent's `session/request_permission`, and select only an offered
+option. Do not send the placeholder literally. Cancellation is a notification;
+if it cancels the active run, the pending prompt response reports
+`stopReason: "cancelled"` (a run that already finished may return `end_turn`).
+Read stdout continuously for responses, `session/update` notifications, and agent requests.
+Close stdin after pending work settles; EOF ends the connection, not a user
+turn. `ego run --output jsonl` remains one-shot event output, not this input
+protocol. The [integration guide](docs/integrations/acp.md#headless-multi-turn-stdio)
+shows both directions, attachment blocks, and flow control.
 
 ### 2.1 Availability — what ships today
 
