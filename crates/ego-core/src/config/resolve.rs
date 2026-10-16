@@ -402,30 +402,14 @@ fn resolve_inner(
             );
         }
 
-        if let Some(value) = profile
-            .and_then(|p| p.max_output_tokens)
-            .or(sourced.value.max_output_tokens)
-        {
-            max_output_tokens = Some(value);
-        }
-        if let Some(value) = sourced.value.cache
-            && (value != crate::generator::capabilities::CacheRetention::Long
-                || sourced.source == Source::User)
-        {
-            cache = value;
-        }
-        if let Some(m) = profile
-            .and_then(|p| p.model.clone())
-            .or_else(|| sourced.value.model.clone())
-        {
-            model = Some(m);
-        }
-        if let Some(value) = profile
-            .and_then(|profile| profile.thinking)
-            .or(sourced.value.thinking)
-        {
-            thinking = Some(value);
-        }
+        merge_generation_fields(
+            sourced,
+            profile,
+            &mut max_output_tokens,
+            &mut cache,
+            &mut model,
+            &mut thinking,
+        );
         let profile_origin = active_profile_name.map(|name| (name, selected_by));
         if let Some(m) = profile.and_then(|p| p.mode) {
             mode = Some(m);
@@ -695,6 +679,40 @@ fn resolve_inner(
         mcp,
         discarded,
     })
+}
+
+fn merge_generation_fields(
+    sourced: &Sourced<ConfigLayer>,
+    profile: Option<&super::layer::ProfileLayer>,
+    max_output_tokens: &mut Option<std::num::NonZeroU64>,
+    cache: &mut crate::generator::capabilities::CacheRetention,
+    model: &mut Option<ModelRef>,
+    thinking: &mut Option<ThinkingLevel>,
+) {
+    if let Some(value) = profile
+        .and_then(|p| p.max_output_tokens)
+        .or(sourced.value.max_output_tokens)
+    {
+        *max_output_tokens = Some(value);
+    }
+    if let Some(value) = sourced.value.cache
+        && (value != crate::generator::capabilities::CacheRetention::Long
+            || sourced.source == Source::User)
+    {
+        *cache = value;
+    }
+    if let Some(m) = profile
+        .and_then(|p| p.model.clone())
+        .or_else(|| sourced.value.model.clone())
+    {
+        *model = Some(m);
+    }
+    if let Some(value) = profile
+        .and_then(|profile| profile.thinking)
+        .or(sourced.value.thinking)
+    {
+        *thinking = Some(value);
+    }
 }
 
 fn resolve_active_profile(

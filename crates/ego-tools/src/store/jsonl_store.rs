@@ -1763,6 +1763,49 @@ impl JsonlStore {
         }
     }
 
+    fn run_successor(
+        state: &RunLogState,
+        expected_revision: Option<RunRevision>,
+        transaction: &RunTransaction,
+    ) -> Result<std::ops::ControlFlow<RunAppend, RunRevision>, StoreError> {
+        let committed = match expected_revision {
+            None => {
+                if let Some(actual) = state.revision {
+                    return Ok(std::ops::ControlFlow::Break(RunAppend::Conflict { actual }));
+                }
+                let first_admission = matches!(
+                    transaction.command(),
+                    RunCommand::CommandAdmitted {
+                        expected_revision: None,
+                        start: true,
+                        ..
+                    }
+                );
+                if transaction.revision() != RunRevision::new(1) || !first_admission {
+                    return Err(invalid_log(
+                        "durable session adoption requires a revision-one initial admission",
+                    ));
+                }
+                RunRevision::new(1)
+            }
+            Some(expected) => {
+                if state.revision != Some(expected) {
+                    return state.revision.map_or(Err(StoreError::NotFound), |actual| {
+                        Ok(std::ops::ControlFlow::Break(RunAppend::Conflict { actual }))
+                    });
+                }
+                expected.next()
+            }
+        };
+        if transaction.revision() != committed {
+            return Err(invalid_log(
+                "run transaction revision is not the expected successor",
+            ));
+        }
+
+        Ok(std::ops::ControlFlow::Continue(committed))
+    }
+
     fn compare_and_append_run_already_locked(
         &self,
         session: &SessionId,
@@ -1803,39 +1846,10 @@ impl JsonlStore {
             ));
         }
         let state = self.run_log_state_from_lines(lines)?;
-        let committed = match expected_revision {
-            None => {
-                if let Some(actual) = state.revision {
-                    return Ok(RunAppend::Conflict { actual });
-                }
-                let first_admission = matches!(
-                    transaction.command(),
-                    RunCommand::CommandAdmitted {
-                        expected_revision: None,
-                        start: true,
-                        ..
-                    }
-                );
-                if transaction.revision() != RunRevision::new(1) || !first_admission {
-                    return Err(invalid_log(
-                        "durable session adoption requires a revision-one initial admission",
-                    ));
-                }
-                RunRevision::new(1)
-            }
-            Some(expected) => {
-                if state.revision != Some(expected) {
-                    return state.revision.map_or(Err(StoreError::NotFound), |actual| {
-                        Ok(RunAppend::Conflict { actual })
-                    });
-                }
-                expected.next()
-            }
-        };
-        if transaction.revision() != committed {
-            return Err(invalid_log(
-                "run transaction revision is not the expected successor",
-            ));
+        if let std::ops::ControlFlow::Break(outcome) =
+            Self::run_successor(&state, expected_revision, &transaction)?
+        {
+            return Ok(outcome);
         }
 
         let mut record_seq = state.last_position;
