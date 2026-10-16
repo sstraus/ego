@@ -673,6 +673,20 @@ transport = "sse"
         assert!(rows.contains_key("openai-codex/gpt-6-sol"));
     }
 
+    // Catches: subscription Sol rows lose image support while API rows advertise it.
+    #[test]
+    fn codex_sol_image_input_is_supported() {
+        let rows = builtin().model;
+        for model in ["gpt-6-sol", "gpt-6.1-sol"] {
+            let caps = &rows[&format!("openai-codex/{model}")].capabilities;
+            assert!(
+                matches!(caps.image_input, ImageInputSupport::Supported(_)),
+                "{model}: {:?}",
+                caps.image_input
+            );
+        }
+    }
+
     #[test]
     fn superseded_builtin_slugs_remain_actionable() {
         for (old, replacement) in [

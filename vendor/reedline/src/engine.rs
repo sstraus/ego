@@ -919,7 +919,13 @@ impl Reedline {
 
         self.bracketed_paste.exit();
         self.kitty_protocol.exit();
-        terminal::disable_raw_mode()?;
+        // Host commands and external breaks suspend this editor; they do not
+        // hand the tty to another program. Keep keys raw while the host works,
+        // or Ctrl+V becomes VLNEXT and the next Enter is echoed as literal ^M.
+        // A completed read and Drop still restore the original terminal mode.
+        if self.suspended_state.is_none() {
+            terminal::disable_raw_mode()?;
+        }
         result
     }
 

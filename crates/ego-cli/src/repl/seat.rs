@@ -1392,8 +1392,7 @@ impl Seat {
         let SeatKind::Live(live) = &self.kind else {
             return;
         };
-        live.status.lock().expect("surface status lock").notice = Some(notice);
-        repaint_status(&live.status);
+        commit_to_transcript(&live.status, &notice);
     }
 
     pub(crate) fn set_image_chips(&self, chips: Vec<String>) {
@@ -1641,6 +1640,10 @@ impl crate::run::Reads for Seat {
 
 impl crate::run::InteractiveSeat for Seat {
     fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
+        #[cfg(test)]
+        if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
+            return Ok(crate::run::PasteboardKind::Image);
+        }
         super::clipboard::kind()
     }
 
@@ -2072,9 +2075,9 @@ use permission::{
 };
 use picker_surface::run_model_picker;
 use question::{
-    PermissionEditOutcome, Question, Waiting, answer_control, edit_permission_parameters,
-    enter_modal, leave_modal, next_selector_key, parse_trust, question_selector_prompt,
-    queued_selector_line,
+    PermissionEditOutcome, Question, Waiting, answer_control, commit_to_transcript,
+    edit_permission_parameters, enter_modal, leave_modal, next_selector_key, parse_trust,
+    question_selector_prompt, queued_selector_line,
 };
 #[cfg(test)]
 use question::{PermissionWord, parse_permission};

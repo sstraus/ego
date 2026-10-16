@@ -1,0 +1,5 @@
+{
+  "type": "input_image",
+  "image_url": "data:image/png;base64,abc",
+  "detail": "auto"
+}
