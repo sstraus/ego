@@ -904,7 +904,11 @@ fn modal_line(editor: &mut Reedline, surface: &mut ModalSurface<'_>, prompt: &dy
     #[cfg(test)]
     if let Some(line) = TERMINAL_SCRIPT.with_borrow_mut(|script| {
         script.as_mut().map(|script| {
-            script.prompts.push(prompt.render_prompt_left().to_string());
+            script.prompts.push(
+                prompt
+                    .render_prompt_indicator(PromptEditMode::Emacs)
+                    .to_string(),
+            );
             script.lines.pop_front().expect("scripted terminal input")
         })
     }) {
