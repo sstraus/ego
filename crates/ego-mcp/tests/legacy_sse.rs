@@ -17,10 +17,11 @@ fn fixture() -> Value {
 }
 
 type Seen = (String, String, Value);
+type EventSender = mpsc::UnboundedSender<Result<Vec<u8>, ego_core::permit::TransportError>>;
 struct Replay {
     fixture: Value,
     seen: Mutex<Vec<Seen>>,
-    events: Mutex<Option<mpsc::UnboundedSender<Result<Vec<u8>, ego_core::permit::TransportError>>>>,
+    events: Mutex<Option<EventSender>>,
     settlements: Mutex<Vec<McpHttpEnd>>,
     endpoint: Option<String>,
     stall_endpoint: bool,
