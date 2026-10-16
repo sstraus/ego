@@ -178,21 +178,10 @@ fn resolve_answer(
     decision
 }
 
-/// Redacted executable declarations and the programs they run. Kept separate
-/// from the full inventory shown to a first-time reviewer.
-pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
-    let Ok(root) = fs::canonicalize(root) else {
-        tracing::warn!(path = %root.display(), "the workspace executable surface root could not be resolved");
-        return ExecutableSurface::default();
-    };
-    let root = root.as_path();
-    let mut surface = ExecutableSurface::default();
-    let configs = project_configs(root);
-    let programs: Vec<_> = configs
-        .iter()
-        .flat_map(|(_, config)| commands_in(config))
-        .filter_map(|command| inside(root, &command))
-        .collect();
+fn collect_executable_declarations(
+    surface: &mut ExecutableSurface,
+    configs: Vec<(&str, toml::Table)>,
+) {
     for (relative, config) in configs {
         if let Some(servers) = config
             .get("mcp")
@@ -278,6 +267,24 @@ pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
             }
         }
     }
+}
+
+/// Redacted executable declarations and the programs they run. Kept separate
+/// from the full inventory shown to a first-time reviewer.
+pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
+    let Ok(root) = fs::canonicalize(root) else {
+        tracing::warn!(path = %root.display(), "the workspace executable surface root could not be resolved");
+        return ExecutableSurface::default();
+    };
+    let root = root.as_path();
+    let mut surface = ExecutableSurface::default();
+    let configs = project_configs(root);
+    let programs: Vec<_> = configs
+        .iter()
+        .flat_map(|(_, config)| commands_in(config))
+        .filter_map(|command| inside(root, &command))
+        .collect();
+    collect_executable_declarations(&mut surface, configs);
     for path in programs {
         let Ok(link_metadata) = fs::symlink_metadata(&path) else {
             continue;
