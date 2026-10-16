@@ -22,8 +22,9 @@ Reasoning selection refuses unsupported values rather than silently substituting
 
 Some actions require idle state or a registered owner; a disabled action names
 its reason. Exact registered slash commands execute with one Enter. Enter on a
-selected slash completion inserts and submits that command. Tab does not submit. Slash text in bracketed paste remains ordinary
-prompt text; it does not execute a pasted control command.
+selected slash completion inserts and submits that command. Tab does not submit.
+Slash text in bracketed paste remains ordinary prompt text; it does not execute
+a pasted control command.
 
 `/clear` clears composer/menu state, not durable history. `/expand` pages the
 retained last-tool output. `/refresh` applies current instructions through a
@@ -36,7 +37,9 @@ ordinary queued prompts are distinct. Up on an empty busy composer withdraws
 the last queued text for editing. Enter queues the edited text again. Withdrawal
 is durable, so resume does not deliver the old text. Local inspection and model-picker actions
 can remain responsive during streaming; model changes take effect at a generation
-boundary, never by mutating an already-sent request.
+boundary, never by mutating an already-sent request. `/help` answers during a turn.
+Local commands that need the coordinator show a persistent pending receipt and
+run once after the current turn settles, including when Escape interrupts it.
 
 Escape requests interruption while busy; Ctrl+C is the interrupt path, and
 Ctrl+D exits from the idle driver. Pending permission/question selectors own

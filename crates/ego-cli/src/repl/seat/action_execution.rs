@@ -811,6 +811,20 @@ pub(super) fn apply_surface_effect(
         SurfaceActionEffect::Expand => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Expand)));
         }
+        SurfaceActionEffect::Help if busy => {
+            let help = {
+                let current = status.lock().expect("surface status lock");
+                render_action_help(
+                    &current
+                        .actions
+                        .as_ref()
+                        .expect("installed actions")
+                        .registry,
+                    current.width,
+                )
+            };
+            commit_to_transcript(status, &help);
+        }
         SurfaceActionEffect::Help => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Help)));
         }

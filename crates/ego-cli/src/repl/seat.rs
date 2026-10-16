@@ -2129,6 +2129,35 @@ fn own_terminal(
                     line
                 };
                 let ended = matches!(line, Line::Ended);
+                if phase.get() == EditPhase::Busy
+                    && let Line::HostCommand(command) = &line
+                {
+                    let label = match command {
+                        HostCommand::Action(action) => {
+                            let current = status.lock().expect("surface status lock");
+                            format!(
+                                "/{}",
+                                current
+                                    .actions
+                                    .as_ref()
+                                    .expect("installed actions")
+                                    .registry
+                                    .help(*action)
+                                    .name()
+                            )
+                        }
+                        HostCommand::Tasks(_) => "/tasks".to_owned(),
+                        HostCommand::Config(_) => "/config".to_owned(),
+                        HostCommand::Fork(_) => "/fork".to_owned(),
+                        HostCommand::Resume(_) => "/resume".to_owned(),
+                        HostCommand::History(_) => "/history".to_owned(),
+                        _ => "local command".to_owned(),
+                    };
+                    commit_to_transcript(
+                        &status,
+                        &format!("{label} pending until the current turn ends"),
+                    );
+                }
                 if input.send(line).is_err() || (ended && failed) {
                     break;
                 }
