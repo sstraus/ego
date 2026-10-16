@@ -11417,7 +11417,8 @@ mod turn {
                 ),
                 model_for(&fx, &generator, &mut gate),
                 tools,
-            );
+            )
+            .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
             block_on(turn.run_admitted_skill(operation)).unwrap();
             let state = turn.state();
             let call = state
