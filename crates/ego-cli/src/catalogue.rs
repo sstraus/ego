@@ -59,8 +59,7 @@ pub fn resolve(
     root: &Path,
     id: Option<SessionId>,
 ) -> Result<SessionId, UsageError> {
-    let metas = store
-        .list()
+    let metas = readable_sessions(store, &crate::output::Stderr)
         .map_err(|err| UsageError(format!("the session store could not be listed: {err}")))?;
 
     let Some(wanted) = id else {
@@ -254,7 +253,7 @@ pub fn listing(
     root: &Path,
     all: bool,
 ) -> Result<Vec<SessionMeta>, StoreError> {
-    let metas = store.list()?;
+    let metas = readable_sessions(store, &crate::output::Stderr)?;
     Ok(if all {
         let mut every = metas;
         by_recency(&mut every);
@@ -267,14 +266,163 @@ pub fn listing(
 /// Interactive rows use current durable prose rather than a stale manifest cache.
 pub(crate) fn saved_sessions(
     store: &ego_tools::store::JsonlStore,
+    diagnostics: &dyn crate::output::Diagnostics,
 ) -> Result<Vec<SessionMeta>, StoreError> {
-    use ego_core::session_lifecycle::SessionLifecycleStore;
-    let mut metas = Vec::new();
-    for listed in store.list()? {
-        if let Some(meta) = store.lifecycle_meta(listed.id)? {
-            metas.push(meta);
-        }
-    }
+    let mut metas = readable_sessions(store, diagnostics)?;
     by_recency(&mut metas);
     Ok(metas)
+}
+
+fn readable_sessions(
+    store: &dyn SessionStore,
+    diagnostics: &dyn crate::output::Diagnostics,
+) -> Result<Vec<SessionMeta>, StoreError> {
+    store.list_readable(&mut |id, error| {
+        diagnostics.note(&format!("session {id} is unreadable: {error}"));
+    })
+}
+
+#[cfg(test)]
+mod unreadable_tests {
+    use super::*;
+    use ego_core::event::id::Seq;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::codec::encode_record;
+    use ego_tools::store::{JsonlStore, OsIo};
+    use serde_json::json;
+
+    #[derive(Default)]
+    struct Notes(std::sync::Mutex<Vec<String>>);
+
+    impl crate::output::Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+
+    fn append_payload(root: &Path, id: SessionId, payload: serde_json::Value) {
+        use std::io::Write;
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(id.to_string()).join("events.jsonl"))
+            .unwrap();
+        let mut position = Seq::ZERO;
+        let mut record = encode_record(position.next(), &payload).unwrap();
+        record.push(b'\n');
+        log.write_all(&record).unwrap();
+    }
+
+    #[test]
+    fn unreadable_catalogue_entry_does_not_hide_readable_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let readable = SessionId::new();
+        let unreadable = SessionId::new();
+        for id in [readable, unreadable] {
+            store
+                .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
+                .unwrap();
+        }
+        append_payload(
+            dir.path(),
+            unreadable,
+            json!({"kind": "future_writer_entry"}),
+        );
+        let notes = Notes::default();
+        let metas = saved_sessions(&store, &notes)
+            .expect("one unreadable log must not abort the catalogue");
+        assert_eq!(
+            metas.iter().map(|meta| meta.id).collect::<Vec<_>>(),
+            vec![readable]
+        );
+        let notes = notes.0.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains(&unreadable.to_string()));
+        assert!(notes[0].contains("unknown payload"));
+    }
+
+    #[test]
+    fn unreadable_real_record_shape_names_the_session_instead_of_an_anonymous_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let id: SessionId = "00000000-0000-7000-8000-000000020001".parse().unwrap();
+        store
+            .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
+            .unwrap();
+        // Structure-only fixture of the copied store's seq 1, not session content.
+        // Nulls deliberately do not invent replacement values for private fields.
+        append_payload(
+            dir.path(),
+            id,
+            json!({"kind": "evidence", "evidence": {
+                "kind": "run_context", "ceilings": null, "config": null,
+                "config_digest": null, "ego_version": null, "execution": null,
+                "instructions": null, "invocation": null, "mcp": null,
+                "origin": null, "policy_digest": null, "run_id": null,
+                "session": null, "version": null
+            }}),
+        );
+        let reason = store.lifecycle_meta(id).unwrap_err().to_string();
+        assert!(
+            reason.contains(&id.to_string()),
+            "unreadable session must be named: {reason}"
+        );
+    }
+
+    #[test]
+    fn unreadable_logs_without_manifests_are_still_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let id = SessionId::new();
+        store
+            .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
+            .unwrap();
+        append_payload(dir.path(), id, json!({"kind": "future_writer_entry"}));
+        std::fs::remove_file(dir.path().join(id.to_string()).join("manifest.json")).unwrap();
+        let notes = Notes::default();
+        assert!(saved_sessions(&store, &notes).unwrap().is_empty());
+        let notes = notes.0.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains(&id.to_string()));
+    }
+
+    #[test]
+    fn missing_torn_and_unsupported_logs_each_get_a_diagnostic_even_when_none_are_readable() {
+        use ego_core::store::codec::{Header, encode_header};
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let ids = [SessionId::new(), SessionId::new(), SessionId::new()];
+        for id in ids {
+            store
+                .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
+                .unwrap();
+        }
+        std::fs::remove_file(dir.path().join(ids[0].to_string()).join("events.jsonl")).unwrap();
+        let torn = dir.path().join(ids[1].to_string()).join("events.jsonl");
+        let mut bytes = std::fs::read(&torn).unwrap();
+        bytes.extend_from_slice(b"{\"torn\":");
+        std::fs::write(torn, bytes).unwrap();
+        let mut header = Header::new(ids[2], Timestamp::from_millis(1), "/workspace".into());
+        header.v += 1;
+        let mut bytes = encode_header(&header);
+        bytes.push(b'\n');
+        std::fs::write(
+            dir.path().join(ids[2].to_string()).join("events.jsonl"),
+            bytes,
+        )
+        .unwrap();
+        let notes = Notes::default();
+        assert!(saved_sessions(&store, &notes).unwrap().is_empty());
+        let notes = notes.0.lock().unwrap();
+        assert_eq!(notes.len(), ids.len());
+        for id in ids {
+            assert_eq!(
+                notes
+                    .iter()
+                    .filter(|note| note.contains(&id.to_string()))
+                    .count(),
+                1
+            );
+        }
+    }
 }
