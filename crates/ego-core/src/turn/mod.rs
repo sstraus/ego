@@ -3525,52 +3525,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Option<crate::event::id::QueuedPromptId>,
         )],
     ) -> Result<DriveOutcome, StoreError> {
-        for (index, (text, images, queued_prompt)) in prompts.iter().enumerate() {
-            let item = ItemId::new();
-            let admitted = self.journal.append(
-                turn,
-                Some(item),
-                None,
-                EventKind::UserPrompt {
-                    text: text.clone(),
-                    images: images.clone(),
-                    queued_prompt: *queued_prompt,
-                },
-            )?;
-            if index == 0 && self.hook_binding.is_some() {
-                let active = match self.policy_source.current() {
-                    Ok(policy) => policy,
-                    Err(error) => {
-                        tracing::warn!(%error, "the active hook policy could not be read");
-                        let Generated::Ended(exit) =
-                            self.refuse(turn, error, ExitReason::Internal)?
-                        else {
-                            unreachable!("a refusal always ends the generation")
-                        };
-                        return Ok(DriveOutcome::Ended(exit, None));
-                    }
-                };
-                if let Err(error) = self.bind_hook_policy(active) {
-                    tracing::warn!(%error, "the active hook policy could not be bound");
-                    let Generated::Ended(exit) = self.refuse(turn, error, ExitReason::Internal)?
-                    else {
-                        unreachable!("a refusal always ends the generation")
-                    };
-                    return Ok(DriveOutcome::Ended(exit, None));
-                }
-            }
-            if !self
-                .dispatch_hook(
-                    HookCausality::item(item, turn, admitted),
-                    HookEvent::turn(HookLifecycle::UserPromptSubmit, HookSubject::Item { item }),
-                )
-                .await
-            {
-                return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
-            }
-            if queued_prompt.is_some() {
-                self.refresh_control_status();
-            }
+        if let Some(outcome) = self.admit_turn_prompts(turn, prompts).await? {
+            return Ok(outcome);
         }
 
         loop {
@@ -3744,150 +3700,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 continue;
             }
 
-            let mut pending = pending;
-            let task_results = self.run_tasks(turn, &policy_snapshot, &mut pending).await?;
-            for index in 0..pending.len() {
-                if task_results.contains(&pending[index].item) {
-                    continue;
-                }
-                // A batch is not one effect, and this is the only place that
-                // says so. A control that arrived while the generation was
-                // streaming reaches the loop with the calls already logged
-                // and none of them run; asking here — before `run_tool` and
-                // not after it — is what keeps the first call in the batch
-                // from being the one effect nobody could stop.
-                if let Some(reason) = self.must_stop() {
-                    self.close_unstarted_siblings(turn, &pending[index..])?;
-                    return Ok(DriveOutcome::Ended(reason, None));
-                }
-                // `CLI.md` §4.4: a run with nobody to ask does not answer a
-                // permission question on the model's behalf. The denial is
-                // still logged against the call — the model's audience
-                // argument holds for the *record*, it just no longer decides
-                // whether the run continues.
-                //
-                // Both endings below are exit 3 and they are not the same
-                // fact. "Denied by r1:…" tells an operator which line of their
-                // config to go and look at; "no rule covers write /ws/x" tells
-                // them there is no line to look at and they have to write one.
-                // Collapsing them would leave the commonest case — a run that
-                // needed an answer — reading like a refusal somebody
-                // configured on purpose. `DeniedBy` is what carries that
-                // difference past the prose and into §4.1's object.
-                let outcome = self
-                    .run_tool(policy.as_ref(), &policy_snapshot, turn, &mut pending[index])
-                    .await?;
-                let call = &pending[index];
-                self.journal.append(
-                    turn,
-                    Some(call.item),
-                    Some(call.started),
-                    EventKind::ToolCallMeasured {
-                        timing: call.timing,
-                    },
-                )?;
-                let denial = match outcome {
-                    ToolOutcome::Answered { ok, mut result } => {
-                        let call = &pending[index];
-                        self.tools
-                            .finish_result(&mut result, self.invocation, call.item);
-                        self.journal.append(
-                            turn,
-                            Some(call.item),
-                            Some(call.started),
-                            EventKind::ToolCallCompleted { ok, result },
-                        )?;
-                        continue;
-                    }
-                    ToolOutcome::Executed {
-                        ok,
-                        mut result,
-                        selector,
-                    } => {
-                        let call = &pending[index];
-                        self.tools
-                            .finish_result(&mut result, self.invocation, call.item);
-                        self.journal.append(
-                            turn,
-                            Some(call.item),
-                            Some(call.started),
-                            EventKind::ToolCallCompleted { ok, result },
-                        )?;
-                        let lifecycle = if ok {
-                            HookLifecycle::PostToolUse
-                        } else {
-                            HookLifecycle::PostToolUseFailure
-                        };
-                        let _ = self
-                            .dispatch_hook(
-                                HookCausality::item(call.item, turn, call.started),
-                                HookEvent::tool(
-                                    lifecycle,
-                                    HookSubject::Item { item: call.item },
-                                    selector,
-                                ),
-                            )
-                            .await;
-                        continue;
-                    }
-                    ToolOutcome::Recorded => {
-                        continue;
-                    }
-                    ToolOutcome::QuestionRequired => {
-                        self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                        return Ok(DriveOutcome::QuestionRequired);
-                    }
-                    // A boundary refusal of a read is the model's to learn
-                    // from, not the run's to end on: the denial text is the
-                    // tool result and the batch carries on.
-                    ToolOutcome::Refused { denial } if denial.is_unreachable_read() => {
-                        let call = &pending[index];
-                        self.journal.append(
-                            turn,
-                            Some(call.item),
-                            Some(call.started),
-                            EventKind::ToolCallCompleted {
-                                ok: false,
-                                result: self
-                                    .tools
-                                    .masked_result(ToolResult::builtin(denial.to_string())),
-                            },
-                        )?;
-                        continue;
-                    }
-                    ToolOutcome::Refused { denial } => Denial {
-                        action: denial.to_string(),
-                        // Never assembled here: `PolicyDenied::authority` is
-                        // the single definition of who said so, and a second
-                        // caller deciding it from the arms would be a second
-                        // chance to attribute a denial to the wrong party.
-                        by: DeniedBy::Decided(denial.authority()),
-                    },
-                    ToolOutcome::Unanswerable { pending } => Denial {
-                        action: pending.request().to_string(),
-                        by: DeniedBy::Nobody,
-                    },
-                    ToolOutcome::Ended(reason) => {
-                        self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                        return Ok(DriveOutcome::Ended(reason, None));
-                    }
-                };
-                let call = &pending[index];
-                self.journal.append(
-                    turn,
-                    Some(call.item),
-                    Some(call.started),
-                    EventKind::ToolCallCompleted {
-                        ok: false,
-                        result: self
-                            .tools
-                            .masked_result(ToolResult::builtin(denial.action.clone())),
-                    },
-                )?;
-                return Ok(DriveOutcome::Ended(
-                    ExitReason::PermissionRequired,
-                    Some(denial),
-                ));
+            if let Some(outcome) = self
+                .run_pending_batch(turn, policy.as_ref(), &policy_snapshot, pending)
+                .await?
+            {
+                return Ok(outcome);
             }
             // The counterpart of the check at the head of the batch, for the
             // last call in it: a control that arrived while that call ran has
@@ -3910,6 +3727,221 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
             self.deliver_pending(turn)?;
         }
+    }
+
+    async fn run_pending_batch(
+        &mut self,
+        turn: TurnId,
+        policy: &PolicyEngine,
+        policy_snapshot: &Arc<GenerationPolicySnapshot>,
+        pending: Vec<PendingCall>,
+    ) -> Result<Option<DriveOutcome>, StoreError> {
+        let mut pending = pending;
+        let task_results = self.run_tasks(turn, policy_snapshot, &mut pending).await?;
+        for index in 0..pending.len() {
+            if task_results.contains(&pending[index].item) {
+                continue;
+            }
+            // A batch is not one effect, and this is the only place that
+            // says so. A control that arrived while the generation was
+            // streaming reaches the loop with the calls already logged
+            // and none of them run; asking here — before `run_tool` and
+            // not after it — is what keeps the first call in the batch
+            // from being the one effect nobody could stop.
+            if let Some(reason) = self.must_stop() {
+                self.close_unstarted_siblings(turn, &pending[index..])?;
+                return Ok(Some(DriveOutcome::Ended(reason, None)));
+            }
+            // `CLI.md` §4.4: a run with nobody to ask does not answer a
+            // permission question on the model's behalf. The denial is
+            // still logged against the call — the model's audience
+            // argument holds for the *record*, it just no longer decides
+            // whether the run continues.
+            //
+            // Both endings below are exit 3 and they are not the same
+            // fact. "Denied by r1:…" tells an operator which line of their
+            // config to go and look at; "no rule covers write /ws/x" tells
+            // them there is no line to look at and they have to write one.
+            // Collapsing them would leave the commonest case — a run that
+            // needed an answer — reading like a refusal somebody
+            // configured on purpose. `DeniedBy` is what carries that
+            // difference past the prose and into §4.1's object.
+            let outcome = self
+                .run_tool(policy, policy_snapshot, turn, &mut pending[index])
+                .await?;
+            let call = &pending[index];
+            self.journal.append(
+                turn,
+                Some(call.item),
+                Some(call.started),
+                EventKind::ToolCallMeasured {
+                    timing: call.timing,
+                },
+            )?;
+            let denial = match outcome {
+                ToolOutcome::Answered { ok, mut result } => {
+                    let call = &pending[index];
+                    self.tools
+                        .finish_result(&mut result, self.invocation, call.item);
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted { ok, result },
+                    )?;
+                    continue;
+                }
+                ToolOutcome::Executed {
+                    ok,
+                    mut result,
+                    selector,
+                } => {
+                    let call = &pending[index];
+                    self.tools
+                        .finish_result(&mut result, self.invocation, call.item);
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted { ok, result },
+                    )?;
+                    let lifecycle = if ok {
+                        HookLifecycle::PostToolUse
+                    } else {
+                        HookLifecycle::PostToolUseFailure
+                    };
+                    let _ = self
+                        .dispatch_hook(
+                            HookCausality::item(call.item, turn, call.started),
+                            HookEvent::tool(
+                                lifecycle,
+                                HookSubject::Item { item: call.item },
+                                selector,
+                            ),
+                        )
+                        .await;
+                    continue;
+                }
+                ToolOutcome::Recorded => {
+                    continue;
+                }
+                ToolOutcome::QuestionRequired => {
+                    self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                    return Ok(Some(DriveOutcome::QuestionRequired));
+                }
+                // A boundary refusal of a read is the model's to learn
+                // from, not the run's to end on: the denial text is the
+                // tool result and the batch carries on.
+                ToolOutcome::Refused { denial } if denial.is_unreachable_read() => {
+                    let call = &pending[index];
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted {
+                            ok: false,
+                            result: self
+                                .tools
+                                .masked_result(ToolResult::builtin(denial.to_string())),
+                        },
+                    )?;
+                    continue;
+                }
+                ToolOutcome::Refused { denial } => Denial {
+                    action: denial.to_string(),
+                    // Never assembled here: `PolicyDenied::authority` is
+                    // the single definition of who said so, and a second
+                    // caller deciding it from the arms would be a second
+                    // chance to attribute a denial to the wrong party.
+                    by: DeniedBy::Decided(denial.authority()),
+                },
+                ToolOutcome::Unanswerable { pending } => Denial {
+                    action: pending.request().to_string(),
+                    by: DeniedBy::Nobody,
+                },
+                ToolOutcome::Ended(reason) => {
+                    self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                    return Ok(Some(DriveOutcome::Ended(reason, None)));
+                }
+            };
+            let call = &pending[index];
+            self.journal.append(
+                turn,
+                Some(call.item),
+                Some(call.started),
+                EventKind::ToolCallCompleted {
+                    ok: false,
+                    result: self
+                        .tools
+                        .masked_result(ToolResult::builtin(denial.action.clone())),
+                },
+            )?;
+            return Ok(Some(DriveOutcome::Ended(
+                ExitReason::PermissionRequired,
+                Some(denial),
+            )));
+        }
+        Ok(None)
+    }
+
+    async fn admit_turn_prompts(
+        &mut self,
+        turn: TurnId,
+        prompts: &[(
+            String,
+            Vec<crate::generator::types::ImageRef>,
+            Option<QueuedPromptId>,
+        )],
+    ) -> Result<Option<DriveOutcome>, StoreError> {
+        for (index, (text, images, queued_prompt)) in prompts.iter().enumerate() {
+            let item = ItemId::new();
+            let admitted = self.journal.append(
+                turn,
+                Some(item),
+                None,
+                EventKind::UserPrompt {
+                    text: text.clone(),
+                    images: images.clone(),
+                    queued_prompt: *queued_prompt,
+                },
+            )?;
+            if index == 0 && self.hook_binding.is_some() {
+                let active = match self.policy_source.current() {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        tracing::warn!(%error, "the active hook policy could not be read");
+                        let Generated::Ended(exit) =
+                            self.refuse(turn, error, ExitReason::Internal)?
+                        else {
+                            unreachable!("a refusal always ends the generation")
+                        };
+                        return Ok(Some(DriveOutcome::Ended(exit, None)));
+                    }
+                };
+                if let Err(error) = self.bind_hook_policy(active) {
+                    tracing::warn!(%error, "the active hook policy could not be bound");
+                    let Generated::Ended(exit) = self.refuse(turn, error, ExitReason::Internal)?
+                    else {
+                        unreachable!("a refusal always ends the generation")
+                    };
+                    return Ok(Some(DriveOutcome::Ended(exit, None)));
+                }
+            }
+            if !self
+                .dispatch_hook(
+                    HookCausality::item(item, turn, admitted),
+                    HookEvent::turn(HookLifecycle::UserPromptSubmit, HookSubject::Item { item }),
+                )
+                .await
+            {
+                return Ok(Some(DriveOutcome::Ended(ExitReason::Completed, None)));
+            }
+            if queued_prompt.is_some() {
+                self.refresh_control_status();
+            }
+        }
+
+        Ok(None)
     }
 
     async fn dispatch_hook(&self, causality: HookCausality, event: HookEvent) -> bool {
@@ -4154,11 +4186,20 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // not have.
         let conversation = Self::with_mcp_instructions(conversation, catalogue.instructions());
 
+        self.generate_candidates(turn, conversation, capture, catalogue)
+            .await
+    }
+
+    async fn generate_candidates(
+        &mut self,
+        turn: TurnId,
+        conversation: Conversation,
+        capture: GenerationPolicyCapture,
+        catalogue: GenerationToolCatalogue,
+    ) -> Result<Generated, StoreError> {
         let policy_snapshot = capture.snapshot();
         let descriptors = catalogue.descriptors();
         let mcp_servers = catalogue.mcp_servers();
-
-        let source = Arc::clone(&self.source);
         let first = AttemptRef::first(GenerationId::new());
         let generation_id = first.generation();
         let mut next_attempt = first;
@@ -4195,31 +4236,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         |model| self.main_model_request().with_model(model.clone()),
                     ),
                 };
-                let resolution_deadline = self
-                    .recovery_deadline
-                    .map(|deadline| self.retry_pause.deadline(deadline));
-                let resolve = async {
-                    match resolution_deadline {
-                        Some(deadline) => {
-                            match select(source.resolve(model_request), deadline).await {
-                                Either::Left((profile, _)) => Some(profile),
-                                Either::Right(_) => None,
-                            }
-                        }
-                        None => Some(source.resolve(model_request).await),
-                    }
-                };
-                let profile = match await_controlled(
-                    &self.journal,
-                    &self.cancel,
-                    &mut self.control,
-                    turn,
-                    resolve,
-                    InterruptDisposition::Return,
-                    None,
-                )
-                .await
-                {
+                let profile = match self.resolve_candidate_profile(turn, model_request).await {
                     Controlled::Completed(Some(Ok(profile))) => {
                         if candidate_index == 0 && primary_model.is_none() {
                             primary_model = Some(profile.identity.clone());
@@ -4320,49 +4337,20 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     max_output_tokens: profile.output_ceiling(),
                     parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
                 };
-                let mut gaps = if candidate_index == 0 {
-                    profile.capabilities.request_gaps(&request)
-                } else {
-                    primary_capabilities
-                        .as_ref()
-                        .unwrap_or(&profile.capabilities)
-                        .fallback_gaps(&profile.capabilities, &request)
-                };
-
-                if let Some(candidate) = candidate.as_ref()
-                    && !gaps.is_empty()
-                    && gaps.iter().all(reasoning_carryover_gap)
-                {
-                    let (sanitized, dropped_blocks, dialects) =
-                        drop_reasoning(candidate_conversation);
-                    candidate_conversation = sanitized;
-                    self.journal.append(
-                        turn,
-                        None,
-                        None,
-                        EventKind::FallbackDecision {
-                            candidate: candidate.clone(),
-                            decision: FallbackDecision::ReasoningDropped {
-                                dropped_blocks,
-                                dialects,
-                            },
-                        },
-                    )?;
-                    let (messages, stable_messages) = self.with_host_context(
-                        turn,
-                        candidate_conversation.clone(),
-                        self.tools.context_notes(),
-                        identity.as_deref(),
-                    )?;
-                    request.messages = messages;
-                    if let Some(cache) = request.cache.as_mut() {
-                        cache.stable_messages = stable_messages;
-                    }
-                    gaps = primary_capabilities
-                        .as_ref()
-                        .unwrap_or(&profile.capabilities)
-                        .fallback_gaps(&profile.capabilities, &request);
-                }
+                let (repaired, gaps) = self.candidate_request_gaps(
+                    turn,
+                    candidate.as_ref(),
+                    candidate_conversation,
+                    &mut request,
+                    (
+                        primary_capabilities
+                            .as_ref()
+                            .unwrap_or(&profile.capabilities),
+                        &profile.capabilities,
+                    ),
+                    identity.as_deref(),
+                )?;
+                candidate_conversation = repaired;
 
                 if !gaps.is_empty() {
                     tracing::warn!(?gaps, "the candidate does not accept this request");
@@ -4453,36 +4441,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 ))?;
 
                 let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-                let reservation = match self.gate.reserve(
-                    &profile.metering,
-                    quote.as_ref(),
+                let attempt = match self.reserve_generation_attempt(
+                    turn,
+                    &profile,
                     &request,
-                    &profile.capabilities,
-                ) {
-                    Ok(reservation) => reservation,
-                    Err(denied) => {
-                        tracing::warn!(%denied, "the budget gate refused a generation attempt");
-                        let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
-                            ExitReason::Budget
-                        } else {
-                            ExitReason::Internal
-                        };
-                        return self.refuse(turn, denied.to_string(), reason);
-                    }
-                };
-                let attempt = match GenerationAttempt::from_attempt(
                     next_attempt,
-                    reservation,
-                    &profile.metering,
-                    quote.as_ref(),
-                    &request,
-                    &profile.capabilities,
-                ) {
+                )? {
                     Ok(attempt) => attempt,
-                    Err(denied) => {
-                        tracing::error!(%denied, "a reservation did not authorise its attempt");
-                        return self.refuse(turn, denied.to_string(), ExitReason::Internal);
-                    }
+                    Err(ended) => return Ok(ended),
                 };
                 let reference = attempt.attempt();
                 next_attempt = reference.retry();
@@ -4530,51 +4496,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 };
                 drained.failure.map_or(Ok(()), Err)?;
 
-                if !drained.accounting_booked {
-                    self.journal.append(
-                        turn,
-                        None,
-                        None,
-                        EventKind::UsageUpdated {
-                            usage: Usage::IDENTITY,
-                            cost_delta: settled_cost_for_delivery(
-                                &profile.metering,
-                                quote.as_ref(),
-                                UsageReport::Missing,
-                                None,
-                                self.settlement_currency,
-                                settlement.outcome.delivery(),
-                            ),
-                            attempt: Some(reference),
-                        },
-                    )?;
-                }
-                let terminal = self.journal.append(
+                let terminal = self.record_generation_settlement(
                     turn,
-                    None,
-                    None,
-                    EventKind::AttemptSettled {
-                        attempt: settlement.attempt,
-                        outcome: settlement.outcome,
-                    },
+                    &profile,
+                    reference,
+                    &settlement,
+                    drained.accounting_booked,
                 )?;
-                if let UsageReport::Reported(usage) = settlement.outcome.usage() {
-                    self.journal.append(
-                        turn,
-                        None,
-                        None,
-                        EventKind::ContextWindowUpdated {
-                            used_tokens: usage.total_tokens(),
-                            provenance: OccupancyProvenance::GenerationBoundary,
-                            // This profile and not the one the caller resolved
-                            // before the loop: the candidate walk above can end
-                            // on a fallback, and the occupancy below is that
-                            // model's, so the ceiling it is a fraction of has
-                            // to be that model's too.
-                            window: profile.capabilities.max_context_tokens,
-                        },
-                    )?;
-                }
                 if drained.cancelled || self.cancel.is_cancelled() {
                     return Ok(Generated::Cancelled {
                         cause: self.cancel.cause().unwrap_or(CancelCause::User),
@@ -4604,73 +4532,24 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 let retryable = stop == StopReason::Error
                     && drained.error_kind == Some(ErrorKind::Transient)
                     && !drained.emitted_output;
-                if retryable && self.recovery_deadline.is_none() {
-                    self.recovery_deadline = self
-                        .provider_recovery
-                        .and_then(|horizon| self.retry_pause.now().checked_add(horizon));
-                }
-                let recovery_remaining = self
-                    .recovery_deadline
-                    .map(|deadline| deadline.saturating_duration_since(self.retry_pause.now()));
-                if retryable
-                    && recovery_remaining
-                        .map_or(additional_attempts < self.config.retry, |remaining| {
-                            !remaining.is_zero()
-                        })
-                    && let Some(delay) =
-                        if recovery_remaining.is_some() && retry_after.flatten().is_some() {
-                            retry_after.flatten()
-                        } else {
-                            retry_delay_with_jitter(
-                                additional_attempts.saturating_add(1),
-                                retry_after.flatten(),
-                                self.retry_pause.jitter_basis_points(),
-                            )
-                        }
-                {
-                    let delay = recovery_remaining.map_or(delay, |remaining| delay.min(remaining));
-                    additional_attempts = additional_attempts.saturating_add(1);
-                    self.journal.publish(&PublicEvent::ProviderRetry {
+                match self
+                    .retry_generation(
                         turn,
-                        attempt: additional_attempts,
-                        limit: self.config.retry,
-                        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        kind: ErrorKind::Transient,
+                        retryable,
+                        retry_after.flatten(),
+                        &mut additional_attempts,
                         cause,
-                        recovery_remaining_ms: recovery_remaining.map(|remaining| {
-                            u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
-                        }),
-                    })?;
-                    let pause = self.retry_pause.pause(delay);
-                    match await_controlled(
-                        &self.journal,
-                        &self.cancel,
-                        &mut self.control,
-                        turn,
-                        pause,
-                        InterruptDisposition::RetryWait,
-                        None,
                     )
-                    .await
-                    {
-                        Controlled::Completed(()) | Controlled::Interrupted
-                            if !self.cancel.is_cancelled() =>
-                        {
-                            if self
-                                .recovery_deadline
-                                .is_none_or(|deadline| self.retry_pause.now() < deadline)
-                            {
-                                continue;
-                            }
-                        }
-                        Controlled::Completed(()) | Controlled::Interrupted => {
-                            return Ok(Generated::Cancelled {
-                                cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                                pending: Vec::new(),
-                            });
-                        }
-                        Controlled::Failed(cause) => return Err(cause),
+                    .await?
+                {
+                    RetryProgress::Retry => continue,
+                    RetryProgress::Cancelled => {
+                        return Ok(Generated::Cancelled {
+                            cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                            pending: Vec::new(),
+                        });
                     }
+                    RetryProgress::Finished => {}
                 }
                 let stopped = (terminal, stop, drained.pending, drained.error_kind);
                 if stop == StopReason::Error && unsent {
@@ -4700,6 +4579,264 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }),
             None => Ok(Generated::Ended(last_preflight_exit)),
         }
+    }
+
+    fn candidate_request_gaps(
+        &mut self,
+        turn: TurnId,
+        candidate: Option<&ModelRef>,
+        mut candidate_conversation: Conversation,
+        request: &mut GenRequest,
+        capabilities: (
+            &crate::generator::capabilities::ModelCapabilities,
+            &crate::generator::capabilities::ModelCapabilities,
+        ),
+        identity: Option<&str>,
+    ) -> Result<(Conversation, Vec<CapabilityGap>), StoreError> {
+        let mut gaps = if candidate.is_none() {
+            capabilities.1.request_gaps(request)
+        } else {
+            capabilities.0.fallback_gaps(capabilities.1, request)
+        };
+
+        if let Some(candidate) = candidate
+            && !gaps.is_empty()
+            && gaps.iter().all(reasoning_carryover_gap)
+        {
+            let (sanitized, dropped_blocks, dialects) = drop_reasoning(candidate_conversation);
+            candidate_conversation = sanitized;
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::FallbackDecision {
+                    candidate: candidate.clone(),
+                    decision: FallbackDecision::ReasoningDropped {
+                        dropped_blocks,
+                        dialects,
+                    },
+                },
+            )?;
+            let (messages, stable_messages) = self.with_host_context(
+                turn,
+                candidate_conversation.clone(),
+                self.tools.context_notes(),
+                identity,
+            )?;
+            request.messages = messages;
+            if let Some(cache) = request.cache.as_mut() {
+                cache.stable_messages = stable_messages;
+            }
+            gaps = capabilities.0.fallback_gaps(capabilities.1, request);
+        }
+
+        Ok((candidate_conversation, gaps))
+    }
+
+    async fn retry_generation(
+        &mut self,
+        turn: TurnId,
+        retryable: bool,
+        retry_after: Option<Duration>,
+        additional_attempts: &mut u32,
+        cause: String,
+    ) -> Result<RetryProgress, StoreError> {
+        if retryable && self.recovery_deadline.is_none() {
+            self.recovery_deadline = self
+                .provider_recovery
+                .and_then(|horizon| self.retry_pause.now().checked_add(horizon));
+        }
+        let recovery_remaining = self
+            .recovery_deadline
+            .map(|deadline| deadline.saturating_duration_since(self.retry_pause.now()));
+        if retryable
+            && recovery_remaining.map_or(*additional_attempts < self.config.retry, |remaining| {
+                !remaining.is_zero()
+            })
+            && let Some(delay) = if recovery_remaining.is_some() && retry_after.is_some() {
+                retry_after
+            } else {
+                retry_delay_with_jitter(
+                    additional_attempts.saturating_add(1),
+                    retry_after,
+                    self.retry_pause.jitter_basis_points(),
+                )
+            }
+        {
+            let delay = recovery_remaining.map_or(delay, |remaining| delay.min(remaining));
+            *additional_attempts = additional_attempts.saturating_add(1);
+            self.journal.publish(&PublicEvent::ProviderRetry {
+                turn,
+                attempt: *additional_attempts,
+                limit: self.config.retry,
+                delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                kind: ErrorKind::Transient,
+                cause,
+                recovery_remaining_ms: recovery_remaining
+                    .map(|remaining| u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)),
+            })?;
+            let pause = self.retry_pause.pause(delay);
+            match await_controlled(
+                &self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                pause,
+                InterruptDisposition::RetryWait,
+                None,
+            )
+            .await
+            {
+                Controlled::Completed(()) | Controlled::Interrupted
+                    if !self.cancel.is_cancelled() =>
+                {
+                    if self
+                        .recovery_deadline
+                        .is_none_or(|deadline| self.retry_pause.now() < deadline)
+                    {
+                        return Ok(RetryProgress::Retry);
+                    }
+                }
+                Controlled::Completed(()) | Controlled::Interrupted => {
+                    return Ok(RetryProgress::Cancelled);
+                }
+                Controlled::Failed(cause) => return Err(cause),
+            }
+        }
+        Ok(RetryProgress::Finished)
+    }
+
+    fn record_generation_settlement(
+        &self,
+        turn: TurnId,
+        profile: &GenerationProfile,
+        reference: AttemptRef,
+        settlement: &crate::generator::attempt::Settlement,
+        accounting_booked: bool,
+    ) -> Result<EventId, StoreError> {
+        let quote = profile.rates.as_ref().map(|rates| &rates.quote);
+        if !accounting_booked {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::UsageUpdated {
+                    usage: Usage::IDENTITY,
+                    cost_delta: settled_cost_for_delivery(
+                        &profile.metering,
+                        quote,
+                        UsageReport::Missing,
+                        None,
+                        self.settlement_currency,
+                        settlement.outcome.delivery(),
+                    ),
+                    attempt: Some(reference),
+                },
+            )?;
+        }
+        let terminal = self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::AttemptSettled {
+                attempt: settlement.attempt,
+                outcome: settlement.outcome,
+            },
+        )?;
+        if let UsageReport::Reported(usage) = settlement.outcome.usage() {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: usage.total_tokens(),
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    // This profile and not the one the caller resolved
+                    // before the loop: the candidate walk above can end
+                    // on a fallback, and the occupancy below is that
+                    // model's, so the ceiling it is a fraction of has
+                    // to be that model's too.
+                    window: profile.capabilities.max_context_tokens,
+                },
+            )?;
+        }
+        Ok(terminal)
+    }
+
+    fn reserve_generation_attempt(
+        &mut self,
+        turn: TurnId,
+        profile: &GenerationProfile,
+        request: &GenRequest,
+        next_attempt: AttemptRef,
+    ) -> Result<Result<GenerationAttempt, Generated>, StoreError> {
+        let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
+        let reservation = match self.gate.reserve(
+            &profile.metering,
+            quote.as_ref(),
+            &request,
+            &profile.capabilities,
+        ) {
+            Ok(reservation) => reservation,
+            Err(denied) => {
+                tracing::warn!(%denied, "the budget gate refused a generation attempt");
+                let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
+                    ExitReason::Budget
+                } else {
+                    ExitReason::Internal
+                };
+                return self.refuse(turn, denied.to_string(), reason).map(Err);
+            }
+        };
+        let attempt = match GenerationAttempt::from_attempt(
+            next_attempt,
+            reservation,
+            &profile.metering,
+            quote.as_ref(),
+            &request,
+            &profile.capabilities,
+        ) {
+            Ok(attempt) => attempt,
+            Err(denied) => {
+                tracing::error!(%denied, "a reservation did not authorise its attempt");
+                return self
+                    .refuse(turn, denied.to_string(), ExitReason::Internal)
+                    .map(Err);
+            }
+        };
+        Ok(Ok(attempt))
+    }
+
+    async fn resolve_candidate_profile(
+        &mut self,
+        turn: TurnId,
+        model_request: GenerationModelRequest,
+    ) -> Controlled<
+        Option<Result<GenerationProfile, crate::generation_model_source::GenerationModelError>>,
+    > {
+        let source = Arc::clone(&self.source);
+        let resolution_deadline = self
+            .recovery_deadline
+            .map(|deadline| self.retry_pause.deadline(deadline));
+        let resolve = async {
+            match resolution_deadline {
+                Some(deadline) => match select(source.resolve(model_request), deadline).await {
+                    Either::Left((profile, _)) => Some(profile),
+                    Either::Right(_) => None,
+                },
+                None => Some(source.resolve(model_request).await),
+            }
+        };
+        await_controlled(
+            &self.journal,
+            &self.cancel,
+            &mut self.control,
+            turn,
+            resolve,
+            InterruptDisposition::Return,
+            None,
+        )
+        .await
     }
 
     fn refresh_detached_execs(&mut self, turn: TurnId) -> Result<(), StoreError> {
@@ -6990,6 +7127,12 @@ enum JudgeRun {
 }
 
 /// What one generation did.
+enum RetryProgress {
+    Retry,
+    Cancelled,
+    Finished,
+}
+
 enum Generated {
     /// The turn is over, for a reason that is not the model's stop reason.
     Ended(ExitReason),
