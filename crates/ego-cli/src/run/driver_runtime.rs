@@ -2650,39 +2650,21 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             return Ok(CommandOutcome::Continue);
         }
         repl::Line::HostCommand(repl::HostCommand::SessionMetadata(operation)) => {
-            if pending_work {
-                diagnostics.note("session metadata is unavailable while source work is pending");
-                return Ok(CommandOutcome::Continue);
-            }
-            if let Err(error) = crate::metadata::execute_interactive(
-                interactive_metadata,
-                leased_session_journal,
-                session_journal,
-                &operation,
-                interactive_metadata_ceilings,
-                &mut |message| diagnostics.note(message),
-            ) {
-                diagnostics.note(&format!("session metadata operation failed: {error}"));
-            }
-            *state = match session_journal.inspect(Clone::clone) {
-                Ok(state) => state,
-                Err(error) => {
-                    last.termination = hook_journal_termination(error);
-                    return Ok(CommandOutcome::Transition(EpochTransition::Exit));
-                }
-            };
-            last.state = state.clone();
-            if let Some(status) = status.as_ref()
-                && status.human
-            {
-                match selection.snapshot() {
-                    Ok(selected) => status.seat.refresh_status(state, selected),
-                    Err(error) => diagnostics.note(&format!(
-                        "the metadata status selection could not be refreshed: {error}"
-                    )),
-                }
-            }
-            return Ok(CommandOutcome::Continue);
+            update_session_metadata(
+                SessionMetadataCommand {
+                    metadata: interactive_metadata,
+                    leased: leased_session_journal,
+                    journal: session_journal,
+                    ceilings: interactive_metadata_ceilings,
+                    state,
+                    last,
+                    status,
+                    selection,
+                    diagnostics,
+                },
+                operation,
+                pending_work,
+            )
         }
         repl::Line::HostCommand(repl::HostCommand::Skill(operation)) => {
             if pending_work {
@@ -2816,7 +2798,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         // implementations would be two diagnoses.
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Doctor)) => {
             diagnostics.note(&crate::doctor::observed_session(
-                root.clone(),
+                root.to_path_buf(),
                 seat.width(),
                 perimeter,
             ));
@@ -2842,7 +2824,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 session_dir: args.session_dir.clone(),
                 directory: args.directory.clone(),
             };
-            match exported(args) {
+            match exported(&args) {
                 Ok(rendered) => diagnostics.note(&rendered),
                 Err(termination) => diagnostics.note(&format!(
                     "the session could not be exported: {}",
@@ -2931,107 +2913,276 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             return Ok(CommandOutcome::Continue);
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Compact)) => {
-            if compaction_availability(pending_work) != repl::actions::Availability::Enabled {
-                return Ok(CommandOutcome::Continue);
-            }
-            if !automatic_compaction && !seat.confirm_compaction(active.id()) {
-                return Ok(CommandOutcome::Continue);
-            }
-            // One automatic attempt per source epoch; failure remains visible.
-            *automatic_compaction_failed = automatic_compaction;
-            seat.busy();
-
-            let target_runtime = Arc::new(Mutex::new(None));
-            let prepared_runtime = Arc::clone(&target_runtime);
-            let source_id = active.id();
-            let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
-            let pre_compact = match dispatch_request_hook(
-                session_hooks.runtime,
-                request_id,
-                session_hooks.turn,
-                None,
-                HookLifecycle::PreCompact,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    diagnostics.note(&format!(
-                        "compaction was blocked before preparation: {}",
-                        error.exit_reason()
-                    ));
-                    return Ok(CommandOutcome::Continue);
-                }
-            };
-            let compaction_cancel = CancelToken::new();
-            let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
-                Box::pin(prepare_interactive_compaction(InteractiveCompaction {
-                    args: args,
-                    effective: effective,
-                    root: root,
-                    cwd: cwd,
-                    diagnostics,
-                    skills: skills,
-                    jsonl_store,
-                    confinement: confinement,
-                    active: &active,
-                    cancel: &compaction_cancel,
+            compact_session_command(
+                InteractiveCommand {
+                    args,
+                    active,
+                    seat,
+                    source,
+                    confinement,
                     run_deadline,
-                    source: source,
-                    policy_source: policy_source,
-                    gate: gate,
-                    config: config,
-                    evidence: evidence,
+                    staged_images,
+                    last,
+                    state,
+                    diagnostics,
+                    interactive_metadata,
+                    leased_session_journal,
+                    session_journal,
+                    interactive_metadata_ceilings,
+                    status,
+                    selection,
+                    skills,
+                    effective,
+                    jsonl_store,
+                    exec_environment,
+                    registry,
+                    session_hooks,
+                    model_switch_owner,
+                    policy_application,
+                    text_output,
+                    session_hook_ports,
+                    skill_profile_layers,
+                    perimeter,
+                    mcp_registry,
+                    session_mcp,
+                    disabled_mcp,
+                    root,
+                    cwd,
+                    clock,
+                    config,
+                    refresh_prompt,
+                    automatic_compaction_failed,
+                    policy_source,
+                    gate,
+                    evidence,
                     invocation,
-                    admitted_tools: admitted_tools,
-                    mcp_runtime: mcp_runtime.as_ref(),
-                    skill_resource_roots: skill_resource_roots,
-                    session_journal: session_journal,
-                    session_hooks: session_hooks,
-                    last_generation_request: last_generation_request.clone(),
-                    elicitor: elicitor,
+                    admitted_tools,
+                    mcp_runtime,
+                    skill_resource_roots,
+                    last_generation_request,
+                    elicitor,
                     judge_available,
                     skill_trust,
-                    control: control,
-                    state: state,
-                    seat: seat.as_ref(),
-                    model_compaction,
-                    prepared_runtime: prepared_runtime.as_ref(),
-                }));
-            let mut preparation = DeferredCompactionPreparation {
-                source: source_id,
-                future: Some(future),
-            };
-            let request = CompactionTransitionRequest {
-                request_id,
-                source: source_id,
-            };
-            let receipt = CompactionTransitionService::new(clock)
-                .compact(request, &mut preparation, jsonl_store.as_ref())
-                .await;
-            drop(preparation);
+                    control,
+                    checkpoint_pending,
+                },
+                posture,
+            )
+            .await
+        }
+        repl::Line::HostCommand(_) => Ok(CommandOutcome::Continue),
+        repl::Line::ExternalBreak(_) => {
+            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+        }
+    }
+}
 
-            let receipt = match receipt {
-                Ok(receipt) => receipt,
-                Err(error) => {
-                    diagnostics.note(&format!("compaction failed: {error}"));
-                    if model_compaction {
-                        session_journal
-                            .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)
-                            .map_err(|error| RunTermination::Failed {
-                                message: error.to_string(),
-                            })?;
-                        *state = session_hooks.state.state();
-                    }
-                    if let Some(status) = status.as_ref()
-                        && status.human
-                        && let Ok(selected) = selection.snapshot()
-                    {
-                        status.seat.refresh_status(state, selected);
-                    }
-                    return Ok(CommandOutcome::Continue);
-                }
-            };
+struct SessionMetadataCommand<'a, 'session> {
+    metadata: &'a SessionMetadata<JsonlStore>,
+    leased: &'a LeasedSharedJournal<'session, JsonlStore>,
+    journal: &'a SharedJournal<'session>,
+    ceilings: &'a Ceilings,
+    state: &'a mut SessionState,
+    last: &'a mut Ended,
+    status: &'a Option<InteractiveStatus>,
+    selection: &'a model::GenerationSelection,
+    diagnostics: &'a dyn Diagnostics,
+}
+
+fn update_session_metadata<'store>(
+    input: SessionMetadataCommand<'_, '_>,
+    operation: crate::cli::SessionMetadataOperation,
+    pending_work: bool,
+) -> Result<CommandOutcome<'store>, RunTermination> {
+    let SessionMetadataCommand {
+        metadata: interactive_metadata,
+        leased: leased_session_journal,
+        journal: session_journal,
+        ceilings: interactive_metadata_ceilings,
+        state,
+        last,
+        status,
+        selection,
+        diagnostics,
+    } = input;
+
+    if pending_work {
+        diagnostics.note("session metadata is unavailable while source work is pending");
+        return Ok(CommandOutcome::Continue);
+    }
+    if let Err(error) = crate::metadata::execute_interactive(
+        interactive_metadata,
+        leased_session_journal,
+        session_journal,
+        &operation,
+        interactive_metadata_ceilings,
+        &mut |message| diagnostics.note(message),
+    ) {
+        diagnostics.note(&format!("session metadata operation failed: {error}"));
+    }
+    *state = match session_journal.inspect(Clone::clone) {
+        Ok(state) => state,
+        Err(error) => {
+            last.termination = hook_journal_termination(error);
+            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
+        }
+    };
+    last.state = state.clone();
+    if let Some(status) = status.as_ref()
+        && status.human
+    {
+        match selection.snapshot() {
+            Ok(selected) => status.seat.refresh_status(state, selected),
+            Err(error) => diagnostics.note(&format!(
+                "the metadata status selection could not be refreshed: {error}"
+            )),
+        }
+    }
+    return Ok(CommandOutcome::Continue);
+}
+
+async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
+    input: InteractiveCommand<'a, 'session, 'store>,
+    posture: (bool, bool, bool),
+) -> Result<CommandOutcome<'store>, RunTermination> {
+    let InteractiveCommand {
+        args,
+        active,
+        seat,
+        source,
+        confinement,
+        run_deadline,
+        staged_images,
+        last,
+        state,
+        diagnostics,
+        interactive_metadata,
+        leased_session_journal,
+        session_journal,
+        interactive_metadata_ceilings,
+        status,
+        selection,
+        skills,
+        effective,
+        jsonl_store,
+        exec_environment,
+        registry,
+        session_hooks,
+        model_switch_owner,
+        policy_application,
+        text_output,
+        session_hook_ports,
+        skill_profile_layers,
+        perimeter,
+        mcp_registry,
+        session_mcp,
+        disabled_mcp,
+        root,
+        cwd,
+        clock,
+        config,
+        refresh_prompt,
+        automatic_compaction_failed,
+        policy_source,
+        gate,
+        evidence,
+        invocation,
+        admitted_tools,
+        mcp_runtime,
+        skill_resource_roots,
+        last_generation_request,
+        elicitor,
+        judge_available,
+        skill_trust,
+        control,
+        checkpoint_pending,
+    } = input;
+    let (pending_work, model_compaction, automatic_compaction) = posture;
+
+    if compaction_availability(pending_work) != repl::actions::Availability::Enabled {
+        return Ok(CommandOutcome::Continue);
+    }
+    if !automatic_compaction && !seat.confirm_compaction(active.id()) {
+        return Ok(CommandOutcome::Continue);
+    }
+    // One automatic attempt per source epoch; failure remains visible.
+    *automatic_compaction_failed = automatic_compaction;
+    seat.busy();
+
+    let target_runtime = Arc::new(Mutex::new(None));
+    let prepared_runtime = Arc::clone(&target_runtime);
+    let source_id = active.id();
+    let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
+    let pre_compact = match dispatch_request_hook(
+        &session_hooks.runtime,
+        request_id,
+        session_hooks.turn,
+        None,
+        HookLifecycle::PreCompact,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "compaction was blocked before preparation: {}",
+                error.exit_reason()
+            ));
+            return Ok(CommandOutcome::Continue);
+        }
+    };
+    let compaction_cancel = CancelToken::new();
+    let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
+        Box::pin(prepare_interactive_compaction(InteractiveCompaction {
+            args: args,
+            effective: effective,
+            root: root,
+            cwd: cwd,
+            diagnostics,
+            skills: skills,
+            jsonl_store,
+            confinement: confinement,
+            active: &active,
+            cancel: &compaction_cancel,
+            run_deadline,
+            source: source,
+            policy_source: policy_source,
+            gate: gate,
+            config: config,
+            evidence: evidence,
+            invocation,
+            admitted_tools: admitted_tools,
+            mcp_runtime: mcp_runtime.as_ref(),
+            skill_resource_roots: skill_resource_roots,
+            session_journal: session_journal,
+            session_hooks: session_hooks,
+            last_generation_request: last_generation_request.clone(),
+            elicitor: elicitor,
+            judge_available,
+            skill_trust,
+            control: control,
+            state: state,
+            seat: seat.as_ref(),
+            model_compaction,
+            prepared_runtime: prepared_runtime.as_ref(),
+        }));
+    let mut preparation = DeferredCompactionPreparation {
+        source: source_id,
+        future: Some(future),
+    };
+    let request = CompactionTransitionRequest {
+        request_id,
+        source: source_id,
+    };
+    let receipt = CompactionTransitionService::new(clock)
+        .compact(request, &mut preparation, jsonl_store.as_ref())
+        .await;
+    drop(preparation);
+
+    let receipt = match receipt {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            diagnostics.note(&format!("compaction failed: {error}"));
             if model_compaction {
                 session_journal
                     .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)
@@ -3040,51 +3191,61 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                     })?;
                 *state = session_hooks.state.state();
             }
-            let target = receipt.target;
-            let target_opened = match session::open(jsonl_store.as_ref(), &target, clock) {
-                Ok(opened) => Opened::Durable(Box::new(opened)),
-                Err(error) => {
-                    diagnostics.note(&format!("compaction target could not be opened: {error}"));
-                    return Ok(CommandOutcome::Continue);
-                }
-            };
-            let target_state = target_opened.state();
-            let target_owner =
-                match ActiveSession::durable(target_opened, target_state, EVIDENCE_CAP) {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        diagnostics.note(&format!(
-                            "compaction target evidence could not be opened: {error}"
-                        ));
-                        return Ok(CommandOutcome::Continue);
-                    }
-                };
-            let diagnostic = receipt.publication.diagnostic().map(str::to_string);
-            if matches!(
-                &receipt.publication,
-                ego_core::session::TargetPublication::NotPublished { .. }
-            ) {
-                diagnostics.note("compaction target was not published");
-                return Ok(CommandOutcome::Continue);
+            if let Some(status) = status.as_ref()
+                && status.human
+                && let Ok(selected) = selection.snapshot()
+            {
+                status.seat.refresh_status(state, selected);
             }
-            let runtime = target_runtime
-                .lock()
-                .expect("interactive compaction runtime")
-                .take();
-            *checkpoint_pending = automatic_compaction;
-            *automatic_compaction_failed = false;
-            return Ok(CommandOutcome::Transition(EpochTransition::Compact {
-                target: target_owner,
-                publication: receipt.publication,
-                diagnostic,
-                runtime,
-                request: request_id,
-                parent: pre_compact.closure_event(),
-            }));
+            return Ok(CommandOutcome::Continue);
         }
-        repl::Line::HostCommand(_) => Ok(CommandOutcome::Continue),
-        repl::Line::ExternalBreak(_) => {
-            return Ok(CommandOutcome::Transition(EpochTransition::Exit));
-        }
+    };
+    if model_compaction {
+        session_journal
+            .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)
+            .map_err(|error| RunTermination::Failed {
+                message: error.to_string(),
+            })?;
+        *state = session_hooks.state.state();
     }
+    let target = receipt.target;
+    let target_opened = match session::open(jsonl_store.as_ref(), &target, clock) {
+        Ok(opened) => Opened::Durable(Box::new(opened)),
+        Err(error) => {
+            diagnostics.note(&format!("compaction target could not be opened: {error}"));
+            return Ok(CommandOutcome::Continue);
+        }
+    };
+    let target_state = target_opened.state();
+    let target_owner = match ActiveSession::durable(target_opened, target_state, EVIDENCE_CAP) {
+        Ok(owner) => owner,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "compaction target evidence could not be opened: {error}"
+            ));
+            return Ok(CommandOutcome::Continue);
+        }
+    };
+    let diagnostic = receipt.publication.diagnostic().map(str::to_string);
+    if matches!(
+        &receipt.publication,
+        ego_core::session::TargetPublication::NotPublished { .. }
+    ) {
+        diagnostics.note("compaction target was not published");
+        return Ok(CommandOutcome::Continue);
+    }
+    let runtime = target_runtime
+        .lock()
+        .expect("interactive compaction runtime")
+        .take();
+    *checkpoint_pending = automatic_compaction;
+    *automatic_compaction_failed = false;
+    return Ok(CommandOutcome::Transition(EpochTransition::Compact {
+        target: target_owner,
+        publication: receipt.publication,
+        diagnostic,
+        runtime,
+        request: request_id,
+        parent: pre_compact.closure_event(),
+    }));
 }
