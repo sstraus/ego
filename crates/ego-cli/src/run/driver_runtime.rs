@@ -717,10 +717,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                         seat.as_ref(),
                         sink,
                         &state,
-                        &registry,
-                        config.system.as_ref(),
-                        compiled.is_some(),
-                        &mcp_errors,
+                        EpochCapabilities {
+                            registry: &registry,
+                            system: config.system.as_ref(),
+                            has_schema: compiled.is_some(),
+                            mcp_errors: &mcp_errors,
+                        },
                         diagnostics,
                     );
                     if !activation_failed
@@ -823,9 +825,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             seat.as_ref(),
                                             pending_work,
                                             &source,
-                                            &confinement,
-                                            active.evidence(),
-                                            run_deadline,
+                                            (&confinement, active.evidence(), run_deadline),
                                             &mut staged_images,
                                         )
                                         .await;
@@ -837,9 +837,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             pending_work,
                                             path,
                                             &source,
-                                            &confinement,
-                                            active.evidence(),
-                                            run_deadline,
+                                            (&confinement, active.evidence(), run_deadline),
                                             &mut staged_images,
                                         )
                                         .await;
@@ -1252,8 +1250,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                             jsonl_store,
                                             &root,
                                             active.id(),
-                                            &clock,
-                                            diagnostics,
+                                            (&clock, diagnostics),
                                         )
                                         .await
                                         {
@@ -2104,11 +2101,14 @@ async fn stage_clipboard_image(
     seat: &dyn InteractiveSeat,
     pending_work: bool,
     source: &Arc<model::CliGenerationModelSource>,
-    confinement: &RunConfinement,
-    evidence: &SessionEvidenceStore,
-    run_deadline: Option<std::time::Instant>,
+    effects: (
+        &RunConfinement,
+        &SessionEvidenceStore,
+        Option<std::time::Instant>,
+    ),
     staged_images: &mut Vec<StagedPasteImage>,
 ) {
+    let (confinement, evidence, run_deadline) = effects;
     if pending_work {
         seat.set_notice("image paste is unavailable while source work is pending".to_owned());
         return;
@@ -2168,11 +2168,14 @@ async fn stage_image_path(
     pending_work: bool,
     path: String,
     source: &Arc<model::CliGenerationModelSource>,
-    confinement: &RunConfinement,
-    evidence: &SessionEvidenceStore,
-    run_deadline: Option<std::time::Instant>,
+    effects: (
+        &RunConfinement,
+        &SessionEvidenceStore,
+        Option<std::time::Instant>,
+    ),
     staged_images: &mut Vec<StagedPasteImage>,
 ) {
+    let (confinement, evidence, run_deadline) = effects;
     if pending_work {
         seat.set_notice("image paste is unavailable while source work is pending".to_owned());
         return;
@@ -2341,9 +2344,9 @@ async fn select_session_transition<'store>(
     store: &'store Arc<JsonlStore>,
     root: &Path,
     session_id: SessionId,
-    clock: &SystemClock,
-    diagnostics: &dyn Diagnostics,
+    journal_ports: (&SystemClock, &dyn Diagnostics),
 ) -> Option<EpochTransition<'store>> {
+    let (clock, diagnostics) = journal_ports;
     if !seat.has_human() {
         match crate::catalogue::listing(store.as_ref(), root, true) {
             Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
@@ -2394,12 +2397,8 @@ async fn select_session_transition<'store>(
             .map(|meta| meta.id),
         _ => seat.pick_session(metas.clone()),
     };
-    let Some(target) = target else {
-        return None;
-    };
-    let Some(meta) = metas.into_iter().find(|meta| meta.id == target) else {
-        return None;
-    };
+    let target = target?;
+    let meta = metas.into_iter().find(|meta| meta.id == target)?;
     if !meta.workspace_root.is_dir() {
         diagnostics.note("the selected session root is unavailable");
         return None;
@@ -2443,9 +2442,9 @@ async fn select_session_transition<'store>(
         return None;
     }
     diagnostics.note(&format!("resumed session {target}"));
-    return Some(EpochTransition::New {
+    Some(EpochTransition::New {
         target: target_owner,
-    });
+    })
 }
 
 async fn new_session_transition<'store>(
@@ -2481,9 +2480,9 @@ async fn new_session_transition<'store>(
         diagnostics.note("the terminal could not activate the new session");
         return None;
     }
-    return Some(EpochTransition::New {
+    Some(EpochTransition::New {
         target: target_owner,
-    });
+    })
 }
 
 async fn fork_session_transition<'store>(
@@ -2507,7 +2506,7 @@ async fn fork_session_transition<'store>(
     let fork_at_message = matches!(command, repl::HostCommand::Fork(_));
     let prepared = match command {
         repl::HostCommand::Fork(item) => lifecycle.prepare_fork_at(session_id, item),
-        _ => ego_core::session::PreparedFork::new(session_id, &state, session::now(clock))
+        _ => ego_core::session::PreparedFork::new(session_id, state, session::now(clock))
             .map_err(ego_core::session_lifecycle::LifecycleError::from),
     };
     let prepared = match prepared {
@@ -2550,12 +2549,12 @@ async fn fork_session_transition<'store>(
         }
     };
     let diagnostic = publication.diagnostic().map(str::to_string);
-    return Some(EpochTransition::Fork {
+    Some(EpochTransition::Fork {
         target: target_owner,
         publication,
         diagnostic,
         projected: project_public(prepared.seed().event()),
-    });
+    })
 }
 
 async fn drive_interactive_input<'session: 'turn, 'turn>(
@@ -2634,18 +2633,28 @@ async fn drive_interactive_input<'session: 'turn, 'turn>(
     }
 }
 
+struct EpochCapabilities<'a> {
+    registry: &'a [RegisteredTool],
+    system: Option<&'a SystemPrompt>,
+    has_schema: bool,
+    mcp_errors: &'a [String],
+}
+
 fn activate_epoch(
     epoch_start: &EpochStart,
     session_id: SessionId,
     seat: &dyn InteractiveSeat,
     sink: &dyn EventSink,
     state: &SessionState,
-    registry: &[RegisteredTool],
-    system: Option<&SystemPrompt>,
-    has_schema: bool,
-    mcp_errors: &[String],
+    capabilities_input: EpochCapabilities<'_>,
     diagnostics: &dyn Diagnostics,
 ) -> bool {
+    let EpochCapabilities {
+        registry,
+        system,
+        has_schema,
+        mcp_errors,
+    } = capabilities_input;
     match epoch_start {
         EpochStart::Initial => false,
         EpochStart::New => {
