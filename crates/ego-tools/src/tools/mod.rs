@@ -48,7 +48,8 @@ pub use memory::{MemoryEntryType, MemoryLookup, MemoryLookupParams};
 pub use read::{ReadParams, ReadTool};
 pub use read_tool_result::{ReadToolResult, ReadToolResultParams};
 pub use web::{
-    ExaSearch, HostedWebSearch, SearchBackend, WebFetch, WebFetchParams, WebSearch, WebSearchParams,
+    ExaSearch, HostedWebSearch, SearchBackend, WebFetch, WebFetchParams, WebSearch,
+    WebSearchParams, selected_web_search,
 };
 pub use write::{WriteParams, WriteTool};
 

@@ -567,6 +567,11 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Configured local executor used only when the resolved provider is non-native.
+    fn local_search_tool(&self) -> Option<std::sync::Arc<dyn Tool>> {
+        None
+    }
+
     fn prepare(&self, params: Value, ctx: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError>;
 
     fn execute<'a, 'io>(
@@ -590,6 +595,11 @@ pub trait TypedTool: Send + Sync {
         false
     }
 
+    /// Configured local executor used only when the resolved provider is non-native.
+    fn local_search_tool(&self) -> Option<std::sync::Arc<dyn Tool>> {
+        None
+    }
+
     fn prepare_typed(
         &self,
         params: Self::Params,
@@ -611,6 +621,10 @@ pub trait TypedTool: Send + Sync {
 pub struct Typed<T>(pub T);
 
 impl<T: TypedTool> Tool for Typed<T> {
+    fn local_search_tool(&self) -> Option<std::sync::Arc<dyn Tool>> {
+        self.0.local_search_tool()
+    }
+
     fn admits_hosted_search(&self) -> bool {
         self.0.admits_hosted_search()
     }

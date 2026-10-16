@@ -4520,11 +4520,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 }
             };
 
+            let catalogue = walk
+                .catalogue
+                .for_provider(profile.generator.supports_web_search());
             let (request, repaired) = match self.prepare_candidate_request(
                 turn,
                 candidate.as_ref(),
                 &profile,
                 &walk,
+                &catalogue,
                 candidate_conversation,
             )? {
                 std::ops::ControlFlow::Break(ended) => {
@@ -4605,7 +4609,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         metering: &profile.metering,
                         quote: quote.as_ref(),
                         visibility: GenerationVisibility::Conversation,
-                        catalogue: Some(&walk.catalogue),
+                        catalogue: Some(&catalogue),
                     },
                 )
                 .await;
@@ -4764,12 +4768,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         candidate: Option<&ModelRef>,
         profile: &GenerationProfile,
         walk: &GenerationWalk,
+        catalogue: &GenerationToolCatalogue,
         mut candidate_conversation: Conversation,
     ) -> Result<std::ops::ControlFlow<Generated, Option<(GenRequest, Conversation)>>, StoreError>
     {
         let policy_snapshot = walk.capture.snapshot();
-        let descriptors = walk.catalogue.descriptors();
-        let mcp_servers = walk.catalogue.mcp_servers();
+        let descriptors = catalogue.descriptors();
+        let mcp_servers = catalogue.mcp_servers();
         if let Some(message) = context_capacity::exhausted(
             self.state().context,
             profile.capabilities.max_context_tokens,
@@ -4805,7 +4810,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         )?;
         let mut request = GenRequest {
             web_search: (profile.generator.supports_web_search()
-                && walk.catalogue.admits_hosted_search())
+                && catalogue.admits_hosted_search())
             .then_some(crate::generator::types::HostedSearch {
                 max_requests: std::num::NonZeroU32::new(5).expect("five is nonzero"),
             }),

@@ -55,6 +55,31 @@ pub(crate) struct GenerationToolCatalogue {
 }
 
 impl GenerationToolCatalogue {
+    /// Route from the resolved candidate, without changing the inherited registry.
+    pub(crate) fn for_provider(&self, native_search: bool) -> Self {
+        let (registry, descriptors) = self
+            .registry
+            .iter()
+            .zip(&self.descriptors)
+            .filter_map(|(entry, descriptor)| match entry.as_effect() {
+                Some(tool) if tool.admits_hosted_search() && !native_search => {
+                    tool.local_search_tool().map(|local| {
+                        let entry = RegisteredTool::Effect(local);
+                        let descriptor = entry.descriptor();
+                        (entry, descriptor)
+                    })
+                }
+                _ => Some((entry.clone(), descriptor.clone())),
+            })
+            .unzip();
+        Self {
+            generation: self.generation.clone(),
+            registry,
+            descriptors,
+            authority: self.authority.clone(),
+        }
+    }
+
     pub(crate) fn generation(&self) -> std::sync::Arc<str> {
         std::sync::Arc::clone(&self.generation)
     }
