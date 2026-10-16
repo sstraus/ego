@@ -920,7 +920,7 @@ fn openrouter_resolution_does_not_borrow_another_models_quote() {
                     cache_write: None,
                     cache_write_extended: None,
                     output: Some("0.00001".parse().unwrap()),
-        web_search: None,
+                    web_search: None,
                 })),
             },
         )
