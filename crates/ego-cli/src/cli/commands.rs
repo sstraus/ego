@@ -849,6 +849,10 @@ pub(super) struct Flags {
     /// Append plain output without terminal styling or live retry updates.
     #[arg(long)]
     pub(super) plain: bool,
+
+    /// Use Vim normal/insert editing in the interactive composer.
+    #[arg(long)]
+    pub(super) vim: bool,
 }
 
 #[derive(Debug, Parser)]

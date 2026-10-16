@@ -353,6 +353,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         quiet: false,
         no_color: false,
         plain: false,
+        vim: false,
     }
 }
 

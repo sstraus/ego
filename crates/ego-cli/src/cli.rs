@@ -870,6 +870,8 @@ pub struct Args {
     pub quiet: bool,
     pub no_color: bool,
     pub plain: bool,
+    /// Select Vim composer editing for this interactive process.
+    pub vim: bool,
 }
 
 /// One validated `resume --answer QUESTION_ID=JSON` value.
@@ -1659,6 +1661,15 @@ fn into_export_invocation(parsed: ExportCommand) -> Result<Invocation, UsageErro
     })))
 }
 
+fn validate_keyboard_value(value: &ManagedConfigValue) -> Result<(), UsageError> {
+    if let ManagedConfigValue::Keybindings(bindings) = value {
+        crate::repl::actions::ActionRegistry::final_surface()
+            .with_keybindings(bindings)
+            .map_err(UsageError)?;
+    }
+    Ok(())
+}
+
 fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
     let action = match command.action {
         ConfigSubcommand::Capabilities => ConfigAction::Capabilities,
@@ -1688,6 +1699,7 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
                 let value = ManagedConfigValue::parse(key.clone(), raw).map_err(|_| {
                     UsageError(format!("invalid TOML value or type for config key `{key}`"))
                 })?;
+                validate_keyboard_value(&value)?;
                 changes.push(ego_core::config::UserConfigMutation::ManagedSet {
                     target: target.clone(),
                     key,
@@ -1728,6 +1740,7 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
             let value = ManagedConfigValue::parse(key.clone(), raw_value).map_err(|_| {
                 UsageError(format!("invalid TOML value or type for config key `{key}`"))
             })?;
+            validate_keyboard_value(&value)?;
             ConfigAction::Set { target, key, value }
         }
         ConfigSubcommand::Unset { profile, key } => {
@@ -1956,6 +1969,11 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
     let RunCommand { prompt, flags } = command;
 
     reject_ephemeral(flags.ephemeral)?;
+    if flags.vim && retry_default == 0 {
+        return Err(UsageError(
+            "--vim applies only to an interactive session".to_owned(),
+        ));
+    }
 
     if flags.file.is_some() && prompt.is_some() {
         return Err(UsageError(
@@ -2062,6 +2080,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         quiet: flags.quiet,
         no_color: flags.no_color,
         plain: flags.plain,
+        vim: flags.vim,
     })
 }
 
