@@ -236,7 +236,7 @@ pub struct ToolTiming {
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
 /// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
-/// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
+/// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
 /// DetachedExecSettled | QuestionRequested | QuestionSettled | QuestionMemberSettled |
 /// PermissionRequested | PermissionAmended | PermissionDecided |
@@ -396,9 +396,9 @@ pub enum EventKind {
         state: ReasoningState,
         visible: bool,
     },
-    /// A tool call began, with its name and raw (unvalidated) arguments.
     /// An explicit user MCP context selection, not a provider-issued tool call.
     ContextCommandStarted { name: String, args: String },
+    /// A tool call began, with its name and raw (unvalidated) arguments.
     ToolCallStarted {
         name: String,
         args: String,
