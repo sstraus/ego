@@ -32,7 +32,7 @@ fn managed_batch_publishes_all_changes_and_preserves_unrelated_configuration() {
     ];
     assert!(store.managed_batch(changes.clone()).unwrap().changed);
     let text = std::fs::read_to_string(&path).unwrap();
-    let parsed: toml::Value = toml::from_str(&text).unwrap();
+    let parsed = text.parse::<toml_edit::DocumentMut>().unwrap();
     assert_eq!(parsed["model"].as_str(), Some("new/model"));
     assert_eq!(parsed["thinking"].as_str(), Some("high"));
     assert_eq!(parsed["profile"]["ci"]["model"].as_str(), Some("ci/model"));
@@ -79,7 +79,8 @@ fn invalid_managed_batch_has_no_filesystem_effect() {
     assert!(store.managed_batch(Vec::new()).is_err());
     assert!(
         store
-            .managed_batch(vec![UserConfigMutation::Thinking {
+            .managed_batch(vec![UserConfigMutation::ModelAndThinking {
+                model: "new/model".into(),
                 thinking: ego_core::generator::types::ThinkingLevel::High
             }])
             .is_err()
