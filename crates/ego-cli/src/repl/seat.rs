@@ -193,7 +193,14 @@ impl Completer for ActionCompleter {
         if filter.contains(char::is_whitespace) {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         }
-        if position == line.len() && self.registry.resolve_slash(filter).is_some() {
+        if position == line.len()
+            && (self.registry.resolve_slash(filter).is_some()
+                || self
+                    .registry
+                    .skill_menu(filter)
+                    .iter()
+                    .any(|(name, _)| name == filter))
+        {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         }
         let mut suggestions = self
