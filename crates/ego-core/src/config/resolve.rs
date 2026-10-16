@@ -831,9 +831,7 @@ fn merge_auth(
     providers: &std::collections::HashMap<String, AuthProviderLayer>,
 ) {
     for (id, provider) in providers {
-        let resolved = auth
-            .entry(id.clone())
-            .or_insert_with(AuthProviderLayer::default);
+        let resolved = auth.entry(id.clone()).or_default();
         if provider.credential_command.is_some() {
             resolved.credential_command = provider.credential_command.clone();
         }

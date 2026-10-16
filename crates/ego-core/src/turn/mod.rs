@@ -4197,388 +4197,477 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         capture: GenerationPolicyCapture,
         catalogue: GenerationToolCatalogue,
     ) -> Result<Generated, StoreError> {
-        let policy_snapshot = capture.snapshot();
-        let descriptors = catalogue.descriptors();
-        let mcp_servers = catalogue.mcp_servers();
         let first = AttemptRef::first(GenerationId::new());
-        let generation_id = first.generation();
-        let mut next_attempt = first;
         let mut candidates = Vec::with_capacity(1 + self.config.fallbacks.len());
         candidates.push(None);
         candidates.extend(self.config.fallbacks.iter().cloned().map(Some));
-        let mut last_failure = None;
-        let mut last_preflight_exit = ExitReason::Usage;
-        let mut primary_model: Option<ModelRef> = None;
-        let mut primary_capabilities = None;
-
+        let mut walk = GenerationWalk {
+            capture,
+            catalogue,
+            conversation,
+            next_attempt: first,
+            last_failure: None,
+            last_preflight_exit: ExitReason::Usage,
+            primary_model: None,
+            primary_capabilities: None,
+        };
         self.recovery_deadline = None;
         for (candidate_index, candidate) in candidates.into_iter().enumerate() {
-            if let Some(cause) = self.cancel.cause() {
-                return Ok(Generated::Cancelled {
-                    cause,
-                    pending: Vec::new(),
-                });
-            }
-            let mut candidate_conversation = conversation.clone();
-            let mut additional_attempts = 0_u32;
-
-            loop {
-                if self
-                    .recovery_deadline
-                    .is_some_and(|deadline| self.retry_pause.now() >= deadline)
-                {
-                    return Ok(Generated::Ended(ExitReason::Provider));
-                }
-                let model_request = match candidate.as_ref() {
-                    Some(model) => self.main_model_request().with_model(model.clone()),
-                    None => primary_model.as_ref().map_or_else(
-                        || self.main_model_request(),
-                        |model| self.main_model_request().with_model(model.clone()),
-                    ),
-                };
-                let profile = match self.resolve_candidate_profile(turn, model_request).await {
-                    Controlled::Completed(Some(Ok(profile))) => {
-                        if candidate_index == 0 && primary_model.is_none() {
-                            primary_model = Some(profile.identity.clone());
-                            primary_capabilities = Some(profile.capabilities.clone());
-                        }
-                        self.main_model_identity = Some(profile.identity.clone());
-                        profile
-                    }
-                    Controlled::Completed(Some(Err(error))) => {
-                        let exit = match error.class {
-                            GenerationModelErrorClass::Usage => ExitReason::Usage,
-                            GenerationModelErrorClass::Provider => ExitReason::Provider,
-                            GenerationModelErrorClass::Internal => ExitReason::Internal,
-                        };
-                        last_preflight_exit = exit;
-                        match candidate.as_ref() {
-                            Some(candidate) => {
-                                self.journal.append(
-                                    turn,
-                                    None,
-                                    None,
-                                    EventKind::FallbackDecision {
-                                        candidate: candidate.clone(),
-                                        decision: FallbackDecision::ResolutionSkipped {
-                                            message: error.message,
-                                        },
-                                    },
-                                )?;
-                            }
-                            None => {
-                                self.journal.append(
-                                    turn,
-                                    None,
-                                    None,
-                                    EventKind::Error {
-                                        message: error.message,
-                                        kind: ErrorKind::Unclassified,
-                                    },
-                                )?;
-                            }
-                        }
-                        break;
-                    }
-                    Controlled::Completed(None) => {
-                        return Ok(Generated::Ended(ExitReason::Provider));
-                    }
-                    Controlled::Interrupted => {
-                        return Ok(Generated::Cancelled {
-                            cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                            pending: Vec::new(),
-                        });
-                    }
-                    Controlled::Failed(cause) => return Err(cause),
-                };
-
-                if let Some(message) = context_capacity::exhausted(
-                    self.state().context,
-                    profile.capabilities.max_context_tokens,
-                ) {
-                    return self.refuse(turn, message, ExitReason::ContextOverflow);
-                }
-
-                if self.automatic_compaction && compaction_due(self.state().context) {
-                    return self.refuse(turn,
-                        "Measured context pressure requires a clean-session compaction before continuing.".to_owned(),
-                        ExitReason::ContextOverflow);
-                }
-
-                // Per candidate: a fallback runs on a different model, and the
-                // model must be told the one actually answering.
-                let identity = self.config.identity.as_ref().map(|identity| {
-                    identity.render(
-                        self.session_id,
-                        &profile.identity,
-                        profile.thinking,
-                        &policy_snapshot,
-                        &descriptors,
-                        &mcp_servers,
-                    )
-                });
-                let (messages, stable_messages) = self.with_host_context(
-                    turn,
-                    candidate_conversation.clone(),
-                    self.tools.context_notes(),
-                    identity.as_deref(),
-                )?;
-                let mut request = GenRequest {
-                    cache: Some(crate::generator::types::PromptCache {
-                        session_id: self.session_id,
-                        lineage_root: self.lineage_root,
-                        retention: self.config.cache,
-                        stable_messages,
-                    }),
-                    model: profile.request_model.clone(),
-                    messages,
-                    tools: descriptors.clone(),
-                    thinking: profile.thinking,
-                    max_output_tokens: profile.output_ceiling(),
-                    parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
-                };
-                let (repaired, gaps) = self.candidate_request_gaps(
-                    turn,
-                    candidate.as_ref(),
-                    candidate_conversation,
-                    &mut request,
-                    (
-                        primary_capabilities
-                            .as_ref()
-                            .unwrap_or(&profile.capabilities),
-                        &profile.capabilities,
-                    ),
-                    identity.as_deref(),
-                )?;
-                candidate_conversation = repaired;
-
-                if !gaps.is_empty() {
-                    tracing::warn!(?gaps, "the candidate does not accept this request");
-                    match candidate.as_ref() {
-                        Some(candidate) => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::FallbackDecision {
-                                    candidate: candidate.clone(),
-                                    decision: FallbackDecision::Skipped { gaps },
-                                },
-                            )?;
-                        }
-                        None => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::Error {
-                                    message: gaps
-                                        .iter()
-                                        .map(ToString::to_string)
-                                        .collect::<Vec<_>>()
-                                        .join("; "),
-                                    kind: ErrorKind::Unclassified,
-                                },
-                            )?;
-                        }
-                    }
-                    last_preflight_exit = ExitReason::Usage;
-                    break;
-                }
-                if let Err(refused) = profile.generator.ensure_expressible(&request) {
-                    tracing::warn!(%refused, "the candidate generator cannot encode this request");
-                    match candidate.as_ref() {
-                        Some(candidate) => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::FallbackDecision {
-                                    candidate: candidate.clone(),
-                                    decision: FallbackDecision::ExpressibilitySkipped {
-                                        message: refused.to_string(),
-                                    },
-                                },
-                            )?;
-                        }
-                        None => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::Error {
-                                    message: refused.to_string(),
-                                    kind: ErrorKind::Unclassified,
-                                },
-                            )?;
-                        }
-                    }
-                    last_preflight_exit = ExitReason::Usage;
-                    break;
-                }
-
-                // Resolution and request admission can advance monotonic time.
-                // Never reserve or dispatch paid work past this generation's horizon.
-                if self
-                    .recovery_deadline
-                    .is_some_and(|deadline| self.retry_pause.now() >= deadline)
-                {
-                    return Ok(Generated::Ended(ExitReason::Provider));
-                }
-
-                let budget = self
-                    .gate
-                    .snapshot()
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
-                self.journal.publish(&PublicEvent::metering_selected(
-                    turn,
-                    &profile.metering,
-                    budget.ledger(),
-                    profile
-                        .rates
-                        .as_ref()
-                        .map_or(&RateSource::None, |rates| &rates.source),
-                ))?;
-
-                let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-                let attempt = match self.reserve_generation_attempt(
-                    turn,
-                    &profile,
-                    &request,
-                    next_attempt,
-                )? {
-                    Ok(attempt) => attempt,
-                    Err(ended) => return Ok(ended),
-                };
-                let reference = attempt.attempt();
-                next_attempt = reference.retry();
-                self.admit_generation(&profile, reference, self.generation_role, &request.tools)?;
-                let generation = self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::GenerationStarted {
-                        attempt: reference,
-                        role: self.generation_role,
-                        snapshot: (self.state().prompt_snapshot.as_ref()
-                            != Some(&self.prompt_snapshot))
-                        .then(|| self.prompt_snapshot.clone()),
-                    },
-                )?;
-                self.last_request = Some(request.clone());
-                if additional_attempts > 0 {
-                    self.journal.publish(&PublicEvent::ProviderRetrying {
-                        turn,
-                        attempt: additional_attempts,
-                    })?;
-                }
-                let stream = profile.generator.generate(request, attempt);
-                let drained = self
-                    .drain(
-                        turn,
-                        stream,
-                        DrainGeneration {
-                            event: generation,
-                            metering: &profile.metering,
-                            quote: quote.as_ref(),
-                            visibility: GenerationVisibility::Conversation,
-                            catalogue: Some(&catalogue),
-                        },
-                    )
-                    .await;
-                let settlement = match self.gate.settle(drained.stream) {
-                    Ok(settlement) => settlement,
-                    Err(denied) => {
-                        tracing::error!(%denied, "the gate refused to settle an attempt it minted");
-                        drained.failure.map_or(Ok(()), Err)?;
-                        return self.refuse(turn, denied.to_string(), ExitReason::Internal);
-                    }
-                };
-                drained.failure.map_or(Ok(()), Err)?;
-
-                let terminal = self.record_generation_settlement(
-                    turn,
-                    &profile,
-                    reference,
-                    &settlement,
-                    drained.accounting_booked,
-                )?;
-                if drained.cancelled || self.cancel.is_cancelled() {
-                    return Ok(Generated::Cancelled {
-                        cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                        pending: drained.pending,
-                    });
-                }
-                if drained.corrupt.is_some() {
-                    return Ok(Generated::Ended(ExitReason::Provider));
-                }
-
-                let stop = settlement.outcome.stop();
-                let unsent = settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
-                let (reported, retry_after) = drained.provider_failure.unzip();
-                let cause = provider_cause(reported.as_deref(), drained.error_kind);
-                self.provider_failure = matches!(
-                    stop,
-                    StopReason::Error | StopReason::Aborted | StopReason::Deferred
-                )
-                .then(|| ProviderFailure {
-                    cause: cause.clone(),
-                    effect_known: !drained.emitted_output || reported.is_some(),
-                });
-                // maintainer decision 2026-10-05, amending the attempt-ownership
-                // ADR: a transient failure that showed nothing is retried even
-                // when it was possibly sent. Output already shown is never
-                // shown twice, so an attempt that emitted any is final.
-                let retryable = stop == StopReason::Error
-                    && drained.error_kind == Some(ErrorKind::Transient)
-                    && !drained.emitted_output;
-                match self
-                    .retry_generation(
-                        turn,
-                        retryable,
-                        retry_after.flatten(),
-                        &mut additional_attempts,
-                        cause,
-                    )
-                    .await?
-                {
-                    RetryProgress::Retry => continue,
-                    RetryProgress::Cancelled => {
-                        return Ok(Generated::Cancelled {
-                            cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                            pending: Vec::new(),
-                        });
-                    }
-                    RetryProgress::Finished => {}
-                }
-                let stopped = (terminal, stop, drained.pending, drained.error_kind);
-                if stop == StopReason::Error && unsent {
-                    last_failure = Some(stopped);
-                    break;
-                }
-
-                return Ok(Generated::Stopped {
-                    capture,
-                    generation: generation_id,
-                    terminal: stopped.0,
-                    reason: stopped.1,
-                    pending: stopped.2,
-                    error_kind: stopped.3,
-                });
-            }
+            walk = match self
+                .generate_candidate(turn, candidate_index, candidate, walk)
+                .await?
+            {
+                std::ops::ControlFlow::Break(outcome) => return Ok(outcome),
+                std::ops::ControlFlow::Continue(walk) => walk,
+            };
         }
 
-        match last_failure {
+        match walk.last_failure {
             Some((terminal, reason, pending, error_kind)) => Ok(Generated::Stopped {
-                capture,
-                generation: generation_id,
+                capture: walk.capture,
+                generation: first.generation(),
                 terminal,
                 reason,
                 pending,
                 error_kind,
             }),
-            None => Ok(Generated::Ended(last_preflight_exit)),
+            None => Ok(Generated::Ended(walk.last_preflight_exit)),
         }
+    }
+
+    async fn generate_candidate(
+        &mut self,
+        turn: TurnId,
+        candidate_index: usize,
+        candidate: Option<ModelRef>,
+        mut walk: GenerationWalk,
+    ) -> Result<std::ops::ControlFlow<Generated, GenerationWalk>, StoreError> {
+        let generation_id = walk.next_attempt.generation();
+        if let Some(cause) = self.cancel.cause() {
+            return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                cause,
+                pending: Vec::new(),
+            }));
+        }
+        let mut candidate_conversation = walk.conversation.clone();
+        let mut additional_attempts = 0_u32;
+
+        loop {
+            if self
+                .recovery_deadline
+                .is_some_and(|deadline| self.retry_pause.now() >= deadline)
+            {
+                return Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                    ExitReason::Provider,
+                )));
+            }
+            let model_request = match candidate.as_ref() {
+                Some(model) => self.main_model_request().with_model(model.clone()),
+                None => walk.primary_model.as_ref().map_or_else(
+                    || self.main_model_request(),
+                    |model| self.main_model_request().with_model(model.clone()),
+                ),
+            };
+            let profile = match self
+                .admit_candidate_profile(
+                    turn,
+                    candidate_index,
+                    candidate.as_ref(),
+                    model_request,
+                    &mut walk,
+                )
+                .await?
+            {
+                std::ops::ControlFlow::Break(ended) => {
+                    return Ok(std::ops::ControlFlow::Break(ended));
+                }
+                std::ops::ControlFlow::Continue(Some(profile)) => profile,
+                std::ops::ControlFlow::Continue(None) => {
+                    return Ok(std::ops::ControlFlow::Continue(walk));
+                }
+            };
+
+            let (request, repaired) = match self.prepare_candidate_request(
+                turn,
+                candidate.as_ref(),
+                &profile,
+                &walk,
+                candidate_conversation,
+            )? {
+                std::ops::ControlFlow::Break(ended) => {
+                    return Ok(std::ops::ControlFlow::Break(ended));
+                }
+                std::ops::ControlFlow::Continue(Some(request)) => request,
+                std::ops::ControlFlow::Continue(None) => {
+                    walk.last_preflight_exit = ExitReason::Usage;
+                    return Ok(std::ops::ControlFlow::Continue(walk));
+                }
+            };
+            candidate_conversation = repaired;
+
+            // Resolution and request admission can advance monotonic time.
+            // Never reserve or dispatch paid work past this generation's horizon.
+            if self
+                .recovery_deadline
+                .is_some_and(|deadline| self.retry_pause.now() >= deadline)
+            {
+                return Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                    ExitReason::Provider,
+                )));
+            }
+
+            let budget = self
+                .gate
+                .snapshot()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            self.journal.publish(&PublicEvent::metering_selected(
+                turn,
+                &profile.metering,
+                budget.ledger(),
+                profile
+                    .rates
+                    .as_ref()
+                    .map_or(&RateSource::None, |rates| &rates.source),
+            ))?;
+
+            let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
+            let attempt = match self.reserve_generation_attempt(
+                turn,
+                &profile,
+                &request,
+                walk.next_attempt,
+            )? {
+                Ok(attempt) => attempt,
+                Err(ended) => return Ok(std::ops::ControlFlow::Break(ended)),
+            };
+            let reference = attempt.attempt();
+            walk.next_attempt = reference.retry();
+            self.admit_generation(&profile, reference, self.generation_role, &request.tools)?;
+            let generation = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::GenerationStarted {
+                    attempt: reference,
+                    role: self.generation_role,
+                    snapshot: (self.state().prompt_snapshot.as_ref()
+                        != Some(&self.prompt_snapshot))
+                    .then(|| self.prompt_snapshot.clone()),
+                },
+            )?;
+            self.last_request = Some(request.clone());
+            if additional_attempts > 0 {
+                self.journal.publish(&PublicEvent::ProviderRetrying {
+                    turn,
+                    attempt: additional_attempts,
+                })?;
+            }
+            let stream = profile.generator.generate(request, attempt);
+            let drained = self
+                .drain(
+                    turn,
+                    stream,
+                    DrainGeneration {
+                        event: generation,
+                        metering: &profile.metering,
+                        quote: quote.as_ref(),
+                        visibility: GenerationVisibility::Conversation,
+                        catalogue: Some(&walk.catalogue),
+                    },
+                )
+                .await;
+            let settlement = match self.gate.settle(drained.stream) {
+                Ok(settlement) => settlement,
+                Err(denied) => {
+                    tracing::error!(%denied, "the gate refused to settle an attempt it minted");
+                    drained.failure.map_or(Ok(()), Err)?;
+                    return self
+                        .refuse(turn, denied.to_string(), ExitReason::Internal)
+                        .map(std::ops::ControlFlow::Break);
+                }
+            };
+            drained.failure.map_or(Ok(()), Err)?;
+
+            let terminal = self.record_generation_settlement(
+                turn,
+                &profile,
+                reference,
+                &settlement,
+                drained.accounting_booked,
+            )?;
+            if drained.cancelled || self.cancel.is_cancelled() {
+                return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                    cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                    pending: drained.pending,
+                }));
+            }
+            if drained.corrupt.is_some() {
+                return Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                    ExitReason::Provider,
+                )));
+            }
+
+            let stop = settlement.outcome.stop();
+            let unsent = settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
+            let (reported, retry_after) = drained.provider_failure.unzip();
+            let cause = provider_cause(reported.as_deref(), drained.error_kind);
+            self.provider_failure = matches!(
+                stop,
+                StopReason::Error | StopReason::Aborted | StopReason::Deferred
+            )
+            .then(|| ProviderFailure {
+                cause: cause.clone(),
+                effect_known: !drained.emitted_output || reported.is_some(),
+            });
+            // maintainer decision 2026-10-05, amending the attempt-ownership
+            // ADR: a transient failure that showed nothing is retried even
+            // when it was possibly sent. Output already shown is never
+            // shown twice, so an attempt that emitted any is final.
+            let retryable = stop == StopReason::Error
+                && drained.error_kind == Some(ErrorKind::Transient)
+                && !drained.emitted_output;
+            match self
+                .retry_generation(
+                    turn,
+                    retryable,
+                    retry_after.flatten(),
+                    &mut additional_attempts,
+                    cause,
+                )
+                .await?
+            {
+                RetryProgress::Retry => continue,
+                RetryProgress::Cancelled => {
+                    return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                        cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                        pending: Vec::new(),
+                    }));
+                }
+                RetryProgress::Finished => {}
+            }
+            let stopped = (terminal, stop, drained.pending, drained.error_kind);
+            if stop == StopReason::Error && unsent {
+                walk.last_failure = Some(stopped);
+                return Ok(std::ops::ControlFlow::Continue(walk));
+            }
+
+            return Ok(std::ops::ControlFlow::Break(Generated::Stopped {
+                capture: walk.capture,
+                generation: generation_id,
+                terminal: stopped.0,
+                reason: stopped.1,
+                pending: stopped.2,
+                error_kind: stopped.3,
+            }));
+        }
+    }
+
+    async fn admit_candidate_profile(
+        &mut self,
+        turn: TurnId,
+        candidate_index: usize,
+        candidate: Option<&ModelRef>,
+        model_request: GenerationModelRequest,
+        walk: &mut GenerationWalk,
+    ) -> Result<std::ops::ControlFlow<Generated, Option<GenerationProfile>>, StoreError> {
+        match self.resolve_candidate_profile(turn, model_request).await {
+            Controlled::Completed(Some(Ok(profile))) => {
+                if candidate_index == 0 && walk.primary_model.is_none() {
+                    walk.primary_model = Some(profile.identity.clone());
+                    walk.primary_capabilities = Some(profile.capabilities.clone());
+                }
+                self.main_model_identity = Some(profile.identity.clone());
+                Ok(std::ops::ControlFlow::Continue(Some(profile)))
+            }
+            Controlled::Completed(Some(Err(error))) => {
+                let exit = match error.class {
+                    GenerationModelErrorClass::Usage => ExitReason::Usage,
+                    GenerationModelErrorClass::Provider => ExitReason::Provider,
+                    GenerationModelErrorClass::Internal => ExitReason::Internal,
+                };
+                walk.last_preflight_exit = exit;
+                match candidate {
+                    Some(candidate) => {
+                        self.journal.append(
+                            turn,
+                            None,
+                            None,
+                            EventKind::FallbackDecision {
+                                candidate: candidate.clone(),
+                                decision: FallbackDecision::ResolutionSkipped {
+                                    message: error.message,
+                                },
+                            },
+                        )?;
+                    }
+                    None => {
+                        self.journal.append(
+                            turn,
+                            None,
+                            None,
+                            EventKind::Error {
+                                message: error.message,
+                                kind: ErrorKind::Unclassified,
+                            },
+                        )?;
+                    }
+                }
+                Ok(std::ops::ControlFlow::Continue(None))
+            }
+            Controlled::Completed(None) => Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                ExitReason::Provider,
+            ))),
+            Controlled::Interrupted => Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                pending: Vec::new(),
+            })),
+            Controlled::Failed(cause) => Err(cause),
+        }
+    }
+
+    fn prepare_candidate_request(
+        &mut self,
+        turn: TurnId,
+        candidate: Option<&ModelRef>,
+        profile: &GenerationProfile,
+        walk: &GenerationWalk,
+        mut candidate_conversation: Conversation,
+    ) -> Result<std::ops::ControlFlow<Generated, Option<(GenRequest, Conversation)>>, StoreError>
+    {
+        let policy_snapshot = walk.capture.snapshot();
+        let descriptors = walk.catalogue.descriptors();
+        let mcp_servers = walk.catalogue.mcp_servers();
+        if let Some(message) = context_capacity::exhausted(
+            self.state().context,
+            profile.capabilities.max_context_tokens,
+        ) {
+            return self
+                .refuse(turn, message, ExitReason::ContextOverflow)
+                .map(std::ops::ControlFlow::Break);
+        }
+
+        if self.automatic_compaction && compaction_due(self.state().context) {
+            return self.refuse(turn,
+                "Measured context pressure requires a clean-session compaction before continuing.".to_owned(),
+                ExitReason::ContextOverflow).map(std::ops::ControlFlow::Break);
+        }
+
+        // Per candidate: a fallback runs on a different model, and the
+        // model must be told the one actually answering.
+        let identity = self.config.identity.as_ref().map(|identity| {
+            identity.render(
+                self.session_id,
+                &profile.identity,
+                profile.thinking,
+                &policy_snapshot,
+                &descriptors,
+                &mcp_servers,
+            )
+        });
+        let (messages, stable_messages) = self.with_host_context(
+            turn,
+            candidate_conversation.clone(),
+            self.tools.context_notes(),
+            identity.as_deref(),
+        )?;
+        let mut request = GenRequest {
+            cache: Some(crate::generator::types::PromptCache {
+                session_id: self.session_id,
+                lineage_root: self.lineage_root,
+                retention: self.config.cache,
+                stable_messages,
+            }),
+            model: profile.request_model.clone(),
+            messages,
+            tools: descriptors.clone(),
+            thinking: profile.thinking,
+            max_output_tokens: profile.output_ceiling(),
+            parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
+        };
+        let (repaired, gaps) = self.candidate_request_gaps(
+            turn,
+            candidate,
+            candidate_conversation,
+            &mut request,
+            (
+                walk.primary_capabilities
+                    .as_ref()
+                    .unwrap_or(&profile.capabilities),
+                &profile.capabilities,
+            ),
+            identity.as_deref(),
+        )?;
+        candidate_conversation = repaired;
+
+        if !gaps.is_empty() {
+            tracing::warn!(?gaps, "the candidate does not accept this request");
+            match candidate {
+                Some(candidate) => {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::FallbackDecision {
+                            candidate: candidate.clone(),
+                            decision: FallbackDecision::Skipped { gaps },
+                        },
+                    )?;
+                }
+                None => {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::Error {
+                            message: gaps
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                            kind: ErrorKind::Unclassified,
+                        },
+                    )?;
+                }
+            }
+
+            return Ok(std::ops::ControlFlow::Continue(None));
+        }
+        if let Err(refused) = profile.generator.ensure_expressible(&request) {
+            tracing::warn!(%refused, "the candidate generator cannot encode this request");
+            match candidate {
+                Some(candidate) => {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::FallbackDecision {
+                            candidate: candidate.clone(),
+                            decision: FallbackDecision::ExpressibilitySkipped {
+                                message: refused.to_string(),
+                            },
+                        },
+                    )?;
+                }
+                None => {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::Error {
+                            message: refused.to_string(),
+                            kind: ErrorKind::Unclassified,
+                        },
+                    )?;
+                }
+            }
+
+            return Ok(std::ops::ControlFlow::Continue(None));
+        }
+
+        Ok(std::ops::ControlFlow::Continue(Some((
+            request,
+            candidate_conversation,
+        ))))
     }
 
     fn candidate_request_gaps(
@@ -4774,7 +4863,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let reservation = match self.gate.reserve(
             &profile.metering,
             quote.as_ref(),
-            &request,
+            request,
             &profile.capabilities,
         ) {
             Ok(reservation) => reservation,
@@ -4793,7 +4882,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             reservation,
             &profile.metering,
             quote.as_ref(),
-            &request,
+            request,
             &profile.capabilities,
         ) {
             Ok(attempt) => attempt,
@@ -7127,6 +7216,17 @@ enum JudgeRun {
 }
 
 /// What one generation did.
+struct GenerationWalk {
+    capture: GenerationPolicyCapture,
+    catalogue: GenerationToolCatalogue,
+    conversation: Conversation,
+    next_attempt: AttemptRef,
+    last_failure: Option<(EventId, StopReason, Vec<PendingCall>, Option<ErrorKind>)>,
+    last_preflight_exit: ExitReason,
+    primary_model: Option<ModelRef>,
+    primary_capabilities: Option<crate::generator::capabilities::ModelCapabilities>,
+}
+
 enum RetryProgress {
     Retry,
     Cancelled,

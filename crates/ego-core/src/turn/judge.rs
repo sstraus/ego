@@ -225,7 +225,7 @@ impl JudgeGeneration<'_, '_, '_> {
         profile: &GenerationProfile,
         request: &GenRequest,
     ) -> Result<bool, StoreError> {
-        let gaps = profile.capabilities.request_gaps(&request);
+        let gaps = profile.capabilities.request_gaps(request);
         if !gaps.is_empty() {
             self.journal.append(
                 turn,
@@ -242,7 +242,7 @@ impl JudgeGeneration<'_, '_, '_> {
             )?;
             return Ok(false);
         }
-        if let Err(refused) = profile.generator.ensure_expressible(&request) {
+        if let Err(refused) = profile.generator.ensure_expressible(request) {
             self.journal.append(
                 turn,
                 None,
