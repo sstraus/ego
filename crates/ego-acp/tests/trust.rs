@@ -735,3 +735,38 @@ async fn a_router_without_a_trust_port_prepares_exactly_as_before() {
     );
     connection.abort().await;
 }
+
+/// Catches: a stale trust form widens authority after the admitted surface changed.
+#[tokio::test]
+async fn a_changed_workspace_rejects_both_trust_answers_without_changing_selections() {
+    struct Changed;
+    impl SessionTrustAdmission for Changed {
+        fn status(&self, _: &RunRoot) -> SessionTrustStatus {
+            SessionTrustStatus::Question {
+                content: "- AGENTS.md".into(),
+                fingerprint: "old-surface".into(),
+            }
+        }
+        fn record_answer(&self, _: &RunRoot, _: &str, _: Trust) -> bool {
+            false
+        }
+    }
+    for answer in ["trusted", "untrusted"] {
+        let executor = Arc::new(support::Executor::default());
+        let mut connection =
+            support::Connected::new(router(Some(Arc::new(Changed)), Arc::clone(&executor)));
+        let session = opened(&mut connection, true).await;
+        let response = prompt_answering(
+            &mut connection,
+            &session,
+            serde_json::json!({"action":"accept", "content":{"answer":answer}}),
+        )
+        .await;
+        assert_eq!(response["result"]["stopReason"], "end_turn");
+        assert_eq!(
+            executor.prepared_selections().expect("preparation").trust(),
+            None
+        );
+        connection.abort().await;
+    }
+}

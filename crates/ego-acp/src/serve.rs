@@ -2627,37 +2627,16 @@ async fn selected_trust(
             return selections;
         }
     };
-    // Four outcomes, four branches, and no default that swallows one: a
-    // refusal is a person's decision and a cancel is a question nobody
-    // answered, and collapsing them would make the two indistinguishable to
-    // the host that produced them.
     match outcome {
-        QuestionOutcome::Answered(QuestionAnswer::Single(answer)) if answer == TRUST_GRANT => {
-            if !admission.record_answer(root, fingerprint, Trust::Trusted) {
-                tracing::warn!(
-                    "the workspace executable surface changed while the trust form was open"
-                );
-                return selections;
-            }
-            tracing::info!(
-                outcome = "trusted",
-                "the host trusted this workspace for this session"
-            );
-            selections.with_trust(Trust::Trusted)
+        QuestionOutcome::Answered(QuestionAnswer::Single(answer)) => {
+            let trust = if answer == TRUST_GRANT {
+                Trust::Trusted
+            } else {
+                Trust::Untrusted
+            };
+            recorded_trust(selections, admission, root, fingerprint, trust)
         }
-        QuestionOutcome::Answered(QuestionAnswer::Single(_)) => {
-            if !admission.record_answer(root, fingerprint, Trust::Untrusted) {
-                tracing::warn!(
-                    "the workspace executable surface changed while the trust form was open"
-                );
-                return selections;
-            }
-            tracing::info!(outcome = "untrusted", "the host kept this session bare");
-            selections.with_trust(Trust::Untrusted)
-        }
-        // `validate_for` already refused every answer outside the grammar, so
-        // reaching here would mean the adapter admitted a shape it offered no
-        // option for. Untrusted, and said out loud.
+        // `validate_for` already refused every answer outside the grammar.
         QuestionOutcome::Answered(other) => {
             tracing::warn!(
                 ?other,
@@ -2667,27 +2646,50 @@ async fn selected_trust(
             selections
         }
         QuestionOutcome::Declined => {
-            tracing::info!(
-                outcome = "declined",
-                "the host refused the workspace trust question"
-            );
+            trust_unanswered("declined", "the host refused the workspace trust question");
             selections.with_trust(Trust::Untrusted)
         }
         QuestionOutcome::Cancelled => {
-            tracing::info!(
-                outcome = "cancelled",
-                "the workspace trust question was withdrawn unanswered"
+            trust_unanswered(
+                "cancelled",
+                "the workspace trust question was withdrawn unanswered",
             );
             selections
         }
         QuestionOutcome::Unavailable => {
-            tracing::info!(
-                outcome = "unavailable",
-                "this host cannot render the workspace trust form"
+            trust_unanswered(
+                "unavailable",
+                "this host cannot render the workspace trust form",
             );
             selections
         }
     }
+}
+
+fn trust_unanswered(outcome: &str, message: &str) {
+    tracing::info!(outcome, "{message}");
+}
+
+fn recorded_trust(
+    selections: RunSelections,
+    admission: &dyn SessionTrustAdmission,
+    root: &RunRoot,
+    fingerprint: &str,
+    trust: Trust,
+) -> RunSelections {
+    if !admission.record_answer(root, fingerprint, trust) {
+        tracing::warn!("the workspace executable surface changed while the trust form was open");
+        return selections;
+    }
+    let (outcome, message) = match trust {
+        Trust::Trusted => (
+            "trusted",
+            "the host trusted this workspace for this session",
+        ),
+        Trust::Untrusted => ("untrusted", "the host kept this session bare"),
+    };
+    tracing::info!(outcome, "{message}");
+    selections.with_trust(trust)
 }
 
 fn control_error(error: &ControlError) -> Error {
