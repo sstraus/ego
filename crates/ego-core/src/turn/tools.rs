@@ -71,6 +71,14 @@ impl GenerationToolCatalogue {
             .ok_or_else(|| format!("there is no tool named {name}"))
     }
 
+    pub(crate) fn admits_hosted_search(&self) -> bool {
+        self.registry.iter().any(|entry| {
+            entry
+                .as_effect()
+                .is_some_and(|tool| tool.admits_hosted_search())
+        })
+    }
+
     pub(crate) fn authority(&self) -> ToolCaptureAuthority {
         self.authority.clone()
     }

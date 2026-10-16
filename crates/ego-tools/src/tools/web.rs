@@ -258,6 +258,10 @@ pub trait SearchBackend: Send + Sync {
 pub struct HostedWebSearch;
 
 impl TypedTool for HostedWebSearch {
+    fn admits_hosted_search(&self) -> bool {
+        true
+    }
+
     type Params = WebSearchParams;
     fn name(&self) -> &str {
         "web_search"

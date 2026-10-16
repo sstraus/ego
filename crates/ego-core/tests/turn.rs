@@ -97,6 +97,68 @@ mod turn {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 
+    struct NativeSearchGenerator(FakeGenerator);
+    impl Generator for NativeSearchGenerator {
+        fn supports_web_search(&self) -> bool {
+            true
+        }
+        fn ensure_expressible(&self, req: &GenRequest) -> Result<(), RequestExpressibilityError> {
+            self.0.ensure_expressible(req)
+        }
+        fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+            self.0.generate(req, attempt)
+        }
+    }
+
+    #[test]
+    fn default_exa_catalogue_does_not_enable_paid_hosted_search() {
+        // Catches: the default Exa function being mistaken for hosted-search consent.
+        let mut fx = Fixture::new(vec![]);
+        fx.registry = vec![Arc::new(Typed(ego_tools::tools::WebSearch::with_backend(
+            Arc::new(ego_tools::tools::ExaSearch::new(
+                ego_core::credentials::SecretMaterial::new(b"unused-fixture".to_vec()),
+            )),
+        )))];
+        let generator = Arc::new(NativeSearchGenerator(FakeGenerator::new([vec![
+            AiEvent::Stop(StopReason::Stop),
+        ]])));
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = CoreTurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &generator, &mut fx.gate.borrow_mut()),
+            tools,
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(turn.run("hello")).unwrap().exit_reason,
+            ExitReason::Completed
+        );
+        let calls = generator.0.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].tools.iter().any(|tool| tool.name == "web_search"));
+        assert!(
+            calls[0].web_search.is_none(),
+            "ordinary Exa admission is not paid hosted-search consent"
+        );
+    }
+
     // Catches: pause_turn completes early, loses opaque blocks, or duplicates rendered citations in replay.
     #[test]
     fn hosted_search_continuation_replays_private_blocks_and_projects_sources() {
