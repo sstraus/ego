@@ -158,7 +158,7 @@ impl AcpQuestionAdapter {
             QuestionMode::FreeText => ElicitationSchema::new().string("answer", true),
             QuestionMode::Form { schema } => map_form_schema(question, schema)?,
             QuestionMode::Round(_) => {
-                return Err(invalid_request(
+                return Err(invalid_request_reason(
                     question,
                     "a round must be presented member by member",
                 ));

@@ -62,7 +62,14 @@ impl QuestionReport {
         Self {
             id,
             target: target.clone(),
-            prompt: request.prompt.clone(),
+            prompt: if matches!(request.mode, QuestionMode::Round(_)) {
+                format!(
+                    "{}; private member details are omitted from public output. Use an interactive terminal or a host with the required elicitation capability",
+                    request.prompt
+                )
+            } else {
+                request.prompt.clone()
+            },
             mode: match &request.mode {
                 QuestionMode::Round(_) => QuestionMode::Round(crate::question::ElicitationRound {
                     expires_at_ms: None,

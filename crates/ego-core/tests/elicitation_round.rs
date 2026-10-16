@@ -128,3 +128,14 @@ fn expiry_boundary_and_previously_completed_member_are_not_reauthorized() {
     );
     assert!(round.complete_member("profile", json!({"name":3})).is_err());
 }
+
+#[test]
+fn model_question_schema_cannot_offer_or_originate_external_browser_actions() {
+    // Catches: adding durable host grammar accidentally advertises browser actions as a model tool.
+    use ego_core::question::{AskQuestionTool, HumanInputTool};
+    let descriptor = AskQuestionTool.descriptor();
+    let schema = serde_json::to_string(&descriptor.parameters).unwrap();
+    assert!(!schema.contains("elicitation_id"));
+    assert!(!schema.contains("ElicitationRound"));
+    assert!(AskQuestionTool.parse(round()).is_err());
+}

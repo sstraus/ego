@@ -21,7 +21,10 @@ pub enum QuestionMode {
     Single,
     Multiple,
     FreeText,
-    Form { schema: Value },
+    Form {
+        schema: Value,
+    },
+    #[schemars(skip)]
     Round(ElicitationRound),
 }
 
