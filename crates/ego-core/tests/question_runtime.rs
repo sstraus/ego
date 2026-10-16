@@ -1771,3 +1771,57 @@ fn crashes_at_each_question_persistence_boundary_do_not_retry_or_repeat_complete
         }
     }
 }
+
+fn empty_round_request() -> QuestionRequest {
+    QuestionRequest::new("Retry MCP?", QuestionMode::Round(ego_core::question::ElicitationRound {
+        expires_at_ms: None, requests: Default::default(), completed: Default::default(),
+    }), vec![], false)
+}
+
+#[test]
+fn declining_successor_round_does_not_resurrect_predecessor() {
+    // Catches: declining a successor leaves its tool incomplete and revives an answered predecessor.
+    let request = empty_round_request();
+    let answer = QuestionAnswer::Round(ego_core::question::ElicitationAnswers {
+        confirmed: true, responses: Default::default(),
+    });
+    let foreign = Arc::new(RecordingForeignQuestionPort::scripted(vec![Ok(ToolExecution::InputRequired(
+        ForeignInputRequired::new(SUCCESSOR_CONTINUATION_ID, request.clone()).unwrap(),
+    ))], None));
+    with_foreign_turn_request(request, foreign_input_generator(), Arc::new(RecordingElicitor::scripted(vec![
+        Ok(QuestionOutcome::Answered(answer)), Ok(QuestionOutcome::Declined),
+    ], None)), foreign.clone(), (None, false), None, |mut turn, store| {
+        futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+        assert_eq!(*foreign.cancelled.lock().unwrap(), vec![SUCCESSOR_CONTINUATION_ID]);
+        assert_eq!(foreign.calls().len(), 1);
+        let replay = SessionState::replay(store.events());
+        assert!(replay.pending_question().is_none(), "decline resurrected an answered predecessor");
+        assert!(store.events().iter().any(|event| matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. })), "cancelled original tool must be durably closed");
+    });
+}
+
+struct InterruptingElicitor(ego_core::turn::control::InteractiveIngress);
+impl Elicitor for InterruptingElicitor {
+    fn elicit<'a>(&'a self, _: ItemId, _: QuestionRequest) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
+        Box::pin(async move {
+            self.0.interrupt().await.unwrap();
+            futures::future::pending().await
+        })
+    }
+}
+
+#[test]
+fn interrupted_foreign_round_has_no_pending_question_after_replay() {
+    // Catches: an interrupted elicitor cancels remote authority but leaves the local question pending.
+    let (ingress, mut control) = ego_core::turn::control::interactive_control();
+    let foreign = Arc::new(RecordingForeignQuestionPort::default());
+    with_foreign_turn_request(empty_round_request(), foreign_input_generator(), Arc::new(InterruptingElicitor(ingress)), foreign.clone(), (None, false), None, |turn, store| {
+        let mut turn = turn.with_interactive_control(&mut control);
+        let outcome = futures::executor::block_on(turn.run("invoke MCP")).unwrap();
+        assert!(matches!(outcome.exit_reason, ExitReason::Cancelled(_)));
+        assert_eq!(*foreign.cancelled.lock().unwrap(), vec![CONTINUATION_ID]);
+        let replay = SessionState::replay(store.events());
+        assert!(replay.pending_question().is_none(), "interruption left a pending foreign question after replay");
+        assert!(store.events().iter().any(|event| matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. })), "interrupted original tool must be durably closed");
+    });
+}
