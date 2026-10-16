@@ -7,7 +7,7 @@
 //! ([`note`]) not being able to reach it.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, IsTerminal, Write};
 use std::sync::Mutex;
 
 use ego_core::cost::{CumulativeCost, RateSource};
@@ -208,7 +208,9 @@ impl InteractiveOutput {
 
 impl Diagnostics for InteractiveOutput {
     fn note(&self, message: &str) {
-        self.line(&format!("{DISPLAY_NAME}: {message}"));
+        let text = format!("{DISPLAY_NAME}: {message}");
+        let width = terminal_size::terminal_size().map(|(width, _)| usize::from(width.0));
+        self.line(&wrap_notice(&text, width));
     }
 
     fn tool_row(&self, rows: &str, detail: String) {
@@ -292,13 +294,32 @@ impl TextOutput for InteractiveOutput {
 /// why it does not take a [`Stdout`] and could not use one if it wanted to.
 pub fn note(message: &str) {
     let mut err = std::io::stderr();
-    write_note(&mut err, message);
+    let width = err
+        .is_terminal()
+        .then(terminal_size::terminal_size)
+        .flatten()
+        .map(|(width, _)| usize::from(width.0));
+    write_note(&mut err, message, width);
 }
 
-fn write_note(mut err: impl Write, message: &str) {
+/// Plain human notices share the answer renderer's word and cell layout.
+/// A missing terminal width keeps redirected diagnostics byte-for-byte intact.
+pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
+    let Some(width) = width else {
+        return text.to_owned();
+    };
+    text.split('\n')
+        .flat_map(|line| crate::render::Line::plain(line).wrap(width))
+        .map(|line| line.text())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn write_note(mut err: impl Write, message: &str, width: Option<usize>) {
     // Nothing to be done if the diagnostic channel itself is gone, and a
     // panic here would replace a report with a crash.
-    let _ = writeln!(err, "{DISPLAY_NAME}: {message}");
+    let text = wrap_notice(&format!("{DISPLAY_NAME}: {message}"), width);
+    let _ = writeln!(err, "{text}");
 }
 
 /// The one sentence every empty listing says: what is missing, and the command
@@ -922,9 +943,39 @@ mod tests {
     #[test]
     fn a_diagnostic_uses_the_human_facing_product_name_byte_for_byte() {
         let mut err = Vec::new();
-        write_note(&mut err, "something failed");
+        write_note(&mut err, "something failed", None);
 
         assert_eq!(err, "εgo: something failed\n".as_bytes());
+    }
+
+    // Catches: a terminal width leaks into redirected diagnostic bytes.
+    #[test]
+    fn redirected_diagnostics_keep_long_lines_and_whitespace() {
+        let message =
+            "a long diagnostic with instructions that must stay on one logical line\n  next line";
+        let mut err = Vec::new();
+        write_note(&mut err, message, None);
+        assert_eq!(String::from_utf8(err).unwrap(), format!("εgo: {message}\n"));
+    }
+
+    // Catches: multiline notice wrapping drops blank rows or measures Unicode in bytes.
+    #[test]
+    fn notices_preserve_blank_rows_and_wrap_unicode_in_cells() {
+        assert_eq!(
+            wrap_notice("\n  hint\nεgo: 日本語 café text continues\n", Some(20)),
+            "\n  hint\nεgo: 日本語 café\ntext continues\n"
+        );
+    }
+
+    // Catches: an oversized diagnostic token bypasses the shared bounded fallback.
+    #[test]
+    fn diagnostic_tokens_wider_than_the_terminal_still_fit() {
+        let mut err = Vec::new();
+        write_note(&mut err, "abcdefghijklmnopqrstuvwxyz", Some(20));
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "εgo:\nabcdefghijklmnopqrst\nuvwxyz\n"
+        );
     }
 
     #[test]
