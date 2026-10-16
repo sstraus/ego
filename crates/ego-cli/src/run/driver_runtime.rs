@@ -469,23 +469,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             Ok(ended)
         }
         Driver::Interactive { seat, between } => {
-            if seat.has_human()
-                && matches!(&args.session, crate::cli::SessionChoice::Resume(_))
-                && let Some(output) = text_output
-            {
-                let environment = crate::render::caps::Environment::read();
-                let capabilities = crate::render::Capabilities::of(
-                    &crate::render::caps::Terminal::from_process(args.no_color, &environment),
-                );
-                if let Err(error) = crate::render::replay::replay(
-                    active.writer(),
-                    active.id(),
-                    output,
-                    capabilities,
-                ) {
-                    diagnostics.note(&format!("the transcript could not be replayed: {error}"));
-                }
-            }
+            replay_interactive_session(&args, seat.as_ref(), &active, text_output, diagnostics);
             let interactive_metadata =
                 SessionMetadata::new(Arc::clone(jsonl_store), Arc::new(clock));
             let mut control = seat.take_control();
@@ -585,23 +569,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                     ));
                     let model_switch_owner;
                     install_model_switch_owner!(session_hooks, model_switch_owner, status);
-                    if let EpochStart::Compact {
-                        request, parent, ..
-                    } = &epoch_start
-                        && let Err(error) = dispatch_request_hook(
-                            &session_hooks.runtime,
-                            *request,
-                            session_hooks.turn,
-                            *parent,
-                            HookLifecycle::PostCompact,
-                        )
-                        .await
-                    {
-                        diagnostics.note(&format!(
-                            "the compaction post hook failed: {}",
-                            error.exit_reason()
-                        ));
-                    }
+                    dispatch_post_compact_hook(&epoch_start, &session_hooks, diagnostics).await;
                     state = session_hooks.state.state();
                     last.session = active.id();
                     last.state = state.clone();
@@ -620,29 +588,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                         },
                         diagnostics,
                     );
-                    if !activation_failed
-                        && !matches!(&epoch_start, EpochStart::Initial)
-                        && let Some(status) = status.as_ref()
-                        && status.human
-                    {
-                        match selection.snapshot() {
-                            Ok(selected) => status.seat.refresh_status(&state, selected),
-                            Err(error) => diagnostics.note(&match &epoch_start {
-                                EpochStart::New => format!(
-                                    "the new session status selection could not be refreshed: {error}"
-                                ),
-                                EpochStart::Fork { .. } => format!(
-                                    "the forked session status selection could not be refreshed: {error}"
-                                ),
-                                EpochStart::Compact { .. } => format!(
-                                    "the compacted session status selection could not be refreshed: {error}"
-                                ),
-                                EpochStart::Initial => unreachable!(
-                                    "initial epoch status is not refreshed through transition setup"
-                                ),
-                            }),
-                        }
-                    }
+                    refresh_epoch_status(
+                        activation_failed,
+                        &epoch_start,
+                        status.as_ref(),
+                        &selection,
+                        &state,
+                        diagnostics,
+                    );
                     if activation_failed {
                         last.termination = RunTermination::Failed {
                             message: format!(
@@ -875,13 +828,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                             last_generation_request = loop_.last_generation_request();
                             drop(loop_);
                             state = session_hooks.state.state();
-                            for (id, snapshot) in &state.detached_execs {
-                                if let Some(snapshot) = snapshot
-                                    && !settled_before.contains(id)
-                                {
-                                    diagnostics.note(&snapshot.model_text());
-                                }
-                            }
+                            report_settled_execs(&state, &settled_before, diagnostics);
                             if state
                                 .prompt_snapshot
                                 .as_ref()
@@ -902,24 +849,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 continue;
                             };
                             between();
-                            if matches!(termination, RunTermination::Signalled(Signal::Int))
-                                && !cancel.is_cancelled()
-                            {
-                                diagnostics.note(&format!(
-                                    "{} after {:.1}s",
-                                    repl::INTERRUPTED_RECEIPT,
-                                    turn_started
-                                        .elapsed()
-                                        .saturating_sub(seat.modal_wait())
-                                        .as_secs_f64()
-                                ));
-                            }
-
-                            if let RunTermination::Failed { message } = &termination {
-                                diagnostics.note(&format!(
-                                    "{message}; fix the error and retry, or use /quit"
-                                ));
-                            }
+                            report_interactive_turn_end(
+                                &termination,
+                                &cancel,
+                                seat.as_ref(),
+                                turn_started,
+                                diagnostics,
+                            );
                             last = Ended {
                                 termination,
                                 session: active.id(),
@@ -3331,5 +3267,122 @@ fn refresh_turn_status(
                 "the native status selection could not be refreshed: {error}"
             )),
         }
+    }
+}
+
+fn replay_interactive_session(
+    args: &Args,
+    seat: &dyn InteractiveSeat,
+    active: &ActiveSession<'_>,
+    text_output: Option<&dyn TextOutput>,
+    diagnostics: &dyn Diagnostics,
+) {
+    if seat.has_human()
+        && matches!(&args.session, crate::cli::SessionChoice::Resume(_))
+        && let Some(output) = text_output
+    {
+        let environment = crate::render::caps::Environment::read();
+        let capabilities = crate::render::Capabilities::of(
+            &crate::render::caps::Terminal::from_process(args.no_color, &environment),
+        );
+        if let Err(error) =
+            crate::render::replay::replay(active.writer(), active.id(), output, capabilities)
+        {
+            diagnostics.note(&format!("the transcript could not be replayed: {error}"));
+        }
+    }
+}
+
+fn refresh_epoch_status(
+    activation_failed: bool,
+    epoch_start: &EpochStart,
+    status: Option<&InteractiveStatus>,
+    selection: &model::GenerationSelection,
+    state: &SessionState,
+    diagnostics: &dyn Diagnostics,
+) {
+    if !activation_failed
+        && !matches!(epoch_start, EpochStart::Initial)
+        && let Some(status) = status
+        && status.human
+    {
+        match selection.snapshot() {
+            Ok(selected) => status.seat.refresh_status(state, selected),
+            Err(error) => diagnostics.note(&match epoch_start {
+                EpochStart::New => {
+                    format!("the new session status selection could not be refreshed: {error}")
+                }
+                EpochStart::Fork { .. } => {
+                    format!("the forked session status selection could not be refreshed: {error}")
+                }
+                EpochStart::Compact { .. } => format!(
+                    "the compacted session status selection could not be refreshed: {error}"
+                ),
+                EpochStart::Initial => {
+                    unreachable!("initial epoch status is not refreshed through transition setup")
+                }
+            }),
+        }
+    }
+}
+
+async fn dispatch_post_compact_hook(
+    epoch_start: &EpochStart,
+    session_hooks: &SessionHookComposition<'_>,
+    diagnostics: &dyn Diagnostics,
+) {
+    if let EpochStart::Compact {
+        request, parent, ..
+    } = epoch_start
+        && let Err(error) = dispatch_request_hook(
+            &session_hooks.runtime,
+            *request,
+            session_hooks.turn,
+            *parent,
+            HookLifecycle::PostCompact,
+        )
+        .await
+    {
+        diagnostics.note(&format!(
+            "the compaction post hook failed: {}",
+            error.exit_reason()
+        ));
+    }
+}
+
+fn report_settled_execs(
+    state: &SessionState,
+    settled_before: &std::collections::HashSet<ego_core::event::id::DetachedExecId>,
+    diagnostics: &dyn Diagnostics,
+) {
+    for (id, snapshot) in &state.detached_execs {
+        if let Some(snapshot) = snapshot
+            && !settled_before.contains(id)
+        {
+            diagnostics.note(&snapshot.model_text());
+        }
+    }
+}
+
+fn report_interactive_turn_end(
+    termination: &RunTermination,
+    cancel: &CancelToken,
+    seat: &dyn InteractiveSeat,
+    turn_started: std::time::Instant,
+    diagnostics: &dyn Diagnostics,
+) {
+    if matches!(termination, RunTermination::Signalled(Signal::Int)) && !cancel.is_cancelled() {
+        diagnostics.note(&format!(
+            "{} after {:.1}s",
+            repl::INTERRUPTED_RECEIPT,
+            turn_started
+                .elapsed()
+                .saturating_sub(seat.modal_wait())
+                .as_secs_f64()
+        ));
+    }
+
+    if let RunTermination::Failed { message } = termination {
+        diagnostics.note(&format!("{message}; fix the error and retry, or use /quit"));
     }
 }
