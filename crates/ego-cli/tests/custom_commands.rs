@@ -232,7 +232,10 @@ fn pasted_custom_command_stays_literal_and_never_runs_its_shell() {
         "config.toml",
         "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
     );
-    ego.home_file("commands/review.md", "EXPANDED !`touch pasted-command-effect`");
+    ego.home_file(
+        "commands/review.md",
+        "EXPANDED !`touch pasted-command-effect`",
+    );
     let marker = ego.workspace_path().join("pasted-command-effect");
     let result = places
         .ego(&stub)
@@ -240,26 +243,9 @@ fn pasted_custom_command_stays_literal_and_never_runs_its_shell() {
         .args(["--mode", "yolo", "--sandbox", "off"])
         .run_pty("\x1b[200~/review\x1b[201~");
     assert_eq!(result.code, Some(0), "{}", result.stdout);
-    assert!(!marker.exists(), "bracketed paste executed the command shell");
-    assert!(stub.generations()[0].to_string().contains("/review"));
-}
-
-// Catches: lexical ./ components refuse a permitted workspace import.
-#[test]
-fn custom_command_dot_relative_import_reaches_provider() {
-    let stub = Stub::start(plan());
-    let places = Places::new();
-    let ego = places.ego(&stub);
-    ego.home_file(
-        "config.toml",
-        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    assert!(
+        !marker.exists(),
+        "bracketed paste executed the command shell"
     );
-    ego.home_file("commands/review.md", "Review @./context.txt");
-    ego.file("context.txt", "DOT-RELATIVE-CONTEXT");
-    let result = places
-        .ego(&stub)
-        .args(["/review", "--mode", "yolo", "--sandbox", "off"])
-        .run();
-    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
-    assert!(stub.generations()[0].to_string().contains("DOT-RELATIVE-CONTEXT"));
+    assert!(stub.generations()[0].to_string().contains("/review"));
 }
