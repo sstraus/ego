@@ -16,7 +16,7 @@ fn child_case(test: &str, case: &str, plan: Plan) -> Stub {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("config.toml"),
-        "model = 'anthropic/claude-sonnet-5-5'\nthinking = 'off'\nbudget = '100k'\nsandbox = 'off'\n",
+        "model = 'anthropic/claude-sonnet-5-5'\nthinking = 'low'\nbudget = '100k'\nsandbox = 'off'\n",
     )
     .unwrap();
     std::fs::write(
@@ -40,6 +40,9 @@ fn child_case(test: &str, case: &str, plan: Plan) -> Stub {
         .envs(support::coverage_environment())
         .envs(support::windows_system_environment())
         .env("PATH", support::fixture_path())
+        // Match the existing real-driver child harness: its nested turn future
+        // exceeds libtest's default stack when coverage is enabled.
+        .env("RUST_MIN_STACK", "16777216")
         .env("HOME", home.path())
         .env("EGO_HOME", home.path())
         .env("ANTHROPIC_API_KEY", "test-key")
@@ -440,6 +443,7 @@ fn headless_completion_collects_background_skill_result_before_returning() {
     }
     runtime().block_on(async {
         let mut args = args("anthropic/claude-sonnet-5-5");
+        args.thinking = Some(ThinkingLevel::Low);
         args.prompt = Some("start the background check".to_owned());
         let ended = run_with_registry(
             args,
