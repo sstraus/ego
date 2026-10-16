@@ -100,6 +100,8 @@ Notes:
   scripted multi-turn conversations — a pipeline can carry a session through
   several stages. One session pool across interactive and headless runs
   (Codex split them and had to add `--include-non-interactive` to re-merge).
+- For an installation-free IDE custom-agent setup over native ACP, see
+  [IDE setup](docs/integrations/ide.md); no `--ide` auto-connect flag is required.
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
 - An ACP host may supply a stateless HTTP MCP server in `session/new`. HTTPS
