@@ -804,22 +804,23 @@ pub(super) async fn drive_execution<S: EventSink>(
 
                 match transition {
                     EpochTransition::Exit => {
-                        active.replace_state(source_state.clone());
-                        last.state = source_state;
-                        if let Err(termination) = session_end {
-                            last.termination = termination;
-                        }
+                        finish_interactive_session(
+                            &mut active,
+                            &mut last,
+                            source_state,
+                            session_end,
+                            None,
+                        );
                         break 'sessions Ok(last);
                     }
                     EpochTransition::Resume { meta } => {
-                        active.replace_state(source_state.clone());
-                        last.state = source_state;
-                        if let Err(termination) = session_end {
-                            last.termination = termination;
-                        } else {
-                            last.selected_session = Some(meta);
-                            seat.restore_control(control);
-                        }
+                        finish_interactive_session(
+                            &mut active,
+                            &mut last,
+                            source_state,
+                            session_end,
+                            Some((meta, seat.as_ref(), control)),
+                        );
                         break 'sessions Ok(last);
                     }
                     EpochTransition::New { target } => {
@@ -3546,4 +3547,25 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         return Ok((true, perimeter));
     }
     Ok((false, perimeter))
+}
+
+fn finish_interactive_session(
+    active: &mut ActiveSession<'_>,
+    last: &mut Ended,
+    source_state: SessionState,
+    session_end: Result<(), RunTermination>,
+    resume: Option<(
+        ego_core::store::session_store::SessionMeta,
+        &dyn InteractiveSeat,
+        InteractiveControl,
+    )>,
+) {
+    active.replace_state(source_state.clone());
+    last.state = source_state;
+    if let Err(termination) = session_end {
+        last.termination = termination;
+    } else if let Some((meta, seat, control)) = resume {
+        last.selected_session = Some(meta);
+        seat.restore_control(control);
+    }
 }
