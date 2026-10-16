@@ -3,7 +3,8 @@
 
 use std::ffi::OsString;
 
-use ego_core::turn::{CancelCause, CancelToken};
+use ego_core::event::domain::CancelCause;
+use ego_core::turn::CancelToken;
 use ego_tools::exec::{EditorProcessError, run_editor_process};
 
 // Catches: accepting an empty command and trying to spawn an unspecified editor.
