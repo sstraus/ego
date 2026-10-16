@@ -973,6 +973,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 mode: match &request.mode {
                     QuestionMode::Round(_) => {
                         QuestionMode::Round(crate::question::ElicitationRound {
+                            expires_at_ms: None,
                             requests: Default::default(),
                             completed: Default::default(),
                         })

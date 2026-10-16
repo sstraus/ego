@@ -342,6 +342,8 @@ struct Journal {
     fail_record: Mutex<bool>,
     fail_pending: Mutex<bool>,
     fail_settle: Mutex<bool>,
+    fail_accept_after_write: Mutex<bool>,
+    fail_claim_after_write: Mutex<bool>,
     trace: Trace,
 }
 impl Journal {
@@ -353,6 +355,8 @@ impl Journal {
             fail_record: Mutex::default(),
             fail_pending: Mutex::default(),
             fail_settle: Mutex::default(),
+            fail_accept_after_write: Mutex::default(),
+            fail_claim_after_write: Mutex::default(),
             trace,
         }
     }
@@ -484,6 +488,11 @@ impl ContinuationJournal for Journal {
         let record = records.get_mut(id).ok_or(ContinuationError::NotFound)?;
         record.accept_answer(answer.to_vec(), now)?;
         self.push("accepted_answer");
+        if std::mem::take(&mut *self.fail_accept_after_write.lock().unwrap()) {
+            return Err(ContinuationError::Unavailable(
+                "accept durability uncertain".to_owned(),
+            ));
+        }
         Ok(())
     }
     fn load(&self, id: &str) -> Result<ContinuationRecord, ContinuationError> {
@@ -519,6 +528,11 @@ impl ContinuationJournal for Journal {
             .map_err(|_| ContinuationError::Corrupt("decode".into()))?,
         );
         self.push("claim");
+        if std::mem::take(&mut *self.fail_claim_after_write.lock().unwrap()) {
+            return Err(ContinuationError::Unavailable(
+                "claim durability uncertain".to_owned(),
+            ));
+        }
         Ok(claimed)
     }
     fn settle(
@@ -3667,4 +3681,256 @@ fn mcp_hook_adapter_wire_retains_the_admitted_hook_identity() {
         wire.get("hook_id").is_some(),
         "the complete invocation request must carry hook identity through MCP"
     );
+}
+
+struct DurableRoundFixture {
+    owner: Arc<McpContinuationOwner>,
+    journal: Arc<Journal>,
+    captures: Arc<CaptureStore>,
+    resolver: Arc<ExactCaptureResolver>,
+    spawner: Arc<ScriptedSpawner>,
+    runtime: SessionHookRuntime<'static>,
+    floor: ego_core::suspension::ResumeFloor,
+    required: ForeignInputRequired,
+}
+
+async fn durable_round_fixture(rounds: usize) -> DurableRoundFixture {
+    let journal = Arc::new(Journal::default());
+    let captures = Arc::new(CaptureStore::default());
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner_with_store(journal.clone(), captures.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(owner.clone(), 64 * 1024, Duration::from_secs(30)).unwrap(),
+    );
+    let (capture, tool) = captured_lookup(factory);
+    resolver.insert(capture.clone());
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume();
+    let resume = sealer.prepare(&auth, floor.clone()).unwrap();
+    let spawner = Arc::new(ScriptedSpawner::with_input_required_rounds(rounds));
+    let runtime = hooks_with_mode(HookMode::Continue, Trace::default());
+    let (call, guarded) =
+        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
+    let ToolExecution::InputRequired(required) = tool.execute(call, &guarded).await.unwrap() else {
+        panic!("input required")
+    };
+    DurableRoundFixture {
+        owner,
+        journal,
+        captures,
+        resolver,
+        spawner,
+        runtime,
+        floor,
+        required,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ninth_round_is_refused_without_extending_expiry_even_for_repeated_opaque_state() {
+    // Catches: unchanged server requestState resets the round budget or collides with an earlier round.
+    let fixture = durable_round_fixture(9).await;
+    let mut required = fixture.required;
+    let initial_expiry = fixture
+        .journal
+        .load(required.continuation_id())
+        .unwrap()
+        .expires_at();
+    let mut ids = std::collections::HashSet::new();
+    for index in 0..8 {
+        assert!(
+            ids.insert(required.continuation_id().to_owned()),
+            "each bounded round has a distinct local claim"
+        );
+        assert_eq!(
+            fixture
+                .journal
+                .load(required.continuation_id())
+                .unwrap()
+                .expires_at(),
+            initial_expiry
+        );
+        let causality =
+            settled_continuation_causality(&fixture.runtime, &required, r#"{"choice":"yes"}"#);
+        let result = fixture
+            .owner
+            .accept_answer(
+                required.continuation_id(),
+                canonical_answer(&required, r#"{"choice":"yes"}"#).as_bytes(),
+                fixture.runtime.clone(),
+                causality,
+                fixture.floor.clone(),
+                ports(fixture.spawner.clone()),
+            )
+            .await;
+        if index == 7 {
+            assert!(result.is_err(), "the ninth input round must not be exposed");
+        } else {
+            let ToolExecution::InputRequired(next) = result.unwrap() else {
+                panic!("successor")
+            };
+            required = next;
+        }
+    }
+    assert_eq!(
+        fixture.spawner.calls(),
+        9,
+        "initial call plus eight explicitly consented retries"
+    );
+    assert_eq!(
+        fixture
+            .journal
+            .events()
+            .iter()
+            .filter(|event| **event == "record")
+            .count(),
+        8
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn crash_after_answer_acceptance_recovers_only_the_same_answer_before_claim() {
+    // Catches: a durable accepted answer is stranded or a restart replaces it with another answer.
+    let fixture = durable_round_fixture(1).await;
+    let id = fixture.required.continuation_id();
+    let answer = canonical_answer(&fixture.required, r#"{"choice":"yes"}"#);
+    let causality =
+        settled_continuation_causality(&fixture.runtime, &fixture.required, r#"{"choice":"yes"}"#);
+    *fixture.journal.fail_accept_after_write.lock().unwrap() = true;
+    assert!(
+        fixture
+            .owner
+            .accept_answer(
+                id,
+                answer.as_bytes(),
+                fixture.runtime.clone(),
+                causality.clone(),
+                fixture.floor.clone(),
+                ports(fixture.spawner.clone())
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.spawner.calls(), 1);
+    assert_eq!(
+        fixture.journal.state_for(id),
+        Some(ContinuationState::Accepted)
+    );
+    let restarted = context_free_owner_with_store(
+        fixture.journal.clone(),
+        fixture.captures.clone(),
+        fixture.resolver.clone(),
+    );
+    let policy = restarted.load_pending_foreign_policy(id).unwrap();
+    restarted
+        .bind_pending_foreign_continuation(id, policy)
+        .unwrap();
+    let changed = canonical_answer(&fixture.required, r#"{"choice":"changed"}"#);
+    assert!(
+        restarted
+            .accept_answer(
+                id,
+                changed.as_bytes(),
+                fixture.runtime.clone(),
+                causality.clone(),
+                fixture.floor.clone(),
+                ports(fixture.spawner.clone())
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.spawner.calls(), 1);
+    let result = restarted
+        .accept_answer(
+            id,
+            answer.as_bytes(),
+            fixture.runtime.clone(),
+            causality,
+            fixture.floor.clone(),
+            ports(fixture.spawner.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, ToolExecution::Complete(_)));
+    assert_eq!(fixture.spawner.calls(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn crash_after_claim_publication_never_repeats_the_remote_effect() {
+    // Catches: an uncertain claim write is treated as unclaimed after restart.
+    let fixture = durable_round_fixture(1).await;
+    let id = fixture.required.continuation_id();
+    let answer = canonical_answer(&fixture.required, r#"{"choice":"yes"}"#);
+    let causality =
+        settled_continuation_causality(&fixture.runtime, &fixture.required, r#"{"choice":"yes"}"#);
+    *fixture.journal.fail_claim_after_write.lock().unwrap() = true;
+    assert!(
+        fixture
+            .owner
+            .accept_answer(
+                id,
+                answer.as_bytes(),
+                fixture.runtime.clone(),
+                causality.clone(),
+                fixture.floor.clone(),
+                ports(fixture.spawner.clone())
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture.journal.state_for(id),
+        Some(ContinuationState::Claimed)
+    );
+    let restarted = context_free_owner_with_store(
+        fixture.journal.clone(),
+        fixture.captures.clone(),
+        fixture.resolver.clone(),
+    );
+    assert!(restarted.load_pending_foreign_policy(id).is_err());
+    assert!(
+        restarted
+            .accept_answer(
+                id,
+                answer.as_bytes(),
+                fixture.runtime.clone(),
+                causality,
+                fixture.floor.clone(),
+                ports(fixture.spawner.clone())
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.spawner.calls(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn decline_port_durably_invalidates_the_remote_operation_without_sending() {
+    // Catches: declining in a host leaves an independently resumable continuation.
+    let fixture = durable_round_fixture(1).await;
+    let id = fixture.required.continuation_id();
+    let adapter = ego_mcp::McpForeignQuestionPort::new(
+        fixture.owner.clone(),
+        fixture.runtime.clone(),
+        fixture.floor.clone(),
+        ports(fixture.spawner.clone()),
+    );
+    ForeignQuestionPort::cancel(&adapter, id).unwrap();
+    assert_eq!(
+        fixture.journal.state_for(id),
+        Some(ContinuationState::Failed)
+    );
+    let causality =
+        settled_continuation_causality(&fixture.runtime, &fixture.required, r#"{"choice":"yes"}"#);
+    assert!(
+        ForeignQuestionPort::resume(
+            &adapter,
+            id,
+            &canonical_answer(&fixture.required, r#"{"choice":"yes"}"#),
+            causality
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(fixture.spawner.calls(), 1);
 }

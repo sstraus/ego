@@ -75,3 +75,56 @@ fn ninth_member_is_refused_before_presentation() {
     let request: QuestionRequest = serde_json::from_value(value).expect("typed round");
     assert!(request.validate().is_err());
 }
+
+#[test]
+fn public_question_projection_omits_the_private_url_and_member_prompts() {
+    // Catches: a host-facing URL is copied into general public events or summaries.
+    let request: QuestionRequest = serde_json::from_value(round()).unwrap();
+    let report = ego_core::public::QuestionReport::from_request(
+        ego_core::event::id::ItemId::new(),
+        &ego_core::question::QuestionTarget::ForeignContinuation {
+            tool_call: ego_core::event::id::ItemId::new(),
+            continuation_id: "local-operation".to_owned(),
+        },
+        &request,
+    );
+    let projected = serde_json::to_string(&report).unwrap();
+    for private in [
+        "example.test",
+        "private=",
+        "Complete verification",
+        "verify-42",
+    ] {
+        assert!(
+            !projected.contains(private),
+            "private round content escaped into public output"
+        );
+    }
+}
+
+#[test]
+fn expiry_boundary_and_previously_completed_member_are_not_reauthorized() {
+    // Catches: a stale URL launch is allowed at the exact deadline or completion is replaceable.
+    let mut request: QuestionRequest = serde_json::from_value(round()).unwrap();
+    let ego_core::question::QuestionMode::Round(round) = &mut request.mode else {
+        panic!("round")
+    };
+    round.expires_at_ms = Some(1000);
+    assert!(!round.expired_at(999));
+    assert!(round.expired_at(1000));
+    assert!(round.expired_at(1001));
+    round
+        .complete_member("verify", json!({"completed":true}))
+        .unwrap();
+    assert!(
+        round
+            .complete_member("verify", json!({"completed":true}))
+            .is_err()
+    );
+    assert!(
+        round
+            .complete_member("different-server-key", json!({"completed":true}))
+            .is_err()
+    );
+    assert!(round.complete_member("profile", json!({"name":3})).is_err());
+}

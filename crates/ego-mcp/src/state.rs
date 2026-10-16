@@ -283,6 +283,12 @@ pub struct McpMappedInput {
 }
 
 impl McpMappedInput {
+    pub(crate) fn bind_deadline(&mut self, expiry: u64) {
+        if let QuestionMode::Round(round) = &mut self.question_request.mode {
+            round.expires_at_ms = Some(expiry);
+        }
+    }
+
     pub fn correlation_key(&self) -> &str {
         &self.correlation_key
     }
@@ -376,10 +382,12 @@ impl McpInputMapping {
                         elicitation_id,
                     },
                 ),
+                _ => return Err(protocol("unsupported elicitation mode")),
             };
             members.insert(key, ElicitationMember { prompt, kind });
         }
         let round = ElicitationRound {
+            expires_at_ms: None,
             requests: members,
             completed: Default::default(),
         };

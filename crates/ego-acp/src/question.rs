@@ -278,6 +278,14 @@ impl AcpQuestionAdapter {
         request: QuestionRequest,
     ) -> Result<QuestionOutcome, ElicitorError> {
         if let QuestionMode::Round(round) = &request.mode {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(u64::MAX, |duration| {
+                    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+                });
+            if round.expired_at(now_ms) {
+                return Ok(QuestionOutcome::Unavailable);
+            }
             request
                 .validate()
                 .map_err(|_| ElicitorError::new("invalid elicitation round"))?;

@@ -430,6 +430,9 @@ fn answer_question(
     request: &QuestionRequest,
 ) -> QuestionOutcome {
     if let QuestionMode::Round(round) = &request.mode {
+        if round.expired_at(host_now_ms()) {
+            return QuestionOutcome::Unavailable;
+        }
         if request.validate().is_err() {
             return QuestionOutcome::Unavailable;
         }
@@ -464,7 +467,11 @@ fn answer_question(
                     if !consent {
                         return QuestionOutcome::Declined;
                     }
-                    if !launch_elicitation_url(url) {
+                    if !open_elicitation_url_on_consent(
+                        url,
+                        consent && !round.expired_at(host_now_ms()),
+                        launch_elicitation_url,
+                    ) {
                         surface.status.lock().expect("surface status lock").notice = Some(
                             "The browser could not be opened; the request remains pending"
                                 .to_owned(),
@@ -1865,4 +1872,45 @@ fn launch_elicitation_url(url: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn host_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn open_elicitation_url_on_consent(
+    url: &str,
+    consent: bool,
+    launch: impl FnOnce(&str) -> bool,
+) -> bool {
+    consent && ego_core::question::validate_url(url).is_ok() && launch(url)
+}
+
+#[cfg(test)]
+mod elicitation_url_consent_tests {
+    use super::*;
+
+    #[test]
+    fn url_launch_requires_fresh_consent_even_when_the_same_url_is_replayed() {
+        // Catches: a rendered/restarted question reuses permission from an earlier launch.
+        let mut launches = 0;
+        for consent in [false, true, false] {
+            let opened =
+                open_elicitation_url_on_consent("https://example.test/verify", consent, |_| {
+                    launches += 1;
+                    true
+                });
+            assert_eq!(opened, consent);
+        }
+        assert_eq!(launches, 1);
+        assert!(!open_elicitation_url_on_consent(
+            "javascript:alert(1)",
+            true,
+            |_| panic!("unsafe URL must never reach the browser")
+        ));
+    }
 }

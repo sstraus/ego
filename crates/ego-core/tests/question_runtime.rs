@@ -158,6 +158,7 @@ where
 
 #[derive(Default)]
 struct MemoryStore {
+    fail_append: Mutex<Option<(&'static str, bool)>>,
     events: Mutex<Vec<DomainEvent>>,
     trace: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
@@ -169,6 +170,7 @@ impl MemoryStore {
 
     fn with_trace(trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
+            fail_append: Mutex::new(None),
             events: Mutex::new(Vec::new()),
             trace: Some(trace),
         }
@@ -181,6 +183,22 @@ impl SessionStore for MemoryStore {
         _id: &ego_core::event::id::SessionId,
         event: &DomainEvent,
     ) -> Result<(), StoreError> {
+        let failure = {
+            let mut fail = self.fail_append.lock().unwrap();
+            if fail
+                .as_ref()
+                .is_some_and(|(kind, _)| *kind == event.kind.name())
+            {
+                fail.take()
+            } else {
+                None
+            }
+        };
+        if failure == Some((event.kind.name(), false)) {
+            return Err(StoreError::Io(std::io::Error::other(
+                "crash before event publication",
+            )));
+        }
         if let Some(trace) = &self.trace {
             let label = if matches!(&event.kind, EventKind::QuestionRequested { .. }) {
                 "question-requested"
@@ -197,6 +215,12 @@ impl SessionStore for MemoryStore {
             .lock()
             .expect("memory store events")
             .push(event.clone());
+        if failure.is_some() {
+            return Err(StoreError::Io(std::io::Error::other(
+                "crash after event publication",
+            )));
+        }
+
         Ok(())
     }
 
@@ -1523,6 +1547,7 @@ fn member_persistence_survives_restart_before_final_retry_consent() {
     let request = QuestionRequest::new(
         "MCP server alpha requires input",
         QuestionMode::Round(ElicitationRound {
+            expires_at_ms: None,
             requests: std::collections::BTreeMap::from([(
                 "verify".to_owned(),
                 ElicitationMember {
@@ -1588,4 +1613,159 @@ fn member_persistence_survives_restart_before_final_retry_consent() {
             assert!(restored.next_member().is_none());
         },
     );
+}
+
+#[test]
+fn crash_after_question_settlement_requires_explicit_same_answer_before_retry() {
+    // Catches: a settlement before remote acceptance strands the operation or replays it automatically.
+    use ego_core::question::{ElicitationAnswers, ElicitationRound};
+    let request = QuestionRequest::new(
+        "Retry MCP?",
+        QuestionMode::Round(ElicitationRound {
+            expires_at_ms: None,
+            requests: Default::default(),
+            completed: Default::default(),
+        }),
+        vec![],
+        false,
+    );
+    let answer = QuestionAnswer::Round(ElicitationAnswers {
+        confirmed: true,
+        responses: Default::default(),
+    });
+    let foreign = Arc::new(RecordingForeignQuestionPort::scripted(
+        vec![Err("crash before acceptance".to_owned())],
+        None,
+    ));
+    with_foreign_turn_request(
+        request,
+        foreign_input_generator(),
+        Arc::new(RecordingElicitor::answered(answer.clone())),
+        foreign.clone(),
+        None,
+        None,
+        false,
+        |mut turn, store| {
+            assert!(futures::executor::block_on(turn.run("invoke MCP")).is_err());
+            let state = turn.state();
+            let pending = state
+                .pending_question()
+                .expect("settled but uncompleted foreign question remains recoverable");
+            let question = pending.item_id();
+            let mut replay = SessionState::default();
+            for event in store.events() {
+                replay.apply(&event);
+            }
+            assert_eq!(replay.pending_question().unwrap().item_id(), question);
+            assert_eq!(foreign.calls().len(), 1, "replay must not drive effects");
+            let outcome =
+                futures::executor::block_on(turn.resume_question(question, answer)).unwrap();
+            assert_eq!(outcome.exit_reason, ExitReason::Completed);
+            assert_eq!(
+                foreign.calls().len(),
+                2,
+                "only explicit user resume retries acceptance"
+            );
+            assert_eq!(
+                store
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::QuestionSettled { .. }))
+                    .count(),
+                1
+            );
+        },
+    );
+}
+
+#[test]
+fn crashes_at_each_question_persistence_boundary_do_not_retry_or_repeat_completed_members() {
+    // Catches: uncertain question/member/final writes trigger effects before durable recovery.
+    use ego_core::question::{
+        ElicitationAnswers, ElicitationKind, ElicitationMember, ElicitationRound,
+    };
+    for kind in [
+        "question_requested",
+        "question_member_settled",
+        "question_settled",
+    ] {
+        for published in [false, true] {
+            let request = QuestionRequest::new(
+                "MCP server alpha",
+                QuestionMode::Round(ElicitationRound {
+                    expires_at_ms: None,
+                    requests: std::collections::BTreeMap::from([(
+                        "url-key".to_owned(),
+                        ElicitationMember {
+                            prompt: "Verify on page".to_owned(),
+                            kind: ElicitationKind::Url {
+                                url: "https://example.test/verify".to_owned(),
+                                elicitation_id: "url-id".to_owned(),
+                            },
+                        },
+                    )]),
+                    completed: Default::default(),
+                }),
+                vec![],
+                false,
+            );
+            let responses = std::collections::BTreeMap::from([(
+                "url-key".to_owned(),
+                serde_json::json!({"completed":true}),
+            )]);
+            let elicitor = Arc::new(RecordingElicitor::scripted(
+                vec![
+                    Ok(QuestionOutcome::MemberCompleted {
+                        key: "url-key".to_owned(),
+                        answer: serde_json::json!({"completed":true}),
+                    }),
+                    Ok(QuestionOutcome::Answered(QuestionAnswer::Round(
+                        ElicitationAnswers {
+                            confirmed: true,
+                            responses,
+                        },
+                    ))),
+                ],
+                None,
+            ));
+            let foreign = Arc::new(RecordingForeignQuestionPort::default());
+            with_foreign_turn_request(
+                request,
+                foreign_input_generator(),
+                elicitor,
+                foreign.clone(),
+                None,
+                None,
+                false,
+                |mut turn, store| {
+                    *store.fail_append.lock().unwrap() = Some((kind, published));
+                    assert!(futures::executor::block_on(turn.run("invoke MCP")).is_err());
+                    assert!(
+                        foreign.calls().is_empty(),
+                        "no remote retry across an uncertain session write"
+                    );
+                    let mut replay = SessionState::default();
+                    for event in store.events() {
+                        replay.apply(&event);
+                    }
+                    if kind != "question_requested" || published {
+                        let pending = replay
+                            .pending_question()
+                            .expect("durable unfinished operation remains visible");
+                        let QuestionMode::Round(round) = &pending.request().mode else {
+                            panic!("round")
+                        };
+                        let member_was_durable = kind == "question_settled"
+                            || (kind == "question_member_settled" && published);
+                        assert_eq!(round.completed.contains_key("url-key"), member_was_durable);
+                        if member_was_durable {
+                            assert!(round.next_member().is_none());
+                        }
+                    } else {
+                        assert!(replay.pending_question().is_none());
+                    }
+                },
+            );
+        }
+    }
 }

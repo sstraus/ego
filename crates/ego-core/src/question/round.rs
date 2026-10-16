@@ -14,6 +14,8 @@ pub const MAX_ELICITATION_ROUNDS: u8 = 8;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ElicitationRound {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
     pub requests: BTreeMap<String, ElicitationMember>,
     #[serde(default)]
     pub completed: BTreeMap<String, Value>,
@@ -94,6 +96,10 @@ impl ElicitationMember {
 }
 
 impl ElicitationRound {
+    pub fn expired_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms.is_some_and(|expiry| now_ms >= expiry)
+    }
+
     pub fn validate(&self) -> Result<(), QuestionError> {
         if self.requests.len() > MAX_ELICITATION_REQUESTS {
             return Err(QuestionError::InvalidRound);

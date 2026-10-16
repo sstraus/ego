@@ -2516,6 +2516,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
             ));
         }
+        if let Some(settled) = self.state().settled_question(question)
+            && settled.outcome() != &QuestionOutcome::Answered(answer.clone())
+        {
+            return Err(self.abandon(
+                turn,
+                StoreError::Io(std::io::Error::other(
+                    "a recorded foreign answer cannot be replaced",
+                )),
+            ));
+        }
         let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
             let reason = "the captured policy binding for this foreign continuation is unavailable";
             tracing::warn!("foreign question resume has no captured policy binding");
@@ -6635,14 +6645,18 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             continuation_id,
         } = settlement;
         let canonical_json = answer.model_text();
-        let settlement = self.journal.append(
-            turn,
-            Some(question),
-            Some(request_event),
-            EventKind::QuestionSettled {
-                outcome: QuestionOutcome::Answered(answer),
-            },
-        )?;
+        let settlement = if let Some(settled) = self.state().settled_question(question) {
+            settled.settlement_event()
+        } else {
+            self.journal.append(
+                turn,
+                Some(question),
+                Some(request_event),
+                EventKind::QuestionSettled {
+                    outcome: QuestionOutcome::Answered(answer),
+                },
+            )?
+        };
         let causality =
             HookCausality::continuation(continuation_id.clone(), turn, tool_call, settlement)
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;

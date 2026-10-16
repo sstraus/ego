@@ -1332,7 +1332,25 @@ impl SessionState {
     }
 
     pub fn pending_question(&self) -> Option<&PendingQuestion> {
-        self.pending_question.as_ref()
+        self.pending_question.as_ref().or_else(|| {
+            // A durable answer can precede continuation acceptance/claim. Recovery
+            // requires a fresh explicit resume; it never repeats an effect itself.
+            self.settled_questions
+                .values()
+                .filter(|settled| {
+                    matches!(settled.outcome, QuestionOutcome::Answered(_))
+                        && matches!(
+                            settled.pending.target,
+                            QuestionTarget::ForeignContinuation { .. }
+                        )
+                        && self
+                            .items
+                            .get(&settled.pending.target.tool_call())
+                            .is_some_and(|item| !item.completed)
+                })
+                .max_by_key(|settled| self.items.get(&settled.pending.item).map(|item| item.seq))
+                .map(|settled| &settled.pending)
+        })
     }
 
     pub fn settled_question(&self, question: ItemId) -> Option<&SettledQuestion> {
@@ -1370,7 +1388,13 @@ impl SessionState {
         json: &str,
     ) -> Result<QuestionAnswer, QuestionError> {
         let pending = self.pending_for(question)?;
-        QuestionAnswer::from_json(&pending.request, json)
+        let answer = QuestionAnswer::from_json(&pending.request, json)?;
+        if let Some(settled) = self.settled_questions.get(&question)
+            && settled.outcome != QuestionOutcome::Answered(answer.clone())
+        {
+            return Err(QuestionError::AlreadySettled);
+        }
+        Ok(answer)
     }
 
     /// Validate an already parsed answer and prepare the pure tool result for
@@ -1396,7 +1420,7 @@ impl SessionState {
     }
 
     fn pending_for(&self, question: ItemId) -> Result<&PendingQuestion, QuestionError> {
-        match &self.pending_question {
+        match self.pending_question() {
             Some(pending) if pending.item == question => Ok(pending),
             Some(_) => Err(QuestionError::WrongQuestion),
             None if self.settled_questions.contains_key(&question) => {
@@ -1480,7 +1504,7 @@ impl SessionState {
     }
 
     pub fn refuse_new_prompt(&self, _turn: TurnId) -> Result<(), QuestionError> {
-        if self.pending_question.is_some() {
+        if self.pending_question().is_some() {
             Err(QuestionError::PendingQuestion)
         } else {
             Ok(())

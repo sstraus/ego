@@ -472,6 +472,15 @@ pub struct PreparedResume {
 }
 
 impl PreparedResume {
+    pub fn expires_at(&self) -> Timestamp {
+        self.expires_at
+    }
+    pub fn used_rounds(&self) -> Result<u8, ContinuationError> {
+        serde_json::from_slice::<ResumePayload>(&self.grant.payload)
+            .map(|payload| payload.used_rounds)
+            .map_err(|_| ContinuationError::InvalidGrant)
+    }
+
     pub fn into_record(
         self,
         id: impl Into<String>,
@@ -764,6 +773,7 @@ impl ContinuationRecord {
         let schema = serde_json::from_slice(&self.correlation_schema)
             .map_err(|_| ContinuationError::InvalidRecord)?;
         Ok(crate::question::ElicitationRound {
+            expires_at_ms: Some(self.expires_at.as_millis()),
             requests: std::collections::BTreeMap::from([(
                 self.correlation_key.clone(),
                 crate::question::ElicitationMember {
@@ -805,6 +815,10 @@ impl ContinuationRecord {
     pub fn expires_at(&self) -> Timestamp {
         self.expires_at
     }
+    pub fn accepted_answer(&self) -> Option<&[u8]> {
+        self.accepted_answer.as_deref()
+    }
+
     pub fn state(&self) -> ContinuationState {
         self.state
     }

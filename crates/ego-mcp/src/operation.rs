@@ -194,7 +194,7 @@ impl McpContinuationOwner {
     pub async fn record_input_required(
         &self,
         envelope: ego_core::permit::McpPreparedEnvelope,
-        required: crate::McpMappedInput,
+        mut required: crate::McpMappedInput,
         guarded: GuardedMcpResume<'_>,
     ) -> Result<ForeignInputRequired, McpError> {
         let (resume, context) = guarded.into_parts().map_err(continuation)?;
@@ -205,6 +205,7 @@ impl McpContinuationOwner {
                 "MCP resume context capture does not match its operation",
             ));
         }
+        required.bind_deadline(resume.expires_at().as_millis());
         let policy_snapshot = context.policy_snapshot();
         let policy_digest = policy_snapshot.digest();
         let binding = match &required.question_request().mode {
@@ -213,7 +214,12 @@ impl McpContinuationOwner {
         };
         let schema = serde_json::to_vec(&binding)
             .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
-        let id = continuation_id(&envelope, &required, &schema);
+        let id = continuation_id(
+            &envelope,
+            &required,
+            &schema,
+            resume.used_rounds().map_err(continuation)?,
+        );
         let mut record = resume
             .into_record(
                 id.clone(),
@@ -303,9 +309,14 @@ impl McpContinuationOwner {
         }
         let capture = &pinned.capture;
         let now = self.clock.now();
-        self.journal
-            .accept_answer(id, raw_answer, now)
-            .map_err(continuation)?;
+        match pending.state() {
+            ContinuationState::Pending => self
+                .journal
+                .accept_answer(id, raw_answer, now)
+                .map_err(continuation)?,
+            ContinuationState::Accepted if pending.accepted_answer() == Some(raw_answer) => {}
+            _ => return Err(continuation(ContinuationError::InvalidTransition)),
+        }
         let accepted = self
             .journal
             .load(id)
@@ -397,7 +408,10 @@ impl McpContinuationOwner {
             .journal
             .load(id)
             .map_err(|_| authority("MCP pending continuation record is unavailable"))?;
-        if record.state() != ContinuationState::Pending {
+        if !matches!(
+            record.state(),
+            ContinuationState::Pending | ContinuationState::Accepted
+        ) {
             return Err(authority("MCP continuation is not pending"));
         }
         Ok(record)
@@ -663,9 +677,11 @@ fn continuation_id(
     envelope: &ego_core::permit::McpPreparedEnvelope,
     required: &crate::McpMappedInput,
     schema: &[u8],
+    used_rounds: u8,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"ego:mcp:continuation:v1\0");
+    digest.update(b"ego:mcp:continuation:v2\0");
+    digest.update([used_rounds]);
     digest.update(envelope.subject().server().as_bytes());
     digest.update([0]);
     digest.update(envelope.operation().method().as_bytes());
