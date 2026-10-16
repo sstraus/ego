@@ -186,22 +186,32 @@ async fn ordinary_main() -> std::process::ExitCode {
             // Configuration management has no session and owns its explicitly
             // online command authority. Runs construct their separate effect
             // authority only after resolving confinement.
-            Ok(Invocation::Mcp(args)) => Ended {
-                termination: ego_cli::mcp::execute(
+            Ok(Invocation::Mcp(args)) => {
+                let mut running = Box::pin(ego_cli::mcp::execute(
                     &args,
                     &out,
                     mcp.as_ref()
                         .and_then(|runtime| runtime.as_ref().ok())
                         .expect("MCP invocation constructed its runtime")
                         .controller(),
-                )
-                .await,
-                session: ego_core::event::id::SessionId::new(),
-                state: ego_core::state::SessionState::default(),
-                result: serde_json::Value::String(String::new()),
-                selected_session: None,
-                mcp_errors: Vec::new(),
-            },
+                ));
+                let termination = tokio::select! {
+                    biased;
+                    cause = run::stop_signal(None) => {
+                        cancel.cancel(cause);
+                        run::cancelled_termination(&cancel)
+                    }
+                    result = &mut running => result,
+                };
+                Ended {
+                    termination,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    selected_session: None,
+                    mcp_errors: Vec::new(),
+                }
+            }
             // `ls` starts no session and takes no turn, so it has no `Ended` to
             // report — only a termination. The two absent fields are stated as
             // what they are rather than filled with a session id nothing wrote.

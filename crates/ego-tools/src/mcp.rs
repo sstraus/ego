@@ -1,5 +1,7 @@
 //! OS-owned materialization and guarded effects for the MCP runtime.
 
+pub use crate::mcp_oauth::LoopbackOAuthInteraction;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

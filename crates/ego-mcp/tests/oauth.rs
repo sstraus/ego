@@ -103,7 +103,7 @@ impl McpOAuthInteraction for RecordingInteraction {
     fn authorize<'a>(
         &'a self,
         interaction: McpAuthorizationInteraction,
-    ) -> McpFuture<'a, McpOAuthCallback> {
+    ) -> McpFuture<'a, Result<McpOAuthCallback, McpError>> {
         let callback = format!(
             "{}?code=auth-code&state={}&iss=https%3A%2F%2Fissuer.example.test",
             interaction.redirect_uri(),
@@ -112,7 +112,7 @@ impl McpOAuthInteraction for RecordingInteraction {
         .parse()
         .expect("callback URL");
         *self.captured.lock().expect("authorization interaction") = Some(interaction);
-        Box::pin(async move { McpOAuthCallback::from_callback_url(callback).expect("callback") })
+        Box::pin(async move { McpOAuthCallback::from_callback_url(callback) })
     }
 }
 
@@ -130,7 +130,7 @@ impl McpOAuthInteraction for TamperedInteraction {
     fn authorize<'a>(
         &'a self,
         interaction: McpAuthorizationInteraction,
-    ) -> McpFuture<'a, McpOAuthCallback> {
+    ) -> McpFuture<'a, Result<McpOAuthCallback, McpError>> {
         let state = match self.tamper {
             CallbackTamper::State => "wrong-state",
             CallbackTamper::Issuer => interaction.state(),
@@ -145,7 +145,7 @@ impl McpOAuthInteraction for TamperedInteraction {
         )
         .parse()
         .expect("callback URL");
-        Box::pin(async move { McpOAuthCallback::from_callback_url(callback).expect("callback") })
+        Box::pin(async move { McpOAuthCallback::from_callback_url(callback) })
     }
 }
 
@@ -1042,4 +1042,188 @@ fn issuer_resource_or_audience_mismatch_and_scope_step_up_fail_closed() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn registered_client_does_not_require_cimd_or_silently_register() {
+    let http = OAuthHttp::with_responses([
+        McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#),
+        McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test"}"#),
+        McpHttpResponse::json(200, br#"{"access_token":"registered-access","refresh_token":"registered-refresh","token_type":"Bearer","scope":""}"#),
+    ]);
+    let metadata = McpClientMetadata::registered(
+        "operator-client".into(),
+        "http://127.0.0.1:9999/callback".parse().unwrap(),
+    )
+    .unwrap();
+    let credentials = Arc::new(RecordingCredentials::new());
+    let interaction = Arc::new(RecordingInteraction {
+        captured: Mutex::new(None),
+    });
+    futures::executor::block_on(login(
+        login_request_with_metadata(metadata),
+        http.clone(),
+        interaction.clone(),
+        credentials.clone(),
+    ))
+    .unwrap();
+    let calls = http.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3, "registered clients must not perform DCR");
+    assert!(String::from_utf8_lossy(&calls[2].5).contains("client_id=operator-client"));
+    let interaction = interaction.captured.lock().unwrap();
+    let url = interaction.as_ref().unwrap().authorization_url();
+    assert!(
+        url.query_pairs()
+            .any(|(key, value)| key == "client_id" && value == "operator-client")
+    );
+}
+
+#[test]
+fn explicit_dcr_persists_client_identity_and_rejects_cross_issuer_registration() {
+    for endpoint in [
+        "https://issuer.example.test/register",
+        "https://attacker.example.test/register",
+    ] {
+        let responses = [
+            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#),
+            McpHttpResponse::json(200, format!(r#"{{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","registration_endpoint":"{endpoint}"}}"#)),
+            McpHttpResponse::json(201, br#"{"client_id":"dynamic-client","token_endpoint_auth_method":"none","redirect_uris":["http://127.0.0.1:9999/callback"]}"#),
+            McpHttpResponse::json(200, br#"{"access_token":"dynamic-access","refresh_token":"dynamic-refresh","token_type":"Bearer","scope":""}"#),
+        ];
+        let http = OAuthHttp::with_responses(responses);
+        let credentials = Arc::new(RecordingCredentials::new());
+        let metadata =
+            McpClientMetadata::dynamic("http://127.0.0.1:9999/callback".parse().unwrap()).unwrap();
+        let result = futures::executor::block_on(login(
+            login_request_with_metadata(metadata),
+            http.clone(),
+            Arc::new(RecordingInteraction {
+                captured: Mutex::new(None),
+            }),
+            credentials.clone(),
+        ));
+        if endpoint.contains("attacker") {
+            assert!(result.is_err());
+            assert_eq!(http.calls.lock().unwrap().len(), 2);
+            assert_eq!(*credentials.puts.lock().unwrap(), 0);
+        } else {
+            result.unwrap();
+            let calls = http.calls.lock().unwrap();
+            assert_eq!(calls.len(), 4);
+            let body: serde_json::Value = serde_json::from_slice(&calls[2].5).unwrap();
+            assert_eq!(body["token_endpoint_auth_method"], "none");
+            assert!(String::from_utf8_lossy(&calls[3].5).contains("client_id=dynamic-client"));
+            let values = credentials.values.lock().unwrap();
+            let stored = values.values().next().unwrap();
+            let wire: serde_json::Value =
+                serde_json::from_slice(stored.strip_prefix(b"ego:mcp:token-bundle:v1\n").unwrap())
+                    .unwrap();
+            assert_eq!(wire["client_id"], "dynamic-client");
+        }
+    }
+}
+
+#[test]
+fn dynamic_refresh_restores_registered_identity_without_repeating_registration() {
+    let key = refresh_key("account-a");
+    let credentials = Arc::new(RecordingCredentials::new());
+    let stored = encoded_bundle("old-access", Some("old-refresh"));
+    let prefix = b"ego:mcp:token-bundle:v1\n";
+    let mut wire: serde_json::Value =
+        serde_json::from_slice(stored.strip_prefix(prefix).unwrap()).unwrap();
+    wire["client_id"] = "persisted-dcr-client".into();
+    let mut bytes = prefix.to_vec();
+    bytes.extend(serde_json::to_vec(&wire).unwrap());
+    credentials
+        .values
+        .lock()
+        .unwrap()
+        .insert(key.clone(), bytes);
+    let http = OAuthHttp::with_responses(refresh_discovery_responses(
+        r#"{"access_token":"new-access","token_type":"Bearer","sub":"account-a"}"#,
+    ));
+    let config = McpHttpConfig::new(
+        "https://mcp.example.test/mcp".parse::<url::Url>().unwrap(),
+        McpHttpAuth::Oauth,
+        false,
+    )
+    .unwrap();
+    let request = ego_mcp::McpTokenRefreshRequest::new(
+        "remote".parse().unwrap(),
+        config,
+        McpClientMetadata::dynamic("http://127.0.0.1:9999/callback".parse().unwrap()).unwrap(),
+        key.clone(),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap();
+    futures::executor::block_on(ego_mcp::refresh_token(
+        request,
+        http.clone(),
+        credentials.clone(),
+    ))
+    .unwrap();
+    let calls = http.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert!(String::from_utf8_lossy(&calls[2].5).contains("client_id=persisted-dcr-client"));
+    let stored = credentials.values.lock().unwrap();
+    let bundle = McpCredentialBundle::decode(SecretMaterial::new(stored[&key].clone())).unwrap();
+    assert_eq!(
+        bundle.refresh_token().unwrap().expose_secret_bytes(),
+        b"old-refresh"
+    );
+    assert_eq!(
+        bundle.scopes().len(),
+        2,
+        "omitted scope retains the original grant"
+    );
+}
+
+struct InvalidCallback(&'static str);
+impl McpOAuthInteraction for InvalidCallback {
+    fn authorize<'a>(
+        &'a self,
+        interaction: McpAuthorizationInteraction,
+    ) -> McpFuture<'a, Result<McpOAuthCallback, McpError>> {
+        let query = match self.0 {
+            "duplicate" => format!(
+                "code=first&code=second&state={}&iss=https://issuer.example.test",
+                interaction.state()
+            ),
+            "denied" => format!("error=access_denied&state={}", interaction.state()),
+            _ => format!("code=first&state={}&state=other", interaction.state()),
+        };
+        let mut url = interaction.redirect_uri().clone();
+        url.set_query(Some(&query));
+        Box::pin(async move { McpOAuthCallback::from_callback_url(url) })
+    }
+}
+
+#[test]
+fn duplicate_or_denied_callbacks_never_exchange_or_publish_credentials() {
+    for scenario in ["duplicate", "denied", "duplicate-state"] {
+        let http = OAuthHttp::with_responses([
+            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test","authorization_servers":["https://issuer.example.test"]}"#),
+            McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","client_id_metadata_document_supported":true}"#),
+        ]);
+        let credentials = Arc::new(RecordingCredentials::new());
+        assert!(
+            futures::executor::block_on(login(
+                login_request(),
+                http.clone(),
+                Arc::new(InvalidCallback(scenario)),
+                credentials.clone()
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            http.calls.lock().unwrap().len(),
+            2,
+            "{scenario} performed token exchange"
+        );
+        assert_eq!(
+            *credentials.puts.lock().unwrap(),
+            0,
+            "{scenario} published credentials"
+        );
+    }
 }

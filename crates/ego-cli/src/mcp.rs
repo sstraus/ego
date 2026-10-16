@@ -46,16 +46,146 @@ async fn execute_inner(
         McpAction::Add { name, server } => add(name, server, out, controller).await,
         McpAction::Remove { name } => remove(name, out, controller).await,
         McpAction::List { json } => list(*json, out, controller).await,
-        McpAction::Login { name } => login(name),
+        McpAction::Login { .. } => login(&args.action, out).await,
         McpAction::Reload { name } => reload(name.as_ref(), out, controller).await,
     }
 }
 
-fn login(_name: &McpServerName) -> Result<(), RunTermination> {
-    Err(RunTermination::Failed {
-        message: "MCP login is deployment-unavailable: the project CIMD client metadata origin and loopback redirect have not been published"
-            .to_owned(),
-    })
+async fn login(action: &McpAction, out: &Stdout) -> Result<(), RunTermination> {
+    let McpAction::Login {
+        name,
+        client_id,
+        cimd,
+        dcr,
+        callback_port,
+        refresh,
+        issuer,
+        account,
+    } = action
+    else {
+        unreachable!()
+    };
+    let client_id = client_id.as_deref();
+    let cimd = cimd.as_deref();
+    let failed = |error: String| RunTermination::Failed { message: error };
+    let configuration = management_config()?;
+    let Some(server) = configuration.effective.mcp.configured(name) else {
+        return Err(usage(UsageError(format!(
+            "MCP server `{name}` is not configured"
+        ))));
+    };
+    let McpServerConfig::Http(http) = server else {
+        return Err(usage(UsageError(
+            "MCP login requires an HTTP server".into(),
+        )));
+    };
+    if client_id.is_none() && cimd.is_none() && !*dcr {
+        return Err(usage(UsageError(
+            "select --client-id ID, --cimd URL, or --dcr".into(),
+        )));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let interaction = ego_tools::mcp::LoopbackOAuthInteraction::bind(*callback_port, deadline)
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+    let redirect = interaction.redirect_uri().clone();
+    let metadata = if let Some(id) = client_id {
+        ego_mcp::McpClientMetadata::registered(id.to_owned(), redirect.clone())
+    } else if let Some(url) = cimd {
+        ego_mcp::McpClientMetadata::new(
+            url.parse()
+                .map_err(|_| usage(UsageError("invalid CIMD URL".into())))?,
+            "ego",
+            redirect.clone(),
+        )
+    } else {
+        ego_mcp::McpClientMetadata::dynamic(redirect.clone())
+    }
+    .map_err(|error| failed(error.to_string()))?;
+    let scope = crate::provider_http::CommandHttpScope::online(ego_core::turn::CancelToken::new())
+        .await
+        .map_err(failed)?;
+    let effects = Arc::new(ego_tools::mcp::RunMcpHttpEffects::new(Arc::clone(
+        scope.ports(),
+    )));
+    let credentials = Arc::new(ego_tools::credentials::OsCredentialStore::default());
+    // Serialize refresh transactions across CLI processes; the store port is
+    // intentionally opaque and has no compare-and-set operation.
+    let root = config::ego_home()
+        .ok_or_else(|| failed("MCP needs EGO_HOME or HOME".into()))?
+        .join("mcp");
+    std::fs::create_dir_all(&root)
+        .map_err(|_| failed("MCP credential lock directory unavailable".into()))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join("oauth-refresh.lock"))
+        .map_err(|_| failed("MCP credential lock unavailable".into()))?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let _refresh_guard = if *refresh {
+        Some(lock.try_write().map_err(|_| {
+            failed("another MCP OAuth refresh is active; retry after it completes".into())
+        })?)
+    } else {
+        None
+    };
+    if *refresh {
+        let mut resource = http.url.as_url().clone();
+        resource.set_path("/");
+        resource.set_query(None);
+        resource.set_fragment(None);
+        let mut issuer: url::Url = issuer
+            .as_deref()
+            .ok_or_else(|| usage(UsageError("refresh requires --issuer".into())))?
+            .parse()
+            .map_err(|_| usage(UsageError("invalid refresh issuer".into())))?;
+        issuer.set_path("/");
+        issuer.set_query(None);
+        issuer.set_fragment(None);
+        let key = ego_core::credentials::CredentialKey::new(
+            issuer.to_string(),
+            ego_core::credentials::CredentialTarget::ProtectedResource(resource.to_string()),
+            account.clone(),
+        )
+        .map_err(|error| failed(error.to_string()))?;
+        let request = ego_mcp::McpTokenRefreshRequest::new(
+            name.clone(),
+            http.clone(),
+            metadata,
+            key,
+            deadline,
+        )
+        .map_err(|error| failed(error.to_string()))?;
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            ego_mcp::refresh_token(request, effects, credentials),
+        )
+        .await
+        .map_err(|_| failed("MCP OAuth refresh timed out".into()))?
+        .map_err(|error| failed(error.to_string()))?;
+        out.line(&format!("MCP server `{name}` credential refreshed"));
+        return Ok(());
+    }
+    let request =
+        ego_mcp::McpLoginRequest::new(name.clone(), http.clone(), redirect, metadata, deadline)
+            .map_err(|error| failed(error.to_string()))?;
+    out.line(
+        "Authorize using the URL below; for SSH, forward the displayed callback port to this host.",
+    );
+    let result = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        ego_mcp::login(request, effects, Arc::new(interaction), credentials),
+    )
+    .await
+    .map_err(|_| failed("MCP OAuth login timed out".into()))?
+    .map_err(|error| failed(error.to_string()))?;
+    out.line(&format!(
+        "MCP server `{name}` authorized for {}",
+        result.resource()
+    ));
+    Ok(())
 }
 
 async fn reload(

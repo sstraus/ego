@@ -1,6 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use ego_core::config::{McpHttpAuth, McpHttpConfig, McpServerName};
 use ego_core::credentials::{CredentialKey, CredentialStore, CredentialTarget, SecretMaterial};
@@ -15,8 +14,15 @@ use crate::{McpError, McpFailure, McpFuture, McpHttpEffects, McpHttpPurpose, Mcp
 const TOKEN_BUNDLE_PREFIX: &[u8] = b"ego:mcp:token-bundle:v1\n";
 const MAX_OAUTH_RESPONSE_BYTES: usize = 1024 * 1024;
 
+enum Registration {
+    Cimd,
+    Registered,
+    Dynamic,
+}
+
 pub struct McpClientMetadata {
-    client_id: Url,
+    client_id: Option<String>,
+    registration: Registration,
     client_name: String,
     redirect_uri: Url,
 }
@@ -34,6 +40,8 @@ impl McpClientMetadata {
             || client_id.path() == "/"
             || client_id.query().is_some()
             || client_id.fragment().is_some()
+            || !client_id.username().is_empty()
+            || client_id.password().is_some()
             || client_name.trim().is_empty()
         {
             return Err(McpError::new(
@@ -43,14 +51,47 @@ impl McpClientMetadata {
         }
         validate_redirect_uri(&redirect_uri)?;
         Ok(Self {
-            client_id,
+            client_id: Some(client_id.to_string()),
+            registration: Registration::Cimd,
             client_name,
             redirect_uri,
         })
     }
 
-    pub fn client_id(&self) -> &Url {
-        &self.client_id
+    /// Select an operator-issued public client; no dynamic fallback occurs.
+    pub fn registered(client_id: String, redirect_uri: Url) -> Result<Self, McpError> {
+        if client_id.trim().is_empty() || client_id.chars().any(char::is_control) {
+            return Err(McpError::new(
+                McpFailure::InvalidValue,
+                "invalid registered client ID",
+            ));
+        }
+        validate_redirect_uri(&redirect_uri)?;
+        Ok(Self {
+            client_id: Some(client_id),
+            registration: Registration::Registered,
+            client_name: "ego".into(),
+            redirect_uri,
+        })
+    }
+
+    /// Select public-client DCR, only when advertised by the bound issuer.
+    pub fn dynamic(redirect_uri: Url) -> Result<Self, McpError> {
+        validate_redirect_uri(&redirect_uri)?;
+        Ok(Self {
+            client_id: None,
+            registration: Registration::Dynamic,
+            client_name: "ego".into(),
+            redirect_uri,
+        })
+    }
+
+    fn explicit_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+
+    pub fn client_id(&self) -> Option<&str> {
+        self.explicit_id()
     }
 
     pub fn client_name(&self) -> &str {
@@ -171,15 +212,19 @@ pub trait McpOAuthInteraction: Send + Sync {
     fn authorize<'a>(
         &'a self,
         interaction: McpAuthorizationInteraction,
-    ) -> McpFuture<'a, McpOAuthCallback>;
+    ) -> McpFuture<'a, Result<McpOAuthCallback, McpError>>;
 }
 
 pub struct McpLoginResult {
     issuer: Url,
     resource: Url,
+    credential_key: CredentialKey,
 }
 
 impl McpLoginResult {
+    pub fn credential_key(&self) -> &CredentialKey {
+        &self.credential_key
+    }
     pub fn issuer(&self) -> &Url {
         &self.issuer
     }
@@ -194,6 +239,7 @@ pub struct McpCredentialBundle {
     refresh_token: Option<SecretMaterial>,
     token_type: String,
     scopes: Vec<String>,
+    client_id: Option<String>,
 }
 
 impl std::fmt::Debug for McpCredentialBundle {
@@ -245,6 +291,7 @@ impl McpCredentialBundle {
                 .map(|token| SecretMaterial::new(token.into_bytes())),
             token_type: wire.token_type,
             scopes: wire.scopes,
+            client_id: wire.client_id,
         })
     }
 
@@ -261,6 +308,7 @@ impl McpCredentialBundle {
                 .map_err(|_| McpError::new(McpFailure::Credential, "invalid refresh token"))?,
             token_type: self.token_type.clone(),
             scopes: self.scopes.clone(),
+            client_id: self.client_id.clone(),
         };
         let mut bytes = TOKEN_BUNDLE_PREFIX.to_vec();
         bytes.extend_from_slice(&serde_json::to_vec(&wire)?);
@@ -271,6 +319,8 @@ impl McpCredentialBundle {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CredentialBundleWire {
+    #[serde(default)]
+    client_id: Option<String>,
     access_token: String,
     refresh_token: Option<String>,
     token_type: String,
@@ -309,8 +359,12 @@ struct AuthorizationServerMetadata {
     authorization_endpoint: Url,
     token_endpoint: Url,
     issuer: Url,
-    resource: Url,
-    audience: Url,
+    #[serde(default)]
+    resource: Option<Url>,
+    #[serde(default)]
+    audience: Option<Url>,
+    #[serde(default)]
+    registration_endpoint: Option<Url>,
     #[serde(default)]
     client_id_metadata_document_supported: bool,
 }
@@ -320,7 +374,8 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     token_type: String,
-    scope: String,
+    #[serde(default)]
+    scope: Option<String>,
     sub: Option<String>,
 }
 
@@ -444,9 +499,14 @@ async fn discover_oauth(
     .await?;
     let metadata: AuthorizationServerMetadata = decode_json_response(response).await?;
     if normalized_origin(&metadata.issuer)? != issuer
-        || normalized_origin(&metadata.resource)? != resource
-        || normalized_origin(&metadata.audience)? != resource
-        || !metadata.client_id_metadata_document_supported
+        || metadata
+            .resource
+            .as_ref()
+            .is_some_and(|value| normalized_origin(value).ok().as_ref() != Some(&resource))
+        || metadata
+            .audience
+            .as_ref()
+            .is_some_and(|value| normalized_origin(value).ok().as_ref() != Some(&resource))
         || normalized_origin(&metadata.authorization_endpoint)? != issuer
         || normalized_origin(&metadata.token_endpoint)? != issuer
     {
@@ -480,19 +540,85 @@ pub async fn login(
         metadata,
     } = discovery;
 
-    let state = opaque_nonce(b"state");
-    let verifier = opaque_nonce(b"verifier");
+    let client_id = match &request.client_metadata.registration {
+        Registration::Cimd if !metadata.client_id_metadata_document_supported => {
+            return Err(McpError::new(
+                McpFailure::Authorization,
+                "issuer does not support CIMD",
+            ));
+        }
+        Registration::Dynamic => {
+            let endpoint = metadata.registration_endpoint.as_ref().ok_or_else(|| {
+                McpError::new(McpFailure::Authorization, "issuer does not advertise DCR")
+            })?;
+            if normalized_origin(endpoint)? != issuer {
+                return Err(McpError::new(
+                    McpFailure::Authorization,
+                    "DCR endpoint issuer mismatch",
+                ));
+            }
+            let body = serde_json::to_vec(&serde_json::json!({
+                "client_name": request.client_metadata.client_name(),
+                "redirect_uris": [request.redirect_uri.as_str()],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none"
+            }))?;
+            let registration = HttpRequest::new(
+                "POST",
+                &crate::http::path_and_query(endpoint),
+                vec![header("content-type", b"application/json".to_vec())?],
+                body,
+            )
+            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+            let response = execute(
+                &as_profile,
+                &request.server,
+                McpHttpPurpose::ClientMetadata,
+                endpoint,
+                registration,
+                request.deadline,
+                &effects,
+            )
+            .await?;
+            #[derive(Deserialize)]
+            struct Registered {
+                client_id: String,
+                token_endpoint_auth_method: String,
+                redirect_uris: Vec<Url>,
+            }
+            let registered: Registered = decode_json_response(response).await?;
+            if registered.client_id.trim().is_empty()
+                || registered.token_endpoint_auth_method != "none"
+                || registered.redirect_uris != [request.redirect_uri.clone()]
+            {
+                return Err(McpError::new(
+                    McpFailure::Authorization,
+                    "DCR public-client binding mismatch",
+                ));
+            }
+            registered.client_id
+        }
+        _ => request
+            .client_metadata
+            .explicit_id()
+            .expect("explicit registration")
+            .to_owned(),
+    };
+    let state = opaque_nonce()?;
+    let verifier = opaque_nonce()?;
     let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
     let mut authorization_url = metadata.authorization_endpoint.clone();
     {
         let mut query = authorization_url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", request.client_metadata.client_id().as_str())
+            .append_pair("client_id", &client_id)
             .append_pair("redirect_uri", request.redirect_uri.as_str())
             .append_pair("state", &state)
             .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256");
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("resource", resource.as_str());
         if !scopes.is_empty() {
             query.append_pair("scope", &scopes.join(" "));
         }
@@ -507,19 +633,37 @@ pub async fn login(
                 method: McpPkceMethod::S256,
             },
         })
-        .await;
+        .await?;
     validate_callback_binding(&request.redirect_uri, callback.as_url())?;
+    let mut seen = std::collections::HashSet::new();
+    if callback
+        .as_url()
+        .query_pairs()
+        .any(|(key, _)| !seen.insert(key.into_owned()))
+    {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "duplicate OAuth callback parameter",
+        ));
+    }
     let callback_values = callback
         .as_url()
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
+    if callback_values.contains_key("error") {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "OAuth authorization was denied",
+        ));
+    }
     let code = callback_values
         .get("code")
         .filter(|code| !code.is_empty())
         .ok_or_else(|| McpError::new(McpFailure::Authorization, "OAuth callback has no code"))?;
     if callback_values.get("state").map(|value| value.as_ref()) != Some(state.as_str())
-        || callback_values.get("iss").map(|value| value.as_ref())
-            != Some(issuer.as_str().trim_end_matches('/'))
+        || callback_values.get("iss").is_some_and(|value| {
+            value.as_ref().trim_end_matches('/') != issuer.as_str().trim_end_matches('/')
+        })
     {
         return Err(McpError::new(
             McpFailure::Authorization,
@@ -530,9 +674,10 @@ pub async fn login(
     let token_profile = as_profile.admitting(&request.server, &metadata.token_endpoint)?;
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "authorization_code")
-        .append_pair("client_id", request.client_metadata.client_id().as_str())
+        .append_pair("client_id", &client_id)
         .append_pair("code", code)
         .append_pair("redirect_uri", request.redirect_uri.as_str())
+        .append_pair("resource", resource.as_str())
         .append_pair("code_verifier", &verifier)
         .finish()
         .into_bytes();
@@ -556,6 +701,8 @@ pub async fn login(
     let granted = normalized_scopes(
         token
             .scope
+            .as_deref()
+            .unwrap_or(&scopes.join(" "))
             .split_ascii_whitespace()
             .map(str::to_owned)
             .collect(),
@@ -566,6 +713,12 @@ pub async fn login(
             "required OAuth scope was not granted",
         ));
     }
+    if token.refresh_token.as_ref().is_some_and(String::is_empty) {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "empty OAuth refresh token",
+        ));
+    }
     let bundle = McpCredentialBundle {
         access_token: SecretMaterial::new(token.access_token.into_bytes()),
         refresh_token: token
@@ -573,6 +726,7 @@ pub async fn login(
             .map(|value| SecretMaterial::new(value.into_bytes())),
         token_type: token.token_type,
         scopes: granted,
+        client_id: Some(client_id),
     };
     let key = CredentialKey::new(
         issuer.to_string(),
@@ -583,7 +737,11 @@ pub async fn login(
     credentials
         .put(&key, bundle.encode()?)
         .map_err(|error| McpError::new(McpFailure::Credential, error.to_string()))?;
-    Ok(McpLoginResult { issuer, resource })
+    Ok(McpLoginResult {
+        issuer,
+        resource,
+        credential_key: key,
+    })
 }
 
 pub async fn refresh_token(
@@ -635,6 +793,31 @@ pub async fn refresh_token(
             "OAuth refresh resource binding mismatch",
         ));
     }
+    let client_id = previous
+        .client_id
+        .as_deref()
+        .or_else(|| request.client_metadata.explicit_id())
+        .ok_or_else(|| {
+            McpError::new(McpFailure::Credential, "stored DCR client identity absent")
+        })?;
+    if request
+        .client_metadata
+        .explicit_id()
+        .is_some_and(|id| id != client_id)
+    {
+        return Err(McpError::new(
+            McpFailure::Credential,
+            "refresh client identity mismatch",
+        ));
+    }
+    if matches!(request.client_metadata.registration, Registration::Cimd)
+        && !discovery.metadata.client_id_metadata_document_supported
+    {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "issuer does not support CIMD",
+        ));
+    }
     let required_scopes = previous.scopes.clone();
 
     let token_profile = discovery
@@ -642,7 +825,7 @@ pub async fn refresh_token(
         .admitting(&request.server, &discovery.metadata.token_endpoint)?;
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "refresh_token")
-        .append_pair("client_id", request.client_metadata.client_id().as_str())
+        .append_pair("client_id", client_id)
         .append_pair("refresh_token", &refresh_token)
         .append_pair("resource", discovery.resource.as_str())
         .append_pair("scope", &required_scopes.join(" "))
@@ -676,6 +859,8 @@ pub async fn refresh_token(
     let granted = normalized_scopes(
         token
             .scope
+            .as_deref()
+            .unwrap_or(&required_scopes.join(" "))
             .split_ascii_whitespace()
             .map(str::to_owned)
             .collect(),
@@ -701,6 +886,7 @@ pub async fn refresh_token(
         refresh_token: rotated_refresh,
         token_type: token.token_type,
         scopes: granted.clone(),
+        client_id: Some(client_id.to_owned()),
     };
     credentials
         .put(&request.credential_key, bundle.encode()?)
@@ -772,7 +958,19 @@ fn protected_resource_metadata_url(resource: &Url) -> Result<Url, McpError> {
 }
 
 fn normalized_origin(url: &Url) -> Result<Url, McpError> {
-    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || (url.scheme() == "http"
+            && !url.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            }))
+    {
         return Err(McpError::new(
             McpFailure::Authorization,
             "invalid OAuth authority URL",
@@ -792,7 +990,13 @@ fn validate_redirect_uri(url: &Url) -> Result<(), McpError> {
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
     });
-    if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
+    if (url.scheme() == "https" || (url.scheme() == "http" && loopback))
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+    {
         Ok(())
     } else {
         Err(McpError::new(
@@ -830,21 +1034,11 @@ fn normalized_scopes(mut scopes: Vec<String>) -> Result<Vec<String>, McpError> {
     Ok(scopes)
 }
 
-static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-fn opaque_nonce(domain: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"ego:mcp:oauth-nonce:v1");
-    digest.update(domain);
-    digest.update(NONCE_COUNTER.fetch_add(1, Ordering::Relaxed).to_be_bytes());
-    digest.update(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .to_be_bytes(),
-    );
-    base64url(&digest.finalize())
+fn opaque_nonce() -> Result<String, McpError> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| McpError::new(McpFailure::Credential, "OAuth entropy unavailable"))?;
+    Ok(base64url(&bytes))
 }
 
 fn base64url(bytes: &[u8]) -> String {

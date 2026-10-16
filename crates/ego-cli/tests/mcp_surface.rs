@@ -82,7 +82,7 @@ fn final_management_grammar_composes_login_and_reload_as_typed_actions() {
     )
     .expect("login is a current MCP management action");
     assert!(
-        matches!(login, Invocation::Mcp(args) if matches!(args.action, McpAction::Login { ref name } if name.to_string() == "remote"))
+        matches!(login, Invocation::Mcp(args) if matches!(args.action, McpAction::Login { ref name, .. } if name.to_string() == "remote"))
     );
 
     let reload = parse(
@@ -360,7 +360,7 @@ fn one_sorted_sanitized_mcp_error_set_reaches_event_text_and_completion_json() {
 }
 
 #[test]
-fn login_is_parsed_but_runtime_stays_unavailable_until_cimd_is_published() {
+fn login_rejects_an_unconfigured_server_without_contacting_a_provider() {
     let places = support::Places::new();
     let stub = support::Stub::start(support::Plan::default());
     let finished = places
@@ -371,16 +371,87 @@ fn login_is_parsed_but_runtime_stays_unavailable_until_cimd_is_published() {
     assert_ne!(
         finished.code,
         Some(0),
-        "login ran without CIMD deployment facts"
+        "login ran without a configured resource"
     );
     assert!(
-        finished.stderr.contains("CIMD")
-            || finished
-                .stderr
-                .to_ascii_lowercase()
-                .contains("client metadata"),
-        "login refusal does not identify pending CIMD deployment: {}",
+        finished.stderr.contains("not configured"),
+        "login refusal does not identify missing configuration: {}",
         finished.stderr
     );
     assert!(stub.requests().is_empty(), "login contacted the provider");
+}
+
+#[test]
+fn oauth_login_prints_copyable_url_and_reports_denial_without_touching_credentials() {
+    use std::io::{BufRead, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let places = support::Places::new();
+    let stub = support::Stub::start(support::Plan::default());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    std::fs::write(places.home_path().join("config.toml"), format!("[mcp.servers.remote]\ntransport = \"http\"\nurl = \"{origin}/mcp\"\nauth = \"oauth\"\nallow_insecure_loopback = true\n")).unwrap();
+    let server_origin = origin.clone();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let mut request = [0u8; 8192];
+            let size = socket.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            let body = if request.contains("oauth-protected-resource") {
+                serde_json::json!({"resource":server_origin,"authorization_servers":[server_origin]})
+            } else {
+                serde_json::json!({"issuer":server_origin,"authorization_endpoint":format!("{server_origin}/authorize"),"token_endpoint":format!("{server_origin}/token")})
+            }.to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let mut running = places
+        .ego(&stub)
+        .subcommand("mcp")
+        .args(["login", "remote", "--client-id", "operator-client"])
+        .spawn();
+    let mut stdout = running.stdout();
+    let mut text = String::new();
+    let authorization = loop {
+        let mut line = String::new();
+        assert_ne!(
+            stdout.read_line(&mut line).unwrap(),
+            0,
+            "login ended before authorization URL: {text}"
+        );
+        text.push_str(&line);
+        if let Some(url) = line.trim().strip_prefix("Authorize: ") {
+            break url.parse::<url::Url>().unwrap();
+        }
+    };
+    let fields: std::collections::HashMap<_, _> =
+        authorization.query_pairs().into_owned().collect();
+    assert_eq!(fields["client_id"], "operator-client");
+    assert_eq!(fields["code_challenge_method"], "S256");
+    let callback: url::Url = fields["redirect_uri"].parse().unwrap();
+    let mut socket =
+        TcpStream::connect((callback.host_str().unwrap(), callback.port().unwrap())).unwrap();
+    write!(
+        socket,
+        "GET /callback?error=access_denied&state={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        fields["state"]
+    )
+    .unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    stdout.read_to_string(&mut text).unwrap();
+    let finished = running.finish();
+    assert_ne!(finished.code, Some(0));
+    assert!(
+        finished.stderr.contains("authorization was denied"),
+        "{}",
+        finished.stderr
+    );
+    assert!(!finished.stderr.contains(&fields["state"]));
+    assert!(!text.contains("code_verifier"));
+    assert!(stub.requests().is_empty());
+    server.join().unwrap();
 }
