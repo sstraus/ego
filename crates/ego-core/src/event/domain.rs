@@ -234,7 +234,7 @@ pub struct ToolTiming {
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
 /// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
-/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
+/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
