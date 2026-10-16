@@ -4309,15 +4309,11 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
             )
         });
     assert!(
-        lines[user + 1].trim().is_empty(),
-        "prompt boundary: {visible:?}"
-    );
-    assert!(
-        lines[user + 2].contains("Esc to interrupt"),
+        lines[user + 1].contains("Esc to interrupt"),
         "the working line must occupy the reply row: {visible:?}"
     );
     assert!(
-        !lines[user + 2].contains('>'),
+        !lines[user + 1].contains('>'),
         "working row must have no input prompt: {visible:?}"
     );
     assert_eq!(
@@ -4417,11 +4413,7 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
         .position(|line| line.contains("tailmarker"))
         .unwrap_or_else(|| panic!("wrapped prompt tail absent: {visible:?}"));
     assert!(
-        lines[tail + 1].trim().is_empty(),
-        "wrapped prompt boundary: {visible:?}"
-    );
-    assert!(
-        lines[tail + 2].contains("Working") && !lines[tail + 2].contains('>'),
+        lines[tail + 1].contains("Working") && !lines[tail + 1].contains('>'),
         "the working line must follow the final wrapped prompt row: {visible:?}"
     );
 
