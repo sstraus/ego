@@ -175,26 +175,30 @@ impl WireGenerator {
             tracing::debug!(target: "ego_ai::tool_names", index, original_name = %original.name,
                 provider_name = %tool.name, "provider tool declaration");
         }
-        // A projection of the serialized request, with no prompt, schemas,
-        // headers or credentials. This records what the wire actually built.
-        if tracing::enabled!(target: "ego_ai::tool_names", tracing::Level::DEBUG)
-            && let Some(body) = &request.body
-            && let Ok(body) = serde_json::from_slice::<serde_json::Value>(body)
-            && let Some(tools) = body.get("tools").and_then(serde_json::Value::as_array)
-        {
-            let sent: Vec<_> = tools
-                .iter()
-                .map(|tool| {
-                    tool.get("name").or_else(|| {
-                        tool.get("function")
-                            .and_then(|function| function.get("name"))
-                    })
-                })
-                .collect();
-            tracing::debug!(target: "ego_ai::tool_names", request_tool_names = ?sent,
-                "serialized provider request tool names");
-        }
+        trace_request_tool_names(&request);
         Ok((request, names))
+    }
+}
+
+fn trace_request_tool_names(request: &crate::http::HttpRequest) {
+    // A projection of the serialized request, with no prompt, schemas,
+    // headers or credentials. This records what the wire actually built.
+    if tracing::enabled!(target: "ego_ai::tool_names", tracing::Level::DEBUG)
+        && let Some(body) = &request.body
+        && let Ok(body) = serde_json::from_slice::<serde_json::Value>(body)
+        && let Some(tools) = body.get("tools").and_then(serde_json::Value::as_array)
+    {
+        let sent: Vec<_> = tools
+            .iter()
+            .map(|tool| {
+                tool.get("name").or_else(|| {
+                    tool.get("function")
+                        .and_then(|function| function.get("name"))
+                })
+            })
+            .collect();
+        tracing::debug!(target: "ego_ai::tool_names", request_tool_names = ?sent,
+            "serialized provider request tool names");
     }
 }
 

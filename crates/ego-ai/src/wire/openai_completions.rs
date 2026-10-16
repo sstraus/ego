@@ -660,6 +660,23 @@ struct WireError {
     kind: Option<String>,
 }
 
+impl WireError {
+    fn classification(&self) -> ErrorKind {
+        if self.code.as_deref() == Some("context_length_exceeded") {
+            ErrorKind::ContextOverflow
+        } else {
+            match self.kind.as_deref() {
+                Some("authentication_error" | "permission_error" | "billing_error") => {
+                    ErrorKind::Refused
+                }
+                Some("invalid_request_error" | "not_found_error") => ErrorKind::Invalid,
+                Some("rate_limit_error" | "overloaded_error" | "api_error") => ErrorKind::Transient,
+                _ => ErrorKind::Unclassified,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Choice {
     #[serde(default)]
@@ -1072,20 +1089,7 @@ impl StreamDecoder {
             }
         };
         if let Some(error) = chunk.error {
-            let kind = if error.code.as_deref() == Some("context_length_exceeded") {
-                ErrorKind::ContextOverflow
-            } else {
-                match error.kind.as_deref() {
-                    Some("authentication_error" | "permission_error" | "billing_error") => {
-                        ErrorKind::Refused
-                    }
-                    Some("invalid_request_error" | "not_found_error") => ErrorKind::Invalid,
-                    Some("rate_limit_error" | "overloaded_error" | "api_error") => {
-                        ErrorKind::Transient
-                    }
-                    _ => ErrorKind::Unclassified,
-                }
-            };
+            let kind = error.classification();
             self.provider_error = Some((error.message, kind));
             return;
         }
