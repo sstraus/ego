@@ -240,6 +240,17 @@ Fork a session at its tip or after the completed turn containing a message.
 - `--session-dir <SESSION_DIR>` — Override the store location
 - `<SOURCE>` — (undocumented)
 
+## `ego rm`
+
+Delete a stored session (history is retained for descendants).
+
+- `-C <DIR>` — Run as if started in DIR
+- `--force` — (undocumented)
+- `-h, --help` — Print help
+- `--session-dir <SESSION_DIR>` — Override the store location
+- `--yes` — (undocumented)
+- `<SOURCE>` — (undocumented)
+
 ## `ego compact`
 
 Compact a session into its deterministic successor.

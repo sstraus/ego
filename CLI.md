@@ -34,6 +34,8 @@ ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or 
                               --answer QUESTION_ID=JSON answers pending input;
                               --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
+ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
+                              --force acknowledges an uncertain run
 ego fork <ID> [--at ITEM_ID]   branch after a completed turn
 ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
                               publish one idempotent checkpoint target

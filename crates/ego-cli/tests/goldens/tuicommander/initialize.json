@@ -14,7 +14,13 @@
     },
     "sessionCapabilities": {
       "list": {},
-      "delete": {},
+      "delete": {
+        "_meta": {
+          "ego": {
+            "force": true
+          }
+        }
+      },
       "fork": {
         "_meta": {
           "ego": {
@@ -28,6 +34,17 @@
     "auth": {},
     "_meta": {
       "ego": {
+        "steer": {
+          "version": 1,
+          "method": "_ego/steer",
+          "contentTypes": [
+            "text"
+          ]
+        },
+        "retry": {
+          "version": 1,
+          "method": "_ego/retry"
+        },
         "compact": {
           "version": 1,
           "method": "_ego/compact"
@@ -36,15 +53,6 @@
           "version": 1,
           "pause": "_ego/pause",
           "resume": "_ego/resume"
-        },
-        "retry": {
-          "version": 1,
-          "method": "_ego/retry"
-        },
-        "steer": {
-          "version": 1,
-          "method": "_ego/steer",
-          "contentTypes": ["text"]
         }
       }
     }

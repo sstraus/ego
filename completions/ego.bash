@@ -64,6 +64,9 @@ _ego() {
             ego,resume)
                 cmd="ego__subcmd__resume"
                 ;;
+            ego,rm)
+                cmd="ego__subcmd__rm"
+                ;;
             ego,roots)
                 cmd="ego__subcmd__roots"
                 ;;
@@ -167,7 +170,7 @@ _ego() {
 
     case "${cmd}" in
         ego)
-            opts="-h --help run resume continue fork compact export ls usage models hooks doctor setup acp a2a auth mcp config roots rules mcp-server orchestrator"
+            opts="-h --help run resume continue fork rm compact export ls usage models hooks doctor setup acp a2a auth mcp config roots rules mcp-server orchestrator"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1182,6 +1185,28 @@ _ego() {
                     return 0
                     ;;
                 -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__rm)
+            opts="-C -h --yes --force --session-dir --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --session-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -C)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
