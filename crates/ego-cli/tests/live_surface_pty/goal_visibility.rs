@@ -22,7 +22,7 @@ fn goal_visibility_transcript() -> String {
     let checker = serde_json::json!([
         "/bin/sh",
         "-c",
-        "cat >/dev/null; printf '%s\\n' '{\"achieved\":false,\"reason\":\"artifact missing 527\"}'"
+        "cat >/dev/null; printf '%s\\n' '{\"verdict\":\"continue\",\"reason\":\"artifact missing 527\"}'"
     ])
     .to_string();
     let ego = places
@@ -98,5 +98,96 @@ fn goal_visibility_exhaustion_names_objective_condition_and_actions() {
         "--goal-turns",
     ] {
         assert!(output.contains(expected), "missing {expected}: {output}");
+    }
+}
+
+// Catches: a checker that needs operator action leaves the goal active or spends automatic turns.
+#[test]
+fn goal_visibility_needs_operator_blocks_without_spending_allowance() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("REGRESSION-MARKER"))],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    let checker = serde_json::json!([
+        "/bin/sh", "-c",
+        "cat >/dev/null; printf '%s\\n' '{\"verdict\":\"needs_operator\",\"reason\":\"Operator must approve account login\"}'"
+    ]).to_string();
+    let ego = places
+        .ego(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--trust-workspace",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--goal",
+            "Verify operator account",
+            "--goal-turns",
+            "20",
+            "--allow",
+            "exec(/bin/sh *)",
+            "--goal-check-command",
+            &checker,
+        ])
+        .env("TERM", "xterm-256color");
+    let (session, mut input, reader) = PtySession::start(&ego, 32, 180, None);
+    let mut output = Vec::new();
+    until_prompt_from(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"verify the account\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Goal stopped:");
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let transcript = normalized(&output[start..]);
+    let log = std::fs::read_to_string(
+        places
+            .home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    let events: Vec<serde_json::Value> = log
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["payload"]["event"]["kind"]
+                .clone()
+        })
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["kind"] == "GoalTransitioned"
+                && event["transition"]["kind"] == "blocked"
+                && event["transition"]["reason"] == "Operator must approve account login"),
+        "{log}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["kind"] == "GoalContinuation"),
+        "{log}"
+    );
+    assert_eq!(stub.generations().len(), 1);
+    for expected in [
+        "needs operator",
+        "Operator must approve account login",
+        "turns 0/20",
+        "/goal set TEXT",
+        "require an active goal",
+        "/goal show",
+        "/goal achieve",
+    ] {
+        assert!(
+            transcript.contains(expected),
+            "missing {expected}: {transcript}"
+        );
     }
 }

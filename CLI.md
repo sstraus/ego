@@ -2158,9 +2158,19 @@ they never claim achievement. ACP managed plan metadata exposes `goalStatus`,
 
 `--goal-check-command '["/path/to/check", "arg"]'` selects a command evaluator
 instead of a model. It receives objective and session evidence JSON on stdin
-and returns only `{ "achieved": true|false, "reason": "evidence or unmet condition" }`
-on stdout. Its exact exec authority must be granted by ordinary policy; it uses
-the same confinement and cancellation scope, with a 60-second timeout. Command
+and returns only
+`{ "verdict": "achieved|continue|needs_operator", "reason": "evidence or unmet condition" }`.
+The `verdict` is required and must be exactly one of those three values; the old
+`achieved` boolean is not accepted. `achieved` requires evidence of success.
+`continue` admits automatic work only when the agent can act on the unmet
+condition. `needs_operator` blocks the goal at once, records the reason and
+shows an actionable stop receipt without consuming an automatic work turn.
+Use it for login, approval, decisions or input that requires a person. A blocked
+goal is terminal: after resolving the blocker, `/goal set TEXT` starts a new
+goal. The stop receipt states this; `/goal achieve` and `/goal block` require an
+active goal. Model checks use the same contract and receive these instructions. The command writes
+its verdict on stdout. Its exact exec authority must be granted by ordinary
+policy; it uses the same confinement and cancellation scope, with a 60-second timeout. Command
 checks do not incur model cost. Model checks remain accounted generations.
 Stderr is not part of the verdict. If the command exits unsuccessfully, the
 visible goal-check diagnostic includes at most 4096 UTF-8 bytes from the end of

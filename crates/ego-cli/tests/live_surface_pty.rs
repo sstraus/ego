@@ -9201,7 +9201,7 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         completions.push(Reply::Sse(text("REGRESSION-MARKER-CONTINUED")));
         // The successor keeps the independent goal check; success must still be verified.
         completions.push(Reply::Sse(text(
-            r#"{"achieved":true,"reason":"next sub-task verified"}"#,
+            r#"{"verdict":"achieved","reason":"next sub-task verified"}"#,
         )));
         let stub = Stub::start(Plan {
             completions,

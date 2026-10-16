@@ -448,8 +448,13 @@ impl<'a> TextSink<'a> {
             if let Some(reason) = &goal.check_stop
                 && prior.is_none_or(|prior| prior.check_stop.as_ref() != Some(reason))
             {
+                let next = if goal.state == GoalState::Blocked {
+                    "Next: /goal show; after resolving the blocker, /goal set TEXT starts a new goal. /goal achieve and /goal block require an active goal"
+                } else {
+                    "Next: /goal show, /goal achieve, /goal block"
+                };
                 receipts.push(format!(
-                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. Next: /goal show, /goal achieve, /goal block; --goal-turns N sets the allowance when checks first start.",
+                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. {next}; --goal-turns N sets the allowance when checks first start.",
                     goal.objective, goal.continuation_turns,
                     goal.blocker_reason.as_deref().unwrap_or("none recorded")
                 ));

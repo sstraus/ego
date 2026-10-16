@@ -29,6 +29,10 @@ pub enum GoalState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalTransition {
+    /// A checked condition requires operator action, not another work turn.
+    Blocked {
+        reason: String,
+    },
     BlockerObserved {
         reason: String,
     },
