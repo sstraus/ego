@@ -2158,3 +2158,30 @@ async fn mcp_admission_failure_leaves_session_unknown_and_uninserted() {
     assert!(data.contains("session/new"));
     connection.finish().await;
 }
+
+/// Catches refusal of unsaved host context and leakage of acquisition secrets.
+#[tokio::test]
+async fn embedded_host_context_needs_no_disk_file_and_drops_private_metadata() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open(WORKSPACE).await;
+    let (response, _) = connection.request("session/prompt", serde_json::json!({
+        "sessionId": session,
+        "prompt": [
+            {"type":"text", "text":"before"},
+            {"type":"resource", "resource": {
+                "uri":"untitled://user:SECRET@editor/unsaved?token=SECRET",
+                "mimeType":"text/plain", "text":"unsaved host buffer",
+                "_meta":{"secret":"SECRET"}
+            }},
+            {"type":"text", "text":"after"}
+        ]
+    })).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let prompt = turns.turns()[0].0.text().to_owned();
+    assert!(prompt.contains("unsaved host buffer"));
+    assert!(prompt.find("before") < prompt.find("unsaved host buffer"));
+    assert!(prompt.find("unsaved host buffer") < prompt.find("after"));
+    assert!(!prompt.contains("SECRET"));
+    connection.finish().await;
+}
