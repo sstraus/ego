@@ -5497,6 +5497,40 @@ mod turn {
         ]
     }
 
+    // Catches: an accepted amendment writes the original params or reuses its permit.
+    #[test]
+    fn a_human_amendment_executes_only_the_newly_approved_write() {
+        let fx = Fixture::new(writing("/ws/original.txt", "original"))
+            .with_write_tool()
+            .with_human([
+                PermissionDecision::Amend {
+                    params: json!({"path":"/ws/amended.txt", "contents":"approved"}),
+                },
+                PermissionDecision::Allow,
+            ]);
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert!(fx.fs.read(&CanonPath::new("/ws/original.txt")).is_err());
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/ws/amended.txt")).unwrap(),
+            b"approved"
+        );
+        assert!(matches!(
+            permission_events(&fx).as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionAmended { .. },
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionDecided {
+                    allowed: Some(true),
+                    by: Some(Authority::Party),
+                    ..
+                },
+            ]
+        ));
+    }
+
     #[test]
     fn a_human_allow_mints_for_and_executes_the_exact_prepared_call() {
         let fx = Fixture::new(writing("/ws/out.txt", "allowed"))
@@ -11285,6 +11319,133 @@ mod turn {
             1,
             "the removed skill hook cannot fire on the next ordinary turn"
         );
+    }
+
+    struct SkillResourceGenerator {
+        sent: AtomicBool,
+        path: &'static str,
+    }
+
+    impl Generator for SkillResourceGenerator {
+        fn ensure_expressible(&self, _: &GenRequest) -> Result<(), RequestExpressibilityError> {
+            Ok(())
+        }
+        fn generate(&self, request: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+            let script = if self.sent.swap(true, Ordering::SeqCst) {
+                vec![AiEvent::Stop(StopReason::Stop)]
+            } else {
+                let invocation = request
+                    .messages
+                    .messages()
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .find_map(|block| {
+                        let ContentBlock::Text { text } = block else {
+                            return None;
+                        };
+                        text.split("Admitted skill instruction (invocation ")
+                            .nth(1)
+                            .and_then(|tail| tail.split(';').next())
+                    })
+                    .expect("admitted invocation is visible to the model");
+                vec![AiEvent::ToolCall {
+                    call_id: "resource-call".into(), name: "skill".into(),
+                    args: json!({"kind":"read_resource", "invocation":invocation, "path":self.path}).to_string(),
+                }, AiEvent::Stop(StopReason::ToolUse)]
+            };
+            FakeGenerator::new([script]).generate(request, attempt)
+        }
+    }
+
+    // Catches: skill resources bypass read denial, path policy, or durable-byte admission.
+    #[test]
+    fn model_skill_resource_discloses_only_guarded_admitted_bytes() {
+        for (path, denied, expected) in [
+            ("refs/guide.md", false, Some("resource bytes")),
+            ("refs/guide.md", true, None),
+            ("private.md", false, None),
+        ] {
+            let descriptor = forked_descriptor(true);
+            let catalogue = Arc::new(
+                ego_core::skill::SkillCatalogue::new(vec![
+                    ego_core::skill::SkillSpec::new(
+                        descriptor.clone(),
+                        b"Use the admitted resource".to_vec(),
+                    )
+                    .unwrap()
+                    .with_resource_paths(["refs/**"])
+                    .unwrap(),
+                ])
+                .unwrap(),
+            );
+            let operation = ego_core::skill::AdmittedSkillOperation::invoke(&descriptor, "");
+            let fx = Fixture::new(vec![])
+                .with_rules(&["read(**)"], if denied { &["read(**)"] } else { &[] });
+            fx.fs
+                .file("/ws/skills/forked/refs/guide.md", "resource bytes");
+            fx.fs.file("/ws/skills/forked/private.md", "private bytes");
+            let generator = Arc::new(SkillResourceGenerator {
+                sent: AtomicBool::new(false),
+                path,
+            });
+            let evidence = SkillEvidence::new();
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::from_registry(
+                &[RegisteredTool::skill(catalogue)],
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            )
+            .with_skill_resource_roots(ego_core::skill::SkillResourceRoots::new(
+                "/ws".into(),
+                "/ws".into(),
+                "/ws".into(),
+            ));
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model_for(&fx, &generator, &mut gate),
+                tools,
+            )
+            .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
+            block_on(turn.run_admitted_skill(operation)).unwrap();
+            let state = turn.state();
+            let call = state
+                .items
+                .values()
+                .find(|item| item.kind == ItemKind::ToolCall)
+                .expect("resource call answered");
+            assert_eq!(call.ok, Some(expected.is_some()), "{path}, denied={denied}");
+            let resources: Vec<_> = fx
+                .store
+                .events()
+                .into_iter()
+                .filter_map(|event| match event.kind {
+                    EventKind::SkillResourceAdmitted { content, .. } => Some(content),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(resources.len(), usize::from(expected.is_some()));
+            if let Some(bytes) = expected {
+                assert_eq!(tool_result_text(call), bytes);
+                use ego_core::store::blob::BlobStore;
+                assert_eq!(
+                    evidence.blobs.read(&resources[0]).unwrap(),
+                    bytes.as_bytes()
+                );
+            }
+        }
     }
 
     #[test]

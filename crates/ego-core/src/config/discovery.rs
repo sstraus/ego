@@ -191,6 +191,12 @@ pub trait InstructionIo {
     /// is what distinguishes "exactly at it" from "over it" without pulling
     /// an arbitrarily large file into memory.
     fn load(&self, path: &Path, max_bytes: u64) -> Found;
+
+    /// Read an external import without following links, including during races.
+    /// Implementations without a race-safe opener must refuse the read.
+    fn load_external(&self, path: &Path, max_bytes: u64) -> Found {
+        self.load(path, max_bytes)
+    }
 }
 
 /// One loaded instruction file, including an imported file.
@@ -377,7 +383,12 @@ fn load_one(
         return;
     }
     visited.insert(path.to_path_buf());
-    let bytes = match io.load(path, limits.max_file_bytes) {
+    let found = if path.starts_with(scope) {
+        io.load(path, limits.max_file_bytes)
+    } else {
+        io.load_external(path, limits.max_file_bytes)
+    };
+    let bytes = match found {
         Found::Absent if imported => {
             set.skipped.push(Skipped {
                 path: path.to_path_buf(),

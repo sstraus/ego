@@ -3525,52 +3525,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Option<crate::event::id::QueuedPromptId>,
         )],
     ) -> Result<DriveOutcome, StoreError> {
-        for (index, (text, images, queued_prompt)) in prompts.iter().enumerate() {
-            let item = ItemId::new();
-            let admitted = self.journal.append(
-                turn,
-                Some(item),
-                None,
-                EventKind::UserPrompt {
-                    text: text.clone(),
-                    images: images.clone(),
-                    queued_prompt: *queued_prompt,
-                },
-            )?;
-            if index == 0 && self.hook_binding.is_some() {
-                let active = match self.policy_source.current() {
-                    Ok(policy) => policy,
-                    Err(error) => {
-                        tracing::warn!(%error, "the active hook policy could not be read");
-                        let Generated::Ended(exit) =
-                            self.refuse(turn, error, ExitReason::Internal)?
-                        else {
-                            unreachable!("a refusal always ends the generation")
-                        };
-                        return Ok(DriveOutcome::Ended(exit, None));
-                    }
-                };
-                if let Err(error) = self.bind_hook_policy(active) {
-                    tracing::warn!(%error, "the active hook policy could not be bound");
-                    let Generated::Ended(exit) = self.refuse(turn, error, ExitReason::Internal)?
-                    else {
-                        unreachable!("a refusal always ends the generation")
-                    };
-                    return Ok(DriveOutcome::Ended(exit, None));
-                }
-            }
-            if !self
-                .dispatch_hook(
-                    HookCausality::item(item, turn, admitted),
-                    HookEvent::turn(HookLifecycle::UserPromptSubmit, HookSubject::Item { item }),
-                )
-                .await
-            {
-                return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
-            }
-            if queued_prompt.is_some() {
-                self.refresh_control_status();
-            }
+        if let Some(outcome) = self.admit_turn_prompts(turn, prompts).await? {
+            return Ok(outcome);
         }
 
         loop {
@@ -3744,150 +3700,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 continue;
             }
 
-            let mut pending = pending;
-            let task_results = self.run_tasks(turn, &policy_snapshot, &mut pending).await?;
-            for index in 0..pending.len() {
-                if task_results.contains(&pending[index].item) {
-                    continue;
-                }
-                // A batch is not one effect, and this is the only place that
-                // says so. A control that arrived while the generation was
-                // streaming reaches the loop with the calls already logged
-                // and none of them run; asking here — before `run_tool` and
-                // not after it — is what keeps the first call in the batch
-                // from being the one effect nobody could stop.
-                if let Some(reason) = self.must_stop() {
-                    self.close_unstarted_siblings(turn, &pending[index..])?;
-                    return Ok(DriveOutcome::Ended(reason, None));
-                }
-                // `CLI.md` §4.4: a run with nobody to ask does not answer a
-                // permission question on the model's behalf. The denial is
-                // still logged against the call — the model's audience
-                // argument holds for the *record*, it just no longer decides
-                // whether the run continues.
-                //
-                // Both endings below are exit 3 and they are not the same
-                // fact. "Denied by r1:…" tells an operator which line of their
-                // config to go and look at; "no rule covers write /ws/x" tells
-                // them there is no line to look at and they have to write one.
-                // Collapsing them would leave the commonest case — a run that
-                // needed an answer — reading like a refusal somebody
-                // configured on purpose. `DeniedBy` is what carries that
-                // difference past the prose and into §4.1's object.
-                let outcome = self
-                    .run_tool(policy.as_ref(), &policy_snapshot, turn, &mut pending[index])
-                    .await?;
-                let call = &pending[index];
-                self.journal.append(
-                    turn,
-                    Some(call.item),
-                    Some(call.started),
-                    EventKind::ToolCallMeasured {
-                        timing: call.timing,
-                    },
-                )?;
-                let denial = match outcome {
-                    ToolOutcome::Answered { ok, mut result } => {
-                        let call = &pending[index];
-                        self.tools
-                            .finish_result(&mut result, self.invocation, call.item);
-                        self.journal.append(
-                            turn,
-                            Some(call.item),
-                            Some(call.started),
-                            EventKind::ToolCallCompleted { ok, result },
-                        )?;
-                        continue;
-                    }
-                    ToolOutcome::Executed {
-                        ok,
-                        mut result,
-                        selector,
-                    } => {
-                        let call = &pending[index];
-                        self.tools
-                            .finish_result(&mut result, self.invocation, call.item);
-                        self.journal.append(
-                            turn,
-                            Some(call.item),
-                            Some(call.started),
-                            EventKind::ToolCallCompleted { ok, result },
-                        )?;
-                        let lifecycle = if ok {
-                            HookLifecycle::PostToolUse
-                        } else {
-                            HookLifecycle::PostToolUseFailure
-                        };
-                        let _ = self
-                            .dispatch_hook(
-                                HookCausality::item(call.item, turn, call.started),
-                                HookEvent::tool(
-                                    lifecycle,
-                                    HookSubject::Item { item: call.item },
-                                    selector,
-                                ),
-                            )
-                            .await;
-                        continue;
-                    }
-                    ToolOutcome::Recorded => {
-                        continue;
-                    }
-                    ToolOutcome::QuestionRequired => {
-                        self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                        return Ok(DriveOutcome::QuestionRequired);
-                    }
-                    // A boundary refusal of a read is the model's to learn
-                    // from, not the run's to end on: the denial text is the
-                    // tool result and the batch carries on.
-                    ToolOutcome::Refused { denial } if denial.is_unreachable_read() => {
-                        let call = &pending[index];
-                        self.journal.append(
-                            turn,
-                            Some(call.item),
-                            Some(call.started),
-                            EventKind::ToolCallCompleted {
-                                ok: false,
-                                result: self
-                                    .tools
-                                    .masked_result(ToolResult::builtin(denial.to_string())),
-                            },
-                        )?;
-                        continue;
-                    }
-                    ToolOutcome::Refused { denial } => Denial {
-                        action: denial.to_string(),
-                        // Never assembled here: `PolicyDenied::authority` is
-                        // the single definition of who said so, and a second
-                        // caller deciding it from the arms would be a second
-                        // chance to attribute a denial to the wrong party.
-                        by: DeniedBy::Decided(denial.authority()),
-                    },
-                    ToolOutcome::Unanswerable { pending } => Denial {
-                        action: pending.request().to_string(),
-                        by: DeniedBy::Nobody,
-                    },
-                    ToolOutcome::Ended(reason) => {
-                        self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                        return Ok(DriveOutcome::Ended(reason, None));
-                    }
-                };
-                let call = &pending[index];
-                self.journal.append(
-                    turn,
-                    Some(call.item),
-                    Some(call.started),
-                    EventKind::ToolCallCompleted {
-                        ok: false,
-                        result: self
-                            .tools
-                            .masked_result(ToolResult::builtin(denial.action.clone())),
-                    },
-                )?;
-                return Ok(DriveOutcome::Ended(
-                    ExitReason::PermissionRequired,
-                    Some(denial),
-                ));
+            if let Some(outcome) = self
+                .run_pending_batch(turn, policy.as_ref(), &policy_snapshot, pending)
+                .await?
+            {
+                return Ok(outcome);
             }
             // The counterpart of the check at the head of the batch, for the
             // last call in it: a control that arrived while that call ran has
@@ -3910,6 +3727,221 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
             self.deliver_pending(turn)?;
         }
+    }
+
+    async fn run_pending_batch(
+        &mut self,
+        turn: TurnId,
+        policy: &PolicyEngine,
+        policy_snapshot: &Arc<GenerationPolicySnapshot>,
+        pending: Vec<PendingCall>,
+    ) -> Result<Option<DriveOutcome>, StoreError> {
+        let mut pending = pending;
+        let task_results = self.run_tasks(turn, policy_snapshot, &mut pending).await?;
+        for index in 0..pending.len() {
+            if task_results.contains(&pending[index].item) {
+                continue;
+            }
+            // A batch is not one effect, and this is the only place that
+            // says so. A control that arrived while the generation was
+            // streaming reaches the loop with the calls already logged
+            // and none of them run; asking here — before `run_tool` and
+            // not after it — is what keeps the first call in the batch
+            // from being the one effect nobody could stop.
+            if let Some(reason) = self.must_stop() {
+                self.close_unstarted_siblings(turn, &pending[index..])?;
+                return Ok(Some(DriveOutcome::Ended(reason, None)));
+            }
+            // `CLI.md` §4.4: a run with nobody to ask does not answer a
+            // permission question on the model's behalf. The denial is
+            // still logged against the call — the model's audience
+            // argument holds for the *record*, it just no longer decides
+            // whether the run continues.
+            //
+            // Both endings below are exit 3 and they are not the same
+            // fact. "Denied by r1:…" tells an operator which line of their
+            // config to go and look at; "no rule covers write /ws/x" tells
+            // them there is no line to look at and they have to write one.
+            // Collapsing them would leave the commonest case — a run that
+            // needed an answer — reading like a refusal somebody
+            // configured on purpose. `DeniedBy` is what carries that
+            // difference past the prose and into §4.1's object.
+            let outcome = self
+                .run_tool(policy, policy_snapshot, turn, &mut pending[index])
+                .await?;
+            let call = &pending[index];
+            self.journal.append(
+                turn,
+                Some(call.item),
+                Some(call.started),
+                EventKind::ToolCallMeasured {
+                    timing: call.timing,
+                },
+            )?;
+            let denial = match outcome {
+                ToolOutcome::Answered { ok, mut result } => {
+                    let call = &pending[index];
+                    self.tools
+                        .finish_result(&mut result, self.invocation, call.item);
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted { ok, result },
+                    )?;
+                    continue;
+                }
+                ToolOutcome::Executed {
+                    ok,
+                    mut result,
+                    selector,
+                } => {
+                    let call = &pending[index];
+                    self.tools
+                        .finish_result(&mut result, self.invocation, call.item);
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted { ok, result },
+                    )?;
+                    let lifecycle = if ok {
+                        HookLifecycle::PostToolUse
+                    } else {
+                        HookLifecycle::PostToolUseFailure
+                    };
+                    let _ = self
+                        .dispatch_hook(
+                            HookCausality::item(call.item, turn, call.started),
+                            HookEvent::tool(
+                                lifecycle,
+                                HookSubject::Item { item: call.item },
+                                selector,
+                            ),
+                        )
+                        .await;
+                    continue;
+                }
+                ToolOutcome::Recorded => {
+                    continue;
+                }
+                ToolOutcome::QuestionRequired => {
+                    self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                    return Ok(Some(DriveOutcome::QuestionRequired));
+                }
+                // A boundary refusal of a read is the model's to learn
+                // from, not the run's to end on: the denial text is the
+                // tool result and the batch carries on.
+                ToolOutcome::Refused { denial } if denial.is_unreachable_read() => {
+                    let call = &pending[index];
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted {
+                            ok: false,
+                            result: self
+                                .tools
+                                .masked_result(ToolResult::builtin(denial.to_string())),
+                        },
+                    )?;
+                    continue;
+                }
+                ToolOutcome::Refused { denial } => Denial {
+                    action: denial.to_string(),
+                    // Never assembled here: `PolicyDenied::authority` is
+                    // the single definition of who said so, and a second
+                    // caller deciding it from the arms would be a second
+                    // chance to attribute a denial to the wrong party.
+                    by: DeniedBy::Decided(denial.authority()),
+                },
+                ToolOutcome::Unanswerable { pending } => Denial {
+                    action: pending.request().to_string(),
+                    by: DeniedBy::Nobody,
+                },
+                ToolOutcome::Ended(reason) => {
+                    self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                    return Ok(Some(DriveOutcome::Ended(reason, None)));
+                }
+            };
+            let call = &pending[index];
+            self.journal.append(
+                turn,
+                Some(call.item),
+                Some(call.started),
+                EventKind::ToolCallCompleted {
+                    ok: false,
+                    result: self
+                        .tools
+                        .masked_result(ToolResult::builtin(denial.action.clone())),
+                },
+            )?;
+            return Ok(Some(DriveOutcome::Ended(
+                ExitReason::PermissionRequired,
+                Some(denial),
+            )));
+        }
+        Ok(None)
+    }
+
+    async fn admit_turn_prompts(
+        &mut self,
+        turn: TurnId,
+        prompts: &[(
+            String,
+            Vec<crate::generator::types::ImageRef>,
+            Option<QueuedPromptId>,
+        )],
+    ) -> Result<Option<DriveOutcome>, StoreError> {
+        for (index, (text, images, queued_prompt)) in prompts.iter().enumerate() {
+            let item = ItemId::new();
+            let admitted = self.journal.append(
+                turn,
+                Some(item),
+                None,
+                EventKind::UserPrompt {
+                    text: text.clone(),
+                    images: images.clone(),
+                    queued_prompt: *queued_prompt,
+                },
+            )?;
+            if index == 0 && self.hook_binding.is_some() {
+                let active = match self.policy_source.current() {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        tracing::warn!(%error, "the active hook policy could not be read");
+                        let Generated::Ended(exit) =
+                            self.refuse(turn, error, ExitReason::Internal)?
+                        else {
+                            unreachable!("a refusal always ends the generation")
+                        };
+                        return Ok(Some(DriveOutcome::Ended(exit, None)));
+                    }
+                };
+                if let Err(error) = self.bind_hook_policy(active) {
+                    tracing::warn!(%error, "the active hook policy could not be bound");
+                    let Generated::Ended(exit) = self.refuse(turn, error, ExitReason::Internal)?
+                    else {
+                        unreachable!("a refusal always ends the generation")
+                    };
+                    return Ok(Some(DriveOutcome::Ended(exit, None)));
+                }
+            }
+            if !self
+                .dispatch_hook(
+                    HookCausality::item(item, turn, admitted),
+                    HookEvent::turn(HookLifecycle::UserPromptSubmit, HookSubject::Item { item }),
+                )
+                .await
+            {
+                return Ok(Some(DriveOutcome::Ended(ExitReason::Completed, None)));
+            }
+            if queued_prompt.is_some() {
+                self.refresh_control_status();
+            }
+        }
+
+        Ok(None)
     }
 
     async fn dispatch_hook(&self, causality: HookCausality, event: HookEvent) -> bool {
@@ -4154,552 +4186,746 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // not have.
         let conversation = Self::with_mcp_instructions(conversation, catalogue.instructions());
 
-        let policy_snapshot = capture.snapshot();
-        let descriptors = catalogue.descriptors();
-        let mcp_servers = catalogue.mcp_servers();
+        self.generate_candidates(turn, conversation, capture, catalogue)
+            .await
+    }
 
-        let source = Arc::clone(&self.source);
+    async fn generate_candidates(
+        &mut self,
+        turn: TurnId,
+        conversation: Conversation,
+        capture: GenerationPolicyCapture,
+        catalogue: GenerationToolCatalogue,
+    ) -> Result<Generated, StoreError> {
         let first = AttemptRef::first(GenerationId::new());
-        let generation_id = first.generation();
-        let mut next_attempt = first;
         let mut candidates = Vec::with_capacity(1 + self.config.fallbacks.len());
         candidates.push(None);
         candidates.extend(self.config.fallbacks.iter().cloned().map(Some));
-        let mut last_failure = None;
-        let mut last_preflight_exit = ExitReason::Usage;
-        let mut primary_model: Option<ModelRef> = None;
-        let mut primary_capabilities = None;
-
+        let mut walk = GenerationWalk {
+            capture,
+            catalogue,
+            conversation,
+            next_attempt: first,
+            last_failure: None,
+            last_preflight_exit: ExitReason::Usage,
+            primary_model: None,
+            primary_capabilities: None,
+        };
         self.recovery_deadline = None;
         for (candidate_index, candidate) in candidates.into_iter().enumerate() {
-            if let Some(cause) = self.cancel.cause() {
-                return Ok(Generated::Cancelled {
-                    cause,
-                    pending: Vec::new(),
-                });
+            walk = match self
+                .generate_candidate(turn, candidate_index, candidate, walk)
+                .await?
+            {
+                std::ops::ControlFlow::Break(outcome) => return Ok(outcome),
+                std::ops::ControlFlow::Continue(walk) => walk,
+            };
+        }
+
+        match walk.last_failure {
+            Some((terminal, reason, pending, error_kind)) => Ok(Generated::Stopped {
+                capture: walk.capture,
+                generation: first.generation(),
+                terminal,
+                reason,
+                pending,
+                error_kind,
+            }),
+            None => Ok(Generated::Ended(walk.last_preflight_exit)),
+        }
+    }
+
+    async fn generate_candidate(
+        &mut self,
+        turn: TurnId,
+        candidate_index: usize,
+        candidate: Option<ModelRef>,
+        mut walk: GenerationWalk,
+    ) -> Result<std::ops::ControlFlow<Generated, GenerationWalk>, StoreError> {
+        let generation_id = walk.next_attempt.generation();
+        if let Some(cause) = self.cancel.cause() {
+            return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                cause,
+                pending: Vec::new(),
+            }));
+        }
+        let mut candidate_conversation = walk.conversation.clone();
+        let mut additional_attempts = 0_u32;
+
+        loop {
+            if self
+                .recovery_deadline
+                .is_some_and(|deadline| self.retry_pause.now() >= deadline)
+            {
+                return Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                    ExitReason::Provider,
+                )));
             }
-            let mut candidate_conversation = conversation.clone();
-            let mut additional_attempts = 0_u32;
-
-            loop {
-                if self
-                    .recovery_deadline
-                    .is_some_and(|deadline| self.retry_pause.now() >= deadline)
-                {
-                    return Ok(Generated::Ended(ExitReason::Provider));
-                }
-                let model_request = match candidate.as_ref() {
-                    Some(model) => self.main_model_request().with_model(model.clone()),
-                    None => primary_model.as_ref().map_or_else(
-                        || self.main_model_request(),
-                        |model| self.main_model_request().with_model(model.clone()),
-                    ),
-                };
-                let resolution_deadline = self
-                    .recovery_deadline
-                    .map(|deadline| self.retry_pause.deadline(deadline));
-                let resolve = async {
-                    match resolution_deadline {
-                        Some(deadline) => {
-                            match select(source.resolve(model_request), deadline).await {
-                                Either::Left((profile, _)) => Some(profile),
-                                Either::Right(_) => None,
-                            }
-                        }
-                        None => Some(source.resolve(model_request).await),
-                    }
-                };
-                let profile = match await_controlled(
-                    &self.journal,
-                    &self.cancel,
-                    &mut self.control,
+            let model_request = match candidate.as_ref() {
+                Some(model) => self.main_model_request().with_model(model.clone()),
+                None => walk.primary_model.as_ref().map_or_else(
+                    || self.main_model_request(),
+                    |model| self.main_model_request().with_model(model.clone()),
+                ),
+            };
+            let profile = match self
+                .admit_candidate_profile(
                     turn,
-                    resolve,
-                    InterruptDisposition::Return,
-                    None,
+                    candidate_index,
+                    candidate.as_ref(),
+                    model_request,
+                    &mut walk,
                 )
-                .await
-                {
-                    Controlled::Completed(Some(Ok(profile))) => {
-                        if candidate_index == 0 && primary_model.is_none() {
-                            primary_model = Some(profile.identity.clone());
-                            primary_capabilities = Some(profile.capabilities.clone());
-                        }
-                        self.main_model_identity = Some(profile.identity.clone());
-                        profile
-                    }
-                    Controlled::Completed(Some(Err(error))) => {
-                        let exit = match error.class {
-                            GenerationModelErrorClass::Usage => ExitReason::Usage,
-                            GenerationModelErrorClass::Provider => ExitReason::Provider,
-                            GenerationModelErrorClass::Internal => ExitReason::Internal,
-                        };
-                        last_preflight_exit = exit;
-                        match candidate.as_ref() {
-                            Some(candidate) => {
-                                self.journal.append(
-                                    turn,
-                                    None,
-                                    None,
-                                    EventKind::FallbackDecision {
-                                        candidate: candidate.clone(),
-                                        decision: FallbackDecision::ResolutionSkipped {
-                                            message: error.message,
-                                        },
-                                    },
-                                )?;
-                            }
-                            None => {
-                                self.journal.append(
-                                    turn,
-                                    None,
-                                    None,
-                                    EventKind::Error {
-                                        message: error.message,
-                                        kind: ErrorKind::Unclassified,
-                                    },
-                                )?;
-                            }
-                        }
-                        break;
-                    }
-                    Controlled::Completed(None) => {
-                        return Ok(Generated::Ended(ExitReason::Provider));
-                    }
-                    Controlled::Interrupted => {
-                        return Ok(Generated::Cancelled {
-                            cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                            pending: Vec::new(),
-                        });
-                    }
-                    Controlled::Failed(cause) => return Err(cause),
-                };
-
-                if let Some(message) = context_capacity::exhausted(
-                    self.state().context,
-                    profile.capabilities.max_context_tokens,
-                ) {
-                    return self.refuse(turn, message, ExitReason::ContextOverflow);
+                .await?
+            {
+                std::ops::ControlFlow::Break(ended) => {
+                    return Ok(std::ops::ControlFlow::Break(ended));
                 }
-
-                if self.automatic_compaction && compaction_due(self.state().context) {
-                    return self.refuse(turn,
-                        "Measured context pressure requires a clean-session compaction before continuing.".to_owned(),
-                        ExitReason::ContextOverflow);
+                std::ops::ControlFlow::Continue(Some(profile)) => profile,
+                std::ops::ControlFlow::Continue(None) => {
+                    return Ok(std::ops::ControlFlow::Continue(walk));
                 }
+            };
 
-                // Per candidate: a fallback runs on a different model, and the
-                // model must be told the one actually answering.
-                let identity = self.config.identity.as_ref().map(|identity| {
-                    identity.render(
-                        self.session_id,
-                        &profile.identity,
-                        profile.thinking,
-                        &policy_snapshot,
-                        &descriptors,
-                        &mcp_servers,
-                    )
-                });
-                let (messages, stable_messages) = self.with_host_context(
+            let (request, repaired) = match self.prepare_candidate_request(
+                turn,
+                candidate.as_ref(),
+                &profile,
+                &walk,
+                candidate_conversation,
+            )? {
+                std::ops::ControlFlow::Break(ended) => {
+                    return Ok(std::ops::ControlFlow::Break(ended));
+                }
+                std::ops::ControlFlow::Continue(Some(request)) => request,
+                std::ops::ControlFlow::Continue(None) => {
+                    walk.last_preflight_exit = ExitReason::Usage;
+                    return Ok(std::ops::ControlFlow::Continue(walk));
+                }
+            };
+            candidate_conversation = repaired;
+
+            // Resolution and request admission can advance monotonic time.
+            // Never reserve or dispatch paid work past this generation's horizon.
+            if self
+                .recovery_deadline
+                .is_some_and(|deadline| self.retry_pause.now() >= deadline)
+            {
+                return Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                    ExitReason::Provider,
+                )));
+            }
+
+            let budget = self
+                .gate
+                .snapshot()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            self.journal.publish(&PublicEvent::metering_selected(
+                turn,
+                &profile.metering,
+                budget.ledger(),
+                profile
+                    .rates
+                    .as_ref()
+                    .map_or(&RateSource::None, |rates| &rates.source),
+            ))?;
+
+            let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
+            let attempt = match self.reserve_generation_attempt(
+                turn,
+                &profile,
+                &request,
+                walk.next_attempt,
+            )? {
+                Ok(attempt) => attempt,
+                Err(ended) => return Ok(std::ops::ControlFlow::Break(ended)),
+            };
+            let reference = attempt.attempt();
+            walk.next_attempt = reference.retry();
+            self.admit_generation(&profile, reference, self.generation_role, &request.tools)?;
+            let generation = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::GenerationStarted {
+                    attempt: reference,
+                    role: self.generation_role,
+                    snapshot: (self.state().prompt_snapshot.as_ref()
+                        != Some(&self.prompt_snapshot))
+                    .then(|| self.prompt_snapshot.clone()),
+                },
+            )?;
+            self.last_request = Some(request.clone());
+            if additional_attempts > 0 {
+                self.journal.publish(&PublicEvent::ProviderRetrying {
                     turn,
-                    candidate_conversation.clone(),
-                    self.tools.context_notes(),
-                    identity.as_deref(),
-                )?;
-                let mut request = GenRequest {
-                    cache: Some(crate::generator::types::PromptCache {
-                        session_id: self.session_id,
-                        lineage_root: self.lineage_root,
-                        retention: self.config.cache,
-                        stable_messages,
-                    }),
-                    model: profile.request_model.clone(),
-                    messages,
-                    tools: descriptors.clone(),
-                    thinking: profile.thinking,
-                    max_output_tokens: profile.output_ceiling(),
-                    parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
-                };
-                let mut gaps = if candidate_index == 0 {
-                    profile.capabilities.request_gaps(&request)
-                } else {
-                    primary_capabilities
-                        .as_ref()
-                        .unwrap_or(&profile.capabilities)
-                        .fallback_gaps(&profile.capabilities, &request)
-                };
+                    attempt: additional_attempts,
+                })?;
+            }
+            let stream = profile.generator.generate(request, attempt);
+            let drained = self
+                .drain(
+                    turn,
+                    stream,
+                    DrainGeneration {
+                        event: generation,
+                        metering: &profile.metering,
+                        quote: quote.as_ref(),
+                        visibility: GenerationVisibility::Conversation,
+                        catalogue: Some(&walk.catalogue),
+                    },
+                )
+                .await;
+            let settlement = match self.gate.settle(drained.stream) {
+                Ok(settlement) => settlement,
+                Err(denied) => {
+                    tracing::error!(%denied, "the gate refused to settle an attempt it minted");
+                    drained.failure.map_or(Ok(()), Err)?;
+                    return self
+                        .refuse(turn, denied.to_string(), ExitReason::Internal)
+                        .map(std::ops::ControlFlow::Break);
+                }
+            };
+            drained.failure.map_or(Ok(()), Err)?;
 
-                if let Some(candidate) = candidate.as_ref()
-                    && !gaps.is_empty()
-                    && gaps.iter().all(reasoning_carryover_gap)
-                {
-                    let (sanitized, dropped_blocks, dialects) =
-                        drop_reasoning(candidate_conversation);
-                    candidate_conversation = sanitized;
+            let terminal = self.record_generation_settlement(
+                turn,
+                &profile,
+                reference,
+                &settlement,
+                drained.accounting_booked,
+            )?;
+            if drained.cancelled || self.cancel.is_cancelled() {
+                return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                    cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                    pending: drained.pending,
+                }));
+            }
+            if drained.corrupt.is_some() {
+                return Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                    ExitReason::Provider,
+                )));
+            }
+
+            let stop = settlement.outcome.stop();
+            let unsent = settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
+            let (reported, retry_after) = drained.provider_failure.unzip();
+            let cause = provider_cause(reported.as_deref(), drained.error_kind);
+            self.provider_failure = matches!(
+                stop,
+                StopReason::Error | StopReason::Aborted | StopReason::Deferred
+            )
+            .then(|| ProviderFailure {
+                cause: cause.clone(),
+                effect_known: !drained.emitted_output || reported.is_some(),
+            });
+            // maintainer decision 2026-10-05, amending the attempt-ownership
+            // ADR: a transient failure that showed nothing is retried even
+            // when it was possibly sent. Output already shown is never
+            // shown twice, so an attempt that emitted any is final.
+            let retryable = stop == StopReason::Error
+                && drained.error_kind == Some(ErrorKind::Transient)
+                && !drained.emitted_output;
+            match self
+                .retry_generation(
+                    turn,
+                    retryable,
+                    retry_after.flatten(),
+                    &mut additional_attempts,
+                    cause,
+                )
+                .await?
+            {
+                RetryProgress::Retry => continue,
+                RetryProgress::Cancelled => {
+                    return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                        cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                        pending: Vec::new(),
+                    }));
+                }
+                RetryProgress::Finished => {}
+            }
+            let stopped = (terminal, stop, drained.pending, drained.error_kind);
+            if stop == StopReason::Error && unsent {
+                walk.last_failure = Some(stopped);
+                return Ok(std::ops::ControlFlow::Continue(walk));
+            }
+
+            return Ok(std::ops::ControlFlow::Break(Generated::Stopped {
+                capture: walk.capture,
+                generation: generation_id,
+                terminal: stopped.0,
+                reason: stopped.1,
+                pending: stopped.2,
+                error_kind: stopped.3,
+            }));
+        }
+    }
+
+    async fn admit_candidate_profile(
+        &mut self,
+        turn: TurnId,
+        candidate_index: usize,
+        candidate: Option<&ModelRef>,
+        model_request: GenerationModelRequest,
+        walk: &mut GenerationWalk,
+    ) -> Result<std::ops::ControlFlow<Generated, Option<GenerationProfile>>, StoreError> {
+        match self.resolve_candidate_profile(turn, model_request).await {
+            Controlled::Completed(Some(Ok(profile))) => {
+                if candidate_index == 0 && walk.primary_model.is_none() {
+                    walk.primary_model = Some(profile.identity.clone());
+                    walk.primary_capabilities = Some(profile.capabilities.clone());
+                }
+                self.main_model_identity = Some(profile.identity.clone());
+                Ok(std::ops::ControlFlow::Continue(Some(profile)))
+            }
+            Controlled::Completed(Some(Err(error))) => {
+                let exit = match error.class {
+                    GenerationModelErrorClass::Usage => ExitReason::Usage,
+                    GenerationModelErrorClass::Provider => ExitReason::Provider,
+                    GenerationModelErrorClass::Internal => ExitReason::Internal,
+                };
+                walk.last_preflight_exit = exit;
+                match candidate {
+                    Some(candidate) => {
+                        self.journal.append(
+                            turn,
+                            None,
+                            None,
+                            EventKind::FallbackDecision {
+                                candidate: candidate.clone(),
+                                decision: FallbackDecision::ResolutionSkipped {
+                                    message: error.message,
+                                },
+                            },
+                        )?;
+                    }
+                    None => {
+                        self.journal.append(
+                            turn,
+                            None,
+                            None,
+                            EventKind::Error {
+                                message: error.message,
+                                kind: ErrorKind::Unclassified,
+                            },
+                        )?;
+                    }
+                }
+                Ok(std::ops::ControlFlow::Continue(None))
+            }
+            Controlled::Completed(None) => Ok(std::ops::ControlFlow::Break(Generated::Ended(
+                ExitReason::Provider,
+            ))),
+            Controlled::Interrupted => Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
+                cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                pending: Vec::new(),
+            })),
+            Controlled::Failed(cause) => Err(cause),
+        }
+    }
+
+    fn prepare_candidate_request(
+        &mut self,
+        turn: TurnId,
+        candidate: Option<&ModelRef>,
+        profile: &GenerationProfile,
+        walk: &GenerationWalk,
+        mut candidate_conversation: Conversation,
+    ) -> Result<std::ops::ControlFlow<Generated, Option<(GenRequest, Conversation)>>, StoreError>
+    {
+        let policy_snapshot = walk.capture.snapshot();
+        let descriptors = walk.catalogue.descriptors();
+        let mcp_servers = walk.catalogue.mcp_servers();
+        if let Some(message) = context_capacity::exhausted(
+            self.state().context,
+            profile.capabilities.max_context_tokens,
+        ) {
+            return self
+                .refuse(turn, message, ExitReason::ContextOverflow)
+                .map(std::ops::ControlFlow::Break);
+        }
+
+        if self.automatic_compaction && compaction_due(self.state().context) {
+            return self.refuse(turn,
+                "Measured context pressure requires a clean-session compaction before continuing.".to_owned(),
+                ExitReason::ContextOverflow).map(std::ops::ControlFlow::Break);
+        }
+
+        // Per candidate: a fallback runs on a different model, and the
+        // model must be told the one actually answering.
+        let identity = self.config.identity.as_ref().map(|identity| {
+            identity.render(
+                self.session_id,
+                &profile.identity,
+                profile.thinking,
+                &policy_snapshot,
+                &descriptors,
+                &mcp_servers,
+            )
+        });
+        let (messages, stable_messages) = self.with_host_context(
+            turn,
+            candidate_conversation.clone(),
+            self.tools.context_notes(),
+            identity.as_deref(),
+        )?;
+        let mut request = GenRequest {
+            cache: Some(crate::generator::types::PromptCache {
+                session_id: self.session_id,
+                lineage_root: self.lineage_root,
+                retention: self.config.cache,
+                stable_messages,
+            }),
+            model: profile.request_model.clone(),
+            messages,
+            tools: descriptors.clone(),
+            thinking: profile.thinking,
+            max_output_tokens: profile.output_ceiling(),
+            parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
+        };
+        let (repaired, gaps) = self.candidate_request_gaps(
+            turn,
+            candidate,
+            candidate_conversation,
+            &mut request,
+            (
+                walk.primary_capabilities
+                    .as_ref()
+                    .unwrap_or(&profile.capabilities),
+                &profile.capabilities,
+            ),
+            identity.as_deref(),
+        )?;
+        candidate_conversation = repaired;
+
+        if !gaps.is_empty() {
+            tracing::warn!(?gaps, "the candidate does not accept this request");
+            match candidate {
+                Some(candidate) => {
                     self.journal.append(
                         turn,
                         None,
                         None,
                         EventKind::FallbackDecision {
                             candidate: candidate.clone(),
-                            decision: FallbackDecision::ReasoningDropped {
-                                dropped_blocks,
-                                dialects,
+                            decision: FallbackDecision::Skipped { gaps },
+                        },
+                    )?;
+                }
+                None => {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::Error {
+                            message: gaps
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                            kind: ErrorKind::Unclassified,
+                        },
+                    )?;
+                }
+            }
+
+            return Ok(std::ops::ControlFlow::Continue(None));
+        }
+        if let Err(refused) = profile.generator.ensure_expressible(&request) {
+            tracing::warn!(%refused, "the candidate generator cannot encode this request");
+            match candidate {
+                Some(candidate) => {
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::FallbackDecision {
+                            candidate: candidate.clone(),
+                            decision: FallbackDecision::ExpressibilitySkipped {
+                                message: refused.to_string(),
                             },
                         },
                     )?;
-                    let (messages, stable_messages) = self.with_host_context(
-                        turn,
-                        candidate_conversation.clone(),
-                        self.tools.context_notes(),
-                        identity.as_deref(),
-                    )?;
-                    request.messages = messages;
-                    if let Some(cache) = request.cache.as_mut() {
-                        cache.stable_messages = stable_messages;
-                    }
-                    gaps = primary_capabilities
-                        .as_ref()
-                        .unwrap_or(&profile.capabilities)
-                        .fallback_gaps(&profile.capabilities, &request);
                 }
-
-                if !gaps.is_empty() {
-                    tracing::warn!(?gaps, "the candidate does not accept this request");
-                    match candidate.as_ref() {
-                        Some(candidate) => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::FallbackDecision {
-                                    candidate: candidate.clone(),
-                                    decision: FallbackDecision::Skipped { gaps },
-                                },
-                            )?;
-                        }
-                        None => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::Error {
-                                    message: gaps
-                                        .iter()
-                                        .map(ToString::to_string)
-                                        .collect::<Vec<_>>()
-                                        .join("; "),
-                                    kind: ErrorKind::Unclassified,
-                                },
-                            )?;
-                        }
-                    }
-                    last_preflight_exit = ExitReason::Usage;
-                    break;
-                }
-                if let Err(refused) = profile.generator.ensure_expressible(&request) {
-                    tracing::warn!(%refused, "the candidate generator cannot encode this request");
-                    match candidate.as_ref() {
-                        Some(candidate) => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::FallbackDecision {
-                                    candidate: candidate.clone(),
-                                    decision: FallbackDecision::ExpressibilitySkipped {
-                                        message: refused.to_string(),
-                                    },
-                                },
-                            )?;
-                        }
-                        None => {
-                            self.journal.append(
-                                turn,
-                                None,
-                                None,
-                                EventKind::Error {
-                                    message: refused.to_string(),
-                                    kind: ErrorKind::Unclassified,
-                                },
-                            )?;
-                        }
-                    }
-                    last_preflight_exit = ExitReason::Usage;
-                    break;
-                }
-
-                // Resolution and request admission can advance monotonic time.
-                // Never reserve or dispatch paid work past this generation's horizon.
-                if self
-                    .recovery_deadline
-                    .is_some_and(|deadline| self.retry_pause.now() >= deadline)
-                {
-                    return Ok(Generated::Ended(ExitReason::Provider));
-                }
-
-                let budget = self
-                    .gate
-                    .snapshot()
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
-                self.journal.publish(&PublicEvent::metering_selected(
-                    turn,
-                    &profile.metering,
-                    budget.ledger(),
-                    profile
-                        .rates
-                        .as_ref()
-                        .map_or(&RateSource::None, |rates| &rates.source),
-                ))?;
-
-                let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-                let reservation = match self.gate.reserve(
-                    &profile.metering,
-                    quote.as_ref(),
-                    &request,
-                    &profile.capabilities,
-                ) {
-                    Ok(reservation) => reservation,
-                    Err(denied) => {
-                        tracing::warn!(%denied, "the budget gate refused a generation attempt");
-                        let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
-                            ExitReason::Budget
-                        } else {
-                            ExitReason::Internal
-                        };
-                        return self.refuse(turn, denied.to_string(), reason);
-                    }
-                };
-                let attempt = match GenerationAttempt::from_attempt(
-                    next_attempt,
-                    reservation,
-                    &profile.metering,
-                    quote.as_ref(),
-                    &request,
-                    &profile.capabilities,
-                ) {
-                    Ok(attempt) => attempt,
-                    Err(denied) => {
-                        tracing::error!(%denied, "a reservation did not authorise its attempt");
-                        return self.refuse(turn, denied.to_string(), ExitReason::Internal);
-                    }
-                };
-                let reference = attempt.attempt();
-                next_attempt = reference.retry();
-                self.admit_generation(&profile, reference, self.generation_role, &request.tools)?;
-                let generation = self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::GenerationStarted {
-                        attempt: reference,
-                        role: self.generation_role,
-                        snapshot: (self.state().prompt_snapshot.as_ref()
-                            != Some(&self.prompt_snapshot))
-                        .then(|| self.prompt_snapshot.clone()),
-                    },
-                )?;
-                self.last_request = Some(request.clone());
-                if additional_attempts > 0 {
-                    self.journal.publish(&PublicEvent::ProviderRetrying {
-                        turn,
-                        attempt: additional_attempts,
-                    })?;
-                }
-                let stream = profile.generator.generate(request, attempt);
-                let drained = self
-                    .drain(
-                        turn,
-                        stream,
-                        DrainGeneration {
-                            event: generation,
-                            metering: &profile.metering,
-                            quote: quote.as_ref(),
-                            visibility: GenerationVisibility::Conversation,
-                            catalogue: Some(&catalogue),
-                        },
-                    )
-                    .await;
-                let settlement = match self.gate.settle(drained.stream) {
-                    Ok(settlement) => settlement,
-                    Err(denied) => {
-                        tracing::error!(%denied, "the gate refused to settle an attempt it minted");
-                        drained.failure.map_or(Ok(()), Err)?;
-                        return self.refuse(turn, denied.to_string(), ExitReason::Internal);
-                    }
-                };
-                drained.failure.map_or(Ok(()), Err)?;
-
-                if !drained.accounting_booked {
+                None => {
                     self.journal.append(
                         turn,
                         None,
                         None,
-                        EventKind::UsageUpdated {
-                            usage: Usage::IDENTITY,
-                            cost_delta: settled_cost_for_delivery(
-                                &profile.metering,
-                                quote.as_ref(),
-                                UsageReport::Missing,
-                                None,
-                                self.settlement_currency,
-                                settlement.outcome.delivery(),
-                            ),
-                            attempt: Some(reference),
+                        EventKind::Error {
+                            message: refused.to_string(),
+                            kind: ErrorKind::Unclassified,
                         },
                     )?;
                 }
-                let terminal = self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::AttemptSettled {
-                        attempt: settlement.attempt,
-                        outcome: settlement.outcome,
-                    },
-                )?;
-                if let UsageReport::Reported(usage) = settlement.outcome.usage() {
-                    self.journal.append(
-                        turn,
-                        None,
-                        None,
-                        EventKind::ContextWindowUpdated {
-                            used_tokens: usage.total_tokens(),
-                            provenance: OccupancyProvenance::GenerationBoundary,
-                            // This profile and not the one the caller resolved
-                            // before the loop: the candidate walk above can end
-                            // on a fallback, and the occupancy below is that
-                            // model's, so the ceiling it is a fraction of has
-                            // to be that model's too.
-                            window: profile.capabilities.max_context_tokens,
-                        },
-                    )?;
-                }
-                if drained.cancelled || self.cancel.is_cancelled() {
-                    return Ok(Generated::Cancelled {
-                        cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                        pending: drained.pending,
-                    });
-                }
-                if drained.corrupt.is_some() {
-                    return Ok(Generated::Ended(ExitReason::Provider));
-                }
+            }
 
-                let stop = settlement.outcome.stop();
-                let unsent = settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
-                let (reported, retry_after) = drained.provider_failure.unzip();
-                let cause = provider_cause(reported.as_deref(), drained.error_kind);
-                self.provider_failure = matches!(
-                    stop,
-                    StopReason::Error | StopReason::Aborted | StopReason::Deferred
+            return Ok(std::ops::ControlFlow::Continue(None));
+        }
+
+        Ok(std::ops::ControlFlow::Continue(Some((
+            request,
+            candidate_conversation,
+        ))))
+    }
+
+    fn candidate_request_gaps(
+        &mut self,
+        turn: TurnId,
+        candidate: Option<&ModelRef>,
+        mut candidate_conversation: Conversation,
+        request: &mut GenRequest,
+        capabilities: (
+            &crate::generator::capabilities::ModelCapabilities,
+            &crate::generator::capabilities::ModelCapabilities,
+        ),
+        identity: Option<&str>,
+    ) -> Result<(Conversation, Vec<CapabilityGap>), StoreError> {
+        let mut gaps = if candidate.is_none() {
+            capabilities.1.request_gaps(request)
+        } else {
+            capabilities.0.fallback_gaps(capabilities.1, request)
+        };
+
+        if let Some(candidate) = candidate
+            && !gaps.is_empty()
+            && gaps.iter().all(reasoning_carryover_gap)
+        {
+            let (sanitized, dropped_blocks, dialects) = drop_reasoning(candidate_conversation);
+            candidate_conversation = sanitized;
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::FallbackDecision {
+                    candidate: candidate.clone(),
+                    decision: FallbackDecision::ReasoningDropped {
+                        dropped_blocks,
+                        dialects,
+                    },
+                },
+            )?;
+            let (messages, stable_messages) = self.with_host_context(
+                turn,
+                candidate_conversation.clone(),
+                self.tools.context_notes(),
+                identity,
+            )?;
+            request.messages = messages;
+            if let Some(cache) = request.cache.as_mut() {
+                cache.stable_messages = stable_messages;
+            }
+            gaps = capabilities.0.fallback_gaps(capabilities.1, request);
+        }
+
+        Ok((candidate_conversation, gaps))
+    }
+
+    async fn retry_generation(
+        &mut self,
+        turn: TurnId,
+        retryable: bool,
+        retry_after: Option<Duration>,
+        additional_attempts: &mut u32,
+        cause: String,
+    ) -> Result<RetryProgress, StoreError> {
+        if retryable && self.recovery_deadline.is_none() {
+            self.recovery_deadline = self
+                .provider_recovery
+                .and_then(|horizon| self.retry_pause.now().checked_add(horizon));
+        }
+        let recovery_remaining = self
+            .recovery_deadline
+            .map(|deadline| deadline.saturating_duration_since(self.retry_pause.now()));
+        if retryable
+            && recovery_remaining.map_or(*additional_attempts < self.config.retry, |remaining| {
+                !remaining.is_zero()
+            })
+            && let Some(delay) = if recovery_remaining.is_some() && retry_after.is_some() {
+                retry_after
+            } else {
+                retry_delay_with_jitter(
+                    additional_attempts.saturating_add(1),
+                    retry_after,
+                    self.retry_pause.jitter_basis_points(),
                 )
-                .then(|| ProviderFailure {
-                    cause: cause.clone(),
-                    effect_known: !drained.emitted_output || reported.is_some(),
-                });
-                // maintainer decision 2026-10-05, amending the attempt-ownership
-                // ADR: a transient failure that showed nothing is retried even
-                // when it was possibly sent. Output already shown is never
-                // shown twice, so an attempt that emitted any is final.
-                let retryable = stop == StopReason::Error
-                    && drained.error_kind == Some(ErrorKind::Transient)
-                    && !drained.emitted_output;
-                if retryable && self.recovery_deadline.is_none() {
-                    self.recovery_deadline = self
-                        .provider_recovery
-                        .and_then(|horizon| self.retry_pause.now().checked_add(horizon));
-                }
-                let recovery_remaining = self
-                    .recovery_deadline
-                    .map(|deadline| deadline.saturating_duration_since(self.retry_pause.now()));
-                if retryable
-                    && recovery_remaining
-                        .map_or(additional_attempts < self.config.retry, |remaining| {
-                            !remaining.is_zero()
-                        })
-                    && let Some(delay) =
-                        if recovery_remaining.is_some() && retry_after.flatten().is_some() {
-                            retry_after.flatten()
-                        } else {
-                            retry_delay_with_jitter(
-                                additional_attempts.saturating_add(1),
-                                retry_after.flatten(),
-                                self.retry_pause.jitter_basis_points(),
-                            )
-                        }
+            }
+        {
+            let delay = recovery_remaining.map_or(delay, |remaining| delay.min(remaining));
+            *additional_attempts = additional_attempts.saturating_add(1);
+            self.journal.publish(&PublicEvent::ProviderRetry {
+                turn,
+                attempt: *additional_attempts,
+                limit: self.config.retry,
+                delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                kind: ErrorKind::Transient,
+                cause,
+                recovery_remaining_ms: recovery_remaining
+                    .map(|remaining| u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)),
+            })?;
+            let pause = self.retry_pause.pause(delay);
+            match await_controlled(
+                &self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                pause,
+                InterruptDisposition::RetryWait,
+                None,
+            )
+            .await
+            {
+                Controlled::Completed(()) | Controlled::Interrupted
+                    if !self.cancel.is_cancelled() =>
                 {
-                    let delay = recovery_remaining.map_or(delay, |remaining| delay.min(remaining));
-                    additional_attempts = additional_attempts.saturating_add(1);
-                    self.journal.publish(&PublicEvent::ProviderRetry {
-                        turn,
-                        attempt: additional_attempts,
-                        limit: self.config.retry,
-                        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        kind: ErrorKind::Transient,
-                        cause,
-                        recovery_remaining_ms: recovery_remaining.map(|remaining| {
-                            u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
-                        }),
-                    })?;
-                    let pause = self.retry_pause.pause(delay);
-                    match await_controlled(
-                        &self.journal,
-                        &self.cancel,
-                        &mut self.control,
-                        turn,
-                        pause,
-                        InterruptDisposition::RetryWait,
-                        None,
-                    )
-                    .await
+                    if self
+                        .recovery_deadline
+                        .is_none_or(|deadline| self.retry_pause.now() < deadline)
                     {
-                        Controlled::Completed(()) | Controlled::Interrupted
-                            if !self.cancel.is_cancelled() =>
-                        {
-                            if self
-                                .recovery_deadline
-                                .is_none_or(|deadline| self.retry_pause.now() < deadline)
-                            {
-                                continue;
-                            }
-                        }
-                        Controlled::Completed(()) | Controlled::Interrupted => {
-                            return Ok(Generated::Cancelled {
-                                cause: self.cancel.cause().unwrap_or(CancelCause::User),
-                                pending: Vec::new(),
-                            });
-                        }
-                        Controlled::Failed(cause) => return Err(cause),
+                        return Ok(RetryProgress::Retry);
                     }
                 }
-                let stopped = (terminal, stop, drained.pending, drained.error_kind);
-                if stop == StopReason::Error && unsent {
-                    last_failure = Some(stopped);
-                    break;
+                Controlled::Completed(()) | Controlled::Interrupted => {
+                    return Ok(RetryProgress::Cancelled);
                 }
-
-                return Ok(Generated::Stopped {
-                    capture,
-                    generation: generation_id,
-                    terminal: stopped.0,
-                    reason: stopped.1,
-                    pending: stopped.2,
-                    error_kind: stopped.3,
-                });
+                Controlled::Failed(cause) => return Err(cause),
             }
         }
+        Ok(RetryProgress::Finished)
+    }
 
-        match last_failure {
-            Some((terminal, reason, pending, error_kind)) => Ok(Generated::Stopped {
-                capture,
-                generation: generation_id,
-                terminal,
-                reason,
-                pending,
-                error_kind,
-            }),
-            None => Ok(Generated::Ended(last_preflight_exit)),
+    fn record_generation_settlement(
+        &self,
+        turn: TurnId,
+        profile: &GenerationProfile,
+        reference: AttemptRef,
+        settlement: &crate::generator::attempt::Settlement,
+        accounting_booked: bool,
+    ) -> Result<EventId, StoreError> {
+        let quote = profile.rates.as_ref().map(|rates| &rates.quote);
+        if !accounting_booked {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::UsageUpdated {
+                    usage: Usage::IDENTITY,
+                    cost_delta: settled_cost_for_delivery(
+                        &profile.metering,
+                        quote,
+                        UsageReport::Missing,
+                        None,
+                        self.settlement_currency,
+                        settlement.outcome.delivery(),
+                    ),
+                    attempt: Some(reference),
+                },
+            )?;
         }
+        let terminal = self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::AttemptSettled {
+                attempt: settlement.attempt,
+                outcome: settlement.outcome,
+            },
+        )?;
+        if let UsageReport::Reported(usage) = settlement.outcome.usage() {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: usage.total_tokens(),
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    // This profile and not the one the caller resolved
+                    // before the loop: the candidate walk above can end
+                    // on a fallback, and the occupancy below is that
+                    // model's, so the ceiling it is a fraction of has
+                    // to be that model's too.
+                    window: profile.capabilities.max_context_tokens,
+                },
+            )?;
+        }
+        Ok(terminal)
+    }
+
+    fn reserve_generation_attempt(
+        &mut self,
+        turn: TurnId,
+        profile: &GenerationProfile,
+        request: &GenRequest,
+        next_attempt: AttemptRef,
+    ) -> Result<Result<GenerationAttempt, Generated>, StoreError> {
+        let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
+        let reservation = match self.gate.reserve(
+            &profile.metering,
+            quote.as_ref(),
+            request,
+            &profile.capabilities,
+        ) {
+            Ok(reservation) => reservation,
+            Err(denied) => {
+                tracing::warn!(%denied, "the budget gate refused a generation attempt");
+                let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
+                    ExitReason::Budget
+                } else {
+                    ExitReason::Internal
+                };
+                return self.refuse(turn, denied.to_string(), reason).map(Err);
+            }
+        };
+        let attempt = match GenerationAttempt::from_attempt(
+            next_attempt,
+            reservation,
+            &profile.metering,
+            quote.as_ref(),
+            request,
+            &profile.capabilities,
+        ) {
+            Ok(attempt) => attempt,
+            Err(denied) => {
+                tracing::error!(%denied, "a reservation did not authorise its attempt");
+                return self
+                    .refuse(turn, denied.to_string(), ExitReason::Internal)
+                    .map(Err);
+            }
+        };
+        Ok(Ok(attempt))
+    }
+
+    async fn resolve_candidate_profile(
+        &mut self,
+        turn: TurnId,
+        model_request: GenerationModelRequest,
+    ) -> Controlled<
+        Option<Result<GenerationProfile, crate::generation_model_source::GenerationModelError>>,
+    > {
+        let source = Arc::clone(&self.source);
+        let resolution_deadline = self
+            .recovery_deadline
+            .map(|deadline| self.retry_pause.deadline(deadline));
+        let resolve = async {
+            match resolution_deadline {
+                Some(deadline) => match select(source.resolve(model_request), deadline).await {
+                    Either::Left((profile, _)) => Some(profile),
+                    Either::Right(_) => None,
+                },
+                None => Some(source.resolve(model_request).await),
+            }
+        };
+        await_controlled(
+            &self.journal,
+            &self.cancel,
+            &mut self.control,
+            turn,
+            resolve,
+            InterruptDisposition::Return,
+            None,
+        )
+        .await
     }
 
     fn refresh_detached_execs(&mut self, turn: TurnId) -> Result<(), StoreError> {
@@ -5491,27 +5717,15 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         } else {
             None
         };
-        if let Some(lease) = &lease {
-            match lease.lookup() {
-                Ok(Some(opinion)) if opinion.reusable(complete_identity(pending.call())) => {
-                    let reason = "reused identity-bound analysis opinion".to_owned();
-                    let outcome = match opinion {
-                        AnalysisOpinion::Allow => JudgeOutcome::Allow { reason },
-                        AnalysisOpinion::Deny => JudgeOutcome::Deny { reason },
-                        AnalysisOpinion::Escalate => JudgeOutcome::Escalate { reason },
-                    };
-                    let analysis = crate::digest::lower_hex(&key.expect("lease has a key"));
-                    return Ok(JudgeRun::Decided {
-                        outcome,
-                        by: Authority::CachedJudge {
-                            model: config.identity,
-                            analysis,
-                        },
-                    });
-                }
-                Err(message) => tracing::warn!(%message, "permission analysis cache miss"),
-                _ => {}
-            }
+        if let Some(cached) = lease.as_ref().and_then(|lease| {
+            Self::cached_judge_opinion(
+                lease.as_ref(),
+                pending,
+                &config,
+                key.as_ref().expect("lease has a key"),
+            )
+        }) {
+            return Ok(cached);
         }
         let input = JudgeInput::new(
             pending.call(),
@@ -5569,6 +5783,36 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             attempt: reference,
         };
         Ok(JudgeRun::Decided { outcome, by })
+    }
+
+    fn cached_judge_opinion(
+        lease: &dyn crate::permit::analysis::AnalysisLease,
+        pending: &Pending,
+        config: &JudgeConfig,
+        key: &[u8; 32],
+    ) -> Option<JudgeRun> {
+        use crate::permit::analysis::{AnalysisOpinion, complete_identity};
+        match lease.lookup() {
+            Ok(Some(opinion)) if opinion.reusable(complete_identity(pending.call())) => {
+                let reason = "reused identity-bound analysis opinion".to_owned();
+                let outcome = match opinion {
+                    AnalysisOpinion::Allow => JudgeOutcome::Allow { reason },
+                    AnalysisOpinion::Deny => JudgeOutcome::Deny { reason },
+                    AnalysisOpinion::Escalate => JudgeOutcome::Escalate { reason },
+                };
+                let analysis = crate::digest::lower_hex(key);
+                return Some(JudgeRun::Decided {
+                    outcome,
+                    by: Authority::CachedJudge {
+                        model: config.identity.clone(),
+                        analysis,
+                    },
+                });
+            }
+            Err(message) => tracing::warn!(%message, "permission analysis cache miss"),
+            _ => {}
+        }
+        None
     }
 
     /// Authorise and run one call prepared from its captured catalogue.
@@ -5633,75 +5877,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return Ok(answered(false, refusal));
             }
         };
-        let (tool, mut prepared, mut presentation) = match prepared {
-            PreparedToolCall::Context(request) => {
-                let state = self.state();
-                if !self.automatic_compaction
-                    || state.context_request.is_some()
-                    || state.context_cooldown > 0
-                    || state.pending_question().is_some()
-                    || state.detached_execs.values().any(Option::is_none)
-                    || !state.unacknowledged_prompts().is_empty()
-                {
-                    return Ok(answered(
-                        false,
-                        "context transition unavailable or cooldown active".into(),
-                    ));
-                }
-                if request.action == crate::context::ContextAction::Clear
-                    && (!self.context_clear
-                        || state
-                            .goal
-                            .as_ref()
-                            .is_none_or(|goal| goal.state != crate::goal::GoalState::Active))
-                {
-                    return Ok(answered(
-                        false,
-                        "clear requires operator opt-in and an active goal".into(),
-                    ));
-                }
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::ContextRequested {
-                        request: request.clone(),
-                    },
-                )?;
-                return Ok(answered(
-                    true,
-                    format!(
-                        "Model-authored {:?} requested: {}. Runs only at idle after this batch; work then continues in the successor.",
-                        request.action, request.reason
-                    ),
-                ));
-            }
-            PreparedToolCall::Goal { objective } => {
-                use crate::goal::{GoalOwner, GoalState};
-                let kind = match self.state().goal {
-                    Some(goal) if goal.state == GoalState::Active => {
-                        if goal.owner != GoalOwner::Automated {
-                            return Ok(answered(
-                                false,
-                                "an operator-owned goal cannot be replaced by the model".into(),
-                            ));
-                        }
-                        EventKind::GoalUpdated {
-                            id: goal.id,
-                            objective,
-                        }
-                    }
-                    _ => EventKind::GoalSet {
-                        id: crate::event::id::GoalId::new(),
-                        objective,
-                        owner: GoalOwner::Automated,
-                        ceilings: self.goal_ceilings.clone(),
-                        derived_from: None,
-                    },
-                };
-                self.journal.append(turn, None, None, kind)?;
-                return Ok(answered(true, "model-authored goal recorded".into()));
-            }
+        let (tool, prepared, presentation) = match prepared {
+            PreparedToolCall::Context(request) => return self.run_context_request(turn, request),
+            PreparedToolCall::Goal { objective } => return self.run_model_goal(turn, objective),
             PreparedToolCall::Task(_) => {
                 return Ok(answered(
                     false,
@@ -5726,233 +5904,65 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 operation,
                 catalogue,
             } => {
-                if let crate::skill::SkillOperation::ReadResource { invocation, path } = &operation
-                {
-                    let admitted = match self.active_skill_invocations.get(invocation).cloned() {
-                        Some(admitted) => admitted,
-                        None => {
-                            return Ok(answered(
-                                false,
-                                "skill resource invocation is not live in this turn".to_owned(),
-                            ));
-                        }
-                    };
-                    let (logical, target, prepared) =
-                        match self.tools.prepare_skill_resource(&admitted, path) {
-                            Ok(prepared) => prepared,
-                            Err(error) => return Ok(answered(false, error)),
-                        };
-                    let permission_selector = prepared.tool().to_owned();
-                    let authorized = match self.tools.authorize(policy, prepared) {
-                        Classification::Settled(Ok(authorized)) => {
-                            self.decided(
-                                turn,
-                                call,
-                                &permission_selector,
-                                true,
-                                authorized.by().clone(),
-                            )
-                            .await?;
-                            authorized
-                        }
-                        Classification::Settled(Err(denial)) => {
-                            self.decided(
-                                turn,
-                                call,
-                                &permission_selector,
-                                false,
-                                denial.authority(),
-                            )
-                            .await?;
-                            return Ok(ToolOutcome::Refused { denial });
-                        }
-                        Classification::Ask(pending) => {
-                            match self.tools.settle(policy, pending).await {
-                                Resolution::Settled(Ok(authorized)) => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &permission_selector,
-                                        true,
-                                        authorized.by().clone(),
-                                    )
-                                    .await?;
-                                    authorized
-                                }
-                                Resolution::Settled(Err(denial)) => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &permission_selector,
-                                        false,
-                                        denial.authority(),
-                                    )
-                                    .await?;
-                                    return Ok(ToolOutcome::Refused { denial });
-                                }
-                                Resolution::Ask(pending) => {
-                                    if !self.requested(turn, call, pending.request()).await? {
-                                        return Ok(answered(
-                                            false,
-                                            "blocked by PermissionRequest hook".to_owned(),
-                                        ));
-                                    }
-                                    return Ok(ToolOutcome::Unanswerable { pending });
-                                }
-                                Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
-                                    unreachable!(
-                                        "mode settlement cannot produce a human resolution"
-                                    )
-                                }
-                            }
-                        }
-                    };
-                    let bytes = match self.tools.read_skill_resource(authorized, &target) {
-                        Ok(bytes) => bytes,
-                        Err(error) => return Ok(answered(false, error)),
-                    };
-                    if let Err(error) = admitted.record_resource(
-                        logical,
-                        &bytes,
-                        self.tools.blob_store(),
-                        &self.journal,
-                        turn,
-                    ) {
-                        return Ok(answered(false, error.to_string()));
-                    }
-                    return Ok(answered(true, String::from_utf8_lossy(&bytes).into_owned()));
-                }
-                let mut next_scope = self.active_skill_scope.clone().unwrap_or_else(|| {
-                    crate::skill::ActiveSkillScope::new(self.effect_tool_baseline())
-                });
-                let requested_selector = operation.name().to_owned();
-                let durable = self
-                    .state()
-                    .skill_events()
-                    .iter()
-                    .find_map(|event| match event {
-                        crate::state::SkillEvent::Instruction(admitted)
-                            if admitted.turn == turn
-                                && admitted.item == Some(call.item)
-                                && admitted.parent == Some(call.started) =>
-                        {
-                            Some((admitted.event, admitted.invocation))
-                        }
-                        _ => None,
-                    });
-                let invocation = match durable {
-                    Some((event, invocation)) => crate::skill::SkillInvocation::resume_durable(
-                        invocation,
-                        self.tools.blob_store(),
-                        &self.journal,
-                    )
-                    .and_then(|invocation| {
-                        if invocation.name() != requested_selector {
-                            return Err(crate::skill::SkillError::new(
-                                "durable skill invocation does not match its tool call",
-                            ));
-                        }
-                        invocation.apply_captured_scope(&mut next_scope)?;
-                        Ok((invocation, event))
-                    }),
-                    None => {
-                        if let Err(error) = crate::skill::SkillInvocation::preflight_scope(
-                            &catalogue,
-                            &operation,
-                            &mut next_scope,
-                        ) {
-                            return Ok(answered(false, error.to_string()));
-                        }
-                        crate::skill::SkillInvocation::admit_in_turn_with_origin(
-                            &catalogue,
-                            operation,
-                            self.tools.blob_store(),
-                            &self.journal,
-                            turn,
-                            call.item,
-                            call.started,
-                        )
-                    }
-                };
-                let (invocation, admitted) = match invocation {
-                    Ok(invocation) => invocation,
-                    Err(error) => return Ok(answered(false, error.to_string())),
-                };
-                let causality = HookCausality::item(call.item, turn, call.started);
-                if invocation.fork_wait().is_some() {
-                    let effect_tools = next_scope
-                        .effect_tools()
-                        .into_iter()
-                        .map(str::to_owned)
-                        .collect();
-                    let outcome = self
-                        .invoke_forked_skill(
-                            turn,
-                            invocation,
-                            call.item,
-                            admitted,
-                            effect_tools,
-                            causality,
-                        )
-                        .await;
-                    return Ok(match outcome {
-                        Ok(outcome) => match self.materialize_skill_outcome(&outcome) {
-                            Ok((ok, text)) => answered(ok, text),
-                            Err(error) => answered(false, error.to_string()),
-                        },
-                        Err(error) => answered(false, error.to_string()),
-                    });
-                }
-                let invocation = match self
-                    .invoke_skill_product(
-                        invocation,
-                        turn,
-                        call.item,
-                        admitted,
-                        next_scope
-                            .effect_tools()
-                            .into_iter()
-                            .map(str::to_owned)
-                            .collect(),
-                    )
-                    .await
-                {
-                    Ok(crate::skill::SkillInvocationOutcome::Parent(invocation)) => *invocation,
-                    Ok(_) => {
-                        return Ok(answered(
-                            false,
-                            "the product owner returned a child outcome for a non-fork skill"
-                                .to_owned(),
-                        ));
-                    }
-                    Err(error) => return Ok(answered(false, error.to_string())),
-                };
-                let skill_selector = invocation.name().to_owned();
-                let continue_generation = self
-                    .activate_skill_invocation(
-                        turn,
-                        &invocation,
-                        next_scope,
-                        causality,
-                        HookSubject::Item { item: call.item },
-                        skill_selector,
-                    )
+                return self
+                    .run_skill_tool(policy, turn, call, operation, catalogue)
                     .await;
-                let continue_generation = match continue_generation {
-                    Ok(continue_generation) => continue_generation,
-                    Err(error) => return Ok(answered(false, error.to_string())),
-                };
-                if !continue_generation {
-                    return Ok(answered(
-                        false,
-                        "blocked by UserPromptExpansion hook".to_owned(),
-                    ));
-                }
-                return Ok(match invocation.rendered(self.tools.blob_store()) {
-                    Ok(bytes) => answered(true, String::from_utf8_lossy(&bytes).into_owned()),
-                    Err(error) => answered(false, error.to_string()),
-                });
             }
+        };
+        self.run_effect_tool(
+            policy,
+            policy_snapshot,
+            turn,
+            call,
+            (tool, prepared, presentation),
+        )
+        .await
+    }
+
+    async fn record_human_tool_decision(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        selector: &str,
+        result: Result<crate::permit::Authorized, PolicyDenied>,
+    ) -> Result<std::ops::ControlFlow<ToolOutcome, crate::permit::Authorized>, StoreError> {
+        match result {
+            Ok(authorized) => {
+                self.decided(turn, call, selector, true, authorized.by().clone())
+                    .await?;
+                Ok(std::ops::ControlFlow::Continue(authorized))
+            }
+            Err(denial) => {
+                self.decided(turn, call, selector, false, denial.authority())
+                    .await?;
+                let outcome = match denial {
+                    PolicyDenied::Redirected { .. } => ToolOutcome::Answered {
+                        ok: false,
+                        result: ToolResult::builtin(denial.to_string()),
+                    },
+                    denial => ToolOutcome::Refused { denial },
+                };
+                Ok(std::ops::ControlFlow::Break(outcome))
+            }
+        }
+    }
+
+    async fn run_effect_tool(
+        &mut self,
+        policy: &PolicyEngine,
+        policy_snapshot: &Arc<GenerationPolicySnapshot>,
+        turn: TurnId,
+        call: &mut PendingCall,
+        effect: (
+            Arc<dyn crate::permit::Tool>,
+            crate::permit::PreparedCall,
+            crate::permit::PermissionPresentationInput,
+        ),
+    ) -> Result<ToolOutcome, StoreError> {
+        let (tool, mut prepared, mut presentation) = effect;
+        let answered = |ok, text: String| ToolOutcome::Answered {
+            ok,
+            result: ToolResult::builtin(text),
         };
         if !self
             .dispatch_hook(
@@ -6119,35 +6129,24 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     Resolution::Ask(pending) => {
                                         return Ok(ToolOutcome::Unanswerable { pending });
                                     }
-                                    Resolution::HumanSettled { result, .. } => match result {
-                                        Ok(authorized) => {
-                                            self.decided(
+                                    Resolution::HumanSettled { result, .. } => {
+                                        match self
+                                            .record_human_tool_decision(
                                                 turn,
                                                 call,
                                                 &hook_selector,
-                                                true,
-                                                authorized.by().clone(),
+                                                result,
                                             )
-                                            .await?;
-                                            break authorized;
+                                            .await?
+                                        {
+                                            std::ops::ControlFlow::Continue(authorized) => {
+                                                break authorized;
+                                            }
+                                            std::ops::ControlFlow::Break(outcome) => {
+                                                return Ok(outcome);
+                                            }
                                         }
-                                        Err(denial) => {
-                                            self.decided(
-                                                turn,
-                                                call,
-                                                &hook_selector,
-                                                false,
-                                                denial.authority(),
-                                            )
-                                            .await?;
-                                            return Ok(match denial {
-                                                PolicyDenied::Redirected { .. } => {
-                                                    answered(false, denial.to_string())
-                                                }
-                                                denial => ToolOutcome::Refused { denial },
-                                            });
-                                        }
-                                    },
+                                    }
                                     Resolution::Reclassify { request, params } => {
                                         self.permission(
                                             turn,
@@ -6190,35 +6189,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                                     },
                                 }
                             }
-                            Resolution::HumanSettled { result, .. } => match result {
-                                Ok(authorized) => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &hook_selector,
-                                        true,
-                                        authorized.by().clone(),
-                                    )
-                                    .await?;
-                                    break authorized;
+                            Resolution::HumanSettled { result, .. } => {
+                                match self
+                                    .record_human_tool_decision(turn, call, &hook_selector, result)
+                                    .await?
+                                {
+                                    std::ops::ControlFlow::Continue(authorized) => {
+                                        break authorized;
+                                    }
+                                    std::ops::ControlFlow::Break(outcome) => return Ok(outcome),
                                 }
-                                Err(denial) => {
-                                    self.decided(
-                                        turn,
-                                        call,
-                                        &hook_selector,
-                                        false,
-                                        denial.authority(),
-                                    )
-                                    .await?;
-                                    return Ok(match denial {
-                                        PolicyDenied::Redirected { .. } => {
-                                            answered(false, denial.to_string())
-                                        }
-                                        denial => ToolOutcome::Refused { denial },
-                                    });
-                                }
-                            },
+                            }
                             Resolution::Reclassify { request, params } => {
                                 self.permission(
                                     turn,
@@ -6254,6 +6235,29 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
             break authorized;
         };
+        self.execute_authorized_tool(
+            policy,
+            policy_snapshot,
+            turn,
+            call,
+            (tool, authorized, hook_selector),
+        )
+        .await
+    }
+
+    async fn execute_authorized_tool(
+        &mut self,
+        policy: &PolicyEngine,
+        policy_snapshot: &Arc<GenerationPolicySnapshot>,
+        turn: TurnId,
+        call: &mut PendingCall,
+        effect: (
+            Arc<dyn crate::permit::Tool>,
+            crate::permit::Authorized,
+            String,
+        ),
+    ) -> Result<ToolOutcome, StoreError> {
+        let (tool, authorized, hook_selector) = effect;
         let detached = authorized.call().background();
         if let Some(id) = detached {
             self.journal.append(
@@ -6367,6 +6371,335 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 result: failure.into_failed_result(),
                 selector: hook_selector,
             },
+        })
+    }
+
+    fn run_context_request(
+        &mut self,
+        turn: TurnId,
+        request: crate::context::ContextRequest,
+    ) -> Result<ToolOutcome, StoreError> {
+        let answered = |ok, text: String| ToolOutcome::Answered {
+            ok,
+            result: ToolResult::builtin(text),
+        };
+
+        let state = self.state();
+        if !self.automatic_compaction
+            || state.context_request.is_some()
+            || state.context_cooldown > 0
+            || state.pending_question().is_some()
+            || state.detached_execs.values().any(Option::is_none)
+            || !state.unacknowledged_prompts().is_empty()
+        {
+            return Ok(answered(
+                false,
+                "context transition unavailable or cooldown active".into(),
+            ));
+        }
+        if request.action == crate::context::ContextAction::Clear
+            && (!self.context_clear
+                || state
+                    .goal
+                    .as_ref()
+                    .is_none_or(|goal| goal.state != crate::goal::GoalState::Active))
+        {
+            return Ok(answered(
+                false,
+                "clear requires operator opt-in and an active goal".into(),
+            ));
+        }
+        self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::ContextRequested {
+                request: request.clone(),
+            },
+        )?;
+        Ok(answered(
+            true,
+            format!(
+                "Model-authored {:?} requested: {}. Runs only at idle after this batch; work then continues in the successor.",
+                request.action, request.reason
+            ),
+        ))
+    }
+
+    fn run_model_goal(
+        &mut self,
+        turn: TurnId,
+        objective: String,
+    ) -> Result<ToolOutcome, StoreError> {
+        let answered = |ok, text: String| ToolOutcome::Answered {
+            ok,
+            result: ToolResult::builtin(text),
+        };
+
+        use crate::goal::{GoalOwner, GoalState};
+        let kind = match self.state().goal {
+            Some(goal) if goal.state == GoalState::Active => {
+                if goal.owner != GoalOwner::Automated {
+                    return Ok(answered(
+                        false,
+                        "an operator-owned goal cannot be replaced by the model".into(),
+                    ));
+                }
+                EventKind::GoalUpdated {
+                    id: goal.id,
+                    objective,
+                }
+            }
+            _ => EventKind::GoalSet {
+                id: crate::event::id::GoalId::new(),
+                objective,
+                owner: GoalOwner::Automated,
+                ceilings: self.goal_ceilings.clone(),
+                derived_from: None,
+            },
+        };
+        self.journal.append(turn, None, None, kind)?;
+        Ok(answered(true, "model-authored goal recorded".into()))
+    }
+
+    async fn run_skill_resource(
+        &mut self,
+        policy: &PolicyEngine,
+        turn: TurnId,
+        call: &mut PendingCall,
+        invocation: &crate::event::skill::SkillInvocationId,
+        path: &str,
+    ) -> Result<ToolOutcome, StoreError> {
+        let answered = |ok, text: String| ToolOutcome::Answered {
+            ok,
+            result: ToolResult::builtin(text),
+        };
+
+        let admitted = match self.active_skill_invocations.get(invocation).cloned() {
+            Some(admitted) => admitted,
+            None => {
+                return Ok(answered(
+                    false,
+                    "skill resource invocation is not live in this turn".to_owned(),
+                ));
+            }
+        };
+        let (logical, target, prepared) = match self.tools.prepare_skill_resource(&admitted, path) {
+            Ok(prepared) => prepared,
+            Err(error) => return Ok(answered(false, error)),
+        };
+        let permission_selector = prepared.tool().to_owned();
+        let authorized = match self.tools.authorize(policy, prepared) {
+            Classification::Settled(Ok(authorized)) => {
+                self.decided(
+                    turn,
+                    call,
+                    &permission_selector,
+                    true,
+                    authorized.by().clone(),
+                )
+                .await?;
+                authorized
+            }
+            Classification::Settled(Err(denial)) => {
+                self.decided(turn, call, &permission_selector, false, denial.authority())
+                    .await?;
+                return Ok(ToolOutcome::Refused { denial });
+            }
+            Classification::Ask(pending) => match self.tools.settle(policy, pending).await {
+                Resolution::Settled(Ok(authorized)) => {
+                    self.decided(
+                        turn,
+                        call,
+                        &permission_selector,
+                        true,
+                        authorized.by().clone(),
+                    )
+                    .await?;
+                    authorized
+                }
+                Resolution::Settled(Err(denial)) => {
+                    self.decided(turn, call, &permission_selector, false, denial.authority())
+                        .await?;
+                    return Ok(ToolOutcome::Refused { denial });
+                }
+                Resolution::Ask(pending) => {
+                    if !self.requested(turn, call, pending.request()).await? {
+                        return Ok(answered(
+                            false,
+                            "blocked by PermissionRequest hook".to_owned(),
+                        ));
+                    }
+                    return Ok(ToolOutcome::Unanswerable { pending });
+                }
+                Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                    unreachable!("mode settlement cannot produce a human resolution")
+                }
+            },
+        };
+        let bytes = match self.tools.read_skill_resource(authorized, &target) {
+            Ok(bytes) => bytes,
+            Err(error) => return Ok(answered(false, error)),
+        };
+        if let Err(error) = admitted.record_resource(
+            logical,
+            &bytes,
+            self.tools.blob_store(),
+            &self.journal,
+            turn,
+        ) {
+            return Ok(answered(false, error.to_string()));
+        }
+        Ok(answered(true, String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    async fn run_skill_tool(
+        &mut self,
+        policy: &PolicyEngine,
+        turn: TurnId,
+        call: &mut PendingCall,
+        operation: crate::skill::SkillOperation,
+        catalogue: Arc<crate::skill::SkillCatalogue>,
+    ) -> Result<ToolOutcome, StoreError> {
+        let answered = |ok, text: String| ToolOutcome::Answered {
+            ok,
+            result: ToolResult::builtin(text),
+        };
+
+        if let crate::skill::SkillOperation::ReadResource { invocation, path } = &operation {
+            return self
+                .run_skill_resource(policy, turn, call, invocation, path)
+                .await;
+        }
+        let mut next_scope = self
+            .active_skill_scope
+            .clone()
+            .unwrap_or_else(|| crate::skill::ActiveSkillScope::new(self.effect_tool_baseline()));
+        let requested_selector = operation.name().to_owned();
+        let durable = self
+            .state()
+            .skill_events()
+            .iter()
+            .find_map(|event| match event {
+                crate::state::SkillEvent::Instruction(admitted)
+                    if admitted.turn == turn
+                        && admitted.item == Some(call.item)
+                        && admitted.parent == Some(call.started) =>
+                {
+                    Some((admitted.event, admitted.invocation))
+                }
+                _ => None,
+            });
+        let invocation = match durable {
+            Some((event, invocation)) => crate::skill::SkillInvocation::resume_durable(
+                invocation,
+                self.tools.blob_store(),
+                &self.journal,
+            )
+            .and_then(|invocation| {
+                if invocation.name() != requested_selector {
+                    return Err(crate::skill::SkillError::new(
+                        "durable skill invocation does not match its tool call",
+                    ));
+                }
+                invocation.apply_captured_scope(&mut next_scope)?;
+                Ok((invocation, event))
+            }),
+            None => {
+                if let Err(error) = crate::skill::SkillInvocation::preflight_scope(
+                    &catalogue,
+                    &operation,
+                    &mut next_scope,
+                ) {
+                    return Ok(answered(false, error.to_string()));
+                }
+                crate::skill::SkillInvocation::admit_in_turn_with_origin(
+                    &catalogue,
+                    operation,
+                    self.tools.blob_store(),
+                    &self.journal,
+                    turn,
+                    call.item,
+                    call.started,
+                )
+            }
+        };
+        let (invocation, admitted) = match invocation {
+            Ok(invocation) => invocation,
+            Err(error) => return Ok(answered(false, error.to_string())),
+        };
+        let causality = HookCausality::item(call.item, turn, call.started);
+        if invocation.fork_wait().is_some() {
+            let effect_tools = next_scope
+                .effect_tools()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let outcome = self
+                .invoke_forked_skill(
+                    turn,
+                    invocation,
+                    call.item,
+                    admitted,
+                    effect_tools,
+                    causality,
+                )
+                .await;
+            return Ok(match outcome {
+                Ok(outcome) => match self.materialize_skill_outcome(&outcome) {
+                    Ok((ok, text)) => answered(ok, text),
+                    Err(error) => answered(false, error.to_string()),
+                },
+                Err(error) => answered(false, error.to_string()),
+            });
+        }
+        let invocation = match self
+            .invoke_skill_product(
+                invocation,
+                turn,
+                call.item,
+                admitted,
+                next_scope
+                    .effect_tools()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            )
+            .await
+        {
+            Ok(crate::skill::SkillInvocationOutcome::Parent(invocation)) => *invocation,
+            Ok(_) => {
+                return Ok(answered(
+                    false,
+                    "the product owner returned a child outcome for a non-fork skill".to_owned(),
+                ));
+            }
+            Err(error) => return Ok(answered(false, error.to_string())),
+        };
+        let skill_selector = invocation.name().to_owned();
+        let continue_generation = self
+            .activate_skill_invocation(
+                turn,
+                &invocation,
+                next_scope,
+                causality,
+                HookSubject::Item { item: call.item },
+                skill_selector,
+            )
+            .await;
+        let continue_generation = match continue_generation {
+            Ok(continue_generation) => continue_generation,
+            Err(error) => return Ok(answered(false, error.to_string())),
+        };
+        if !continue_generation {
+            return Ok(answered(
+                false,
+                "blocked by UserPromptExpansion hook".to_owned(),
+            ));
+        }
+        Ok(match invocation.rendered(self.tools.blob_store()) {
+            Ok(bytes) => answered(true, String::from_utf8_lossy(&bytes).into_owned()),
+            Err(error) => answered(false, error.to_string()),
         })
     }
 
@@ -6882,6 +7215,23 @@ enum JudgeRun {
 }
 
 /// What one generation did.
+struct GenerationWalk {
+    capture: GenerationPolicyCapture,
+    catalogue: GenerationToolCatalogue,
+    conversation: Conversation,
+    next_attempt: AttemptRef,
+    last_failure: Option<(EventId, StopReason, Vec<PendingCall>, Option<ErrorKind>)>,
+    last_preflight_exit: ExitReason,
+    primary_model: Option<ModelRef>,
+    primary_capabilities: Option<crate::generator::capabilities::ModelCapabilities>,
+}
+
+enum RetryProgress {
+    Retry,
+    Cancelled,
+    Finished,
+}
+
 enum Generated {
     /// The turn is over, for a reason that is not the model's stop reason.
     Ended(ExitReason),

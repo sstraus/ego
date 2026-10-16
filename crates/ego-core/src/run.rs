@@ -2370,58 +2370,19 @@ where
                             .await);
                     }
                 };
-                let cached = self
-                    .live
-                    .lock()
-                    .expect("run live state")
-                    .handles
-                    .get(&run_id)
-                    .cloned();
-                let handle = match cached {
-                    Some(handle) => handle,
-                    None => {
-                        let attachment = RunAttachment {
+                let handle = self
+                    .execution_handle(
+                        run_id,
+                        lease,
+                        RunAttachment {
                             run_id,
                             root,
                             model,
                             origin,
-                        };
-                        let handle = match self.executor.attach(&attachment).await {
-                            Ok(handle) => handle,
-                            Err(error) => {
-                                return Err(self
-                                    .settle_execution_failure(
-                                        run_id,
-                                        lease,
-                                        error.into(),
-                                        ExecutionFailure::Uncertain,
-                                    )
-                                    .await);
-                            }
-                        };
-                        if let Err(error) = self.bind_handle(run_id, &handle) {
-                            return Err(self
-                                .settle_execution_failure(
-                                    run_id,
-                                    lease,
-                                    error,
-                                    ExecutionFailure::Interrupted,
-                                )
-                                .await);
-                        }
-                        handle
-                    }
-                };
-                if let Err(error) = self.interrupt_if_cancelling(run_id, lease, &handle).await {
-                    let failure = if matches!(&error, RunError::Executor(_)) {
-                        ExecutionFailure::Uncertain
-                    } else {
-                        ExecutionFailure::Interrupted
-                    };
-                    return Err(self
-                        .settle_execution_failure(run_id, lease, error, failure)
-                        .await);
-                }
+                        },
+                    )
+                    .await?;
+                self.interrupt_execution(run_id, lease, &handle).await?;
                 self.executor
                     .submit(&handle, &prompt, *prepared, bindings)
                     .await
@@ -2437,16 +2398,7 @@ where
                         )
                         .await);
                 }
-                if let Err(error) = self.interrupt_if_cancelling(run_id, lease, &handle).await {
-                    let failure = if matches!(&error, RunError::Executor(_)) {
-                        ExecutionFailure::Uncertain
-                    } else {
-                        ExecutionFailure::Interrupted
-                    };
-                    return Err(self
-                        .settle_execution_failure(run_id, lease, error, failure)
-                        .await);
-                }
+                self.interrupt_execution(run_id, lease, &handle).await?;
                 self.executor.observe(&handle, bindings).await
             }
         };
@@ -2464,6 +2416,70 @@ where
             }
         };
         self.settle(run_id, lease, settlement).await
+    }
+
+    async fn interrupt_execution(
+        &self,
+        run_id: RunId,
+        lease: TurnLease,
+        handle: &RunHandle,
+    ) -> Result<(), RunError> {
+        if let Err(error) = self.interrupt_if_cancelling(run_id, lease, handle).await {
+            let failure = if matches!(&error, RunError::Executor(_)) {
+                ExecutionFailure::Uncertain
+            } else {
+                ExecutionFailure::Interrupted
+            };
+            return Err(self
+                .settle_execution_failure(run_id, lease, error, failure)
+                .await);
+        }
+        Ok(())
+    }
+
+    async fn execution_handle(
+        &self,
+        run_id: RunId,
+        lease: TurnLease,
+        attachment: RunAttachment,
+    ) -> Result<RunHandle, RunError> {
+        let cached = self
+            .live
+            .lock()
+            .expect("run live state")
+            .handles
+            .get(&run_id)
+            .cloned();
+        let handle = match cached {
+            Some(handle) => handle,
+            None => {
+                let handle = match self.executor.attach(&attachment).await {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        return Err(self
+                            .settle_execution_failure(
+                                run_id,
+                                lease,
+                                error.into(),
+                                ExecutionFailure::Uncertain,
+                            )
+                            .await);
+                    }
+                };
+                if let Err(error) = self.bind_handle(run_id, &handle) {
+                    return Err(self
+                        .settle_execution_failure(
+                            run_id,
+                            lease,
+                            error,
+                            ExecutionFailure::Interrupted,
+                        )
+                        .await);
+                }
+                handle
+            }
+        };
+        Ok(handle)
     }
 
     pub async fn cancel_admitted(&self, key: &CancelKey) -> Result<RunSnapshot, RunError> {

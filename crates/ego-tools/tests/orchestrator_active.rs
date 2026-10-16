@@ -330,3 +330,24 @@ fn resume_rework_limits_come_from_owned_spawn_and_say_journal_events() {
         [("owned-child".into(), 2)].into()
     );
 }
+
+// Catches: a settled child triggers another TUIC read/resend after observer restart.
+#[test]
+fn settled_spawn_supervision_needs_no_runtime_or_transport_after_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let working = receipt("c7d80d16-5f27-5d3e-8363-9eca5cee4d7a");
+    let sessions: Value =
+        serde_json::from_str(include_str!("fixtures/orchestrator/sessions.json")).unwrap();
+    let mut pump = ObservationPump::open(home.path(), home.path()).unwrap();
+    assert!(
+        pump.supervise_sessions(std::slice::from_ref(&working), &sessions, 61_000)
+            .unwrap()
+            .is_empty()
+    );
+    drop(pump);
+    let mut reopened = ObservationPump::open(home.path(), home.path()).unwrap();
+    // No Tokio runtime: any attempt to spawn a transport is itself a test failure.
+    futures::executor::block_on(reopened.supervise(std::slice::from_ref(&working), 120_000))
+        .unwrap();
+    futures::executor::block_on(reopened.supervise(&[working], 180_000)).unwrap();
+}

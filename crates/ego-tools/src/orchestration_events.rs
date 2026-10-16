@@ -207,23 +207,32 @@ impl ObservationPump {
         let actions = self.supervise_sessions(receipts, &sessions, now_ms)?;
         let mut failures = Vec::new();
         for receipt in actions {
-            let response = self.call("session", json!({"action":"submit", "session_id":receipt.session_id, "input":receipt.prompt})).await;
-            match response {
-                Ok(response) if response["acknowledged"] == true => {}
-                Ok(_) => failures.push(format!(
-                    "spawn resend was not acknowledged for {}; no further resend",
-                    receipt.name
-                )),
-                Err(error) => failures.push(format!(
-                    "spawn resend failed for {}: {error}; no further resend",
-                    receipt.name
-                )),
-            }
+            failures.extend(self.resend_spawn(receipt).await);
         }
         if failures.is_empty() {
             Ok(())
         } else {
             Err(io::Error::other(failures.join("\n")))
+        }
+    }
+
+    async fn resend_spawn(&self, receipt: ego_core::orchestrator::SpawnReceipt) -> Option<String> {
+        let response = self
+            .call(
+                "session",
+                json!({"action":"submit", "session_id":receipt.session_id, "input":receipt.prompt}),
+            )
+            .await;
+        match response {
+            Ok(response) if response["acknowledged"] == true => None,
+            Ok(_) => Some(format!(
+                "spawn resend was not acknowledged for {}; no further resend",
+                receipt.name
+            )),
+            Err(error) => Some(format!(
+                "spawn resend failed for {}: {error}; no further resend",
+                receipt.name
+            )),
         }
     }
 

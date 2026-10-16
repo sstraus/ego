@@ -957,3 +957,123 @@ async fn cancellation_and_settlement_retain_the_exact_request_owned_identity() {
     assert!(!client_settlement.http().is_empty());
     assert!(client_settlement.request(&request_id).is_some());
 }
+
+struct AcpCancellationEffects {
+    started: Arc<tokio::sync::Notify>,
+    request_dropped: Arc<AtomicBool>,
+    disconnected: Arc<AtomicBool>,
+    notifications: Mutex<Vec<String>>,
+}
+
+struct PendingAcpRequest(Arc<AtomicBool>);
+
+impl Drop for PendingAcpRequest {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl ego_mcp::McpAcpEffects for AcpCancellationEffects {
+    fn connect(&self, _: String) -> McpFuture<'static, Result<String, McpError>> {
+        unreachable!("the host supplies an already connected ACP channel")
+    }
+
+    fn request(
+        &self,
+        connection: String,
+        method: String,
+        _: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> McpFuture<'static, Result<serde_json::Value, McpError>> {
+        assert_eq!(connection, "acp-connection");
+        match method.as_str() {
+            "server/discover" => Box::pin(async {
+                Ok(serde_json::json!({
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {"tools": {"listChanged": false}},
+                    "ttlMs": 0,
+                    "cacheScope": "private"
+                }))
+            }),
+            "tools/list" => {
+                let started = Arc::clone(&self.started);
+                let dropped = Arc::clone(&self.request_dropped);
+                Box::pin(async move {
+                    let _pending = PendingAcpRequest(dropped);
+                    started.notify_one();
+                    futures::future::pending().await
+                })
+            }
+            other => panic!("unexpected ACP request: {other}"),
+        }
+    }
+
+    fn notify(
+        &self,
+        connection: String,
+        method: String,
+        _: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(), McpError> {
+        assert_eq!(connection, "acp-connection");
+        self.notifications
+            .lock()
+            .expect("notifications")
+            .push(method);
+        Ok(())
+    }
+
+    fn disconnect(&self, connection: String) -> McpFuture<'static, Result<(), McpError>> {
+        assert_eq!(connection, "acp-connection");
+        self.disconnected.store(true, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn publish_resource(&self, _: &str, _: String) {
+        unreachable!("listing tools does not publish resources")
+    }
+}
+
+// Catches: cancellation is forwarded as an ordinary ACP notification and leaves its request alive.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_cancellation_drops_the_host_request_before_connection_settlement() {
+    let effects = Arc::new(AcpCancellationEffects {
+        started: Arc::new(tokio::sync::Notify::new()),
+        request_dropped: Arc::new(AtomicBool::new(false)),
+        disconnected: Arc::new(AtomicBool::new(false)),
+        notifications: Mutex::new(Vec::new()),
+    });
+    let mut client = McpClient::connect_acp(
+        "acp".parse().expect("server name"),
+        options(),
+        "acp-connection".to_owned(),
+        Arc::clone(&effects) as Arc<dyn ego_mcp::McpAcpEffects>,
+    )
+    .expect("ACP client");
+    client.discover().await.expect("ACP discovery");
+    let cancellation = client.cancellation();
+    let cancel_after_request = async {
+        effects.started.notified().await;
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(client.list_tools(), cancel_after_request)
+    })
+    .await
+    .expect("cancellation releases the caller");
+    assert!(result.is_err());
+    wait_for_flag(&effects.request_dropped).await;
+    assert!(
+        !effects.disconnected.load(Ordering::SeqCst),
+        "request abort must not require disconnect"
+    );
+    assert!(
+        !effects
+            .notifications
+            .lock()
+            .expect("notifications")
+            .iter()
+            .any(|method| method == "notifications/cancelled")
+    );
+    client.settle().await.expect("ACP settlement");
+    assert!(effects.disconnected.load(Ordering::SeqCst));
+}

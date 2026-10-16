@@ -22,47 +22,66 @@ pub struct OsInstructionIo;
 
 impl InstructionIo for OsInstructionIo {
     fn load(&self, path: &Path, max_bytes: u64) -> Found {
-        let file = match open_no_links(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
-            Err(error) if error.raw_os_error() == Some(nix_symlink_error()) => {
-                return Found::Refused(Refusal::Symlink);
-            }
-            Err(error) => {
-                return Found::Refused(Refusal::Unreadable {
-                    message: error.to_string(),
-                });
-            }
-        };
-        let meta = match file.metadata() {
-            Ok(meta) => meta,
-            Err(error) => {
-                return Found::Refused(Refusal::Unreadable {
-                    message: error.to_string(),
-                });
-            }
-        };
-        if !meta.is_file() {
-            return Found::Refused(Refusal::NotAFile);
-        }
-        if meta.len() > max_bytes {
-            return Found::Refused(Refusal::TooLarge { limit: max_bytes });
-        }
+        read_instruction(open_in_tree(path), max_bytes)
+    }
 
-        // One byte past the limit, and no further: enough to tell "exactly at
-        // the limit" from "over it" without pulling an arbitrarily large file
-        // into memory when the metadata above was wrong or raced.
-        let mut bytes = Vec::new();
-        if let Err(err) = file.take(max_bytes + 1).read_to_end(&mut bytes) {
+    fn load_external(&self, path: &Path, max_bytes: u64) -> Found {
+        read_instruction(open_no_links(path), max_bytes)
+    }
+}
+
+fn read_instruction(opened: std::io::Result<fs::File>, max_bytes: u64) -> Found {
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
+        Err(error) if error.raw_os_error() == Some(nix_symlink_error()) => {
+            return Found::Refused(Refusal::Symlink);
+        }
+        Err(error) => {
             return Found::Refused(Refusal::Unreadable {
-                message: err.to_string(),
+                message: error.to_string(),
             });
         }
-        if bytes.len() as u64 > max_bytes {
-            return Found::Refused(Refusal::TooLarge { limit: max_bytes });
+    };
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(error) => {
+            return Found::Refused(Refusal::Unreadable {
+                message: error.to_string(),
+            });
         }
+    };
+    if !meta.is_file() {
+        return Found::Refused(Refusal::NotAFile);
+    }
+    if meta.len() > max_bytes {
+        return Found::Refused(Refusal::TooLarge { limit: max_bytes });
+    }
 
-        Found::Read { bytes }
+    // One byte past the limit, and no further: enough to tell "exactly at
+    // the limit" from "over it" without pulling an arbitrarily large file
+    // into memory when the metadata above was wrong or raced.
+    let mut bytes = Vec::new();
+    if let Err(err) = file.take(max_bytes + 1).read_to_end(&mut bytes) {
+        return Found::Refused(Refusal::Unreadable {
+            message: err.to_string(),
+        });
+    }
+    if bytes.len() as u64 > max_bytes {
+        return Found::Refused(Refusal::TooLarge { limit: max_bytes });
+    }
+
+    Found::Read { bytes }
+}
+
+fn open_in_tree(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        open_no_links(path)
+    }
+    #[cfg(not(unix))]
+    {
+        open_portable(path)
     }
 }
 
@@ -112,8 +131,143 @@ fn open_no_links(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_no_links(_path: &Path) -> std::io::Result<fs::File> {
-    Err(std::io::Error::other(
-        "race-safe instruction reads are unsupported on this platform",
+fn open_no_links(path: &Path) -> std::io::Result<fs::File> {
+    let _ = path;
+    unsupported_external()
+}
+
+#[cfg(any(not(unix), test))]
+fn unsupported_external() -> std::io::Result<fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "race-safe external instruction reads are unsupported on this platform",
     ))
+}
+
+#[cfg(any(not(unix), test))]
+fn open_portable(path: &Path) -> std::io::Result<fs::File> {
+    // In-tree reads retain the static-link policy. External imports never use
+    // this check-then-open path because they need substitution protection.
+    for ancestor in path.ancestors() {
+        if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
+            return Err(std::io::Error::from_raw_os_error(nix_symlink_error()));
+        }
+    }
+    fs::File::open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches selecting the portable reader for an out-of-scope import.
+    #[test]
+    fn portable_policy_routes_only_external_imports_to_safe_reader() {
+        use ego_core::config::{Limits, Selection, load_with_home};
+        use std::cell::RefCell;
+        struct PolicyIo {
+            reads: RefCell<Vec<bool>>,
+        }
+        impl InstructionIo for PolicyIo {
+            fn load(&self, path: &Path, _: u64) -> Found {
+                self.reads.borrow_mut().push(false);
+                if path.ends_with("AGENTS.md") {
+                    Found::Read {
+                        bytes: b"@inside.md\n@../external.md".to_vec(),
+                    }
+                } else {
+                    Found::Read {
+                        bytes: b"inside".to_vec(),
+                    }
+                }
+            }
+            fn load_external(&self, _: &Path, _: u64) -> Found {
+                self.reads.borrow_mut().push(true);
+                read_instruction(unsupported_external(), 100)
+            }
+        }
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path().join("workspace");
+        let io = PolicyIo {
+            reads: RefCell::new(Vec::new()),
+        };
+        let set = load_with_home(
+            &io,
+            &root,
+            &root,
+            &Selection::Ambient,
+            Limits::default(),
+            Some(tree.path()),
+        )
+        .unwrap();
+        assert_eq!(*io.reads.borrow(), [false, false, true]);
+        assert_eq!(set.loaded.len(), 2);
+        assert!(matches!(set.skipped[0].reason, Refusal::Unreadable { .. }));
+    }
+
+    /// Catches unsupported external imports being opened with the portable path.
+    #[test]
+    fn portable_external_import_stays_unsupported() {
+        assert_eq!(
+            unsupported_external().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
+
+    /// Catches losing absence, exact byte limits, or regular-file checks.
+    #[test]
+    fn portable_in_tree_reads_preserve_bounds_and_absence() {
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        let path = root.join("AGENTS.md");
+        assert_eq!(read_instruction(open_portable(&path), 4), Found::Absent);
+        fs::write(&path, "rule").unwrap();
+        assert_eq!(
+            read_instruction(open_portable(&path), 4),
+            Found::Read {
+                bytes: b"rule".to_vec()
+            }
+        );
+        assert_eq!(
+            read_instruction(open_portable(&path), 3),
+            Found::Refused(Refusal::TooLarge { limit: 3 })
+        );
+        assert_eq!(
+            read_instruction(open_portable(&root), 4),
+            Found::Refused(Refusal::NotAFile)
+        );
+    }
+
+    /// Catches static leaf or parent links bypassing the portable policy.
+    #[cfg(unix)]
+    #[test]
+    fn portable_in_tree_reads_refuse_leaf_and_parent_links() {
+        use std::os::unix::fs::symlink;
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        fs::write(root.join("real/AGENTS.md"), "secret").unwrap();
+        symlink(root.join("real/AGENTS.md"), root.join("AGENTS.md")).unwrap();
+        symlink(root.join("real"), root.join("linked")).unwrap();
+        for path in [root.join("AGENTS.md"), root.join("linked/AGENTS.md")] {
+            assert_eq!(
+                read_instruction(open_portable(&path), 100),
+                Found::Refused(Refusal::Symlink)
+            );
+        }
+    }
+
+    /// Catches refusing ordinary in-tree instructions on non-Unix platforms.
+    #[test]
+    fn portable_in_tree_agents_is_read_instead_of_unsupported() {
+        let tree = tempfile::tempdir().unwrap();
+        let path = tree.path().canonicalize().unwrap().join("AGENTS.md");
+        fs::write(&path, "workspace rules").unwrap();
+        let mut text = String::new();
+        open_portable(&path)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "workspace rules");
+    }
 }

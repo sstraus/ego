@@ -99,30 +99,7 @@ enum Settlement {
 pub async fn run_secret_child(
     request: SecretChildRequest,
 ) -> Result<SecretChildOutput, SecretChildError> {
-    if request.cancel.is_cancelled() {
-        return Err(SecretChildError::Cancelled);
-    }
-    if request
-        .run_deadline
-        .is_some_and(|deadline| Instant::now() >= deadline)
-    {
-        return Err(SecretChildError::RunTimeout);
-    }
-    if request.command_timeout.is_zero() {
-        return Err(SecretChildError::InvalidRequest(
-            "credential command timeout must be greater than zero",
-        ));
-    }
-    if request.termination_grace.is_zero() {
-        return Err(SecretChildError::InvalidRequest(
-            "credential command termination grace must be greater than zero",
-        ));
-    }
-    let Some(program) = request.argv.first() else {
-        return Err(SecretChildError::InvalidRequest(
-            "credential command argv must not be empty",
-        ));
-    };
+    let program = validate_secret_request(&request)?;
 
     let mut command = tokio::process::Command::new(program);
     command
@@ -157,48 +134,17 @@ pub async fn run_secret_child(
         (None, _) => None,
     };
 
-    let started = Instant::now();
     let mut stdout_result = None;
-    let settlement = loop {
-        if request.cancel.is_cancelled() {
-            break Settlement::Failed(SecretChildError::Cancelled);
-        }
-        if request
-            .run_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            break Settlement::Failed(SecretChildError::RunTimeout);
-        }
-        if started.elapsed() >= request.command_timeout {
-            break Settlement::Failed(SecretChildError::CommandTimeout);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break Settlement::Exited(status),
-            Ok(None) => {}
-            Err(error) => break Settlement::Failed(SecretChildError::Io(error)),
-        }
-        if stdin_task.as_ref().is_some_and(JoinHandle::is_finished) {
-            let task = stdin_task.take().expect("finished stdin task is present");
-            match task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => break Settlement::Failed(SecretChildError::Io(error)),
-                Err(error) => {
-                    break Settlement::Failed(SecretChildError::Io(std::io::Error::other(error)));
-                }
-            }
-        }
-        if stdout_task.as_ref().is_some_and(JoinHandle::is_finished) {
-            let task = stdout_task.take().expect("finished stdout task is present");
-            match task.await {
-                Ok(Ok(stdout)) => stdout_result = Some(stdout),
-                Ok(Err(error)) => break Settlement::Failed(SecretChildError::Io(error)),
-                Err(error) => {
-                    break Settlement::Failed(SecretChildError::Io(std::io::Error::other(error)));
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
+    let settlement = wait_secret_child(
+        &mut child,
+        &request.cancel,
+        request.run_deadline,
+        request.command_timeout,
+        &mut stdin_task,
+        &mut stdout_task,
+        &mut stdout_result,
+    )
+    .await;
 
     let (status, cleanup_complete) = match settlement {
         Settlement::Exited(status) => (
@@ -239,6 +185,84 @@ pub async fn run_secret_child(
     Ok(SecretChildOutput {
         stdout: stdout_result.expect("stdout reaches EOF after child exit"),
     })
+}
+
+fn validate_secret_request(request: &SecretChildRequest) -> Result<&OsString, SecretChildError> {
+    if request.cancel.is_cancelled() {
+        return Err(SecretChildError::Cancelled);
+    }
+    if request
+        .run_deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return Err(SecretChildError::RunTimeout);
+    }
+    if request.command_timeout.is_zero() {
+        return Err(SecretChildError::InvalidRequest(
+            "credential command timeout must be greater than zero",
+        ));
+    }
+    if request.termination_grace.is_zero() {
+        return Err(SecretChildError::InvalidRequest(
+            "credential command termination grace must be greater than zero",
+        ));
+    }
+    let Some(program) = request.argv.first() else {
+        return Err(SecretChildError::InvalidRequest(
+            "credential command argv must not be empty",
+        ));
+    };
+
+    Ok(program)
+}
+
+async fn wait_secret_child(
+    child: &mut ManagedChild,
+    cancel: &CancelToken,
+    run_deadline: Option<Instant>,
+    command_timeout: Duration,
+    stdin_task: &mut Option<JoinHandle<std::io::Result<()>>>,
+    stdout_task: &mut Option<JoinHandle<std::io::Result<SecretMaterial>>>,
+    stdout_result: &mut Option<SecretMaterial>,
+) -> Settlement {
+    let started = Instant::now();
+    loop {
+        if cancel.is_cancelled() {
+            break Settlement::Failed(SecretChildError::Cancelled);
+        }
+        if run_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break Settlement::Failed(SecretChildError::RunTimeout);
+        }
+        if started.elapsed() >= command_timeout {
+            break Settlement::Failed(SecretChildError::CommandTimeout);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Settlement::Exited(status),
+            Ok(None) => {}
+            Err(error) => break Settlement::Failed(SecretChildError::Io(error)),
+        }
+        if stdin_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            let task = stdin_task.take().expect("finished stdin task is present");
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => break Settlement::Failed(SecretChildError::Io(error)),
+                Err(error) => {
+                    break Settlement::Failed(SecretChildError::Io(std::io::Error::other(error)));
+                }
+            }
+        }
+        if stdout_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            let task = stdout_task.take().expect("finished stdout task is present");
+            match task.await {
+                Ok(Ok(stdout)) => *stdout_result = Some(stdout),
+                Ok(Err(error)) => break Settlement::Failed(SecretChildError::Io(error)),
+                Err(error) => {
+                    break Settlement::Failed(SecretChildError::Io(std::io::Error::other(error)));
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn write_secret(

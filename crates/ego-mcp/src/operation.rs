@@ -727,7 +727,7 @@ impl McpOperationFactory for McpHttpOperationFactory {
                 return Err(execution_error("HTTP MCP factory received stdio config"));
             };
             let config = config.clone();
-            execute_http_hook(&config, call, io, self, admission, scope)
+            execute_http_hook(&config, call, io, self.limits, admission, scope)
                 .await
                 .map_err(mcp_execution_error)
         })
@@ -1264,7 +1264,7 @@ async fn execute_http_hook(
     config: &McpHttpConfig,
     call: PreparedCall,
     io: &dyn GuardedIo<'_>,
-    factory: &McpHttpOperationFactory,
+    limits: OperationLimits,
     admission: Arc<McpServerAdmission>,
     scope: EffectScope,
 ) -> Result<McpHookExecution, McpError> {
@@ -1282,10 +1282,7 @@ async fn execute_http_hook(
     if envelope.transport() != &transport || envelope.transport_fingerprint() != fingerprint {
         return Err(authority("selected MCP hook transport fingerprint changed"));
     }
-    let request = operation_request(&envelope)?;
-    if !matches!(&request, OperationRequest::Tool(_)) {
-        return Err(authority("MCP hook operation is not a tool call"));
-    }
+    let request = hook_operation_request(&envelope)?;
     let expected_wire_params = request.wire_params()?;
     let claim = io.claim_mcp_http(call).map_err(McpError::from)?;
     if claim.envelope() != &envelope {
@@ -1299,21 +1296,18 @@ async fn execute_http_hook(
         envelope,
         expected_wire_params,
         admission
-            .authorization_headers(None, Instant::now() + factory.limits.timeout)
+            .authorization_headers(None, Instant::now() + limits.timeout)
             .await?,
         admission.oauth_session().cloned(),
     ));
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
-    let mut client = McpClient::connect_http(
+    let client = McpClient::connect_http(
         server,
         config.clone(),
-        factory.limits.hook_options(&scope)?,
+        limits.hook_options(&scope)?,
         effects,
     )?;
-    if let Err(error) = client.discover().await {
-        let _ = client.settle().await;
-        return Err(error);
-    }
+    let mut client = discover_hook_client(client).await?;
     let outcome = invoke_in_scope(request, &mut client, &scope).await;
     let settlement = client.settle().await;
     let outcome = outcome?;
@@ -1322,6 +1316,16 @@ async fn execute_http_hook(
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP hook HTTP operation was not settled"))?;
     project_hook_outcome(outcome, io, selected.delivery())
+}
+
+fn hook_operation_request(
+    envelope: &ego_core::permit::McpPreparedEnvelope,
+) -> Result<OperationRequest, McpError> {
+    let request = operation_request(envelope)?;
+    if !matches!(&request, OperationRequest::Tool(_)) {
+        return Err(authority("MCP hook operation is not a tool call"));
+    }
+    Ok(request)
 }
 
 async fn execute_stdio_hook(
@@ -1351,20 +1355,14 @@ async fn execute_stdio_hook(
     {
         return Err(authority("selected MCP hook transport fingerprint changed"));
     }
-    let request = operation_request(&envelope)?;
-    if !matches!(&request, OperationRequest::Tool(_)) {
-        return Err(authority("MCP hook operation is not a tool call"));
-    }
+    let request = hook_operation_request(&envelope)?;
     let duplex = io.guarded_duplex(call).await.map_err(McpError::from)?;
     let effects: Box<dyn McpDuplexEffects> = Box::new(ClaimedDuplexEffects {
         server: server.clone(),
         duplex: Some(duplex),
     });
-    let mut client = McpClient::connect_stdio(server, limits.hook_options(&scope)?, effects)?;
-    if let Err(error) = client.discover().await {
-        let _ = client.settle().await;
-        return Err(error);
-    }
+    let client = McpClient::connect_stdio(server, limits.hook_options(&scope)?, effects)?;
+    let mut client = discover_hook_client(client).await?;
     let outcome = invoke_in_scope(request, &mut client, &scope).await;
     let settlement = client.settle().await;
     let outcome = outcome?;
@@ -1373,6 +1371,14 @@ async fn execute_stdio_hook(
         .duplex()
         .ok_or_else(|| protocol("selected MCP hook stdio operation has no settlement"))?;
     project_hook_outcome(outcome, io, duplex.delivery())
+}
+
+async fn discover_hook_client(mut client: McpClient) -> Result<McpClient, McpError> {
+    if let Err(error) = client.discover().await {
+        let _ = client.settle().await;
+        return Err(error);
+    }
+    Ok(client)
 }
 
 async fn invoke_in_scope(
@@ -1559,6 +1565,19 @@ fn tool_schema_command(
     let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
         return Ok(None);
     };
+    let structured_content = schema_lookup_content(result)?;
+    let parameters: Value = serde_json::from_slice(envelope.parameters())?;
+    let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
+    Ok(Some(McpToolSchemaCommand::new(
+        server_admission,
+        generation.to_string(),
+        envelope.admission().clone(),
+        requested_name,
+        structured_content,
+    )))
+}
+
+fn schema_lookup_content(result: &CallToolResult) -> Result<Value, McpError> {
     if result.is_error == Some(true)
         || !result
             .result_type
@@ -1584,15 +1603,7 @@ fn tool_schema_command(
                 .map_err(|_| protocol("collapsed schema lookup text content is not valid JSON"))?
         }
     };
-    let parameters: Value = serde_json::from_slice(envelope.parameters())?;
-    let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
-    Ok(Some(McpToolSchemaCommand::new(
-        server_admission,
-        generation.to_string(),
-        envelope.admission().clone(),
-        requested_name,
-        structured_content,
-    )))
+    Ok(structured_content)
 }
 
 async fn project_outcome(
@@ -2319,7 +2330,10 @@ mod stdio_fingerprint_tests {
         }
 
         fn claim_mcp_http(&self, _: PreparedCall) -> Result<McpHttpClaim, TransportError> {
-            unreachable!("stdio selection does not use HTTP")
+            self.0.store(true, Ordering::SeqCst);
+            Err(TransportError::definitely_unsent(
+                TransportFailure::Exchange("HTTP claim probe".into()),
+            ))
         }
 
         fn guarded_duplex(
@@ -2372,6 +2386,157 @@ mod stdio_fingerprint_tests {
             material,
         )
         .expect("TUIC admission")
+    }
+
+    // Catches: HTTP hooks cross the guarded claim boundary with a changed transport.
+    #[test]
+    fn http_hook_rejects_changed_transport_before_claiming_the_selected_call() {
+        let config = McpHttpConfig::new(
+            "https://example.com/mcp".parse::<url::Url>().unwrap(),
+            ego_core::config::McpHttpAuth::None,
+            false,
+        )
+        .unwrap();
+        let admission = Arc::new(
+            McpServerAdmission::new(
+                "fixture".parse().unwrap(),
+                McpServerConfig::Http(config.clone()),
+                crate::McpTransportMaterial::http(Vec::new()),
+            )
+            .unwrap(),
+        );
+        let operation = || {
+            McpOperation::captured(
+                McpSubject::Tool {
+                    server: "fixture".into(),
+                    name: "lookup".into(),
+                },
+                McpOperationKind::CallTool,
+                McpAdmissionFingerprint::new("capture", "fixture/lookup", "schema").unwrap(),
+                serde_json::json!({}),
+                vec![],
+            )
+        };
+        let probe = DuplexProbe(AtomicBool::new(false));
+        let limits = OperationLimits::new(64 * 1024, Duration::from_secs(30)).unwrap();
+        let result = futures::executor::block_on(execute_http_hook(
+            &config,
+            prepare_http(&config, operation()).unwrap(),
+            &probe,
+            limits,
+            admission.clone(),
+            EffectScope::new(Duration::from_secs(30)),
+        ));
+        assert!(result.unwrap_err().to_string().contains("HTTP claim probe"));
+        assert!(probe.0.swap(false, Ordering::SeqCst));
+        let changed = McpHttpConfig::new(
+            "https://other.example/mcp".parse::<url::Url>().unwrap(),
+            ego_core::config::McpHttpAuth::None,
+            false,
+        )
+        .unwrap();
+        let result = futures::executor::block_on(execute_http_hook(
+            &changed,
+            prepare_http(&config, operation()).unwrap(),
+            &probe,
+            limits,
+            admission,
+            EffectScope::new(Duration::from_secs(30)),
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("transport fingerprint changed")
+        );
+        assert!(!probe.0.load(Ordering::SeqCst));
+    }
+
+    struct RejectSchemaPublication;
+    impl McpToolSchemaAdmission for RejectSchemaPublication {
+        fn reconcile(&self, _: McpToolSchemaCommand) -> McpFuture<'static, Result<(), McpError>> {
+            panic!("schema command construction must not publish a registry")
+        }
+    }
+
+    // Catches: an unsuccessful schema lookup mints a registry admission command.
+    #[test]
+    fn schema_lookup_admission_requires_a_successful_complete_selected_tool_result() {
+        let management = vec![
+            ego_core::generator::types::ToolDescriptor {
+                name: "search_tools".into(),
+                description: "search".into(),
+                parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}),
+            },
+            ego_core::generator::types::ToolDescriptor {
+                name: "get_tool_schema".into(),
+                description: "lookup".into(),
+                parameters: serde_json::json!({"type":"object","properties":{"tool_name":{"type":"string"}},"required":["tool_name"]}),
+            },
+            ego_core::generator::types::ToolDescriptor {
+                name: "call_tool".into(),
+                description: "call".into(),
+                parameters: serde_json::json!({"type":"object","properties":{"tool_name":{"type":"string"},"arguments":{"type":"object"}},"required":["tool_name","arguments"],"additionalProperties":false}),
+            },
+        ];
+        let collapsed = CollapsedSchemaAdmission {
+            bootstrap: McpCollapsedBootstrap::new(management).unwrap(),
+            admission: Arc::new(RejectSchemaPublication),
+        };
+        let config = McpHttpConfig::new(
+            "https://example.com/mcp".parse::<url::Url>().unwrap(),
+            ego_core::config::McpHttpAuth::None,
+            false,
+        )
+        .unwrap();
+        let admission = Arc::new(
+            McpServerAdmission::new(
+                "fixture".parse().unwrap(),
+                McpServerConfig::Http(config.clone()),
+                crate::McpTransportMaterial::http(Vec::new()),
+            )
+            .unwrap(),
+        );
+        let call = prepare_http(
+            &config,
+            McpOperation::captured(
+                McpSubject::Tool {
+                    server: "fixture".into(),
+                    name: "get_tool_schema".into(),
+                },
+                McpOperationKind::CallTool,
+                McpAdmissionFingerprint::new("capture", "fixture/get_tool_schema", "schema")
+                    .unwrap(),
+                serde_json::json!({"tool_name":"weather"}),
+                vec![],
+            ),
+        )
+        .unwrap();
+        let envelope = call.mcp_envelope().unwrap();
+        for failed in [true, false] {
+            let mut result = CallToolResult::success(vec![ContentBlock::text(
+                r#"{"name":"weather","inputSchema":{"type":"object"}}"#,
+            )]);
+            result.is_error = Some(failed);
+            let outcome = OperationOutcome::Complete(CompleteResult::Tool(result));
+            let command = tool_schema_command(
+                &outcome,
+                envelope,
+                admission.clone(),
+                "generation",
+                Some(&collapsed),
+            );
+            if failed {
+                assert!(command.is_err());
+            } else {
+                assert!(command.unwrap().is_some());
+            }
+            assert!(
+                tool_schema_command(&outcome, envelope, admission.clone(), "generation", None)
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

@@ -355,26 +355,8 @@ fn resolve_inner(
         .collect();
 
     let active_profile_name = active_profile;
-    let resolved_active_profile = if let Some(name) = active_profile_name {
-        let mut definitions = OriginSet::default();
-        for layer in &eligible {
-            if layer.value.profile.contains_key(name) {
-                definitions.insert(layer.source);
-            }
-        }
-        if definitions.is_empty() {
-            return Err(ConfigError::UnknownProfile {
-                name: name.to_string(),
-            });
-        }
-        selected_by.map(|selected_by| ActiveProfileProvenance {
-            name: name.to_owned(),
-            selected_by,
-            definitions,
-        })
-    } else {
-        None
-    };
+    let resolved_active_profile =
+        resolve_active_profile(&eligible, active_profile_name, selected_by)?;
     let mut max_output_tokens = None;
     let mut cache = crate::generator::capabilities::CacheRetention::Short;
     let mut model = None;
@@ -420,58 +402,24 @@ fn resolve_inner(
             );
         }
 
-        if let Some(value) = profile
-            .and_then(|p| p.max_output_tokens)
-            .or(sourced.value.max_output_tokens)
-        {
-            max_output_tokens = Some(value);
-        }
-        if let Some(value) = sourced.value.cache
-            && (value != crate::generator::capabilities::CacheRetention::Long
-                || sourced.source == Source::User)
-        {
-            cache = value;
-        }
-        if let Some(m) = profile
-            .and_then(|p| p.model.clone())
-            .or_else(|| sourced.value.model.clone())
-        {
-            model = Some(m);
-        }
-        if let Some(value) = profile
-            .and_then(|profile| profile.thinking)
-            .or(sourced.value.thinking)
-        {
-            thinking = Some(value);
-        }
-        let profile_origin = active_profile_name.map(|name| (name, selected_by));
-        if let Some(m) = profile.and_then(|p| p.mode) {
-            mode = Some(m);
-            mode_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
-        } else if let Some(m) = sourced.value.mode {
-            mode = Some(m);
-            mode_provenance = super::SettingProvenance::layer(sourced.source, None);
-        }
-        if let Some(value) = profile.and_then(|profile| profile.sandbox) {
-            sandbox = Some(value);
-            sandbox_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
-        } else if let Some(value) = sourced.value.sandbox {
-            sandbox = Some(value);
-            sandbox_provenance = super::SettingProvenance::layer(sourced.source, None);
-        }
-        for controls in sourced
-            .value
-            .exec
-            .iter()
-            .chain(profile.and_then(|profile| profile.exec.as_ref()))
-        {
-            if controls.env.is_some() {
-                exec.env = controls.env;
-            }
-            if controls.env_allowlist.is_some() {
-                exec.env_allowlist = controls.env_allowlist.clone();
-            }
-        }
+        merge_generation_fields(
+            sourced,
+            profile,
+            &mut max_output_tokens,
+            &mut cache,
+            &mut model,
+            &mut thinking,
+        );
+        merge_confinement(
+            sourced,
+            profile,
+            active_profile_name.map(|name| (name, selected_by)),
+            &mut mode,
+            &mut mode_provenance,
+            &mut sandbox,
+            &mut sandbox_provenance,
+        );
+        merge_exec_controls(&mut exec, sourced, profile);
         if let Some(value) = profile
             .and_then(|profile| profile.network)
             .or(sourced.value.network)
@@ -524,22 +472,14 @@ fn resolve_inner(
             .and_then(|p| p.roots.as_ref())
             .or(sourced.value.roots.as_ref())
         {
-            if matches!(sourced.source, Source::Project | Source::Local) {
-                root_restrictions.push(
-                    if roots_source.is_none()
-                        && sandbox.unwrap_or_default() != crate::permit::Confinement::Adaptive
-                    {
-                        vec![crate::permit::RootCfg {
-                            path: "~/Gits".into(),
-                            access: crate::permit::RootAccess::ReadWrite,
-                        }]
-                    } else {
-                        roots.clone()
-                    },
-                );
-            }
-            roots = selected.clone();
-            roots_source = Some(sourced.source);
+            select_roots(
+                sourced.source,
+                selected,
+                sandbox,
+                &mut roots,
+                &mut roots_source,
+                &mut root_restrictions,
+            );
         }
         if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
             artifact_dir = Some(Sourced {
@@ -547,20 +487,7 @@ fn resolve_inner(
                 value: path,
             });
         }
-        for (id, provider) in &sourced.value.auth {
-            let resolved = auth
-                .entry(id.clone())
-                .or_insert_with(AuthProviderLayer::default);
-            if provider.credential_command.is_some() {
-                resolved.credential_command = provider.credential_command.clone();
-            }
-            for (name, value) in &provider.headers {
-                resolved
-                    .headers
-                    .retain(|existing, _| !existing.eq_ignore_ascii_case(name));
-                resolved.headers.insert(name.clone(), value.clone());
-            }
-        }
+        merge_auth(&mut auth, &sourced.value.auth);
         if let Some(segments) = sourced
             .value
             .ui
@@ -575,25 +502,7 @@ fn resolve_inner(
     // The ceiling is gathered independently of the ordinary merge above, so
     // a `[profile.NAME]` override that clears `deny` — or a later layer
     // that overwrites it — can never make a system-layer deny disappear.
-    let mut system_deny: Vec<Rule> = Vec::new();
-    for sourced in eligible.iter().filter(|l| l.source == Source::System) {
-        if let Some(perm) = &sourced.value.permissions {
-            for entry in &perm.deny {
-                if !system_deny.contains(entry) {
-                    system_deny.push(entry.clone());
-                }
-            }
-        }
-        if let Some(profile) = active_profile_name.and_then(|name| sourced.value.profile.get(name))
-            && let Some(perm) = &profile.permissions
-        {
-            for entry in &perm.deny {
-                if !system_deny.contains(entry) {
-                    system_deny.push(entry.clone());
-                }
-            }
-        }
-    }
+    let system_deny = system_denies(&eligible, active_profile_name);
     // A **union of origins, not a skip**. This loop used to read
     //
     // ```rust
@@ -665,18 +574,7 @@ fn resolve_inner(
     // rather than "system wins", because `CLI.md:311` binds everyone to the
     // administrator's cap and not to the administrator's *figure* — an
     // operator asking for less keeps their own.
-    let mut system_ceiling = Ceilings::default();
-    for sourced in eligible.iter().filter(|l| l.source == Source::System) {
-        if let Some(budget) = &sourced.value.budget {
-            system_ceiling.apply(budget);
-        }
-        if let Some(budget) = active_profile_name
-            .and_then(|name| sourced.value.profile.get(name))
-            .and_then(|profile| profile.budget.as_ref())
-        {
-            system_ceiling.apply(budget);
-        }
-    }
+    let system_ceiling = system_budget_ceiling(&eligible, active_profile_name);
     let clamped = ceilings.clamp(&system_ceiling);
 
     let mut profile_warnings = Vec::new();
@@ -701,50 +599,13 @@ fn resolve_inner(
         }
     }
 
-    let mut max_mode: Option<Mode> = None;
-    let mut root_ceilings = root_restrictions;
-    for sourced in eligible
-        .iter()
-        .filter(|layer| layer.source == Source::System)
-    {
-        if let Some(maximum) = sourced.value.max_mode
-            && max_mode.is_none_or(|current| maximum.within(current))
-        {
-            max_mode = Some(maximum);
-        }
-        let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
-        for maximum in sourced
-            .value
-            .sandbox
-            .iter()
-            .chain(profile.and_then(|profile| profile.sandbox.as_ref()))
-        {
-            if !sandbox.unwrap_or_default().within(*maximum) {
-                return Err(ConfigError::Invalid {
-                    source: Source::System,
-                    message: format!(
-                        "sandbox {} exceeds the system ceiling {maximum}",
-                        sandbox.unwrap_or_default()
-                    ),
-                });
-            }
-        }
-        if let Some(bounds) = &sourced.value.roots {
-            root_ceilings.push(bounds.clone());
-        }
-        if let Some(bounds) = profile.and_then(|p| p.roots.as_ref()) {
-            root_ceilings.push(bounds.clone());
-        }
-    }
-    if let Some(maximum) = max_mode {
-        let selected = mode.unwrap_or(Mode::Default);
-        if !selected.within(maximum) {
-            return Err(ConfigError::Invalid {
-                source: Source::System,
-                message: format!("mode {selected} exceeds system max_mode {maximum}"),
-            });
-        }
-    }
+    let (mut max_mode, root_ceilings) = system_authority_ceilings(
+        &eligible,
+        active_profile_name,
+        mode,
+        sandbox,
+        root_restrictions,
+    )?;
 
     if let Some(ceiling) = profile_ceiling {
         let maximum = ceiling.mode.unwrap_or(Mode::Default);
@@ -793,6 +654,255 @@ fn resolve_inner(
         mcp,
         discarded,
     })
+}
+
+fn system_budget_ceiling(
+    eligible: &[&Sourced<ConfigLayer>],
+    active_profile_name: Option<&str>,
+) -> Ceilings {
+    let mut system_ceiling = Ceilings::default();
+    for sourced in eligible.iter().filter(|l| l.source == Source::System) {
+        if let Some(budget) = &sourced.value.budget {
+            system_ceiling.apply(budget);
+        }
+        if let Some(budget) = active_profile_name
+            .and_then(|name| sourced.value.profile.get(name))
+            .and_then(|profile| profile.budget.as_ref())
+        {
+            system_ceiling.apply(budget);
+        }
+    }
+    system_ceiling
+}
+
+fn select_roots(
+    source: Source,
+    selected: &[crate::permit::RootCfg],
+    sandbox: Option<Confinement>,
+    roots: &mut Vec<crate::permit::RootCfg>,
+    roots_source: &mut Option<Source>,
+    root_restrictions: &mut Vec<Vec<crate::permit::RootCfg>>,
+) {
+    if matches!(source, Source::Project | Source::Local) {
+        let inherited =
+            if roots_source.is_none() && sandbox.unwrap_or_default() != Confinement::Adaptive {
+                vec![crate::permit::RootCfg {
+                    path: "~/Gits".into(),
+                    access: crate::permit::RootAccess::ReadWrite,
+                }]
+            } else {
+                roots.clone()
+            };
+        root_restrictions.push(inherited);
+    }
+    *roots = selected.to_vec();
+    *roots_source = Some(source);
+}
+
+fn merge_confinement(
+    sourced: &Sourced<ConfigLayer>,
+    profile: Option<&super::layer::ProfileLayer>,
+    profile_origin: Option<(&str, Option<Source>)>,
+    mode: &mut Option<Mode>,
+    mode_provenance: &mut super::SettingProvenance,
+    sandbox: &mut Option<Confinement>,
+    sandbox_provenance: &mut super::SettingProvenance,
+) {
+    if let Some(m) = profile.and_then(|p| p.mode) {
+        *mode = Some(m);
+        *mode_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
+    } else if let Some(m) = sourced.value.mode {
+        *mode = Some(m);
+        *mode_provenance = super::SettingProvenance::layer(sourced.source, None);
+    }
+    if let Some(value) = profile.and_then(|profile| profile.sandbox) {
+        *sandbox = Some(value);
+        *sandbox_provenance = super::SettingProvenance::layer(sourced.source, profile_origin);
+    } else if let Some(value) = sourced.value.sandbox {
+        *sandbox = Some(value);
+        *sandbox_provenance = super::SettingProvenance::layer(sourced.source, None);
+    }
+}
+
+fn merge_generation_fields(
+    sourced: &Sourced<ConfigLayer>,
+    profile: Option<&super::layer::ProfileLayer>,
+    max_output_tokens: &mut Option<std::num::NonZeroU64>,
+    cache: &mut crate::generator::capabilities::CacheRetention,
+    model: &mut Option<ModelRef>,
+    thinking: &mut Option<ThinkingLevel>,
+) {
+    if let Some(value) = profile
+        .and_then(|p| p.max_output_tokens)
+        .or(sourced.value.max_output_tokens)
+    {
+        *max_output_tokens = Some(value);
+    }
+    if let Some(value) = sourced.value.cache
+        && (value != crate::generator::capabilities::CacheRetention::Long
+            || sourced.source == Source::User)
+    {
+        *cache = value;
+    }
+    if let Some(m) = profile
+        .and_then(|p| p.model.clone())
+        .or_else(|| sourced.value.model.clone())
+    {
+        *model = Some(m);
+    }
+    if let Some(value) = profile
+        .and_then(|profile| profile.thinking)
+        .or(sourced.value.thinking)
+    {
+        *thinking = Some(value);
+    }
+}
+
+fn resolve_active_profile(
+    eligible: &[&Sourced<ConfigLayer>],
+    active_profile_name: Option<&str>,
+    selected_by: Option<Source>,
+) -> Result<Option<ActiveProfileProvenance>, ConfigError> {
+    let resolved = if let Some(name) = active_profile_name {
+        let mut definitions = OriginSet::default();
+        for layer in eligible {
+            if layer.value.profile.contains_key(name) {
+                definitions.insert(layer.source);
+            }
+        }
+        if definitions.is_empty() {
+            return Err(ConfigError::UnknownProfile {
+                name: name.to_string(),
+            });
+        }
+        selected_by.map(|selected_by| ActiveProfileProvenance {
+            name: name.to_owned(),
+            selected_by,
+            definitions,
+        })
+    } else {
+        None
+    };
+    Ok(resolved)
+}
+
+fn system_denies(
+    eligible: &[&Sourced<ConfigLayer>],
+    active_profile_name: Option<&str>,
+) -> Vec<Rule> {
+    let mut system_deny: Vec<Rule> = Vec::new();
+    for sourced in eligible.iter().filter(|l| l.source == Source::System) {
+        if let Some(perm) = &sourced.value.permissions {
+            for entry in &perm.deny {
+                if !system_deny.contains(entry) {
+                    system_deny.push(entry.clone());
+                }
+            }
+        }
+        if let Some(profile) = active_profile_name.and_then(|name| sourced.value.profile.get(name))
+            && let Some(perm) = &profile.permissions
+        {
+            for entry in &perm.deny {
+                if !system_deny.contains(entry) {
+                    system_deny.push(entry.clone());
+                }
+            }
+        }
+    }
+    system_deny
+}
+
+fn system_authority_ceilings(
+    eligible: &[&Sourced<ConfigLayer>],
+    active_profile_name: Option<&str>,
+    mode: Option<Mode>,
+    sandbox: Option<Confinement>,
+    root_restrictions: Vec<Vec<crate::permit::RootCfg>>,
+) -> Result<(Option<Mode>, Vec<Vec<crate::permit::RootCfg>>), ConfigError> {
+    let mut max_mode: Option<Mode> = None;
+    let mut root_ceilings = root_restrictions;
+    for sourced in eligible
+        .iter()
+        .filter(|layer| layer.source == Source::System)
+    {
+        if let Some(maximum) = sourced.value.max_mode
+            && max_mode.is_none_or(|current| maximum.within(current))
+        {
+            max_mode = Some(maximum);
+        }
+        let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
+        for maximum in sourced
+            .value
+            .sandbox
+            .iter()
+            .chain(profile.and_then(|profile| profile.sandbox.as_ref()))
+        {
+            if !sandbox.unwrap_or_default().within(*maximum) {
+                return Err(ConfigError::Invalid {
+                    source: Source::System,
+                    message: format!(
+                        "sandbox {} exceeds the system ceiling {maximum}",
+                        sandbox.unwrap_or_default()
+                    ),
+                });
+            }
+        }
+        if let Some(bounds) = &sourced.value.roots {
+            root_ceilings.push(bounds.clone());
+        }
+        if let Some(bounds) = profile.and_then(|p| p.roots.as_ref()) {
+            root_ceilings.push(bounds.clone());
+        }
+    }
+    if let Some(maximum) = max_mode {
+        let selected = mode.unwrap_or(Mode::Default);
+        if !selected.within(maximum) {
+            return Err(ConfigError::Invalid {
+                source: Source::System,
+                message: format!("mode {selected} exceeds system max_mode {maximum}"),
+            });
+        }
+    }
+
+    Ok((max_mode, root_ceilings))
+}
+
+fn merge_exec_controls(
+    exec: &mut super::ExecLayer,
+    sourced: &Sourced<ConfigLayer>,
+    profile: Option<&super::layer::ProfileLayer>,
+) {
+    for controls in sourced
+        .value
+        .exec
+        .iter()
+        .chain(profile.and_then(|profile| profile.exec.as_ref()))
+    {
+        if controls.env.is_some() {
+            exec.env = controls.env;
+        }
+        if controls.env_allowlist.is_some() {
+            exec.env_allowlist = controls.env_allowlist.clone();
+        }
+    }
+}
+
+fn merge_auth(
+    auth: &mut std::collections::HashMap<String, AuthProviderLayer>,
+    providers: &std::collections::HashMap<String, AuthProviderLayer>,
+) {
+    for (id, provider) in providers {
+        let resolved = auth.entry(id.clone()).or_default();
+        if provider.credential_command.is_some() {
+            resolved.credential_command = provider.credential_command.clone();
+        }
+        for (name, value) in &provider.headers {
+            resolved
+                .headers
+                .retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+            resolved.headers.insert(name.clone(), value.clone());
+        }
+    }
 }
 
 fn apply_mcp_entries(
