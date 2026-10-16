@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::negotiate::{SERVED, negotiate};
 use crate::project::{
-    AcpNotice, project_goal_plan_v1, project_notice_v1, project_replay_v1, stop_reason_v1,
+    AcpNotice, project_notice_v1, project_objective_v1, project_replay_v1, stop_reason_v1,
 };
 use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 use agent_client_protocol::{
@@ -2934,10 +2934,17 @@ fn emit_info(
         ),
     ))?;
     if let Some(lifecycle) = lifecycle {
+        let plan = lifecycle
+            .plan(meta.id)
+            .map_err(|error| lifecycle_error(&error))?;
+        connection.send_notification(v1::SessionNotification::new(
+            id.clone(),
+            crate::project::project_plan_v1(&plan),
+        ))?;
         let goal = lifecycle
             .goal(meta.id)
             .map_err(|error| lifecycle_error(&error))?;
-        if let Some(plan) = project_goal_plan_v1(goal.as_ref()) {
+        if let Some(plan) = project_objective_v1(goal.as_ref()) {
             connection.send_notification(v1::SessionNotification::new(id.clone(), plan))?;
         }
     }

@@ -12571,6 +12571,7 @@ mod turn {
                 .map(RegisteredTool::Effect)
                 .collect();
             registry.push(RegisteredTool::Task);
+            registry.push(RegisteredTool::Plan);
             let tools = Tools::from_registry(
                 &registry,
                 ToolEffectPorts::new(
@@ -12618,6 +12619,151 @@ mod turn {
             .unwrap();
             let outcome = block_on(loop_.run("parent")).unwrap();
             (outcome.exit_reason, loop_.into_state().unwrap())
+        }
+
+        #[test]
+        fn plan_tool_and_linked_child_progress_share_durable_state() {
+            // Catches: child progress is ephemeral, affects the wrong ID, or completes a failed task.
+            use ego_core::plan::StepStatus;
+            for failed in [false, true] {
+                let fx = Fixture::new(vec![]);
+                let child = if failed {
+                    vec![
+                        AiEvent::Error {
+                            message: "child cannot continue".into(),
+                            kind: ErrorKind::Unclassified,
+                        },
+                        AiEvent::Stop(StopReason::Error),
+                    ]
+                } else {
+                    vec![
+                        AiEvent::TextDelta {
+                            text: "child finished".into(),
+                        },
+                        AiEvent::Stop(StopReason::Stop),
+                    ]
+                };
+                let generator = Arc::new(FakeGenerator::new([
+                    vec![
+                        call(
+                            "plan",
+                            "plan",
+                            json!({"operation":"replace","steps":[
+                                {"id":"child", "text":"Verify artifact", "status":"pending"},
+                                {"id":"other", "text":"Independent work", "status":"pending"}
+                            ]}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![
+                        call(
+                            "task",
+                            "task",
+                            json!({"name":"verify", "prompt":"check", "plan_step":"child"}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    child,
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ]));
+                let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+                assert_eq!(
+                    state.plan.steps[0].status,
+                    if failed {
+                        StepStatus::Blocked
+                    } else {
+                        StepStatus::Completed
+                    }
+                );
+                assert_eq!(state.plan.steps[1].status, StepStatus::Pending);
+                assert!(state.goal.is_none());
+                let updates = fx
+                    .sink
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        PublicEvent::PlanUpdated { update, .. } => Some(update),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(updates.len(), 3);
+                assert!(
+                    matches!(&updates[1], ego_core::plan::PlanUpdate::Step { id, status: StepStatus::InProgress } if id == "child")
+                );
+                let last = serde_json::to_string(generator.calls().last().unwrap()).unwrap();
+                assert!(last.contains("Current durable plan"));
+                assert!(last.contains(if failed { "blocked" } else { "completed" }));
+            }
+        }
+
+        #[test]
+        fn task_plan_links_reject_unknown_and_duplicate_ids_before_starting_children() {
+            // Catches: duplicate owners race one step, or unknown links still start a child.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "plan",
+                        "plan",
+                        json!({"operation":"replace","steps":[
+                            {"id":"one", "text":"One owner", "status":"pending"}
+                        ]}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "first",
+                        "task",
+                        json!({"name":"first", "prompt":"check", "plan_step":"one"}),
+                    ),
+                    call(
+                        "duplicate",
+                        "task",
+                        json!({"name":"duplicate", "prompt":"check", "plan_step":"one"}),
+                    ),
+                    call(
+                        "unknown",
+                        "task",
+                        json!({"name":"unknown", "prompt":"check", "plan_step":"missing"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    AiEvent::TextDelta {
+                        text: "verified".into(),
+                    },
+                    AiEvent::Stop(StopReason::Stop),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            assert_eq!(
+                generator.calls().len(),
+                4,
+                "only one child reaches the generator"
+            );
+            let tasks: Vec<_> = state
+                .items
+                .values()
+                .filter(|item| item.tool_name.as_deref() == Some("task"))
+                .collect();
+            assert_eq!(tasks.iter().filter(|item| item.ok == Some(true)).count(), 1);
+            assert_eq!(
+                tasks.iter().filter(|item| item.ok == Some(false)).count(),
+                2
+            );
+            let results = tasks
+                .iter()
+                .map(|item| item.tool_result.as_ref().unwrap().model_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(results.contains("unknown plan step: missing"));
+            assert!(results.contains("plan step already assigned in this batch: one"));
+            assert_eq!(
+                state.plan.steps[0].status,
+                ego_core::plan::StepStatus::Completed
+            );
         }
 
         #[test]

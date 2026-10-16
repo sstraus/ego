@@ -513,6 +513,17 @@ impl TargetSeed {
         self
     }
 
+    pub(crate) fn with_plan(mut self, plan: &crate::plan::Plan) -> Self {
+        if !plan.steps.is_empty() {
+            self.push_trailing(EventKind::PlanUpdated {
+                update: crate::plan::PlanUpdate::Replace {
+                    steps: plan.steps.clone(),
+                },
+            });
+        }
+        self
+    }
+
     pub(crate) fn with_goal(mut self, goal: Option<&GoalRecord>) -> Self {
         let Some(goal) = goal.filter(|goal| goal.state == GoalState::Active) else {
             return self;
@@ -670,7 +681,8 @@ impl PreparedFork {
             seed: TargetSeed::fork(source, state.last_seq, at)
                 .with_prompt_snapshot(state.prompt_snapshot.clone())
                 .with_title(state.title.clone())
-                .with_goal(state.goal.as_ref()),
+                .with_goal(state.goal.as_ref())
+                .with_plan(&state.plan),
         })
     }
 
@@ -707,7 +719,8 @@ impl PreparedFork {
             seed: TargetSeed::fork(source, prefix.last_seq, at)
                 .with_prompt_snapshot(prefix.prompt_snapshot.clone())
                 .with_title(prefix.title.clone())
-                .with_goal(prefix.goal.as_ref()),
+                .with_goal(prefix.goal.as_ref())
+                .with_plan(&prefix.plan),
         })
     }
 

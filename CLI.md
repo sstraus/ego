@@ -610,6 +610,23 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 
 The model can also call `task` with a printable `name` and a `prompt` to run a depth-one, in-process child. The child inherits the parent mode, sandbox, offline posture and workspace ceilings, shares its budget and cancellation scope, and has no `task` tool. Task-only provider batches run concurrently. A batch that mixes `task` with other tool calls is refused with failed tool feedback for every call; no child or sibling tool runs. Child tool rows are nested under their names; permission prompts identify the child through the existing human seat. Only the final answer, bounded to the existing 64 KiB tool-result limit, enters the parent context. Child usage is booked once to the parent; child conversation state is held in memory and is not resumable.
 
+The `plan` tool owns one durable ordered plan, separate from the checked goal.
+Call `{"operation":"replace","steps":[{"id":"inspect","text":"Inspect the source","status":"pending"}]}`
+to replace it, or `{"operation":"step","id":"inspect","status":"in_progress"}`
+to update an existing ID. Statuses are `pending`, `in_progress`, `completed`, and
+`blocked`. Keep IDs stable when reordering or replacing steps. IDs are unique,
+printable, nonempty strings of at most 80 bytes; step text must not be empty.
+The plan is limited to 128 steps and 16 KiB of combined IDs and text. An empty
+replacement clears it. Updates are journal events (`plan_updated` in JSONL),
+survive replay, fork, and compaction, and appear as terminal progress rows and
+ACP plan replacements. Plan completion does not achieve the goal.
+
+An optional `task.plan_step` names an existing plan step. The parent records
+`in_progress` before the child runs, then `completed` on success or `blocked`
+on failure. An unknown ID or a second child assigned the same ID in one batch
+is refused before that child runs. Child progress changes only its linked step,
+not the objective or sibling steps. Child-authored plans stay local to the child.
+
 The table distinguishes implemented flags, intentional refusals, frozen M5
 target spellings, and the excluded verbose placeholder. The defect would be §3
 reading, to someone who has not run the binary, as though all of it worked.
@@ -624,7 +641,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 14,
+  "v": 15,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -2100,7 +2117,7 @@ sets an operator-owned objective. The `goal` tool sets or updates a model-author
 objective, but cannot replace an operator-owned active goal. Provider, permission,
 pause, cancellation and budget stops do not admit automatic work. Invalid checks
 and exhausted allowances emit a visible diagnostic and retain the active goal;
-they never claim achievement. ACP managed plan metadata exposes `goalStatus`,
+they never claim achievement. ACP session objective metadata exposes `goalStatus`,
 `goalStop`, and `goalContinuationTurns` separately from work-turn completion.
 
 `--goal-check-command '["/path/to/check", "arg"]'` selects a command evaluator

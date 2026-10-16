@@ -19,6 +19,7 @@ use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore};
 pub(crate) struct TaskRequest {
     name: String,
     prompt: String,
+    plan_step: Option<String>,
 }
 
 pub(super) fn descriptor() -> ToolDescriptor {
@@ -27,6 +28,7 @@ pub(super) fn descriptor() -> ToolDescriptor {
         description: "Run an isolated child agent with your tools, permissions, sandbox, offline posture and shared budget. Children cannot delegate. Returns only its bounded final answer.".into(),
         parameters: json!({"type":"object", "additionalProperties":false,
             "required":["name","prompt"], "properties": {
+                "plan_step":{"type":"string", "description":"Existing durable plan step ID. Child execution marks it in_progress, then completed or blocked."},
                 "name":{"type":"string", "minLength":1,"maxLength":80},
                 "prompt":{"type":"string", "minLength":1,"maxLength":65536}
             }}),
@@ -330,6 +332,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
         let mut completed = BTreeSet::new();
         let serial = Arc::new(futures::lock::Mutex::new(()));
         let mut work = Vec::new();
+        let mut claimed_steps = BTreeSet::new();
         for call in pending {
             if !matches!(call.selected.as_ref(), Some(Ok(RegisteredTool::Task))) {
                 continue;
@@ -355,6 +358,30 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     continue;
                 }
             };
+            if let Some(id) = &request.plan_step {
+                let update = crate::plan::PlanUpdate::Step {
+                    id: id.clone(),
+                    status: crate::plan::StepStatus::InProgress,
+                };
+                let valid = if claimed_steps.insert(id.clone()) {
+                    self.state().plan.apply(&update)
+                } else {
+                    Err(format!("plan step already assigned in this batch: {id}"))
+                };
+                if let Err(error) = valid {
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted {
+                            ok: false,
+                            result: ToolResult::builtin(error),
+                        },
+                    )?;
+                    completed.insert(call.item);
+                    continue;
+                }
+            }
             let task = TaskExecution {
                 session: self.session_id,
                 parent: self.journal.clone(),
@@ -396,11 +423,41 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     })
                     .or_else(|| self.inherited_effect_tools.clone()),
             };
+            if let Some(id) = &request.plan_step {
+                self.journal.append(
+                    turn,
+                    None,
+                    Some(call.started),
+                    EventKind::PlanUpdated {
+                        update: crate::plan::PlanUpdate::Step {
+                            id: id.clone(),
+                            status: crate::plan::StepStatus::InProgress,
+                        },
+                    },
+                )?;
+            }
             let journal = self.journal.clone();
             let item = call.item;
             let started = call.started;
             work.push(async move {
-                let (ok, result) = task.run(started, request).await?;
+                let step = request.plan_step.clone();
+                let outcome = task.run(started, request).await;
+                if let Some(id) = step {
+                    let status = if matches!(&outcome, Ok((true, _))) {
+                        crate::plan::StepStatus::Completed
+                    } else {
+                        crate::plan::StepStatus::Blocked
+                    };
+                    journal.append(
+                        turn,
+                        None,
+                        Some(started),
+                        EventKind::PlanUpdated {
+                            update: crate::plan::PlanUpdate::Step { id, status },
+                        },
+                    )?;
+                }
+                let (ok, result) = outcome?;
                 journal.append(
                     turn,
                     Some(item),
