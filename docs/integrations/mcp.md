@@ -22,6 +22,22 @@ second configuration hierarchy. See [configuration](../reference/configuration.m
 for every field/default. HTTP OAuth uses `ego mcp login NAME` with the product's
 CIMD binding; credentials are stored privately under the existing authority.
 
+HTTP defaults to the current stateless contract. For a legacy SSE-only server,
+select the profile explicitly:
+
+```sh
+ego mcp add events --http https://example.test/sse --profile legacy-sse
+```
+
+The stored entry uses `transport = "http"` and `profile = "legacy-sse"`.
+The same fields work in an invocation-scoped JSON declaration. ACP hosts select
+this profile with their explicit `sse` server variant. A failed current request
+never triggers a legacy GET or initialize handshake. The legacy profile pins
+2024-11-05, accepts only a same-origin POST endpoint, and keeps the configured
+frame bound, deadline, cancellation, and guarded egress. It does not reconnect
+or retry. Legacy complete results have no reusable cache grant. WebSocket is
+not supported; no official server fixture was found in the audited SDK tree.
+
 Project declarations load only after workspace trust. A stdio child has a
 session-owned lifetime and an admitted working-directory/environment identity.
 HTTP connection and tool calls use the guarded transport and captured generation

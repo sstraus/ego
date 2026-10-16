@@ -354,7 +354,7 @@ pub enum McpLayerEntry {
     Tombstone,
 }
 
-/// One current MCP transport configuration.
+/// One explicitly selected MCP transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpServerConfig {
     Stdio(McpStdioConfig),
@@ -503,9 +503,28 @@ impl<'de> Deserialize<'de> for McpHttpUrl {
     }
 }
 
-/// A stateless HTTP MCP server after URL-policy validation.
+/// Wire contract for an HTTP server. Errors never change this selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpHttpProfile {
+    #[default]
+    Current,
+    LegacySse,
+}
+
+impl McpHttpProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::LegacySse => "legacy-sse",
+        }
+    }
+}
+
+/// An HTTP MCP server after URL-policy validation and explicit profile selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpHttpConfig {
+    pub profile: McpHttpProfile,
     pub url: McpHttpUrl,
     pub auth: McpHttpAuth,
     pub allow_insecure_loopback: bool,
@@ -518,6 +537,7 @@ impl McpHttpConfig {
         allow_insecure_loopback: bool,
     ) -> Result<Self, McpValueError> {
         let config = Self {
+            profile: McpHttpProfile::Current,
             url: url.into(),
             auth,
             allow_insecure_loopback,
@@ -610,6 +630,8 @@ enum McpStdioTransport {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct McpHttpWire {
+    #[serde(default)]
+    profile: McpHttpProfile,
     transport: McpHttpTransport,
     url: McpHttpUrl,
     #[serde(default)]
@@ -652,7 +674,10 @@ impl McpEntryWire {
             Self::Http(wire) => {
                 let _ = wire.transport;
                 McpHttpConfig::new(wire.url, wire.auth, wire.allow_insecure_loopback)
-                    .map(McpServerConfig::Http)
+                    .map(|mut config| {
+                        config.profile = wire.profile;
+                        McpServerConfig::Http(config)
+                    })
                     .map(|server| layer_entry(server, wire.enabled))
             }
             Self::Tombstone(wire) if wire.removed => Ok(McpLayerEntry::Tombstone),

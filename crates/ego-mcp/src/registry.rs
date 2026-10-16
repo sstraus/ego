@@ -2300,6 +2300,7 @@ impl StableCaptureHasher {
             }
             McpServerConfig::Http(config) => {
                 self.field("transport", b"http");
+                self.field("http-profile", config.profile.as_str().as_bytes());
                 self.field("url", config.url.to_string().as_bytes());
                 self.field(
                     "http-auth",

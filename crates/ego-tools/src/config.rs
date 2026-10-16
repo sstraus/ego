@@ -1298,6 +1298,7 @@ fn server_table(server: &McpServerConfig) -> Result<Table, UserConfigError> {
         }
         McpServerConfig::Http(http) => {
             table.insert("transport", value("http"));
+            table.insert("profile", value(http.profile.as_str()));
             table.insert("url", value(http.url.to_string()));
             if http.auth == McpHttpAuth::Oauth {
                 table.insert("auth", value("oauth"));
