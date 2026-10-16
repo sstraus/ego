@@ -2651,7 +2651,7 @@ fn resumed_terminal_round_prompts_remaining_members_and_fresh_retry_consent() {
                         },
                         turn,
                         item: Some(question),
-                        parent: None,
+                        parent: (seq != 0).then_some(request_event),
                         ts: Timestamp::from_millis(1000),
                         producer: Producer::Main,
                     },
@@ -2676,7 +2676,9 @@ fn resumed_terminal_round_prompts_remaining_members_and_fresh_retry_consent() {
     let plan = plan_resume_answer(&state, &[]).expect(
         "terminal resume must present the pending foreign round without a hand-constructed answer",
     );
-    assert!(matches!(plan, ResumePlan::Foreign { question: id, .. } if id == question));
+    assert!(
+        matches!(plan, ResumePlan::Foreign { question: id, answer: None, .. } if id == question)
+    );
     let pending = state.pending_question().unwrap();
     crate::repl::test_resumed_round_terminal(pending.request().clone());
 }
