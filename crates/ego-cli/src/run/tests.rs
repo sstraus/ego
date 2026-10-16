@@ -2599,15 +2599,16 @@ fn resumed_terminal_round_prompts_remaining_members_and_fresh_retry_consent() {
         completed: Default::default(),
     };
     let request = QuestionRequest::new("MCP input", QuestionMode::Round(round), vec![], false);
+    let mut sequence = Seq::default();
     for (seq, kind) in [
         EventKind::QuestionRequested { request, target: QuestionTarget::ForeignContinuation { tool_call: ItemId::new(), continuation_id: "mcp-reopened".into() } },
         EventKind::QuestionMemberSettled { key: "a".into(), answer: serde_json::json!({"completed":true}) },
     ].into_iter().enumerate() {
-        store.append(&session, &DomainEvent { env: Envelope { seq: Seq(seq as u64), id: if seq == 0 { request_event } else { EventId::new() }, turn, item: Some(question), parent: None, ts: Timestamp::from_millis(1000), producer: Producer::Main }, kind }).unwrap();
+        store.append(&session, &DomainEvent { env: Envelope { seq: sequence.next(), id: if seq == 0 { request_event } else { EventId::new() }, turn, item: Some(question), parent: None, ts: Timestamp::from_millis(1000), producer: Producer::Main }, kind }).unwrap();
     }
     let entries = futures::executor::block_on(async {
         use futures::StreamExt;
-        store.read(&session).unwrap().collect::<Vec<_>>().await
+        SessionStore::read(&store, &session).unwrap().collect::<Vec<_>>().await
     });
     let state = SessionState::replay(entries.into_iter().filter_map(|entry| match entry.unwrap() {
         ego_core::store::session_store::SessionEntry::Event(event) => Some(event),
