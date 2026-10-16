@@ -4308,7 +4308,10 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
                 String::from_utf8_lossy(&output)
             )
         });
-    assert!(lines[user + 1].trim().is_empty(), "prompt boundary: {visible:?}");
+    assert!(
+        lines[user + 1].trim().is_empty(),
+        "prompt boundary: {visible:?}"
+    );
     assert!(
         lines[user + 2].contains("Esc to interrupt"),
         "the working line must occupy the reply row: {visible:?}"
@@ -4353,7 +4356,10 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
         .iter()
         .position(|line| line.contains("> layout check"))
         .expect("user line");
-    assert!(lines[user + 1].trim().is_empty(), "prompt boundary: {visible:?}");
+    assert!(
+        lines[user + 1].trim().is_empty(),
+        "prompt boundary: {visible:?}"
+    );
     assert!(
         lines[user + 2].contains("ANSWER-ON-REPLY-ROW"),
         "reply replaces thinking at the same row: {visible:?}"
@@ -4410,7 +4416,10 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
         .iter()
         .position(|line| line.contains("tailmarker"))
         .unwrap_or_else(|| panic!("wrapped prompt tail absent: {visible:?}"));
-    assert!(lines[tail + 1].trim().is_empty(), "wrapped prompt boundary: {visible:?}");
+    assert!(
+        lines[tail + 1].trim().is_empty(),
+        "wrapped prompt boundary: {visible:?}"
+    );
     assert!(
         lines[tail + 2].contains("Working") && !lines[tail + 2].contains('>'),
         "the working line must follow the final wrapped prompt row: {visible:?}"
@@ -4426,7 +4435,10 @@ fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
         .iter()
         .position(|line| line.contains("tailmarker"))
         .expect("wrapped prompt tail");
-    assert!(lines[tail + 1].trim().is_empty(), "wrapped prompt boundary: {visible:?}");
+    assert!(
+        lines[tail + 1].trim().is_empty(),
+        "wrapped prompt boundary: {visible:?}"
+    );
     assert!(
         lines[tail + 2].contains("WRAPPED-ANSWER"),
         "answer must replace thinking after wrapped prompt: {visible:?}"
@@ -4475,7 +4487,10 @@ fn streamed_reply_keeps_one_working_line_below_the_partial_text() {
         .iter()
         .position(|line| line.contains("> stream check"))
         .expect("user line");
-    assert!(lines[user + 1].trim().is_empty(), "prompt boundary: {visible:?}");
+    assert!(
+        lines[user + 1].trim().is_empty(),
+        "prompt boundary: {visible:?}"
+    );
     assert!(
         lines[user + 2].contains("PARTIAL-ANSWER"),
         "partial text must occupy the reply row: {visible:?}"

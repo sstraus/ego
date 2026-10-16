@@ -75,7 +75,9 @@ fn risk_row(session: &mut ModalSession, headline: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        screen[at + 1..].iter().any(|line| line.contains("[d] details")),
+        screen[at + 1..]
+            .iter()
+            .any(|line| line.contains("[d] details")),
         "decision keys disappeared: {screen:#?}"
     );
     reason
