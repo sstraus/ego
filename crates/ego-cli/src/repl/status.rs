@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use ego_core::config::{Mode, ModelRef, Trust};
-use ego_core::cost::{CumulativeCost, Money};
+use ego_core::cost::{CostAttribution, CostDelta, CumulativeCost, Money, SubscriptionEquivalent};
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::state::{QueueStatus, SessionState};
@@ -236,7 +236,7 @@ pub struct SurfaceSnapshot {
     cost: String,
     used_tokens: Option<u64>,
     window: Option<u64>,
-    money: Option<Money>,
+    cost_display: Option<String>,
     queue: QueueStatus,
     drafts: usize,
     cwd: String,
@@ -290,7 +290,7 @@ impl SurfaceSnapshot {
             cost,
             used_tokens: state.context.used_tokens,
             window: state.context.window,
-            money: state.cost.known().copied(),
+            cost_display: visible_cost(state),
             queue: seat.queue,
             drafts: seat.drafts,
             cwd: seat.cwd,
@@ -423,9 +423,7 @@ impl SurfaceSnapshot {
             StatusSegmentName::Context => Some(SegmentValue::text(self.context_display())),
             // An unpriced or unstarted session has no figure to show; a
             // `$0` here would claim the spend is known to be nothing.
-            StatusSegmentName::Cost => self
-                .money
-                .map(|money| SegmentValue::text(money_display(&money))),
+            StatusSegmentName::Cost => self.cost_display.as_ref().map(SegmentValue::text),
             // Idle counters carry no news, so they do not take a row cell.
             StatusSegmentName::Queue => self.active(name).then(|| {
                 SegmentValue::text(format!(
@@ -460,6 +458,66 @@ impl SurfaceSnapshot {
             StatusSegmentName::Trust => self.trust == Trust::Untrusted,
             _ => self.value(name).is_some(),
         }
+    }
+}
+
+// Policy zeros are budget accounting, not a known per-token currency price.
+fn visible_cost(state: &SessionState) -> Option<String> {
+    let mut equivalent: Option<Money> = None;
+    let mut policies = 0;
+    let mut unpriced = matches!(state.cost, CumulativeCost::Unknown(_));
+    let mut monetary = false;
+    for charge in &state.charges {
+        match &charge.cost {
+            CostDelta::Known {
+                attribution:
+                    CostAttribution::MeteringPolicy {
+                        equivalent: estimate,
+                        ..
+                    },
+                ..
+            } => {
+                policies += 1;
+                match estimate.as_deref() {
+                    Some(SubscriptionEquivalent::V1 { amount, .. }) => {
+                        equivalent = match equivalent {
+                            Some(total) => match total.checked_add(amount) {
+                                Ok(total) => Some(total),
+                                Err(_) => {
+                                    unpriced = true;
+                                    None
+                                }
+                            },
+                            None => Some(*amount),
+                        };
+                    }
+                    None => unpriced = true,
+                }
+            }
+            CostDelta::Known { .. } => monetary = true,
+            CostDelta::Unknown(_) => unpriced = true,
+        }
+    }
+    if policies > 0 {
+        let estimate = equivalent.map(|amount| {
+            format!(
+                "{} subscription-equivalent (standard API)",
+                money_display(&amount)
+            )
+        });
+        return Some(if unpriced || monetary {
+            estimate.map_or_else(
+                || "unpriced".to_owned(),
+                |text| format!("{text} (partial; mixed/unpriced)"),
+            )
+        } else {
+            estimate.unwrap_or_else(|| "unpriced".to_owned())
+        });
+    }
+    match &state.cost {
+        CumulativeCost::Unstarted => None,
+        CumulativeCost::Unknown(_) => Some("unpriced".to_owned()),
+        CumulativeCost::Known { total } => Some(money_display(total)),
     }
 }
 

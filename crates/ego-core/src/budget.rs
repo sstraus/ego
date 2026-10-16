@@ -336,7 +336,10 @@ pub enum Metering {
     /// Also **not** the answer to "we do not know this row's rates". That is
     /// `Currency` with no rates: this variant asserts *the provider charges
     /// nothing per token*, a claim about the world that has to be earned.
-    Subscription { revision: MeteringRevision },
+    Subscription {
+        revision: MeteringRevision,
+        equivalent: Option<Box<crate::cost::EquivalentPricing>>,
+    },
     /// Nobody is charging: a daemon serving its own weights. Same reasoning
     /// as [`Subscription`](Self::Subscription), one row over.
     Unmetered { revision: MeteringRevision },
@@ -349,7 +352,7 @@ impl Metering {
             Metering::Currency { settlement } => MeteringIdentity::Currency {
                 settlement: settlement.clone(),
             },
-            Metering::Subscription { revision } => MeteringIdentity::Subscription {
+            Metering::Subscription { revision, .. } => MeteringIdentity::Subscription {
                 revision: revision.clone(),
             },
             Metering::Unmetered { revision } => MeteringIdentity::Unmetered {
@@ -427,9 +430,10 @@ impl Metering {
     pub fn policy_attribution(&self) -> Option<CostAttribution> {
         match self {
             Metering::Currency { .. } => None,
-            Metering::Subscription { revision } | Metering::Unmetered { revision } => {
+            Metering::Subscription { revision, .. } | Metering::Unmetered { revision } => {
                 Some(CostAttribution::MeteringPolicy {
                     revision: revision.clone(),
+                    equivalent: None,
                 })
             }
         }
@@ -632,7 +636,9 @@ impl BudgetBinding {
             (
                 MeteringIdentity::Subscription { revision }
                 | MeteringIdentity::Unmetered { revision },
-                CostAttribution::MeteringPolicy { revision: settled },
+                CostAttribution::MeteringPolicy {
+                    revision: settled, ..
+                },
             ) => revision == settled,
             _ => false,
         }

@@ -707,6 +707,7 @@ mod acp_golden {
             CurrencyCode::new("USD").expect("USD is a valid code"),
             CostAttribution::MeteringPolicy {
                 revision: MeteringRevision("ego/builtin/openai-codex-subscription/v1".to_owned()),
+                equivalent: None,
             },
         )
     }

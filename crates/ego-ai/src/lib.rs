@@ -18,3 +18,5 @@ pub mod provider;
 pub mod resolver;
 mod tool_names;
 pub mod wire;
+
+mod subscription_pricing;
