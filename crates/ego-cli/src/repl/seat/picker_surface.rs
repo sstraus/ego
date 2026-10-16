@@ -449,47 +449,11 @@ fn wrap_instruction(instruction: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::model_picker::ModelPickerRow;
-    use crate::render::{Capabilities, Depth, Style};
     use crate::run::InteractiveSeat;
     use ego_ai::catalogue::{ModelAvailability, ModelAvailabilityCause, ModelSlug};
     use ego_core::generator::capabilities::ReasoningEffortSupport;
     use ego_core::generator::types::ThinkingLevel;
     use unicode_width::UnicodeWidthStr;
-
-    #[derive(Clone, Copy)]
-    pub(super) enum PickerRole {
-        Question,
-        Selected,
-        Label,
-        Description,
-        Hint,
-    }
-
-    /// One role table for question, model/reasoning and session picker frames.
-    pub(super) fn picker_row(text: impl Into<String>, role: PickerRole, depth: Depth) -> String {
-        let style = match role {
-            PickerRole::Question | PickerRole::Label => Style::PLAIN,
-            PickerRole::Selected => Style::PLAIN.reverse().bold(),
-            PickerRole::Description | PickerRole::Hint => Style::PLAIN.dim(),
-        };
-        crate::render::Line::styled(text, style).render(depth)
-    }
-
-    pub(super) fn picker_capabilities(status: &SharedStatus) -> Capabilities {
-        let status = status.lock().expect("surface status lock");
-        let mut caps = status.permission_capabilities.with_current_width();
-        caps.width = picker_width(
-            status.width,
-            if caps.on_screen() {
-                Some(caps.width)
-            } else {
-                crossterm::terminal::size()
-                    .ok()
-                    .map(|(cols, _)| usize::from(cols))
-            },
-        );
-        caps
-    }
 
     fn view() -> ModelPickerView {
         ModelPickerView {
