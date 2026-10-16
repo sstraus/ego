@@ -47,7 +47,9 @@ pub use grep::{GrepParams, GrepTool};
 pub use memory::{MemoryEntryType, MemoryLookup, MemoryLookupParams};
 pub use read::{ReadParams, ReadTool};
 pub use read_tool_result::{ReadToolResult, ReadToolResultParams};
-pub use web::{ExaSearch, SearchBackend, WebFetch, WebFetchParams, WebSearch, WebSearchParams};
+pub use web::{
+    ExaSearch, HostedWebSearch, SearchBackend, WebFetch, WebFetchParams, WebSearch, WebSearchParams,
+};
 pub use write::{WriteParams, WriteTool};
 
 use std::path::{Path, PathBuf};

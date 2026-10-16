@@ -3139,3 +3139,24 @@ async fn cli_drain_repeated_empty_drain_does_not_duplicate_settlement() {
         "an empty second drain must not rerun hooks or append another settlement"
     );
 }
+// Catches: native providers require EXA_API_KEY or expose Exa as a silent fallback.
+#[test]
+fn native_search_registry_does_not_require_or_select_exa() {
+    for model in ["openai/fixture", "anthropic/fixture"] {
+        let tools = composition::tools_with_mode(
+            Some(&vec!["web_search".into()]),
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            ego_core::orchestrator::Mode::Observe,
+            Some(model),
+        )
+        .unwrap();
+        assert_eq!(tools.len(), 1);
+        let descriptor = tools[0].descriptor();
+        assert_eq!(descriptor.name, "web_search");
+        assert!(descriptor.description.contains("provider hosted tool"));
+        assert!(!descriptor.description.contains("EXA_API_KEY"));
+    }
+}

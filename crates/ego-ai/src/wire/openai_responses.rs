@@ -90,6 +90,7 @@ pub const PATH: &str = "responses";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
     ReasoningStateNotCarriable,
+    ProviderContentNotCarriable,
     ImageMediaTypeNotSupported(ImageMediaType),
     ImageRoleNotSupported,
 }
@@ -97,6 +98,10 @@ pub enum Inexpressible {
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ProviderContentNotCarriable => write!(
+                f,
+                "openai-responses cannot replay provider content from another dialect or invalid JSON"
+            ),
             Self::ReasoningStateNotCarriable => write!(
                 f,
                 "openai-responses has no established projection for ego's opaque reasoning state; dropping it is forbidden"
@@ -129,9 +134,11 @@ struct WireRequest<'a> {
     prompt_cache_retention: Option<&'static str>,
     model: &'a str,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tool_calls: Option<u32>,
     /// Always `false`. See this module's header: the default is `true`.
     store: bool,
-    input: Vec<Value>,
+    input: Vec<WireInput<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,17 +149,31 @@ struct WireRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum WireInput<'a> {
+    Value(Value),
+    Replayed(&'a RawValue),
+}
+
+#[derive(Debug, Serialize)]
 struct WireReasoning {
     effort: &'static str,
 }
 
 #[derive(Debug, Serialize)]
-struct WireTool<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    name: &'a str,
-    description: &'a str,
-    parameters: &'a Value,
+#[serde(untagged)]
+enum WireTool<'a> {
+    WebSearch {
+        #[serde(rename = "type")]
+        kind: &'static str,
+    },
+    Function {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: &'a str,
+        description: &'a str,
+        parameters: &'a Value,
+    },
 }
 
 /// OpenAI's spelling for every level [`ThinkingLevel`] can produce.
@@ -179,7 +200,7 @@ fn carries_reasoning(req: &GenRequest) -> bool {
         .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
 }
 
-fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
+fn input_items(req: &GenRequest) -> Result<Vec<WireInput<'_>>, Inexpressible> {
     let mut items = Vec::new();
     for message in req.messages.messages() {
         let has_image = message
@@ -221,7 +242,9 @@ fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
                     }));
                 }
             }
-            items.push(serde_json::json!({ "role": "user", "content": content }));
+            items.push(WireInput::Value(
+                serde_json::json!({ "role": "user", "content": content }),
+            ));
         }
         for block in &message.content {
             match block {
@@ -230,43 +253,52 @@ fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
                 // ego minted. It stays explicit rather than falling into a
                 // wildcard so that adding a block kind is a compile error
                 // here rather than a silently dropped field.
+                ContentBlock::ProviderContent { state } => {
+                    if state.dialect != "openai-responses" {
+                        return Err(Inexpressible::ProviderContentNotCarriable);
+                    }
+                    items.push(WireInput::Replayed(
+                        serde_json::from_str::<&RawValue>(&state.blob)
+                            .map_err(|_| Inexpressible::ProviderContentNotCarriable)?,
+                    ));
+                }
                 ContentBlock::Reasoning { .. } => {}
                 // Handled above when the message had one, and refused above
                 // when the role was wrong.
                 ContentBlock::Image { .. } => {}
                 ContentBlock::Text { text } if !has_image => match message.role {
-                    Role::System => items.push(serde_json::json!({
+                    Role::System => items.push(WireInput::Value(serde_json::json!({
                         "role": "system",
                         "content": text,
-                    })),
-                    Role::User => items.push(serde_json::json!({
+                    }))),
+                    Role::User => items.push(WireInput::Value(serde_json::json!({
                         "role": "user",
                         "content": text,
-                    })),
-                    Role::Assistant => items.push(serde_json::json!({
+                    }))),
+                    Role::Assistant => items.push(WireInput::Value(serde_json::json!({
                         "type": "message",
                         "role": "assistant",
                         "content": [{ "type": "output_text", "text": text }],
-                    })),
+                    }))),
                 },
                 ContentBlock::Text { .. } => {}
                 ContentBlock::ToolUse {
                     call_id,
                     name,
                     args,
-                } => items.push(serde_json::json!({
+                } => items.push(WireInput::Value(serde_json::json!({
                     "type": "function_call",
                     "call_id": call_id,
                     "name": name,
                     "arguments": args,
-                })),
+                }))),
                 ContentBlock::ToolResult {
                     call_id, output, ..
-                } => items.push(serde_json::json!({
+                } => items.push(WireInput::Value(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": output,
-                })),
+                }))),
             }
         }
     }
@@ -281,17 +313,22 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     if carries_reasoning(req) {
         return Err(Inexpressible::ReasoningStateNotCarriable);
     }
-    let tools: Vec<WireTool<'_>> = req
+    let mut tools: Vec<WireTool<'_>> = req
         .tools
         .iter()
-        .map(|tool| WireTool {
+        .filter(|tool| req.web_search.is_none() || tool.name != "web_search")
+        .map(|tool| WireTool::Function {
             kind: "function",
             name: &tool.name,
             description: &tool.description,
             parameters: &tool.parameters,
         })
         .collect();
+    if req.web_search.is_some() {
+        tools.push(WireTool::WebSearch { kind: "web_search" });
+    }
     let wire = WireRequest {
+        max_tool_calls: req.web_search.map(|search| search.max_requests.get()),
         prompt_cache_key: super::cache::routing_key(req, "openai"),
         prompt_cache_retention: req.cache.as_ref().and_then(|cache| {
             // Current vendor guide: GPT-5.6+ uses a different TTL contract.
@@ -458,6 +495,7 @@ fn map_usage(raw: &RawValue) -> Option<Usage> {
         cache_write_tokens,
         cache_write_extended_tokens: 0,
         output_tokens: usage.output_tokens,
+        web_search_requests: 0,
         reasoning_tokens: usage
             .output_tokens_details
             .as_ref()
@@ -478,6 +516,8 @@ struct StreamDecoder {
     calls: BTreeMap<String, PartialToolCall>,
     finish_reason: Option<StopReason>,
     usage: Option<Usage>,
+    search_calls: std::collections::BTreeSet<String>,
+    provider_items: std::collections::BTreeSet<String>,
     usage_incoherent: bool,
     cost: Option<Arc<dyn ProviderCost>>,
     stated_cost: Option<Money>,
@@ -490,6 +530,8 @@ impl StreamDecoder {
             calls: BTreeMap::new(),
             finish_reason: None,
             usage: None,
+            search_calls: Default::default(),
+            provider_items: Default::default(),
             usage_incoherent: false,
             cost,
             stated_cost: None,
@@ -574,6 +616,67 @@ impl StreamDecoder {
                 return;
             }
         };
+        if event.kind == "response.output_item.done" {
+            if let Ok(raw) = serde_json::from_str::<Value>(frame)
+                && let Some(item) = raw.get("item")
+                && let Some(id) = item["id"].as_str()
+                && self.provider_items.insert(id.to_owned())
+            {
+                match item["type"].as_str() {
+                    Some("web_search_call") => {
+                        let id = item["id"].as_str().unwrap_or_default().to_owned();
+                        if item["action"]["type"] == "search"
+                            && self.search_calls.insert(id.clone())
+                        {
+                            out.push(AiEvent::WebSearch {
+                                call_id: id,
+                                query: item["action"]["query"]
+                                    .as_str()
+                                    .unwrap_or("web search")
+                                    .to_owned(),
+                            });
+                        }
+                        out.push(AiEvent::ProviderContent {
+                            state: ego_core::generator::types::ReasoningState {
+                                dialect: "openai-responses".into(),
+                                blob: serde_json::to_string(item).expect("JSON value"),
+                            },
+                            visible: false,
+                        });
+                    }
+                    Some("message")
+                        if item["content"].as_array().is_some_and(|parts| {
+                            parts.iter().any(|part| {
+                                part["annotations"]
+                                    .as_array()
+                                    .is_some_and(|a| !a.is_empty())
+                            })
+                        }) =>
+                    {
+                        for part in item["content"].as_array().into_iter().flatten() {
+                            for citation in part["annotations"].as_array().into_iter().flatten() {
+                                if citation["type"] == "url_citation"
+                                    && let Some(url) = citation["url"].as_str()
+                                {
+                                    out.push(AiEvent::Citation {
+                                        url: url.into(),
+                                        title: citation["title"].as_str().unwrap_or(url).into(),
+                                    });
+                                }
+                            }
+                        }
+                        out.push(AiEvent::ProviderContent {
+                            state: ego_core::generator::types::ReasoningState {
+                                dialect: "openai-responses".into(),
+                                blob: serde_json::to_string(item).expect("JSON value"),
+                            },
+                            visible: true,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
         match event.kind.as_str() {
             "response.output_text.delta" => {
                 if let Some(text) = event.delta.filter(|text| !text.is_empty()) {
@@ -627,7 +730,10 @@ impl StreamDecoder {
                         self.stated_cost = Some(cost);
                     }
                     match map_usage(raw) {
-                        Some(usage) => self.usage = Some(usage),
+                        Some(mut usage) => {
+                            usage.web_search_requests = self.search_calls.len() as u64;
+                            self.usage = Some(usage);
+                        }
                         None => self.usage_incoherent = true,
                     }
                 }

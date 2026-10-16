@@ -34,6 +34,7 @@ mod generator {
 
     fn gen_request() -> GenRequest {
         GenRequest {
+            web_search: None,
             cache: None,
             model: "claude-opus-5".to_string(),
             messages: Conversation::new(vec![Message::text(
@@ -60,6 +61,7 @@ mod generator {
     /// checks that answer it read the history.
     fn request_carrying_reasoning() -> GenRequest {
         GenRequest {
+            web_search: None,
             cache: None,
             messages: Conversation::new(vec![
                 Message::text(Role::User, "list the files".to_string()),
@@ -108,6 +110,7 @@ mod generator {
     fn quote() -> PricingQuote {
         let rate = |d: &str| Some(d.parse::<Amount>().expect("a valid test rate"));
         PricingQuote {
+            web_search: None,
             revision: PricingRevision("test-2026-08".to_string()),
             currency: CurrencyCode::new("USD").expect("USD is a valid code"),
             uncached_input: rate("0.000003"),
@@ -216,7 +219,11 @@ mod generator {
             match event {
                 // Not journalled by this stub assembler: it exists to test
                 // turn assembly, and the reasoning carrier is `turn/drain`'s.
-                AiEvent::ReasoningState(_) | AiEvent::ProviderFailure { .. } => Vec::new(),
+                AiEvent::ProviderContent { .. }
+                | AiEvent::WebSearch { .. }
+                | AiEvent::Citation { .. }
+                | AiEvent::ReasoningState(_)
+                | AiEvent::ProviderFailure { .. } => Vec::new(),
                 AiEvent::TextDelta { text } => {
                     let item = *self.message_item.get_or_insert_with(ItemId::new);
                     let env = self.envelope(Some(item));
@@ -278,7 +285,7 @@ mod generator {
                         // Terminal for the attempt, but nothing was
                         // delivered: the provider will hand the result over
                         // elsewhere, so there is no turn to complete yet.
-                        StopReason::Deferred => return vec![],
+                        StopReason::Deferred | StopReason::Continue => return vec![],
                     };
                     let env = self.envelope(None);
                     vec![DomainEvent {
@@ -333,6 +340,7 @@ mod generator {
                 cache_write_tokens: 0,
                 cache_write_extended_tokens: 0,
                 output_tokens: 34,
+                web_search_requests: 0,
                 reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::ToolUse),
@@ -380,6 +388,7 @@ mod generator {
                     cache_write_tokens: 0,
                     cache_write_extended_tokens: 0,
                     output_tokens: 34,
+                    web_search_requests: 0,
                     reasoning_tokens: None,
                 },
                 // 12 x 0.000003 + 34 x 0.000015 = 0.000546, exactly.
@@ -598,6 +607,7 @@ mod generator {
             },
         };
         let req = GenRequest {
+            web_search: None,
             cache: None,
             messages: Conversation::new(vec![
                 Message::text(Role::User, "list the files".to_string()),
@@ -642,6 +652,7 @@ mod generator {
         let mut caps = capabilities(ReasoningCarryover::Portable);
         caps.reasoning_efforts = ReasoningEffortSupport::Unknown;
         let req = GenRequest {
+            web_search: None,
             cache: None,
             thinking: ThinkingLevel::Medium,
             ..gen_request()
@@ -673,6 +684,7 @@ mod generator {
             ThinkingLevel::Max,
         ] {
             let req = GenRequest {
+                web_search: None,
                 cache: None,
                 thinking: level,
                 ..gen_request()
@@ -695,6 +707,7 @@ mod generator {
         let mut caps = capabilities(ReasoningCarryover::Portable);
         caps.reasoning_efforts = ReasoningEffortSupport::Only(accepted.clone());
         let req = GenRequest {
+            web_search: None,
             cache: None,
             thinking: ThinkingLevel::Max,
             ..gen_request()
@@ -721,6 +734,7 @@ mod generator {
             ThinkingLevel::Medium,
         ]));
         let req = GenRequest {
+            web_search: None,
             cache: None,
             thinking: ThinkingLevel::Low,
             ..gen_request()
@@ -734,6 +748,7 @@ mod generator {
         let mut caps = capabilities(ReasoningCarryover::Portable);
         caps.reasoning_efforts = ReasoningEffortSupport::Any;
         let req = GenRequest {
+            web_search: None,
             cache: None,
             thinking: ThinkingLevel::Max,
             ..gen_request()
@@ -774,6 +789,7 @@ mod generator {
         target.reasoning_efforts =
             ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::Low]));
         let req = GenRequest {
+            web_search: None,
             cache: None,
             thinking: ThinkingLevel::Max,
             ..gen_request()
@@ -817,6 +833,7 @@ mod generator {
         let mut target = capabilities(ReasoningCarryover::Portable);
         target.supports_parallel_tool_calls = false;
         let req = GenRequest {
+            web_search: None,
             cache: None,
             parallel_tool_calls: true,
             ..gen_request()
@@ -848,6 +865,7 @@ mod generator {
         let mut target = capabilities(ReasoningCarryover::Portable);
         target.max_output_tokens = Some(100);
         let req = GenRequest {
+            web_search: None,
             cache: None,
             max_output_tokens: Some(1024),
             ..gen_request()

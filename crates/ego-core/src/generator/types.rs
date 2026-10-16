@@ -544,6 +544,8 @@ pub enum StopReason {
     Length,
     /// The model stopped to call a tool.
     ToolUse,
+    /// The provider paused its own server-tool loop; resume the unchanged content.
+    Continue,
     /// The provider reported an error.
     Error,
     /// The generation was cancelled.
@@ -621,6 +623,8 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
+    /// Opaque provider-owned output, replayed only to its originating dialect.
+    ProviderContent { state: ReasoningState },
     /// Visible text.
     Text { text: String },
     /// Exact image bytes. Only a user-authored message may carry this block.
@@ -811,7 +815,9 @@ impl Conversation {
                 // Neither takes part in the call/result relation these
                 // invariants are about. Reasoning is ordered, and the block
                 // list is what carries that; nothing here needs to know it.
-                ContentBlock::Text { .. } | ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Text { .. }
+                | ContentBlock::Reasoning { .. }
+                | ContentBlock::ProviderContent { .. } => {}
                 ContentBlock::Image { .. } if role != Role::User => {
                     return Err(HistoryError::ImageFromNonUser);
                 }
@@ -888,7 +894,7 @@ pub struct ToolDescriptor {
     pub parameters: serde_json::Value,
 }
 
-/// Opaque, provider-private reasoning-continuation state (e.g. an encrypted
+/// Opaque, provider-private continuation state (e.g. an encrypted
 /// reasoning signature). `ego-core` never interprets the contents — only
 /// whether a target `ModelCapabilities` declares it can carry this over
 /// (`capabilities::ReasoningCarryover`).
@@ -908,9 +914,18 @@ pub struct ReasoningState {
     pub dialect: String,
 }
 
+/// Maximum provider-side search uses authorized for one generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedSearch {
+    pub max_requests: std::num::NonZeroU32,
+}
+
 /// A request to generate the next assistant turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenRequest {
+    /// Explicit hosted search request. No local tool executor receives these calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<HostedSearch>,
     /// Transient provider-cache policy and prefix boundary; never journaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<PromptCache>,

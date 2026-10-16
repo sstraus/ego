@@ -249,6 +249,7 @@ pub(super) fn tools(
         history,
         environment,
         ego_core::orchestrator::Mode::Observe,
+        None,
     )
 }
 
@@ -271,11 +272,21 @@ pub(super) fn tools_with_mode(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
     orchestration: ego_core::orchestrator::Mode,
+    model: Option<&str>,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
+    if model
+        .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
+        .is_some_and(|provider| matches!(provider, "openai" | "anthropic"))
+    {
+        all.retain(|tool| tool.descriptor().name != "web_search");
+        all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
+            ego_tools::tools::HostedWebSearch,
+        ))));
+    }
     if profile == Some("coordinator") {
         all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
             ego_tools::tools::MemoryLookup,
@@ -1031,6 +1042,13 @@ pub(super) fn prepared_materials(
             .policy()
             .map_err(|error| UsageError(error.to_string()))?,
         orchestration_mode(&settings.effective),
+        args.model.as_deref().or_else(|| {
+            settings
+                .effective
+                .model
+                .as_ref()
+                .map(|model| model.0.as_str())
+        }),
     )?;
     let slug = args
         .model
