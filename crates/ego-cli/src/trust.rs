@@ -33,8 +33,6 @@ use crate::output::Diagnostics;
 /// Project configuration and the local override beside it: the two files that
 /// carry project hooks, project MCP servers and project rules.
 const PROJECT_CONFIGS: [&str; 2] = [".ego/config.toml", ".ego/config.local.toml"];
-/// One directory per project skill, each holding one `SKILL.md`.
-const PROJECT_SKILLS: &str = ".ego/skills";
 const SKILL_FILE: &str = "SKILL.md";
 
 /// Shared project rules precede repository rules, but scratch fixtures under
@@ -583,12 +581,15 @@ fn inventory(root: &Path) -> TrustInventory {
         .iter()
         .map(|relative| root.join(relative))
         .collect();
-    paths.extend(skill_files(root));
     paths.extend(referenced_commands(root));
     let mut entries: Vec<_> = paths
         .iter()
         .filter_map(|path| content(root, path))
         .collect();
+    entries.extend(skill_files(root).iter().filter_map(|path| {
+        // Ancestor skill roots are part of the same explicit trust answer.
+        content(path.parent()?, path)
+    }));
 
     let discovery_root = match std::env::var_os("HOME") {
         Some(home) => match instruction_discovery_root(root, &PathBuf::from(home)) {
@@ -749,16 +750,36 @@ fn readable<T>(path: &Path, result: std::io::Result<T>) -> Option<T> {
     }
 }
 
-/// `<root>/.ego/skills/*/SKILL.md`, exactly as the skill loader finds them.
+/// Inventory the same project roots as the loader before asking for trust.
 fn skill_files(root: &Path) -> Vec<PathBuf> {
-    let skills = root.join(PROJECT_SKILLS);
-    let Some(entries) = readable(&skills, fs::read_dir(&skills)) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|entry| readable(&skills, entry))
-        .map(|entry| entry.path().join(SKILL_FILE))
-        .collect()
+    let mut paths = Vec::new();
+    let mut canonical = std::collections::BTreeSet::new();
+    for skills in crate::capability_roots::discover_capability_roots(
+        root,
+        true,
+        Path::new("/etc/ego"),
+        Path::new(""),
+        None,
+        "skills",
+    )
+    .into_iter()
+    .filter(|entry| entry.source == ego_core::event::skill::SkillSourceAuthority::Project)
+    {
+        let Some(entries) = readable(&skills.path, fs::read_dir(&skills.path)) else {
+            continue;
+        };
+        for path in entries
+            .filter_map(|entry| readable(&skills.path, entry))
+            .map(|entry| entry.path().join(SKILL_FILE))
+        {
+            if let Ok(resolved) = fs::canonicalize(&path)
+                && canonical.insert(resolved)
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }
 
 /// One entry, or nothing if this path is not something ego would admit.
@@ -1518,5 +1539,27 @@ mod tests {
             );
         }
         assert_eq!(fixture.asked.get(), 2);
+    }
+}
+
+#[cfg(test)]
+mod regression_case {
+    use super::*;
+
+    #[test]
+    fn portable_only_workspace_prompts_and_ancestor_changes_invalidate_trust() {
+        // Catches: portable skills bypass the prompt or reuse stale approval.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let skill = root.join(".agents/skills/foo/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&skill, "first").unwrap();
+        let before = inventory(&nested);
+        assert!(!before.is_empty());
+        fs::write(&skill, "second").unwrap();
+        assert_ne!(before.digest(), inventory(&nested).digest());
     }
 }
