@@ -1477,7 +1477,7 @@ fn remember_permission(
 /// Called only from the terminal owner, between reads, so nothing else is
 /// painting. It does not go through the row output: that holds text until a
 /// newline, and a wait has no more rows coming.
-fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
+pub(super) fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
     let signals = status.lock().expect("surface status lock").signals;
     let Some((osc, quiet)) = signals else {
         return;

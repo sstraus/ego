@@ -273,14 +273,11 @@ pub(crate) fn publish_add(
 pub(crate) fn repl_add_args(arguments: &str) -> Result<McpArgs, UsageError> {
     let mut tokens = vec!["ego".into(), "mcp".into()];
     tokens.extend(shell_words::split(arguments).map_err(|error| UsageError(error.to_string()))?);
-    match crate::cli::parse(tokens)? {
+    match crate::cli::parse(tokens).map_err(|_| UsageError(SESSION_USAGE.into()))? {
         crate::cli::Invocation::Mcp(args) if matches!(args.action, McpAction::Add { .. }) => {
             Ok(*args)
         }
-        _ => Err(UsageError(
-            "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]"
-                .into(),
-        )),
+        _ => Err(UsageError(SESSION_USAGE.into())),
     }
 }
 
@@ -835,6 +832,41 @@ impl ConfigurationReport {
     }
 }
 
+pub(crate) const SESSION_USAGE: &str =
+    "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
+
+/// The terminal inventory exposes state labels, never registry debug metadata.
+pub(crate) fn session_inventory<'a>(
+    status: &McpRegistryStatus,
+    servers: impl IntoIterator<Item = (&'a McpServerName, bool)>,
+) -> String {
+    let mut rows = vec!["mcp:".to_owned()];
+    rows.extend(servers.into_iter().map(|(name, disabled)| {
+        let state = if disabled {
+            "off (session)"
+        } else {
+            server_status_text(status, name)
+        };
+        format!("{name}\t{state}")
+    }));
+    if rows.len() == 1 {
+        rows[0] = "mcp: no configured servers".to_owned();
+    }
+    rows.push("/mcp toggle NAME — turn a server on/off for this session".to_owned());
+    rows.push("/mcp add NAME --http URL | /mcp add NAME --stdio -- COMMAND ...".to_owned());
+    rows.join("\n")
+}
+
+pub(crate) fn session_error(error: &RunTermination) -> String {
+    let message = match error {
+        RunTermination::UsageError { message } | RunTermination::Failed { message } => {
+            message.as_str()
+        }
+        _ => error.exit_reason(),
+    };
+    format!("MCP control failed: {message}")
+}
+
 /// Session-local admission changes do not mutate configured enablement.
 pub(crate) async fn session_command(
     arguments: &str,
@@ -843,24 +875,12 @@ pub(crate) async fn session_command(
     disabled: &mut std::collections::BTreeSet<McpServerName>,
 ) -> Result<String, RunTermination> {
     if arguments.is_empty() {
-        let status = controller.status();
-        if configured.is_empty() {
-            return Ok("mcp: no configured servers".into());
-        }
-        return Ok(configured
-            .iter()
-            .map(|(name, _, _)| {
-                format!(
-                    "{name}\t{}",
-                    if disabled.contains(name) {
-                        "off (session)"
-                    } else {
-                        server_status_text(&status, name)
-                    }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"));
+        return Ok(session_inventory(
+            &controller.status(),
+            configured
+                .iter()
+                .map(|(name, _, _)| (name, disabled.contains(name))),
+        ));
     }
     let (name, candidates, turning_off) = if let Some(raw) = arguments.strip_prefix("toggle ") {
         let name = raw
@@ -937,4 +957,38 @@ pub(crate) async fn session_command(
             server_status_text(&controller.status(), &name)
         }
     ))
+}
+
+#[cfg(test)]
+mod session_presentation_tests {
+    use super::*;
+
+    // Catches: an empty inventory hides the available slash operations.
+    #[test]
+    fn empty_session_inventory_includes_slash_syntax() {
+        let text = session_inventory(&McpRegistryStatus::default(), std::iter::empty());
+        assert!(text.contains("mcp: no configured servers"));
+        assert!(text.contains("/mcp toggle NAME"));
+        assert!(text.contains("/mcp add NAME"));
+    }
+
+    // Catches: malformed slash input returns the top-level CLI usage dump.
+    #[test]
+    fn invalid_session_add_uses_slash_usage() {
+        assert_eq!(
+            repl_add_args("--invalid extra").unwrap_err().0,
+            SESSION_USAGE
+        );
+    }
+
+    // Catches: formatting a termination with Debug escapes newlines and exposes Rust variants.
+    #[test]
+    fn session_errors_keep_plain_message_lines() {
+        assert_eq!(
+            session_error(&RunTermination::UsageError {
+                message: "invalid server\nusage: /mcp".into()
+            }),
+            "MCP control failed: invalid server\nusage: /mcp"
+        );
+    }
 }

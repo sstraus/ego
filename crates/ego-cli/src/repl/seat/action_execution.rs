@@ -301,6 +301,15 @@ pub(super) fn surface_line(
     drafts: &mut DraftStash,
 ) -> (Line, bool) {
     loop {
+        if phase.get() == EditPhase::Idle {
+            question::tell_host(status, |osc, _| {
+                [
+                    osc.state(crate::render::osc::State::Idle),
+                    osc.progress(crate::render::osc::Progress::Cleared),
+                ]
+                .concat()
+            });
+        }
         let signal = editor.read_line(prompt);
         // Reject blank input before Reedline commits it to history or clears
         // the composer, for both idle submission and busy queue admission.
@@ -839,6 +848,20 @@ pub(super) fn apply_surface_effect(
                 diagnostics.expand_last_tool();
             }
         }
+        SurfaceActionEffect::Help if busy => {
+            let help = {
+                let current = status.lock().expect("surface status lock");
+                render_action_help(
+                    &current
+                        .actions
+                        .as_ref()
+                        .expect("installed actions")
+                        .registry,
+                    current.width,
+                )
+            };
+            commit_to_transcript(status, &help);
+        }
         SurfaceActionEffect::Help => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Help)));
         }
@@ -885,12 +908,14 @@ pub(super) fn apply_surface_effect(
                 .clone()
                 .expect("the enabled MCP action has an installed handler");
             let registry_status = actions.registry.status();
-            let notice = if registry_status.servers().is_empty() {
-                "mcp: no admitted servers".to_string()
-            } else {
-                format!("mcp: {:?}", registry_status.servers())
-            };
-            status.lock().expect("surface status lock").notice = Some(notice);
+            let inventory = crate::mcp::session_inventory(
+                &registry_status,
+                actions
+                    .servers
+                    .iter()
+                    .map(|(name, disabled)| (name, *disabled)),
+            );
+            commit_to_transcript(status, &inventory);
         }
         SurfaceActionEffect::Tasks => {
             return Some(Line::HostCommand(HostCommand::Tasks(String::new())));
