@@ -673,6 +673,7 @@ mod regression_case {
 
     fn discovery(roots: &Roots, workspace: &Path, trusted: bool) -> SkillDiscovery {
         SkillDiscovery {
+            command_roots: Vec::new(),
             roots: discover_capability_roots(
                 workspace,
                 trusted,
@@ -782,5 +783,77 @@ mod regression_case {
                 .render_list()
                 .contains(&agents.join("foo/SKILL.md").display().to_string())
         );
+    }
+}
+
+mod regression_case {
+    use super::*;
+    use crate::capability_roots::{discover_capability_roots, register_external_skill_roots};
+
+    #[test]
+    fn managed_and_codex_cache_files_reach_catalogue_without_admitting_plugin_caches() {
+        // Catches: registered foreign roots never reach the real catalogue, or
+        // installing a disabled plugin implicitly grants its skills admission.
+        let fixture = Roots::new();
+        let base = fixture._dir.path();
+        let workspace = base.join("workspace");
+        let home = base.join("home");
+        let codex = home.join("custom-codex");
+        let claude = home.join("custom-claude");
+        let managed = base.join("managed-claude");
+        let admin = base.join("managed-codex");
+        for (root, name) in [
+            (codex.join("skills"), "codex-user"),
+            (codex.join("skills/.system"), "codex-bundled"),
+            (claude.join("skills"), "claude-custom"),
+            (managed.join(".claude/skills"), "claude-admin"),
+            (admin.join("skills"), "codex-admin"),
+            (workspace.join(".codex/skills"), "codex-project"),
+            (
+                claude.join("plugins/cache/demo/1/skills"),
+                "disabled-plugin",
+            ),
+        ] {
+            fixture.write(&root, name, &valid_for(name, ""), "real skill body");
+        }
+        for trusted in [false, true] {
+            let mut roots = discover_capability_roots(
+                &workspace,
+                trusted,
+                fixture.system.parent().unwrap(),
+                fixture.user.parent().unwrap(),
+                Some(&home),
+                "skills",
+            );
+            register_external_skill_roots(
+                &mut roots,
+                Some(&codex),
+                Some(&claude),
+                &managed,
+                &admin,
+            );
+            let catalogue = SkillCatalogue::discover(
+                SkillDiscovery {
+                    roots,
+                    command_roots: Vec::new(),
+                    trusted_project: trusted,
+                },
+                &[],
+            )
+            .unwrap();
+            let admitted = capture(&catalogue);
+            for (name, authority) in [
+                ("codex-user", SkillSourceAuthority::User),
+                ("codex-bundled", SkillSourceAuthority::User),
+                ("claude-custom", SkillSourceAuthority::User),
+                ("claude-admin", SkillSourceAuthority::System),
+                ("codex-admin", SkillSourceAuthority::System),
+            ] {
+                assert_eq!(admitted.descriptor(name).unwrap().source(), authority);
+            }
+            assert_eq!(admitted.descriptor("codex-project").is_some(), trusted);
+            assert!(admitted.descriptor("disabled-plugin").is_none());
+            assert!(admitted.diagnostics().is_empty());
+        }
     }
 }

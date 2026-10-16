@@ -618,6 +618,19 @@ impl HealthProbe for Skills {
             "the skill catalogue",
             roots,
         )?];
+        for (id, message) in crate::capability_roots::UNSUPPORTED_SKILL_SOURCES {
+            items.push(
+                HealthItem::new(
+                    HealthItemId::probe(id),
+                    HealthStatus::NotChecked,
+                    HealthDetail::fixed(message),
+                    HealthDetail::fixed("the skill root compatibility inventory"),
+                )
+                .remediation(HealthDetail::fixed(
+                    "install reviewed standalone skills in an ego skill root",
+                )),
+            );
+        }
         // A diagnostic is a skill that was rejected. It is a warning and not
         // an error because the rest of the catalogue is admitted and usable,
         // and it is never silent because a skill an operator wrote and cannot

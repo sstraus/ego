@@ -195,6 +195,26 @@ pub(crate) fn executable_surface_selected(
     };
     let root = root.as_path();
     let mut surface = ExecutableSurface::default();
+    for path in crate::command::project_files(root) {
+        let mut bytes = Vec::new();
+        if fs::File::open(&path)
+            .and_then(|file| {
+                file.take(TRUST_DIGEST_MAX_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .is_ok()
+        {
+            surface.programs.insert(
+                path.to_string_lossy().into_owned(),
+                ProgramEvidence {
+                    bytes: bytes.len() as u64,
+                    digest: ego_core::digest::sha256_hex(&bytes),
+                    executable: false,
+                    link_target: None,
+                },
+            );
+        }
+    }
     let configs = project_configs(root);
     let programs: Vec<_> = configs
         .iter()
@@ -643,11 +663,17 @@ fn inventory(root: &Path) -> TrustInventory {
         .iter()
         .map(|relative| root.join(relative))
         .collect();
+
     paths.extend(referenced_commands(root));
     let mut entries: Vec<_> = paths
         .iter()
         .filter_map(|path| content(root, path))
         .collect();
+    entries.extend(
+        crate::command::project_files(root)
+            .iter()
+            .filter_map(|path| content(path.parent()?, path)),
+    );
     entries.extend(skill_files(root).iter().filter_map(|path| {
         // Ancestor skill roots are part of the same explicit trust answer.
         content(path.parent()?, path)
@@ -1427,6 +1453,16 @@ mod tests {
     }
 
     #[test]
+    fn command_only_workspace_requires_trust_again_when_shell_source_changes() {
+        let fixture = Fixture::new();
+        fixture.write(".claude/commands/review.md", "Review !`true`\n");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        fixture.write(".claude/commands/review.md", "Review !`false`\n");
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
+    #[test]
     fn changing_a_referenced_hook_program_requires_a_new_answer() {
         let fixture = Fixture::new();
         fixture.write("scripts/hook.sh", "#!/bin/sh\ntrue\n");
@@ -1601,5 +1637,27 @@ mod tests {
             );
         }
         assert_eq!(fixture.asked.get(), 2);
+    }
+}
+
+#[cfg(test)]
+mod regression_case {
+    use super::*;
+
+    #[test]
+    fn portable_only_workspace_prompts_and_ancestor_changes_invalidate_trust() {
+        // Catches: portable skills bypass the prompt or reuse stale approval.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let skill = root.join(".agents/skills/foo/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&skill, "first").unwrap();
+        let before = inventory(&nested);
+        assert!(!before.is_empty());
+        fs::write(&skill, "second").unwrap();
+        assert_ne!(before.digest(), inventory(&nested).digest());
     }
 }

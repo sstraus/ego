@@ -2154,3 +2154,34 @@ Deletion uses the same durable tombstone as ACP `session/delete`. It hides
 only the target from `ego ls` and ACP session lists. It retains history for
 fork descendants and does not remove shared storage or resolve uncertain
 external effects. Repeated deletion succeeds.
+
+
+## Markdown custom commands
+
+Markdown files under `commands/` in the shared capability roots define `/name`
+prompts. Project namespaces are `.ego`, `.agents`, `.claude`, then `.opencode`;
+nearest trusted project wins over ancestors, user roots, and `/etc/ego/commands`.
+User roots include `$EGO_HOME/commands`, `~/.agents/commands`,
+`~/.claude/commands`, `~/.opencode/commands`, and `~/.config/opencode/commands`.
+A nested `git/review.md` is `/git:review`. Built-ins and skill-name collisions
+are refused visibly rather than shadowed.
+
+`$ARGUMENTS` inserts raw arguments; `$1`, `$2`, and later positions use shell-like
+argument grouping. Pi `$@`, `${1:-default}`, `${@:-default}`, `${@:N}` and `${@:N:L}`
+expressions are also supported in prompt text; malformed expressions fail visibly.
+With no placeholder, raw arguments are appended. `@path`
+inlines a workspace file under the instruction byte and file-count limits.
+`!` followed by a backtick-delimited shell command captures stdout before the
+prompt is sent. Shell execution uses the existing exec permission, approval,
+process identity, timeout, cancellation, and sandbox path. A failed, refused,
+truncated, or non-UTF-8 result refuses the complete prompt with a visible error.
+Arguments, imports and output cannot introduce additional shell markers.
+Use positional parameters inside shell markers; raw `$ARGUMENTS` there is refused.
+
+Optional strict YAML frontmatter accepts string `description` and `argument-hint`.
+`model`, `allowed-tools`, and all other behavioral fields are rejected visibly;
+they never silently grant foreign authority. Commands appear with admitted
+skills in help, completion, `/skills`, and ACP `available_commands_update`.
+See the [command contract](ARCHITECTURE.md)
+for bounds, ordering, and the distinction between atomic prompt publication and
+non-transactional shell side effects.

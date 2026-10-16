@@ -926,3 +926,17 @@ mod rule_matching_against_a_real_volume {
         }
     }
 }
+
+#[test]
+fn bounded_command_import_rejects_oversize_directory_and_symlink() {
+    let tree = Tree::new();
+    let file = tree.root.join("import.txt");
+    fs::write(&file, b"12345").unwrap();
+    let path = CanonPath::new(&file);
+    assert_eq!(OsFs.read_bounded(&path, 5).unwrap(), b"12345");
+    assert!(OsFs.read_bounded(&path, 4).is_err());
+    assert!(OsFs.read_bounded(&CanonPath::new(&tree.root), 5).is_err());
+    let alias = tree.root.join("alias");
+    std::os::unix::fs::symlink(&file, &alias).unwrap();
+    assert!(OsFs.read_bounded(&CanonPath::new(alias), 5).is_err());
+}

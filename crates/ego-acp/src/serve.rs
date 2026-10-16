@@ -653,6 +653,13 @@ pub enum SessionTrustStatus {
 }
 
 pub trait SessionTrustAdmission: Send + Sync {
+    /// The admitted user catalogue after this session's trust answer.
+    fn available_commands(
+        &self,
+        _root: &RunRoot,
+    ) -> Vec<ego_core::event::skill::SkillDescriptorEvidence> {
+        Vec::new()
+    }
     /// The adapter decides whether the process has a host-selected profile.
     /// Default ports never accept client self-attestation.
     fn attest_trusted(&self, _root: &RunRoot) {}
@@ -3377,6 +3384,16 @@ where
                             ),
                     )?;
                     notices.register(id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
+                    if let Some(trust) = &trust {
+                        let commands = trust.available_commands(&attachment_root).into_iter().map(|descriptor| {
+                            let command = v1::AvailableCommand::new(descriptor.name, descriptor.description);
+                            match descriptor.argument_hint {
+                                Some(hint) => command.input(v1::AvailableCommandInput::Unstructured(v1::UnstructuredCommandInput::new(hint))),
+                                None => command,
+                            }
+                        }).collect();
+                        cx.send_notification(v1::SessionNotification::new(id.clone(), v1::SessionUpdate::AvailableCommandsUpdate(v1::AvailableCommandsUpdate::new(commands))))?;
+                    }
                     if let Some(meta) = announcement {
                         emit_info(&cx, &id, &meta, lifecycle.as_deref())?;
                     }

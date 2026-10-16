@@ -382,6 +382,10 @@ impl<'a> Tools<'a> {
         self.effects.evidence
     }
 
+    pub(crate) fn command_cwd(&self) -> &CanonPath {
+        &self.cwd
+    }
+
     pub(crate) fn effect_ports(&self) -> ToolEffectPorts<'a> {
         self.effects.clone()
     }

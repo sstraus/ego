@@ -371,3 +371,20 @@ fn a_detail_may_name_a_visible_root_and_nothing_else_on_the_machine() {
     ego_core::health::HealthDetail::sanitized("probe", PRIVATE_MACHINE_PATH, &roots)
         .expect_err("a path outside every visible root must be refused, not printed");
 }
+
+#[test]
+fn unsupported_foreign_plugin_roots_are_not_silently_reported_as_supported() {
+    // Catches: a healthy standalone catalogue hides unsupported foreign sources.
+    let scratch = scratch();
+    let snapshot = observed(scratch.path());
+    let text = doctor::text(&snapshot);
+    for id in [
+        "skills.plugins.claude",
+        "skills.plugins.codex",
+        "skills.dynamic",
+    ] {
+        assert!(text.contains(id), "missing source diagnostic: {id}");
+    }
+    assert!(text.contains("installed caches are not admitted"));
+    assert!(text.contains("not_checked"));
+}
