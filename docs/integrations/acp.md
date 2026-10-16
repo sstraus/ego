@@ -6,6 +6,8 @@ full compatibility with every host capability.
 
 For wire shapes, fallback rules, source citations, and planned features, see
 [ego extensions to ACP](acp-extensions.md).
+For pinned standard TypeScript, Python, and Rust libraries and runnable clients,
+see [Drive ego with standard ACP client libraries](acp-clients.md).
 
 ## Launch and transport
 
