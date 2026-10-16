@@ -727,6 +727,7 @@ mod public_golden {
             (
                 Metering::Subscription {
                     revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
+                    equivalent: None,
                 },
                 limited.ledger(),
                 RateSource::None,

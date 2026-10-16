@@ -290,6 +290,7 @@ mod cost {
             currency("USD"),
             CostAttribution::MeteringPolicy {
                 revision: policy.clone(),
+                equivalent: None,
             },
         );
         let CostDelta::Known {
@@ -303,7 +304,10 @@ mod cost {
         assert!(amount.amount.is_zero());
         assert_eq!(
             *attribution,
-            CostAttribution::MeteringPolicy { revision: policy },
+            CostAttribution::MeteringPolicy {
+                revision: policy,
+                equivalent: None
+            },
             "a zero has to name the policy that produced it, not a price list"
         );
 

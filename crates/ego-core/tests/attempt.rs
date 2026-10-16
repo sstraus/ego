@@ -565,6 +565,7 @@ mod lifecycle {
             (
                 Metering::Subscription {
                     revision: revision.clone(),
+                    equivalent: None,
                 },
                 None,
                 Some("0"),

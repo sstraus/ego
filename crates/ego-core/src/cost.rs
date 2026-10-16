@@ -563,9 +563,71 @@ pub enum CostAttribution {
     ProviderReported(ProviderCostRevision),
     /// Neither: the row is not metered in currency, and this policy is what
     /// established that.
-    MeteringPolicy { revision: MeteringRevision },
+    MeteringPolicy {
+        revision: MeteringRevision,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        equivalent: Option<Box<SubscriptionEquivalent>>,
+    },
     /// The transport proved that no request bytes left this process.
     DefinitelyUnsent,
+}
+
+/// Resolution-time facts for a display-only Standard API estimate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquivalentPricing {
+    pub model: String,
+    pub quote: crate::budget::PricingQuote,
+    pub long_context_threshold: u64,
+}
+
+impl EquivalentPricing {
+    pub fn estimate(&self, usage: &crate::state::Usage) -> Option<Box<SubscriptionEquivalent>> {
+        let input = usage
+            .uncached_input_tokens
+            .checked_add(usage.cache_read_tokens)?
+            .checked_add(usage.cache_write_tokens)?
+            .checked_add(usage.cache_write_extended_tokens)?;
+        let mut quote = self.quote.clone();
+        if input > self.long_context_threshold {
+            let double = Amount::new(2, 0).ok()?;
+            for value in [
+                &mut quote.uncached_input,
+                &mut quote.cache_read,
+                &mut quote.cache_write,
+                &mut quote.cache_write_extended,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *value = value.checked_mul(&double)?;
+            }
+            if let Some(output) = &mut quote.output {
+                *output = output.checked_mul(&Amount::new(15, 1).ok()?)?;
+            }
+        }
+        let CostDelta::Known { amount, .. } = quote.price(usage) else {
+            return None;
+        };
+        Some(Box::new(SubscriptionEquivalent::V1 {
+            model: self.model.clone(),
+            source: quote.revision,
+            service_tier: "standard".to_owned(),
+            amount,
+        }))
+    }
+}
+
+/// Versioned display-only API equivalent. This is never a budget charge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "version", rename_all = "snake_case")]
+pub enum SubscriptionEquivalent {
+    V1 {
+        model: String,
+        source: PricingRevision,
+        /// Standard API service tier, not the subscription's billing tier.
+        service_tier: String,
+        amount: Money,
+    },
 }
 
 /// Why a generation's cost is not known.
