@@ -61,12 +61,22 @@ fn default_mode_exec_prompt_says_why_git_status_and_rg_are_not_read_only() {
     );
 }
 
-/// The row under the headline `headline` on the current screen.
+/// The complete wrapped risk reason below the headline, before the decision keys.
 fn risk_row(session: &mut ModalSession, headline: &str) -> String {
     let screen = session.screen();
     let at = screen
         .iter()
         .rposition(|line| line.trim_end() == headline)
         .unwrap_or_else(|| panic!("no {headline:?} row: {screen:#?}"));
-    screen[at + 1].trim_end().to_owned()
+    let reason = screen[at + 1..]
+        .iter()
+        .take_while(|line| !line.trim().is_empty())
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        screen[at + 1..].iter().any(|line| line.contains("[d] details")),
+        "decision keys disappeared: {screen:#?}"
+    );
+    reason
 }
