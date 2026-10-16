@@ -867,6 +867,7 @@ fn openrouter_resolution_preserves_operator_quote() {
         cache_write: Some("0.0000025".parse().unwrap()),
         cache_write_extended: Some("0.000004".parse().unwrap()),
         output: Some("0.00001".parse().unwrap()),
+        web_search: None,
     });
     let catalogue = Catalogue::new([ProviderRow::openrouter_default()]).with_hosted(
         "openrouter/anthropic/claude-sonnet-5.5",
@@ -919,6 +920,7 @@ fn openrouter_resolution_does_not_borrow_another_models_quote() {
                     cache_write: None,
                     cache_write_extended: None,
                     output: Some("0.00001".parse().unwrap()),
+        web_search: None,
                 })),
             },
         )
