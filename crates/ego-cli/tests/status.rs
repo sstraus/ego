@@ -60,7 +60,7 @@ fn builtins_and_arbitrary_configured_segments_render_in_user_order() {
     assert_eq!(line.diagnostics(), &[]);
     assert!(line.text().find("gpt-5.6").unwrap() < line.text().find("high").unwrap());
     assert!(line.text().find("queue=").unwrap() < line.text().find("drafts=").unwrap());
-    assert!(line.text().find("cwd=").unwrap() < line.text().find("git=").unwrap());
+    assert!(line.text().find("/w/ego").unwrap() < line.text().find("⎇").unwrap());
 
     let custom = StatusSegmentName::custom("latency");
     let custom_line = StatusLine::render_with_values(

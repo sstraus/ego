@@ -1607,7 +1607,7 @@ fn status_row(status: &SurfaceStatus) -> String {
     let text = status
         .painter
         .current_status()
-        .map(|line| line.text().to_string())
+        .map(|line| line.terminal_text(&status.permission_capabilities))
         .unwrap_or_default();
     if text.is_empty() {
         String::new()

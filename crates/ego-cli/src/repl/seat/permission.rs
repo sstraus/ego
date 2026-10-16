@@ -543,7 +543,7 @@ pub(super) fn choose_statusline_preset(
         phase,
         status,
         busy,
-        "Choose status-line setup",
+        "Choose status-line setup\n▰/▱: context used/window; green <60%, yellow ≥60%, red ≥85%.\n≈$: subscription-equivalent (standard API), not billed; $: billed.\n(partial): mixed/unpriced usage; ?: context unmeasured.\n⎇: branch; ●: uncommitted changes; path: abbreviated cwd.",
         &choices,
         (false, true),
     ) {
