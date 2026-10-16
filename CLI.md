@@ -2135,9 +2135,24 @@ block the goal. A changed condition resets that count. The default allowance is
 checks first start. The allowance and consumed count survive resume. Internal
 continuations count toward `--max-turns`. `ego run --goal TEXT`
 sets an operator-owned objective. The `goal` tool sets or updates a model-authored
-objective, but cannot replace an operator-owned active goal. Provider, permission,
-pause, cancellation and budget stops do not admit automatic work. Invalid checks
-and exhausted allowances emit a visible diagnostic and retain the active goal;
+objective, but cannot replace an operator-owned active goal. Text output shows a
+`Goal (operator|automated): OBJECTIVE` receipt when a goal first appears and when
+the model updates it. Each automatic turn shows `Goal turn n of N: CONDITION`
+before its work output. A goal-check stop shows the objective, turns used, stop
+reason, last unmet condition and next actions: `/goal show`, `/goal achieve`,
+`/goal block`, and `--goal-turns N` (which sets the allowance when checks first
+start, not after it is exhausted). These receipts remain visible with `--quiet`;
+headless text sends them to stderr, not answer stdout. JSON/JSONL and ACP keep
+their existing structured contracts.
+
+The native status row includes `goal n/N` while a goal is active, including when
+a check stop retains that active goal. Until checks configure the durable
+allowance, the denominator is `pending`. The segment uses the existing
+width-bounded renderer; a disabled status row stays disabled. Achieved and
+blocked goals do not retain this active segment.
+
+Provider, permission, pause, cancellation and budget stops do not admit automatic
+work. Invalid checks and exhausted allowances emit a visible diagnostic and retain the active goal;
 they never claim achievement. ACP managed plan metadata exposes `goalStatus`,
 `goalStop`, and `goalContinuationTurns` separately from work-turn completion.
 

@@ -60,6 +60,8 @@ pub trait TextOutput: Diagnostics {
     }
     /// Replace a live retry row; ordinary outputs remain append-only.
     fn retry_status(&self, _message: Option<(&str, u64)>) {}
+    /// Refresh the active goal counter without writing a transcript row.
+    fn goal_status(&self, _goal: Option<(u32, Option<u32>)>) {}
     fn begin_block(&self) {}
     fn finish(&self) {}
 }
@@ -266,6 +268,13 @@ impl TextOutput for InteractiveOutput {
             .retry_status(message);
     }
 
+    fn goal_status(&self, goal: Option<(u32, Option<u32>)>) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .goal_status(goal);
+    }
+
     fn begin_block(&self) {
         let _ = self
             .inner
@@ -361,6 +370,7 @@ pub struct TextSink<'a> {
     calls: Mutex<HashMap<ItemId, StartedCall>>,
     capabilities: Capabilities,
     retry_cause: Mutex<Option<String>>,
+    goal: Mutex<Option<ego_core::goal::GoalRecord>>,
 }
 
 struct StartedCall {
@@ -387,7 +397,69 @@ impl<'a> TextSink<'a> {
             calls: Mutex::new(HashMap::new()),
             capabilities,
             retry_cause: Mutex::new(None),
+            goal: Mutex::new(None),
         }
+    }
+
+    /// Compare reduced goal facts, not provider prose, at the live output boundary.
+    /// One path renders set/update, admitted continuation and stop receipts.
+    fn goal_receipts(&self, event: &PublicEvent, state: &SessionState) {
+        use ego_core::goal::{GoalOwner, GoalState};
+        let mut previous = self.goal.lock().expect("goal receipt lock");
+        let current = state.goal.as_ref();
+        let updated_by_tool = matches!(event, PublicEvent::ItemCompleted {
+            item, kind: ItemKind::Tool, ok: true, ..
+        } if state.items.get(item)
+            .is_some_and(|item| item.tool_name.as_deref() == Some("goal")));
+        if previous.as_ref() == current && !updated_by_tool {
+            return;
+        }
+        self.out.goal_status(
+            current
+                .filter(|goal| goal.state == GoalState::Active)
+                .map(|goal| (goal.continuation_turns, goal.continuation_budget)),
+        );
+        if let Some(goal) = current {
+            let prior = previous.as_ref().filter(|prior| prior.id == goal.id);
+            let mut receipts = Vec::new();
+            if prior
+                .is_none_or(|prior| prior.objective != goal.objective || prior.owner != goal.owner)
+                || updated_by_tool
+            {
+                let owner = match goal.owner {
+                    GoalOwner::Operator => "operator",
+                    GoalOwner::Automated => "automated",
+                    GoalOwner::Check => "check",
+                };
+                receipts.push(format!("Goal ({owner}): {}", goal.objective));
+            }
+            let allowance = goal
+                .continuation_budget
+                .map_or_else(|| "pending".into(), |n| n.to_string());
+            if prior.is_some_and(|prior| prior.continuation_turns < goal.continuation_turns) {
+                receipts.push(format!(
+                    "Goal turn {} of {allowance}: {}",
+                    goal.continuation_turns,
+                    goal.blocker_reason
+                        .as_deref()
+                        .unwrap_or("condition unavailable")
+                ));
+            }
+            if let Some(reason) = &goal.check_stop
+                && prior.is_none_or(|prior| prior.check_stop.as_ref() != Some(reason))
+            {
+                receipts.push(format!(
+                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. Next: /goal show, /goal achieve, /goal block; --goal-turns N sets the allowance when checks first start.",
+                    goal.objective, goal.continuation_turns,
+                    goal.blocker_reason.as_deref().unwrap_or("none recorded")
+                ));
+            }
+            for receipt in receipts {
+                self.finish();
+                self.out.note(&receipt);
+            }
+        }
+        *previous = current.cloned();
     }
 
     /// What an operator has to be told about the ceiling they asked for, and
@@ -491,6 +563,7 @@ impl<'a> TextSink<'a> {
 
 impl EventSink for TextSink<'_> {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        self.goal_receipts(event, state);
         if self.capabilities.on_screen()
             && self.out.live_retry()
             && matches!(
@@ -628,6 +701,12 @@ impl EventSink for TextSink<'_> {
                     self.out.note(&message);
                 }
             }
+            PublicEvent::Error { message, .. }
+                if state
+                    .goal
+                    .as_ref()
+                    .and_then(|goal| goal.check_stop.as_deref())
+                    == Some(message.as_str()) => {}
             PublicEvent::Error { message, kind, .. } => {
                 self.finish();
                 if self.capabilities.on_screen()
