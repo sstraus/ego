@@ -104,6 +104,13 @@ pub fn wait_pty_child(
     }
 }
 
+/// Keep instrumented children from writing default profiles into observed fixtures.
+pub fn coverage_environment() -> Vec<(&'static str, OsString)> {
+    std::env::var_os("LLVM_PROFILE_FILE")
+        .map(|profile| vec![("LLVM_PROFILE_FILE", profile)])
+        .unwrap_or_default()
+}
+
 #[cfg(not(windows))]
 pub fn fixture_path() -> OsString {
     OsString::from("/usr/bin:/bin")
@@ -1008,8 +1015,8 @@ impl Ego {
         // `cargo llvm-cov` points the instrumented child at its own profile
         // directory through this variable; without it the real binary's
         // production paths show 0% coverage.
-        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
-            command.env("LLVM_PROFILE_FILE", profile);
+        for (key, value) in coverage_environment() {
+            command.env(key, value);
         }
         for (key, value) in &self.env {
             command.env(key, value);
