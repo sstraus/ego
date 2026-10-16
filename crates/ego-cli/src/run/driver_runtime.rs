@@ -840,80 +840,24 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Skills(
                                         repl::actions::SkillSurfaceAction::Rescan,
                                     )) => {
-                                        if pending_work {
-                                            diagnostics.note(
-                                                "skills cannot be rescanned while source work is pending",
-                                            );
-                                            continue;
-                                        }
-                                        let Some(catalogue) = skills.as_ref() else {
-                                            diagnostics.note("the skill catalogue is unavailable");
-                                            continue;
-                                        };
-                                        seat.busy();
-                                        let prepared = match catalogue.prepare_rescan() {
-                                            Ok(prepared) => prepared,
-                                            Err(error) => {
-                                                diagnostics.note(&format!(
-                                                    "the skill catalogue could not be rescanned: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let published = prepared.published();
-                                        let prospective = prepared.capture();
-                                        debug_assert_eq!(
-                                            prospective.retained_last_good(),
-                                            !published
-                                        );
-                                        let next_registry =
-                                            match super::composition::tools_with_mode(
-                                                args.tools.as_ref(),
-                                                Some(prospective.core()),
-                                                effective
-                                                    .active_profile
-                                                    .as_ref()
-                                                    .map(|profile| profile.name.as_str()),
-                                                Some(Arc::new(jsonl_store.history())),
+                                        match rescan_session_skills(
+                                            pending_work,
+                                            skills.as_deref(),
+                                            seat.as_ref(),
+                                            (
+                                                &args,
+                                                &effective,
+                                                jsonl_store.as_ref(),
                                                 exec_environment.clone(),
-                                                super::composition::orchestration_mode(&effective),
-                                            ) {
-                                                Ok(registry) => registry,
-                                                Err(error) => {
-                                                    last.termination = RunTermination::Failed {
-                                                        message: format!(
-                                                            "the rescanned skill catalogue could not rebuild model tools: {error}"
-                                                        ),
-                                                    };
-                                                    break 'epoch EpochTransition::Exit;
-                                                }
-                                            };
-                                        let capture = match catalogue.commit_rescan(prepared) {
-                                            Ok(capture) => capture,
-                                            Err(error) => {
-                                                last.termination = RunTermination::Failed {
-                                                    message: format!(
-                                                        "the prepared skill catalogue could not be published: {error}"
-                                                    ),
-                                                };
+                                            ),
+                                            diagnostics,
+                                        ) {
+                                            Ok(Some(next_registry)) => registry = next_registry,
+                                            Ok(None) => {}
+                                            Err(termination) => {
+                                                last.termination = termination;
                                                 break 'epoch EpochTransition::Exit;
                                             }
-                                        };
-                                        registry = next_registry;
-                                        if !args.no_context_tool && args.tools.is_none() {
-                                            registry.push(RegisteredTool::Context);
-                                        }
-                                        if published {
-                                            diagnostics.note(&format!(
-                                                "skills: published generation {}",
-                                                capture.snapshot_digest()
-                                            ));
-                                        } else {
-                                            diagnostics.note(&format!(
-                                                "skills: retained last-good generation {}",
-                                                capture.snapshot_digest()
-                                            ));
-                                            diagnostics.note(&capture.render_diagnostics());
                                         }
                                         continue;
                                     }
@@ -1645,34 +1589,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                         diagnostic,
                         projected,
                     } => {
-                        let parent = active.id();
-                        active.replace_state(source_state);
-                        if !active.apply_publication(target, &publication) {
-                            return Err(RunTermination::Failed {
-                                message: format!(
-                                    "the published fork target could not be activated: {}",
-                                    diagnostic.as_deref().unwrap_or("publication was refused")
-                                ),
-                            });
-                        }
-                        admit_successor_context(&evidence, &active, &run_context)?;
-                        if let Err(error) = session_end {
-                            diagnostics.note(&format!(
-                                "the fork source session-end hook failed: {}",
-                                error.exit_reason()
-                            ));
-                        }
-                        diagnostics.note(&format!(
-                            "forked session {parent} into {}; this is now session {}. \
-                             To return to the source: ego resume {parent} ({})",
-                            active.id(),
-                            active.id(),
-                            crate::usage::context_line(active.state().context)
-                        ));
-                        epoch_start = EpochStart::Fork {
-                            diagnostic,
-                            projected: projected.map(Box::new),
-                        };
+                        epoch_start = activate_fork_transition(
+                            &mut active,
+                            source_state,
+                            session_end,
+                            (target, publication, diagnostic, projected),
+                            (&evidence, &run_context, diagnostics),
+                        )?;
                     }
                     EpochTransition::Compact {
                         target,
@@ -1698,38 +1621,13 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 error.exit_reason()
                             ));
                         }
-                        if let Some((target_system, target_registry, prepared_skills)) = runtime {
-                            if let Some(prepared) = prepared_skills {
-                                let published = prepared.published();
-                                let Some(catalogue) = skills.as_ref() else {
-                                    return Err(RunTermination::Failed {
-                                        message: "the prepared skill catalogue lost its publication owner"
-                                            .to_owned(),
-                                    });
-                                };
-                                let capture = catalogue.commit_rescan(prepared).map_err(|error| {
-                                    RunTermination::Failed {
-                                        message: format!(
-                                            "the prepared skill catalogue could not be published after compaction activation: {error}"
-                                        ),
-                                    }
-                                })?;
-                                if published {
-                                    diagnostics.note(&format!(
-                                        "skills: published generation {}",
-                                        capture.snapshot_digest()
-                                    ));
-                                } else {
-                                    diagnostics.note(&format!(
-                                        "skills: retained last-good generation {}",
-                                        capture.snapshot_digest()
-                                    ));
-                                    diagnostics.note(&capture.render_diagnostics());
-                                }
-                            }
-                            registry = target_registry;
-                            config.system = target_system;
-                        }
+                        publish_compaction_runtime(
+                            runtime,
+                            skills.as_deref(),
+                            &mut registry,
+                            &mut config,
+                            diagnostics,
+                        )?;
                         diagnostics.note(&format!(
                             "compacted session {parent_id} into {}; this is now session {}. \
                              Before: {}; after: known once the next reply is generated. \
@@ -2942,4 +2840,170 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         .expect("interactive compaction runtime") =
         Some((target_system, target_registry, prepared_skills));
     Ok(prepared)
+}
+
+fn publish_compaction_runtime(
+    runtime: Option<CompactionRuntime>,
+    skills: Option<&crate::skill::SkillCatalogue>,
+    registry: &mut Vec<RegisteredTool>,
+    config: &mut TurnConfig,
+    diagnostics: &dyn Diagnostics,
+) -> Result<(), RunTermination> {
+    if let Some((target_system, target_registry, prepared_skills)) = runtime {
+        if let Some(prepared) = prepared_skills {
+            let published = prepared.published();
+            let Some(catalogue) = skills else {
+                return Err(RunTermination::Failed {
+                    message: "the prepared skill catalogue lost its publication owner".to_owned(),
+                });
+            };
+            let capture = catalogue.commit_rescan(prepared).map_err(|error| {
+                                    RunTermination::Failed {
+                                        message: format!(
+                                            "the prepared skill catalogue could not be published after compaction activation: {error}"
+                                        ),
+                                    }
+                                })?;
+            if published {
+                diagnostics.note(&format!(
+                    "skills: published generation {}",
+                    capture.snapshot_digest()
+                ));
+            } else {
+                diagnostics.note(&format!(
+                    "skills: retained last-good generation {}",
+                    capture.snapshot_digest()
+                ));
+                diagnostics.note(&capture.render_diagnostics());
+            }
+        }
+        *registry = target_registry;
+        config.system = target_system;
+    }
+    Ok(())
+}
+
+fn activate_fork_transition<'store>(
+    active: &mut ActiveSession<'store>,
+    source_state: SessionState,
+    session_end: Result<(), RunTermination>,
+    target: (
+        ActiveSession<'store>,
+        ego_core::session::TargetPublication,
+        Option<String>,
+        Option<PublicEvent>,
+    ),
+    context: (
+        &EvidenceAdmissionService,
+        &Option<RunContextEvidence>,
+        &dyn Diagnostics,
+    ),
+) -> Result<EpochStart, RunTermination> {
+    let (target, publication, diagnostic, projected) = target;
+    let (evidence, run_context, diagnostics) = context;
+    let parent = active.id();
+    active.replace_state(source_state);
+    if !active.apply_publication(target, &publication) {
+        return Err(RunTermination::Failed {
+            message: format!(
+                "the published fork target could not be activated: {}",
+                diagnostic.as_deref().unwrap_or("publication was refused")
+            ),
+        });
+    }
+    admit_successor_context(evidence, active, run_context)?;
+    if let Err(error) = session_end {
+        diagnostics.note(&format!(
+            "the fork source session-end hook failed: {}",
+            error.exit_reason()
+        ));
+    }
+    diagnostics.note(&format!(
+        "forked session {parent} into {}; this is now session {}. \
+                             To return to the source: ego resume {parent} ({})",
+        active.id(),
+        active.id(),
+        crate::usage::context_line(active.state().context)
+    ));
+    Ok(EpochStart::Fork {
+        diagnostic,
+        projected: projected.map(Box::new),
+    })
+}
+
+fn rescan_session_skills(
+    pending_work: bool,
+    skills: Option<&crate::skill::SkillCatalogue>,
+    seat: &dyn InteractiveSeat,
+    inputs: (&Args, &Effective, &JsonlStore, ego_core::permit::EnvPolicy),
+    diagnostics: &dyn Diagnostics,
+) -> Result<Option<Vec<RegisteredTool>>, RunTermination> {
+    let (args, effective, jsonl_store, exec_environment) = inputs;
+
+    if pending_work {
+        diagnostics.note("skills cannot be rescanned while source work is pending");
+        return Ok(None);
+    }
+    let Some(catalogue) = skills else {
+        diagnostics.note("the skill catalogue is unavailable");
+        return Ok(None);
+    };
+    seat.busy();
+    let prepared = match catalogue.prepare_rescan() {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "the skill catalogue could not be rescanned: {error}"
+            ));
+            return Ok(None);
+        }
+    };
+    let published = prepared.published();
+    let prospective = prepared.capture();
+    debug_assert_eq!(prospective.retained_last_good(), !published);
+    let next_registry = match super::composition::tools_with_mode(
+        args.tools.as_ref(),
+        Some(prospective.core()),
+        effective
+            .active_profile
+            .as_ref()
+            .map(|profile| profile.name.as_str()),
+        Some(Arc::new(jsonl_store.history())),
+        exec_environment,
+        super::composition::orchestration_mode(effective),
+    ) {
+        Ok(registry) => registry,
+        Err(error) => {
+            return Err(RunTermination::Failed {
+                message: format!(
+                    "the rescanned skill catalogue could not rebuild model tools: {error}"
+                ),
+            });
+        }
+    };
+    let capture = match catalogue.commit_rescan(prepared) {
+        Ok(capture) => capture,
+        Err(error) => {
+            return Err(RunTermination::Failed {
+                message: format!("the prepared skill catalogue could not be published: {error}"),
+            });
+        }
+    };
+    let mut registry = next_registry;
+    if !args.no_context_tool && args.tools.is_none() {
+        registry.push(RegisteredTool::Context);
+    }
+    if published {
+        diagnostics.note(&format!(
+            "skills: published generation {}",
+            capture.snapshot_digest()
+        ));
+    } else {
+        diagnostics.note(&format!(
+            "skills: retained last-good generation {}",
+            capture.snapshot_digest()
+        ));
+        diagnostics.note(&capture.render_diagnostics());
+    }
+    Ok(Some(registry))
 }
