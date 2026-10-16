@@ -236,7 +236,7 @@ pub struct ToolTiming {
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
 /// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
-/// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
+/// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
 /// DetachedExecSettled | QuestionRequested | QuestionSettled | QuestionMemberSettled |
 /// PermissionRequested | PermissionAmended | PermissionDecided |
@@ -391,6 +391,13 @@ pub enum EventKind {
     /// resumed session that reconstructed the order by guesswork would be
     /// reconstructing the one thing the provider checks.
     ReasoningState { state: ReasoningState },
+    /// Private provider output required for exact continuation.
+    ProviderContent {
+        state: ReasoningState,
+        visible: bool,
+    },
+    /// An explicit user MCP context selection, not a provider-issued tool call.
+    ContextCommandStarted { name: String, args: String },
     /// A tool call began, with its name and raw (unvalidated) arguments.
     ToolCallStarted {
         name: String,
@@ -823,6 +830,8 @@ impl EventKind {
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::ReasoningDelta { .. } => "reasoning_delta",
             EventKind::ReasoningState { .. } => "reasoning_state",
+            EventKind::ContextCommandStarted { .. } => "context_command_started",
+            EventKind::ProviderContent { .. } => "provider_content",
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",

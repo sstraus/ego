@@ -119,6 +119,7 @@ fn usd(decimal: &str) -> Money {
 fn pessimistic_quote() -> PricingQuote {
     let rate = |d: &str| Some(d.parse::<Amount>().expect("a valid rate"));
     PricingQuote {
+        web_search: None,
         revision: PricingRevision("smoke-upper-bound".to_string()),
         currency: CurrencyCode::new("USD").expect("USD is valid"),
         uncached_input: rate("0.0001"),
@@ -439,6 +440,7 @@ async fn smoke(profile: &Profile, when: &str) {
     // every provider owes an answer to and the cheapest to ask for: it is
     // rejected before any generation happens, so it costs nothing.
     let absent = GenRequest {
+        web_search: None,
         cache: None,
         model: "this-model-does-not-exist".to_string(),
         ..canonical(profile)

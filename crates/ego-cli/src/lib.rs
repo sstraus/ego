@@ -45,6 +45,7 @@ pub mod metadata;
 pub mod model;
 pub mod model_picker;
 pub mod models;
+pub(crate) mod named_agents;
 pub(crate) mod onboarding;
 pub(crate) mod orchestration_observer;
 pub mod orchestrator;

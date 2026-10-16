@@ -310,6 +310,42 @@ impl GenerationPolicyCapture {
         Arc::clone(&self.policy)
     }
 
+    /// Narrow a task without changing parent roots, deny rules or human authority.
+    pub(crate) fn task_ceiling(
+        self,
+        mode: Option<Mode>,
+        deny: &[Rule],
+        roots: Option<&[CanonPath]>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let mode = mode
+            .filter(|mode| mode.within(self.snapshot.mode))
+            .unwrap_or(self.snapshot.mode);
+        let mut ruleset = self.snapshot.ruleset.clone();
+        for rule in deny {
+            if let Some(existing) = ruleset.deny.iter_mut().find(|entry| entry.rule() == rule) {
+                existing.also_carried_by(Source::AgentFile);
+            } else {
+                ruleset
+                    .deny
+                    .push(SourcedRule::new(rule.clone(), Source::AgentFile));
+            }
+        }
+        let roots = if roots.is_some() {
+            Vec::new()
+        } else {
+            self.snapshot.roots.clone()
+        };
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            roots,
+            mode,
+            self.snapshot.coordinator,
+            ruleset,
+            self.snapshot.read_perimeter.clone(),
+        )?;
+        Self::restore(Arc::new(snapshot), self.human)
+    }
+
     pub fn snapshot(&self) -> Arc<GenerationPolicySnapshot> {
         Arc::clone(&self.snapshot)
     }

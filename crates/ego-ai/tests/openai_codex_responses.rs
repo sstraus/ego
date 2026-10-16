@@ -17,6 +17,7 @@ use url::Url;
 
 fn request() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "gpt-5.6-sol".to_string(),
         messages: Conversation::new(vec![

@@ -97,6 +97,89 @@ mod turn {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 
+    // Catches: pause_turn completes early, loses opaque blocks, or duplicates rendered citations in replay.
+    #[test]
+    fn hosted_search_continuation_replays_private_blocks_and_projects_sources() {
+        let opaque = ReasoningState {
+            dialect: "test-provider".into(),
+            blob: "{  \"encrypted_content\": \"unchanged\"  }".into(),
+        };
+        let answer = ReasoningState {
+            dialect: "test-provider".into(),
+            blob: "{\"provider_answer\":\"original\"}".into(),
+        };
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::WebSearch {
+                    call_id: "server-1".into(),
+                    query: "query".into(),
+                },
+                AiEvent::ProviderContent {
+                    state: opaque.clone(),
+                    visible: false,
+                },
+                AiEvent::TextDelta {
+                    text: "cited answer".into(),
+                },
+                AiEvent::Citation {
+                    url: "https://example.com/source".into(),
+                    title: "Source".into(),
+                },
+                AiEvent::ProviderContent {
+                    state: answer.clone(),
+                    visible: true,
+                },
+                AiEvent::Stop(StopReason::Continue),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "finished".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let (reason, ok, state) = run(&fx, SessionState::default(), "search");
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 2);
+        let carried: Vec<_> = calls[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ProviderContent { state } => Some(state.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(carried, vec![opaque, answer]);
+        let rendered: String = state
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::Assistant)
+            .map(|item| item.text.as_str())
+            .collect();
+        assert!(rendered.contains("[Source](https://example.com/source)"));
+        assert!(fx.sink.events().iter().any(|event| matches!(event, PublicEvent::ItemDelta { text, .. } if text.contains("[Source](https://example.com/source)"))));
+        assert!(
+            fx.sink
+                .events()
+                .iter()
+                .all(|event| !serde_json::to_string(event)
+                    .unwrap()
+                    .contains("encrypted_content")),
+            "opaque provider state must not escape through the public/ACP event boundary"
+        );
+        assert!(!calls[1].messages.messages().iter().flat_map(|message| &message.content).any(|block| matches!(block, ContentBlock::Text { text } if text.contains("[Source]"))));
+        assert!(
+            fx.store
+                .events()
+                .iter()
+                .all(|event| !matches!(event.kind, EventKind::ToolCallStarted { .. }))
+        );
+    }
+
     // Catches: a process killed after GenerationStarted permanently blocks fresh turns.
     #[test]
     fn regression_case_resume_accepts_next_turn_without_replaying_interrupted_attempt() {
@@ -1440,6 +1523,7 @@ mod turn {
     fn quote() -> PricingQuote {
         let rate = |d: &str| Some(d.parse::<Amount>().expect("a valid test rate"));
         PricingQuote {
+            web_search: None,
             revision: PricingRevision("test-2026-08".to_string()),
             currency: CurrencyCode::new("USD").expect("USD is a valid code"),
             uncached_input: rate("0.000003"),
@@ -1889,6 +1973,110 @@ mod turn {
 
     /// Everything a `TurnLoop` borrows, kept alive in one place so a test can
     /// build a loop in one line without fighting the borrow checker.
+    fn run_user_context(
+        fx: &Fixture,
+        generation: &str,
+        name: &str,
+        parameters: serde_json::Value,
+    ) -> (ExitReason, SessionState) {
+        let catalogue = ego_core::turn::CapturedToolCatalogue::new(
+            generation,
+            fx.registry
+                .iter()
+                .cloned()
+                .map(RegisteredTool::Effect)
+                .collect(),
+        )
+        .expect("context catalogue");
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let runtime = model_for(fx, &fx.generator, &mut gate);
+        let turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        );
+        let mut turn = turn.with_goal(Some("existing active goal".to_owned()), 1);
+        let outcome = block_on(turn.run_admitted_context(catalogue, name.to_owned(), parameters))
+            .expect("durable context command");
+        (
+            outcome.exit_reason,
+            turn.into_state().expect("unique journal"),
+        )
+    }
+
+    #[test]
+    fn user_context_refuses_revoked_generation_without_dispatch_or_model_call() {
+        // Catches a stale slash selection executing after the admitted generation changes.
+        let fx = Fixture::new(Vec::new()).with_read_tool();
+        fx.fs.file("/ws/guide", "guide contents");
+        let (reason, state) = run_user_context(
+            &fx,
+            "revoked-generation",
+            "read",
+            json!({"path":"/ws/guide"}),
+        );
+        assert_eq!(reason, ExitReason::Usage);
+        assert!(
+            state
+                .items
+                .values()
+                .all(|item| item.kind != ItemKind::ToolCall)
+        );
+        assert!(fx.generator.calls().is_empty());
+    }
+
+    #[test]
+    fn user_context_attaches_guarded_result_without_model_generation() {
+        // Catches attachments starting a model/goal-check call or corrupting subsequent history.
+        let fx = Fixture::new(Vec::new()).with_read_tool();
+        fx.fs.file("/ws/guide", "guide contents");
+        let (reason, state) = run_user_context(&fx, "static", "read", json!({"path":"/ws/guide"}));
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(fx.generator.calls().is_empty());
+        let (history, repairs) = conversation_from(&state).expect("sendable history");
+        assert!(repairs.is_empty());
+        assert!(history.messages().iter().any(|message| message.role == Role::User && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("guide contents")))));
+    }
+
+    #[test]
+    fn user_context_cannot_bypass_effect_permission_authority() {
+        // Catches direct context dispatch treating explicit user input as effect approval.
+        let fx = Fixture::new(Vec::new()).with_write_tool();
+        fx.fs.file("/ws/guide", "original");
+        let (reason, _) = run_user_context(
+            &fx,
+            "static",
+            "fake_write",
+            json!({"path":"/ws/guide", "contents":"replacement"}),
+        );
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert_eq!(
+            fx.fs
+                .read(&CanonPath::new("/ws/guide"))
+                .expect("original file"),
+            b"original"
+        );
+        assert!(fx.generator.calls().is_empty());
+    }
+
     struct Fixture {
         store: MemStore,
         clock: FixedClock,
@@ -3005,6 +3193,7 @@ mod turn {
             cache_write_tokens: cache_write,
             cache_write_extended_tokens: 0,
             output_tokens: output,
+            web_search_requests: 0,
             reasoning_tokens: None,
         }
     }
@@ -12564,6 +12753,16 @@ mod turn {
             cancel: CancelToken,
             ceiling: Option<u64>,
         ) -> (ExitReason, SessionState) {
+            run_named_tasks(fx, generator, cancel, ceiling, Vec::new())
+        }
+
+        fn run_named_tasks<G: Generator + 'static>(
+            fx: &Fixture,
+            generator: &Arc<G>,
+            cancel: CancelToken,
+            ceiling: Option<u64>,
+            agents: Vec<ego_core::turn::NamedAgent>,
+        ) -> (ExitReason, SessionState) {
             let mut registry: Vec<_> = fx
                 .registry
                 .iter()
@@ -12587,6 +12786,7 @@ mod turn {
                     .to_vec()])),
                 CanonPath::new("/ws"),
             );
+            let tools = tools.with_named_agents(agents);
             let mut settings = config();
             settings.parallel_tool_calls = true;
             let mut runtime = model_with(
@@ -12655,6 +12855,212 @@ mod turn {
                     .values()
                     .all(|i| i.tool_name.as_deref() != Some("fake_write")),
                 "child transcript leaked into parent"
+            );
+        }
+
+        fn reviewer() -> ego_core::turn::NamedAgent {
+            ego_core::turn::NamedAgent {
+                name: "reviewer".into(),
+                prompt: "Review, never modify.".into(),
+                model: None,
+                tools: Some(BTreeSet::new()),
+                mode: Some(Mode::Plan),
+                deny: Vec::new(),
+                sandbox: Some(Confinement::Workspace),
+                roots: None,
+            }
+        }
+
+        #[test]
+        fn named_task_intersects_tools_and_injects_definition_without_child_delegation() {
+            // Catches: named tool ceilings only changing the prompt, not executable tools.
+            let fx = Fixture::new(vec![]).with_write_tool();
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "denied",
+                        "fake_write",
+                        json!({"path":"/ws/stolen", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let mut definition = reviewer();
+            definition.model = Some(ModelRef("test/reviewer".into()));
+            let (exit, _) =
+                run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+            assert_eq!(exit, ExitReason::Completed);
+            let calls = generator.calls();
+            assert_eq!(calls[1].model, "test/reviewer");
+            assert_eq!(calls.last().unwrap().model, calls[0].model);
+            assert_ne!(calls[0].model, calls[1].model);
+            let task = calls[0]
+                .tools
+                .iter()
+                .find(|tool| tool.name == "task")
+                .unwrap();
+            assert_eq!(
+                task.parameters["properties"]["agent"]["enum"],
+                json!(["reviewer"])
+            );
+            assert!(calls[1].tools.is_empty());
+            assert!(format!("{:?}", calls[1].messages).contains("Review, never modify."));
+            assert!(fx.fs.read(&CanonPath::new("/ws/stolen")).is_err());
+        }
+
+        #[test]
+        fn named_task_mode_is_a_ceiling_not_a_replacement_for_parent_authority() {
+            // Catches: a named yolo overriding parent plan, or a named plan being ignored.
+            for (parent, requested) in [(Mode::Plan, Mode::Yolo), (Mode::Yolo, Mode::Plan)] {
+                let mut fx = Fixture::new(vec![]).with_write_tool();
+                fx.set_mode(parent);
+                let mut definition = reviewer();
+                definition.tools = None;
+                definition.mode = Some(requested);
+                let generator = Arc::new(FakeGenerator::new([
+                    vec![
+                        call(
+                            "task1",
+                            "task",
+                            json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![
+                        call(
+                            "denied",
+                            "fake_write",
+                            json!({"path":"/ws/stolen", "contents":"bad"}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ]));
+                let (exit, state) =
+                    run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+                assert_eq!(exit, ExitReason::Completed);
+                assert_eq!(
+                    state
+                        .items
+                        .values()
+                        .find(|item| item.tool_name.as_deref() == Some("task"))
+                        .unwrap()
+                        .ok,
+                    Some(false)
+                );
+                assert!(fx.fs.read(&CanonPath::new("/ws/stolen")).is_err());
+            }
+        }
+
+        #[test]
+        fn named_task_deny_rule_cannot_be_overridden_by_parent_yolo_mode() {
+            // Catches: named denies being parsed but omitted from the child's captured policy.
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            fx.set_mode(Mode::Yolo);
+            let mut definition = reviewer();
+            definition.tools = None;
+            definition.mode = Some(Mode::Yolo);
+            definition.deny = vec![Rule::load("write(**)").unwrap()];
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "denied",
+                        "fake_write",
+                        json!({"path":"/ws/stolen", "contents":"bad"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, _) =
+                run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+            assert_eq!(exit, ExitReason::Completed);
+            assert!(fx.fs.read(&CanonPath::new("/ws/stolen")).is_err());
+        }
+
+        #[test]
+        fn named_task_conflicting_roots_or_sandbox_refuse_before_child_generation() {
+            // Catches: a definition relocating the workspace or replacing its sandbox backend.
+            for conflicting_root in [true, false] {
+                let fx = Fixture::new(vec![]);
+                let mut definition = reviewer();
+                if conflicting_root {
+                    definition.roots = Some(vec![CanonPath::new("/outside")]);
+                } else {
+                    definition.sandbox = Some(Confinement::Off);
+                }
+                let generator = Arc::new(FakeGenerator::new([
+                    vec![
+                        call(
+                            "task1",
+                            "task",
+                            json!({"name":"audit", "agent":"reviewer", "prompt":"Inspect"}),
+                        ),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ]));
+                let (exit, state) =
+                    run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![definition]);
+                assert_eq!(exit, ExitReason::Completed);
+                assert_eq!(generator.calls().len(), 2);
+                assert_eq!(
+                    state
+                        .items
+                        .values()
+                        .find(|item| item.tool_name.as_deref() == Some("task"))
+                        .unwrap()
+                        .ok,
+                    Some(false)
+                );
+            }
+        }
+
+        #[test]
+        fn unknown_named_task_is_not_silently_run_with_parent_authority() {
+            // Catches: an unknown name falling back to an unrestricted ordinary child.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "task1",
+                        "task",
+                        json!({"name":"audit", "agent":"missing", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (exit, state) =
+                run_named_tasks(&fx, &generator, CancelToken::new(), None, vec![reviewer()]);
+            assert_eq!(exit, ExitReason::Completed);
+            assert_eq!(generator.calls().len(), 2);
+            assert_eq!(
+                state
+                    .items
+                    .values()
+                    .find(|item| item.tool_name.as_deref() == Some("task"))
+                    .unwrap()
+                    .ok,
+                Some(false)
             );
         }
 

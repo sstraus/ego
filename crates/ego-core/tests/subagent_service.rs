@@ -1052,6 +1052,7 @@ fn generation_metering() -> Metering {
 
 fn generation_quote() -> PricingQuote {
     PricingQuote {
+        web_search: None,
         revision: PricingRevision("test-m4-child".to_owned()),
         currency: CurrencyCode::new("USD").expect("USD is valid"),
         uncached_input: Some("0.000003".parse::<Amount>().expect("rate")),
@@ -1064,6 +1065,7 @@ fn generation_quote() -> PricingQuote {
 
 fn generation_request(prompt: &str) -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "provider/model".to_owned(),
         messages: Conversation::new(vec![Message::text(Role::User, prompt.to_owned())])

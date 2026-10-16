@@ -165,6 +165,7 @@ fn a_figure_too_fine_to_represent_is_refused_rather_than_rounded() {
 fn quote() -> PricingQuote {
     let rate = |d: &str| Some(d.parse::<Amount>().expect("a valid rate"));
     PricingQuote {
+        web_search: None,
         revision: PricingRevision("supplied-by-the-caller".to_string()),
         currency: CurrencyCode::new("USD").expect("USD is valid"),
         uncached_input: rate("0.000003"),
@@ -195,6 +196,7 @@ fn caps() -> ModelCapabilities {
 
 fn request() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "grok-5".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "x".repeat(200_000))])
@@ -424,6 +426,7 @@ async fn two_unrelated_wire_conventions_settle_through_the_identical_core_path()
         cache_write_tokens: 0,
         cache_write_extended_tokens: 0,
         output_tokens: 250,
+        web_search_requests: 0,
         reasoning_tokens: None,
     });
     let CostDelta::Known {
@@ -526,6 +529,7 @@ async fn a_provider_that_states_no_cost_settles_at_the_bound_and_names_why() {
                 cache_write_tokens: 0,
                 cache_write_extended_tokens: 0,
                 output_tokens: 250,
+                web_search_requests: 0,
                 reasoning_tokens: None,
             }),
             None,

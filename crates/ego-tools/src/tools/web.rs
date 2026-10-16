@@ -254,6 +254,38 @@ pub trait SearchBackend: Send + Sync {
         'io: 'a;
 }
 
+/// Declaration for a provider-executed tool. Local execution always refuses.
+pub struct HostedWebSearch;
+
+impl TypedTool for HostedWebSearch {
+    type Params = WebSearchParams;
+    fn name(&self) -> &str {
+        "web_search"
+    }
+    fn description(&self) -> &str {
+        "Search the web using the active provider hosted tool. Uses the model provider credential, incurs provider search fees and token charges, and returns cited sources. At most five searches per generation. No Exa fallback."
+    }
+    fn prepare_typed(
+        &self,
+        _params: Self::Params,
+        _ctx: &PrepareCtx<'_>,
+    ) -> Result<PreparedCall, ToolError> {
+        Err(invalid(
+            "hosted web search is executed by the provider, never locally; no fallback is used",
+        ))
+    }
+    fn execute<'a, 'io>(
+        &'a self,
+        _call: PreparedCall,
+        _io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
+        Box::pin(async { Err(invalid("hosted web search cannot execute locally")) })
+    }
+}
+
 #[derive(Default)]
 pub struct WebSearch {
     backend: Option<Arc<dyn SearchBackend>>,

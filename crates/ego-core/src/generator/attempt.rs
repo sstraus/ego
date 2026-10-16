@@ -525,7 +525,10 @@ impl AttemptStream {
                 self.terminal.get_or_insert(*stop);
             }
 
-            AiEvent::TextDelta { .. }
+            AiEvent::ProviderContent { .. }
+            | AiEvent::WebSearch { .. }
+            | AiEvent::Citation { .. }
+            | AiEvent::TextDelta { .. }
             | AiEvent::ReasoningDelta { .. }
             | AiEvent::ReasoningState(_)
             | AiEvent::ToolCall { .. } => {}
@@ -562,7 +565,10 @@ impl AttemptStream {
         // forgetful adapter would actually emit.
         if matches!(
             event,
-            AiEvent::TextDelta { .. }
+            AiEvent::ProviderContent { .. }
+                | AiEvent::WebSearch { .. }
+                | AiEvent::Citation { .. }
+                | AiEvent::TextDelta { .. }
                 | AiEvent::ReasoningDelta { .. }
                 | AiEvent::ReasoningState(_)
                 | AiEvent::ToolCall { .. }

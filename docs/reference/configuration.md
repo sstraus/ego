@@ -30,6 +30,63 @@ Omitting the corresponding flags retains those values, even `yolo` and `off`.
 Saving a default affects future sessions. Use live `/model`, `/thinking`, or
 `/mode` controls to change current session selections.
 
+## Destination policy and declared profiles
+
+`ego config ls --effective` (also `--json`), `ego doctor`, and the session
+`/config perimeter` view include `destination_policy`. This is a read-only
+snapshot of the admitted startup `net(...)` declarations, not a second policy
+engine. It shows allow and deny predicates, their authoritative source, other
+sources that carry the same rule, and the selected profile. It excludes
+untrusted or discarded project declarations. The selected profile is context;
+a rule's source names its config layer. Use `ego rules ls` and `ego rules explain`
+for current rule authority after live rule changes. Saved profile edits require
+a new session.
+
+Declare a destination grant profile with the existing permissions vocabulary:
+
+```toml
+[profile.docs]
+network = "on"
+mode = "default"
+
+[profile.docs.permissions]
+allow = ["net(docs.example.com:443)", "net(*.docs.example.com:443)"]
+deny = ["net(blocked.docs.example.com)"]
+```
+
+Select it with `--profile docs` or `EGO_PROFILE=docs`. A wildcard subdomain
+predicate does not include the apex domain, so the example declares both.
+Profile permissions replace the layer's whole permission block; system denies
+still bind. A deny wins over an allow. **This grant list is not a default-deny
+firewall.** Uncovered destinations still follow mode and approval policy.
+Do not add `deny = ["net(*)"]` as an allowlist fallback: that also denies the
+listed destinations. `network="off"` or `--offline` remains a separate boundary
+and cannot be lifted by a destination grant.
+
+The view explains these enforcement boundaries:
+
+- Guarded tool HTTP effects use `net(...)` authorization. These rules do not
+  describe every ego HTTP client, provider endpoint, or a remote server's
+  downstream activity.
+- Each guarded effect uses fresh DNS evidence bound to its logical host and
+  selected socket address. Literal addresses skip DNS. Redirects are one hop
+  per authorization; the next destination needs fresh authorization and DNS
+  validation, not the first destination's grant.
+- Native public web requests reject special-use literal addresses and DNS
+  answers on each hop. An authorized foreign HTTP effect can use private
+  destinations, including a local MCP endpoint. A `net(...)` allow does not
+  bypass the native public web address checks.
+- Destination rules do not filter child-process sockets. Child offline
+  isolation needs a measured backend `offline` capability. Inspection reports
+  `not_checked` until there is probe evidence; this is not a guarantee.
+- macOS uses Seatbelt. Linux offline requires a supported namespace backend
+  and successful capability probes. Unsupported enforcement fails closed.
+  Sandbox `off` alone does not provide network isolation.
+
+The shared view does not run DNS, open sockets, probe child processes, or make
+provider calls. Existing effect-level checks remain in the guarded transport;
+capability evidence remains in the execution backend.
+
 ## Every config.toml key
 
 The source schema for base/profile, MCP, auth, and UI fields is

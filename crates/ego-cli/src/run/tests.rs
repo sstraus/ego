@@ -3067,16 +3067,17 @@ async fn cli_drain_failed_child_does_not_abandon_later_children() {
     let first = fixture.add(false, false).await;
     let second = fixture.add(false, false).await;
     // BTreeMap order, not insertion order, determines the first child drained.
-    let mut pending = fixture.owner.background.lock().unwrap();
-    let earlier = *pending.keys().next().unwrap();
-    let task = pending.get_mut(&earlier).unwrap().execution.take().unwrap();
-    pending.get_mut(&earlier).unwrap().execution = Some(tokio::spawn(async move {
-        task.await.expect("child executor task")?;
-        Err(ChildServiceError::Result {
-            diagnostic: "drain execution failure".to_owned(),
-        })
-    }));
-    drop(pending);
+    {
+        let mut pending = fixture.owner.background.lock().unwrap();
+        let earlier = *pending.keys().next().unwrap();
+        let task = pending.get_mut(&earlier).unwrap().execution.take().unwrap();
+        pending.get_mut(&earlier).unwrap().execution = Some(tokio::spawn(async move {
+            task.await.expect("child executor task")?;
+            Err(ChildServiceError::Result {
+                diagnostic: "drain execution failure".to_owned(),
+            })
+        }));
+    }
     let error = fixture.drain().await.unwrap_err().to_string();
     assert!(error.contains("drain execution failure"), "{error}");
     let mut settled = fixture.settled().await;
@@ -3138,4 +3139,42 @@ async fn cli_drain_repeated_empty_drain_does_not_duplicate_settlement() {
         before,
         "an empty second drain must not rerun hooks or append another settlement"
     );
+}
+// Catches: native providers require EXA_API_KEY or expose Exa as a silent fallback.
+#[test]
+fn native_search_registry_does_not_require_or_select_exa() {
+    for model in ["openai/fixture", "anthropic/fixture"] {
+        let tools = composition::tools_with_mode(
+            Some(&vec!["web_search".into()]),
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            ego_core::orchestrator::Mode::Observe,
+            Some(model),
+        )
+        .unwrap();
+        assert_eq!(tools.len(), 1);
+        let descriptor = tools[0].descriptor();
+        assert_eq!(descriptor.name, "web_search");
+        assert!(descriptor.description.contains("provider hosted tool"));
+        assert!(!descriptor.description.contains("EXA_API_KEY"));
+        let defaults = composition::tools_with_mode(
+            None,
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            ego_core::orchestrator::Mode::Observe,
+            Some(model),
+        )
+        .unwrap();
+        assert!(
+            defaults.iter().all(|tool| !tool
+                .descriptor()
+                .description
+                .contains("provider hosted tool")),
+            "paid native search requires explicit selection"
+        );
+    }
 }
