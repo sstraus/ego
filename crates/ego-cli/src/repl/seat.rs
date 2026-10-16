@@ -384,6 +384,7 @@ struct SurfaceStatus {
     /// The part of the current turn spent waiting on modals.
     modal_waited: std::time::Duration,
     reply_started: Arc<AtomicBool>,
+    retry: Option<(String, Instant, u64)>,
     notice: Option<String>,
     image_chips: Vec<String>,
     origin: InputOrigin,
@@ -439,6 +440,7 @@ impl Default for SurfaceStatus {
             modal_since: None,
             modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
+            retry: None,
             notice: None,
             image_chips: Vec::new(),
             origin: InputOrigin::Typed,
@@ -681,6 +683,7 @@ pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
+    status: Option<SharedStatus>,
     signals: Option<Sender<String>>,
     cancel: CancelToken,
     reply_started: Arc<AtomicBool>,
@@ -692,6 +695,7 @@ impl SurfaceOutput {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
+            status: None,
             signals: None,
             cancel,
             reply_started: Arc::new(AtomicBool::new(false)),
@@ -732,12 +736,21 @@ impl SurfaceOutput {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
+                status: None,
                 signals: None,
                 cancel,
                 reply_started,
             },
             owner,
         )
+    }
+
+    pub(crate) fn retry_status(&self, message: Option<(&str, u64)>) {
+        if let Some(status) = &self.status {
+            status.lock().expect("surface status lock").retry =
+                message.map(|(text, delay)| (text.to_string(), Instant::now(), delay));
+            repaint_status(status);
+        }
     }
 
     pub(crate) fn signal(&self, sequence: &str) -> Result<(), SendError<String>> {
@@ -1002,6 +1015,7 @@ impl Seat {
         // Host metadata never waits for the row printer or consumes a row.
         let (signal_sender, signals) = crossbeam::channel::unbounded();
         output.signals = Some(signal_sender);
+        output.status = Some(Arc::clone(&status));
         let active_signals = signals.clone();
         editor = editor.with_idle_callback(Box::new(move || {
             let mut out = std::io::stdout().lock();
@@ -1017,7 +1031,10 @@ impl Seat {
         let held_printer = printer.sender();
         let startup_output = printer.receiver().clone();
         let break_signal = Arc::new(AtomicBool::new(false));
-        let (input_sender, input) = bounded(CHANNEL_CAPACITY);
+        // The driver can wait for the output pump at turn completion. Its
+        // terminal owner must remain free to drain that pump's printer even
+        // when several input lines arrive before the driver reads again.
+        let (input_sender, input) = crossbeam::channel::unbounded();
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
         let owner_break = Arc::clone(&break_signal);
         let owner_phase = phase.clone();
@@ -1375,8 +1392,7 @@ impl Seat {
         let SeatKind::Live(live) = &self.kind else {
             return;
         };
-        live.status.lock().expect("surface status lock").notice = Some(notice);
-        repaint_status(&live.status);
+        commit_to_transcript(&live.status, &notice);
     }
 
     pub(crate) fn set_image_chips(&self, chips: Vec<String>) {
@@ -1624,6 +1640,10 @@ impl crate::run::Reads for Seat {
 
 impl crate::run::InteractiveSeat for Seat {
     fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
+        #[cfg(test)]
+        if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
+            return Ok(crate::run::PasteboardKind::Image);
+        }
         super::clipboard::kind()
     }
 
@@ -2055,9 +2075,9 @@ use permission::{
 };
 use picker_surface::run_model_picker;
 use question::{
-    PermissionEditOutcome, Question, Waiting, answer_control, edit_permission_parameters,
-    enter_modal, leave_modal, next_selector_key, parse_trust, question_selector_prompt,
-    queued_selector_line,
+    PermissionEditOutcome, Question, Waiting, answer_control, commit_to_transcript,
+    edit_permission_parameters, enter_modal, leave_modal, next_selector_key, parse_trust,
+    question_selector_prompt, queued_selector_line,
 };
 #[cfg(test)]
 use question::{PermissionWord, parse_permission};

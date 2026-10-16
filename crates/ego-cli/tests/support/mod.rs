@@ -50,7 +50,7 @@ pub fn vision_model_facts(image_input: &str) -> String {
 schema_version = 5
 max_context_tokens = 128000
 max_output_tokens = 4096
-max_tools = 16
+max_tools = 32
 supports_parallel_tool_calls = false
 reasoning_carryover = "unsupported"
 reasoning_efforts = "any"
@@ -102,6 +102,13 @@ pub fn wait_pty_child(
             ))
         }
     }
+}
+
+/// Keep instrumented children from writing default profiles into observed fixtures.
+pub fn coverage_environment() -> Vec<(&'static str, OsString)> {
+    std::env::var_os("LLVM_PROFILE_FILE")
+        .map(|profile| vec![("LLVM_PROFILE_FILE", profile)])
+        .unwrap_or_default()
 }
 
 #[cfg(not(windows))]
@@ -1008,8 +1015,8 @@ impl Ego {
         // `cargo llvm-cov` points the instrumented child at its own profile
         // directory through this variable; without it the real binary's
         // production paths show 0% coverage.
-        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
-            command.env("LLVM_PROFILE_FILE", profile);
+        for (key, value) in coverage_environment() {
+            command.env(key, value);
         }
         for (key, value) in &self.env {
             command.env(key, value);

@@ -38,6 +38,9 @@ fn confirmation_case(answer: &[u8], applied: bool) {
     command.args(["setup", "inspect this task"]);
     command.cwd(&workspace);
     command.env_clear();
+    for (key, value) in support::coverage_environment() {
+        command.env(key, value);
+    }
     command.env("EGO_HOME", &home);
     command.env("HOME", &home);
     command.env("OLLAMA_HOST", &stub.address);

@@ -129,6 +129,8 @@ pub enum Refusal {
     MissingImport,
     /// An import leaves the allowed instruction tree or names an absolute path.
     ImportOutsideScope,
+    /// External bytes have not been approved for this workspace.
+    ExternalApprovalRequired,
     /// A file imports one of its active ancestors.
     ImportCycle,
     /// A standalone `@` lacks a single usable relative path.
@@ -151,6 +153,10 @@ impl std::fmt::Display for Refusal {
             }
             Refusal::MissingImport => write!(f, "the imported file does not exist"),
             Refusal::ImportOutsideScope => write!(f, "the import leaves its instruction scope"),
+            Refusal::ExternalApprovalRequired => write!(
+                f,
+                "external instruction content requires workspace approval"
+            ),
             Refusal::ImportCycle => write!(f, "the import forms a cycle"),
             Refusal::InvalidImport => write!(f, "the import is malformed"),
         }
@@ -295,6 +301,19 @@ pub fn load(
     selection: &Selection,
     limits: Limits,
 ) -> Result<InstructionSet, CwdOutsideRoot> {
+    load_with_home(io, root, cwd, selection, limits, None)
+}
+
+/// Stage bounded imports for review. A caller must authorize external bytes
+/// before using the returned text in a prompt. `home` is launch-owned.
+pub fn load_with_home(
+    io: &dyn InstructionIo,
+    root: &Path,
+    cwd: &Path,
+    selection: &Selection,
+    limits: Limits,
+    home: Option<&Path>,
+) -> Result<InstructionSet, CwdOutsideRoot> {
     let paths = plan(root, cwd, selection)?;
     let mut set = InstructionSet::default();
     let mut total: u64 = 0;
@@ -311,6 +330,7 @@ pub fn load(
             &path,
             false,
             scope,
+            home,
             limits,
             &mut set,
             &mut total,
@@ -329,6 +349,7 @@ fn load_one(
     path: &Path,
     imported: bool,
     scope: &Path,
+    home: Option<&Path>,
     limits: Limits,
     set: &mut InstructionSet,
     total: &mut u64,
@@ -407,7 +428,7 @@ fn load_one(
             });
             continue;
         }
-        let Some(target) = import_target(path, scope, &reference) else {
+        let Some(target) = import_target(path, scope, &reference, home) else {
             set.skipped.push(Skipped {
                 path: path.parent().unwrap_or(path).join(&reference),
                 reason: Refusal::ImportOutsideScope,
@@ -431,6 +452,7 @@ fn load_one(
             &target,
             true,
             scope,
+            home,
             limits,
             set,
             total,
@@ -479,26 +501,45 @@ pub fn instruction_references(text: &str) -> Vec<String> {
 }
 
 /// Normalize lexically so an import cannot escape its trusted tree.
-fn import_target(containing: &Path, scope: &Path, reference: &str) -> Option<PathBuf> {
-    let reference = Path::new(reference);
-    if reference.is_absolute() {
+fn import_target(
+    containing: &Path,
+    scope: &Path,
+    reference: &str,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let expanded;
+    let reference = if let Some(relative) = reference.strip_prefix("~/") {
+        expanded = home?.join(relative);
+        expanded.as_path()
+    } else {
+        if reference.starts_with('~') {
+            return None;
+        }
+        Path::new(reference)
+    };
+    // Without a launch home, retain the original contained-only API contract.
+    if home.is_none() && reference.is_absolute() {
         return None;
     }
-    let mut target = containing.parent()?.to_path_buf();
+    let mut target = if reference.is_absolute() {
+        PathBuf::new()
+    } else {
+        containing.parent()?.to_path_buf()
+    };
     for component in reference.components() {
         match component {
             Component::CurDir => {}
             Component::Normal(name) => target.push(name),
             Component::ParentDir => {
-                target.pop();
-                if !target.starts_with(scope) {
+                if !target.pop() {
                     return None;
                 }
             }
-            Component::RootDir | Component::Prefix(_) => return None,
+            Component::RootDir => target.push(component.as_os_str()),
+            Component::Prefix(prefix) => target.push(prefix.as_os_str()),
         }
     }
-    target.starts_with(scope).then_some(target)
+    (home.is_some() || target.starts_with(scope)).then_some(target)
 }
 
 /// The system prompt a set of instructions becomes, **and** the descriptors

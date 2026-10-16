@@ -1211,6 +1211,45 @@ impl GuardedHttp {
         })
     }
 
+    /// Public web requests reject special-use destinations before opening a socket.
+    pub fn execute_public_admitted(
+        &self,
+        route: HttpRoute,
+        connect: PreparedConnect,
+        request: HttpRequest,
+        deadline: std::time::Instant,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        if route.target != connect.target || !connect.matches(&request) {
+            return Box::pin(futures::future::ready(Err(authority_mismatch())));
+        }
+        let resolver = Arc::clone(&self.resolver);
+        let one_hop = Arc::clone(&self.one_hop);
+        Box::pin(async move {
+            let resolved = if connect.target.ip().is_some() {
+                ResolvedConnect::literal(route, connect)?
+            } else {
+                let resolution = resolver.resolve(connect.target.clone(), deadline).await?;
+                if resolution
+                    .addresses
+                    .iter()
+                    .any(|address| !public_web_address(*address))
+                {
+                    return Err(authority_mismatch());
+                }
+                let selected = resolution
+                    .addresses
+                    .first()
+                    .copied()
+                    .ok_or_else(authority_mismatch)?;
+                ResolvedConnect::from_resolution(route, connect, resolution, selected)?
+            };
+            if !public_web_address(resolved.selected()) {
+                return Err(authority_mismatch());
+            }
+            one_hop.execute(resolved, request, deadline).await
+        })
+    }
+
     pub fn execute_admitted(
         &self,
         route: HttpRoute,
@@ -1415,5 +1454,39 @@ mod windows_native_codec_tests {
             decode_native(&base64url_encode(&[0x41, 0x00, 0x42])),
             Err("invalid native string encoding")
         );
+    }
+}
+
+/// Conservative public-unicast policy for native web tools only.
+fn public_web_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || a == 0
+                || a >= 224
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && (18..=19).contains(&b)))
+        }
+        IpAddr::V6(ip) => {
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                return public_web_address(IpAddr::V4(ip));
+            }
+            let segments = ip.segments();
+            // Only global unicast; exclude special-use 2001::/23, documentation,
+            // 6to4, and the deprecated 3ffe::/16 range.
+            (segments[0] & 0xe000) == 0x2000
+                && !(segments[0] == 0x2001 && segments[1] < 0x0200)
+                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+                && segments[0] != 0x2002
+                && segments[0] != 0x3ffe
+                && !(segments[0] == 0x3fff && segments[1] < 0x1000)
+        }
     }
 }

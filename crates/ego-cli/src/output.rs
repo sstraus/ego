@@ -55,6 +55,11 @@ pub trait TextOutput: Diagnostics {
     fn signal(&self, sequence: &str) {
         self.write(sequence);
     }
+    fn live_retry(&self) -> bool {
+        false
+    }
+    /// Replace a live retry row; ordinary outputs remain append-only.
+    fn retry_status(&self, _message: Option<(&str, u64)>) {}
     fn finish(&self) {}
 }
 
@@ -245,6 +250,17 @@ impl TextOutput for InteractiveOutput {
             .signal(sequence);
     }
 
+    fn live_retry(&self) -> bool {
+        true
+    }
+
+    fn retry_status(&self, message: Option<(&str, u64)>) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .retry_status(message);
+    }
+
     fn finish(&self) {
         let _ = self.inner.lock().expect("surface output lock").finish();
     }
@@ -331,6 +347,7 @@ pub struct TextSink<'a> {
     /// the start event, kept until the completion event arrives.
     calls: Mutex<HashMap<ItemId, StartedCall>>,
     capabilities: Capabilities,
+    retry_cause: Mutex<Option<String>>,
 }
 
 struct StartedCall {
@@ -356,6 +373,7 @@ impl<'a> TextSink<'a> {
             ceiling: Mutex::new(None),
             calls: Mutex::new(HashMap::new()),
             capabilities,
+            retry_cause: Mutex::new(None),
         }
     }
 
@@ -460,6 +478,21 @@ impl<'a> TextSink<'a> {
 
 impl EventSink for TextSink<'_> {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        if self.capabilities.on_screen()
+            && self.out.live_retry()
+            && matches!(
+                event,
+                PublicEvent::ItemStarted { .. }
+                    | PublicEvent::ItemDelta { .. }
+                    | PublicEvent::TurnCompleted { .. }
+            )
+        {
+            self.out.retry_status(None);
+            if let Some(cause) = self.retry_cause.lock().expect("retry cause lock").take() {
+                self.finish();
+                self.out.note(&format!("{cause} — retry finished"));
+            }
+        }
         match event {
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
@@ -571,14 +604,28 @@ impl EventSink for TextSink<'_> {
                 } else {
                     format!("attempt {attempt}/{limit}")
                 };
-                self.out.note(&format!(
+                let message = format!(
                     "{cause} — connection problem, retrying in {:.1}s ({counter})",
                     *delay_ms as f64 / 1_000.0
-                ));
+                );
+                if self.capabilities.on_screen() && self.out.live_retry() {
+                    *self.retry_cause.lock().expect("retry cause lock") = Some(cause.clone());
+                    self.out.retry_status(Some((&message, *delay_ms)));
+                } else {
+                    self.out.note(&message);
+                }
             }
-            PublicEvent::Error { message, .. } => {
+            PublicEvent::Error { message, kind, .. } => {
                 self.finish();
-                self.out.note(message);
+                if self.capabilities.on_screen()
+                    && self.out.live_retry()
+                    && *kind == ego_core::generator::types::ErrorKind::Transient
+                {
+                    *self.retry_cause.lock().expect("retry cause lock") = Some(message.clone());
+                    self.out.retry_status(Some((message, 0)));
+                } else {
+                    self.out.note(message);
+                }
             }
             _ => {}
         }

@@ -165,3 +165,200 @@ fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
     }
     assert!(places.home_path().join("trust.json").exists());
 }
+
+// Catches: an external import leaks before consent, or remembered consent
+// survives replacement bytes. Uses the built CLI with isolated HOME/workspace.
+#[test]
+fn external_import_disclosure_requires_content_bound_workspace_consent() {
+    let places = Places::new();
+    let home = places.home_path();
+    let maintainer = home.join("workspace/example-project/maintainer.md");
+    std::fs::create_dir_all(maintainer.parent().unwrap()).unwrap();
+    std::fs::write(&maintainer, "EXTERNAL-maintainer-477-ORIGINAL").unwrap();
+    places.file("AGENTS.md", "@~/workspace/example-project/maintainer.md\n");
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK")); 5],
+        ..Plan::default()
+    });
+    for (index, grant, expected) in [(0, false, false), (1, true, true), (2, false, true)] {
+        let id = format!("01900000-0000-7000-8000-{index:012}");
+        let ego = places.ego(&stub).args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--session-id",
+            &id,
+            "task",
+        ]);
+        let result = if grant {
+            ego.args(["--trust-workspace"]).run()
+        } else {
+            ego.run()
+        };
+        assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+        assert_eq!(
+            stub.generations()[index]["messages"]
+                .to_string()
+                .contains("EXTERNAL-maintainer-477-ORIGINAL"),
+            expected
+        );
+    }
+    std::fs::write(&maintainer, "EXTERNAL-maintainer-477-CHANGED").unwrap();
+    let result = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--session-id",
+            "01900000-0000-7000-8000-000000000003",
+            "task",
+        ])
+        .run();
+    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+    assert!(
+        !stub.generations()[3]["messages"]
+            .to_string()
+            .contains("EXTERNAL-maintainer-477")
+    );
+}
+
+// Catches: --trust-workspace approves ambient files but silently drops imports
+// from the instruction file the operator explicitly selected.
+#[test]
+fn explicit_instruction_file_external_import_survives_explicit_workspace_grant() {
+    let places = Places::new();
+    places.file("AGENTS.md", "Ambient workspace instructions.\n");
+    let selected = places.file("selected.md", "@~/shared.md\n");
+    std::fs::write(
+        places.home_path().join("shared.md"),
+        "REGRESSION-MARKER",
+    )
+    .unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK"))],
+        ..Plan::default()
+    });
+    let result = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--trust-workspace",
+            "--instructions",
+            selected.to_str().unwrap(),
+            "task",
+        ])
+        .run();
+    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]["messages"]
+            .to_string()
+            .contains("REGRESSION-MARKER"),
+        "explicitly granted import omitted from provider request; diagnostics: {}",
+        result.stderr
+    );
+}
+
+// Catches: portable-only ancestor skills fail to trigger the real trust question,
+// or ordinary skill edits incorrectly revoke an executable-surface answer.
+#[test]
+fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
+    let places = Places::new();
+    places.file(".git/HEAD", "ref: refs/heads/fixture\n");
+    let skill = places.file(
+        ".agents/skills/foo/SKILL.md",
+        "---\nname: foo\ndescription: portable fixture\n---\nFIRST-REGRESSION-MARKER\n",
+    );
+    let nested = places
+        .file("nested/.keep", "")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK")); 3],
+        ..Plan::default()
+    });
+    for (index, expected_prompt) in [true, false, false].into_iter().enumerate() {
+        if index == 2 {
+            std::fs::write(
+                &skill,
+                "---\nname: foo\ndescription: changed portable fixture\n---\nSECOND-REGRESSION-MARKER\n",
+            )
+            .unwrap();
+        }
+        let result = support::Ego::at(places.home_path(), &nested, Some(&stub))
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--thinking",
+                "off",
+            ])
+            .run_pty_trusting("yes", "/skills");
+        assert_eq!(result.code, Some(0), "{}", result.stdout);
+        assert_eq!(
+            result.stdout.contains("Trust project files"),
+            expected_prompt,
+            "{}",
+            result.stdout
+        );
+        assert!(result.stdout.contains("/foo"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains(&skill.display().to_string()),
+            "{}",
+            result.stdout
+        );
+    }
+    assert!(stub.generations().is_empty());
+}
+
+// Catches: consent inventories an unnormalized --instructions path while prompt
+// assembly canonicalizes it, silently omitting explicitly approved imports.
+#[test]
+fn parent_relative_selected_file_keeps_approved_external_imports() {
+    let places = Places::new();
+    places.file("AGENTS.md", "Ambient instructions.\n");
+    places.file("nested/.keep", "");
+    places.file("selected.md", "@~/shared.md\n");
+    std::fs::write(
+        places.home_path().join("shared.md"),
+        "REGRESSION-MARKER",
+    )
+    .unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK"))],
+        ..Plan::default()
+    });
+    let result = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--trust-workspace",
+            "--instructions",
+            "nested/../selected.md",
+            "task",
+        ])
+        .run();
+    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]["messages"]
+            .to_string()
+            .contains("REGRESSION-MARKER"),
+        "parent-relative selection lost approved import: {}",
+        result.stderr
+    );
+}

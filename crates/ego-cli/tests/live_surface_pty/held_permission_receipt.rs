@@ -2,7 +2,7 @@
 //! the CLI binary, its terminal owner can hold its actual printer deterministically.
 
 #[path = "../support/mod.rs"]
-mod support;
+pub(super) mod support;
 
 use std::io::{Read, Write};
 use std::sync::{Arc, mpsc};

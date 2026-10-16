@@ -98,6 +98,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
+            [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -154,6 +155,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
+            [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -210,6 +212,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
+            [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

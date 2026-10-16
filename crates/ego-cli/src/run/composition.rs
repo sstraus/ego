@@ -141,7 +141,7 @@ pub(super) fn instructions(
             Some(path) => Some(explicit(path, cwd)?),
             None => None,
         };
-        let selection = Selection::of(effective.posture, named);
+        let selection = Selection::of(effective.posture, named.clone());
         let discovery_root = if matches!(selection, Selection::Disabled) {
             root.to_path_buf()
         } else if let Some(home) = std::env::var_os("HOME") {
@@ -155,14 +155,50 @@ pub(super) fn instructions(
         } else {
             root.to_path_buf()
         };
-        let set = ego_core::config::load(
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut set = ego_core::config::load_with_home(
             &OsInstructionIo,
             &discovery_root,
             cwd,
             &selection,
             Limits::default(),
+            home.as_deref(),
         )
         .map_err(|err| UsageError(err.to_string()))?;
+
+        // Consent covers the exact bytes staged above, not a later path read.
+        let surface = if matches!(selection, Selection::Disabled) {
+            ego_core::config::ExecutableSurface::default()
+        } else {
+            crate::trust::executable_surface_selected(root, named.as_deref())
+        };
+        let approved = !matches!(selection, Selection::Disabled)
+            && crate::trust::remembered_decision(
+                root,
+                crate::config::ego_home().as_deref(),
+                &surface,
+            ) == Some(ego_core::config::Trust::Trusted);
+        let scope = match &selection {
+            Selection::Explicit(path) => path.parent().unwrap_or(&discovery_root),
+            _ => &discovery_root,
+        };
+        let mut rejected = Vec::new();
+        set.loaded.retain(|file| {
+            let allowed = file.path.starts_with(scope)
+                || (approved
+                    && surface
+                        .external_instructions
+                        .get(&file.path.display().to_string())
+                        == Some(&file.digest));
+            if !allowed {
+                rejected.push(ego_core::config::Skipped {
+                    path: file.path.clone(),
+                    reason: ego_core::config::Refusal::ExternalApprovalRequired,
+                });
+            }
+            allowed
+        });
+        set.skipped.extend(rejected);
 
         for skipped in &set.skipped {
             diagnostics.note(&format!(
@@ -276,6 +312,9 @@ pub(super) fn tools_with_mode(
             .iter()
             .any(|tool| tool.descriptor().name == name.as_str())
         {
+            if name == "web_search" {
+                return Err(UsageError("--tools web_search: no search backend configured; set EXA_API_KEY to enable Exa (account credits and possible paid charges); no fallback is used".into()));
+            }
             let known: Vec<String> = all.iter().map(|tool| tool.descriptor().name).collect();
             return Err(UsageError(format!(
                 "--tools {name}: there is no such builtin; this build has {}",

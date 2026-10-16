@@ -94,6 +94,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand -q 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --quiet 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --no-color 'Never emit ANSI colour, whatever the terminal claims to support'
+            cand --plain 'Append plain output without terminal styling or live retry updates'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -149,6 +150,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand -q 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --quiet 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --no-color 'Never emit ANSI colour, whatever the terminal claims to support'
+            cand --plain 'Append plain output without terminal styling or live retry updates'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -204,6 +206,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand -q 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --quiet 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --no-color 'Never emit ANSI colour, whatever the terminal claims to support'
+            cand --plain 'Append plain output without terminal styling or live retry updates'
             cand -h 'Print help'
             cand --help 'Print help'
         }

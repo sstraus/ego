@@ -469,6 +469,26 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         call: PreparedCall,
         request: HttpRequest,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        if let Some((route, expected)) = call.web_http_envelope() {
+            let checked = self.permit.allows_call(&call).and_then(|()| {
+                self.permit
+                    .allows_network(&PreparedConnect::new(route.target().clone(), &request))
+            });
+            let route = route.clone();
+            let matches = expected == &request && call.ops().len() == 1;
+            let http = self.http.clone();
+            let spent = self.foreign_spent.swap(true, Ordering::AcqRel);
+            return Box::pin(async move {
+                checked?;
+                if !matches || spent {
+                    return Err(authority_mismatch());
+                }
+                let deadline = http.begin_call();
+                let connect = PreparedConnect::new(route.target().clone(), &request);
+                http.execute_public_admitted(route, connect, request, deadline)
+                    .await
+            });
+        }
         let claim = self.claim_foreign(&call, ForeignKind::Http, Some(&request));
         let http = self.http.clone();
         Box::pin(async move {

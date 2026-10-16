@@ -862,6 +862,7 @@ pub struct Args {
     pub(crate) ceiling_profile: Option<String>,
     pub quiet: bool,
     pub no_color: bool,
+    pub plain: bool,
 }
 
 /// One validated `resume --answer QUESTION_ID=JSON` value.
@@ -2000,6 +2001,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         profile: shape.profile,
         quiet: flags.quiet,
         no_color: flags.no_color,
+        plain: flags.plain,
     })
 }
 

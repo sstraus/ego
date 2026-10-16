@@ -33,8 +33,6 @@ use crate::output::Diagnostics;
 /// Project configuration and the local override beside it: the two files that
 /// carry project hooks, project MCP servers and project rules.
 const PROJECT_CONFIGS: [&str; 2] = [".ego/config.toml", ".ego/config.local.toml"];
-/// One directory per project skill, each holding one `SKILL.md`.
-const PROJECT_SKILLS: &str = ".ego/skills";
 const SKILL_FILE: &str = "SKILL.md";
 
 /// Shared project rules precede repository rules, but scratch fixtures under
@@ -71,6 +69,7 @@ pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> std::io::R
 /// `ask` is called at most once, when the workspace has trustable content and
 /// no answer for its current executable surface. An explicit launch grant
 /// supplies a fresh answer without consulting the seat or a prior refusal.
+#[cfg(test)]
 pub(crate) fn resolve(
     root: &Path,
     home: Option<&Path>,
@@ -78,26 +77,28 @@ pub(crate) fn resolve(
     explicit_grant: bool,
     ask: impl FnOnce(&str) -> Trust,
 ) -> Trust {
-    resolve_answer(root, home, diagnostics, explicit_grant, |context| {
+    resolve_selected(root, home, diagnostics, explicit_grant, None, |context| {
         Some(ask(context))
     })
 }
 
 /// Headless launches may reuse an answer, but never manufacture a refusal.
+#[cfg(test)]
 pub(crate) fn resolve_headless(
     root: &Path,
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
     explicit_grant: bool,
 ) -> Trust {
-    resolve_answer(root, home, diagnostics, explicit_grant, |_| None)
+    resolve_selected(root, home, diagnostics, explicit_grant, None, |_| None)
 }
 
-fn resolve_answer(
+pub(crate) fn resolve_selected(
     root: &Path,
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
     explicit_grant: bool,
+    selected: Option<&Path>,
     ask: impl FnOnce(&str) -> Option<Trust>,
 ) -> Trust {
     let Ok(root) = fs::canonicalize(root) else {
@@ -105,14 +106,14 @@ fn resolve_answer(
         return Trust::Untrusted;
     };
     let root = root.as_path();
-    let Some(content) = trustable_content(root) else {
+    let Some(content) = trustable_content_selected(root, selected) else {
         // No project config, no instructions, no skills: `y` and `n` would
         // open the same session, and a question whose answers do not differ
         // teaches the reader that trust questions do not matter.
         return Trust::Untrusted;
     };
 
-    let surface = executable_surface(root);
+    let surface = executable_surface_selected(root, selected);
     let key = root.display().to_string();
     let store = home.map(TrustStore::new);
     if !explicit_grant && let Some(store) = &store {
@@ -160,7 +161,7 @@ fn resolve_answer(
         };
         answer
     };
-    if executable_surface(root) != surface {
+    if executable_surface_selected(root, selected) != surface {
         diagnostics.note("the workspace executable surface changed while trust was being answered; this answer was not applied");
         return Trust::Untrusted;
     }
@@ -181,6 +182,13 @@ fn resolve_answer(
 /// Redacted executable declarations and the programs they run. Kept separate
 /// from the full inventory shown to a first-time reviewer.
 pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
+    executable_surface_selected(root, None)
+}
+
+pub(crate) fn executable_surface_selected(
+    root: &Path,
+    selected: Option<&Path>,
+) -> ExecutableSurface {
     let Ok(root) = fs::canonicalize(root) else {
         tracing::warn!(path = %root.display(), "the workspace executable surface root could not be resolved");
         return ExecutableSurface::default();
@@ -347,6 +355,41 @@ pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
                 link_target,
             },
         );
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if let Ok(discovery_root) = instruction_discovery_root(root, &home) {
+            let mut selections = vec![ego_core::config::Selection::Ambient];
+            if let Some(selected) = selected {
+                selections.push(ego_core::config::Selection::Explicit(
+                    selected.to_path_buf(),
+                ));
+            }
+            for selection in selections {
+                let scope = match &selection {
+                    ego_core::config::Selection::Explicit(path) => {
+                        path.parent().unwrap_or(&discovery_root)
+                    }
+                    _ => &discovery_root,
+                };
+                if let Ok(set) = ego_core::config::load_with_home(
+                    &OsInstructionIo,
+                    &discovery_root,
+                    root,
+                    &selection,
+                    ego_core::config::Limits::default(),
+                    Some(&home),
+                ) {
+                    for file in set.loaded {
+                        if !file.path.starts_with(scope) {
+                            surface
+                                .external_instructions
+                                .insert(file.path.display().to_string(), file.digest);
+                        }
+                    }
+                }
+            }
+        }
     }
     surface
 }
@@ -532,8 +575,12 @@ const LISTED_CONTENT: usize = 12;
 /// full, separately from what it merely *declares*, and only the declarations
 /// are bounded.
 pub(crate) fn trustable_content(root: &Path) -> Option<String> {
+    trustable_content_selected(root, None)
+}
+
+fn trustable_content_selected(root: &Path, selected: Option<&Path>) -> Option<String> {
     let inventory = inventory(root);
-    if inventory.is_empty() {
+    if inventory.is_empty() && selected.is_none() {
         return None;
     }
     let programs: Vec<String> = referenced_commands(root)
@@ -565,6 +612,19 @@ pub(crate) fn trustable_content(root: &Path) -> Option<String> {
             rendered.push_str(&format!("- {}\n", entry.path()));
         }
     }
+    if let Some(selected) = selected {
+        rendered.push_str(&format!(
+            "- {} (selected instructions)\n",
+            selected.display()
+        ));
+    }
+    let external = executable_surface_selected(root, selected).external_instructions;
+    if !external.is_empty() {
+        rendered.push_str("\nExternal instructions offered for disclosure to the model:\n");
+        for (path, digest) in external {
+            rendered.push_str(&format!("- {path:?} SHA-256 {digest}\n"));
+        }
+    }
     rendered.push_str(
         "\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\n\
          No: continue without project files.\n",
@@ -583,12 +643,15 @@ fn inventory(root: &Path) -> TrustInventory {
         .iter()
         .map(|relative| root.join(relative))
         .collect();
-    paths.extend(skill_files(root));
     paths.extend(referenced_commands(root));
     let mut entries: Vec<_> = paths
         .iter()
         .filter_map(|path| content(root, path))
         .collect();
+    entries.extend(skill_files(root).iter().filter_map(|path| {
+        // Ancestor skill roots are part of the same explicit trust answer.
+        content(path.parent()?, path)
+    }));
 
     let discovery_root = match std::env::var_os("HOME") {
         Some(home) => match instruction_discovery_root(root, &PathBuf::from(home)) {
@@ -749,16 +812,36 @@ fn readable<T>(path: &Path, result: std::io::Result<T>) -> Option<T> {
     }
 }
 
-/// `<root>/.ego/skills/*/SKILL.md`, exactly as the skill loader finds them.
+/// Inventory the same project roots as the loader before asking for trust.
 fn skill_files(root: &Path) -> Vec<PathBuf> {
-    let skills = root.join(PROJECT_SKILLS);
-    let Some(entries) = readable(&skills, fs::read_dir(&skills)) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|entry| readable(&skills, entry))
-        .map(|entry| entry.path().join(SKILL_FILE))
-        .collect()
+    let mut paths = Vec::new();
+    let mut canonical = std::collections::BTreeSet::new();
+    for skills in crate::capability_roots::discover_capability_roots(
+        root,
+        true,
+        Path::new("/etc/ego"),
+        Path::new(""),
+        None,
+        "skills",
+    )
+    .into_iter()
+    .filter(|entry| entry.source == ego_core::event::skill::SkillSourceAuthority::Project)
+    {
+        let Some(entries) = readable(&skills.path, fs::read_dir(&skills.path)) else {
+            continue;
+        };
+        for path in entries
+            .filter_map(|entry| readable(&skills.path, entry))
+            .map(|entry| entry.path().join(SKILL_FILE))
+        {
+            if let Ok(resolved) = fs::canonicalize(&path)
+                && canonical.insert(resolved)
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }
 
 /// One entry, or nothing if this path is not something ego would admit.

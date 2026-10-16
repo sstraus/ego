@@ -89,6 +89,14 @@ cancel = "cooperative"
 cache = "none"
 transport = "web_socket"
 
+# Image input: OpenAI model pages and Codex's InputImage protocol, checked
+# 2026-10-16. See ego-ai/tests/goldens/openai-codex/README.md for pinned sources.
+# The snapshot already states image modalities; this missing wire fact made
+# every Codex row unknown. Use the published formats and ego's 100-image cap.
+[provider.openai-codex.wire.image_input]
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
 # ---------------------------------------------------------------------------
 # anthropic. Current generation: the newest model of each tier, released from
 # Fable 5.1 (2026-09-01) on: fable-5-1, opus-5-5, sonnet-5-5, haiku-5-5.

@@ -447,8 +447,26 @@ confined execs. The launcher was subsequently fixed.
     --profile NAME      layer [profile.NAME] from config (§7)
     --bare              no ambient discovery even in a trusted workspace
     --trust-workspace   explicitly trust this launch's workspace, without asking
--q / --no-color
+-q / --no-color / --plain
 ```
+
+**Native web tools**
+
+`web_fetch` retrieves public HTTP(S) UTF-8 HTML, text, Markdown, or JSON through
+the same network permission rules as other connections. It sends no credentials,
+cookies, or proxy authorization. It rejects private and special-use resolved
+addresses before connect. Each call has a 30-second deadline, a 1 MiB response
+limit, and a 32 KiB rendered-content limit. Results identify their source and
+mark web content as untrusted. Redirects return a destination for a new
+`web_fetch` call; they do not transfer the original network permission.
+
+`web_search` is present only when `EXA_API_KEY` is nonempty in the process
+environment. It sends queries to Exa, uses account credits, and can incur paid
+charges. Each call requires `allow_paid: true` and normal network permission.
+There is no fallback backend. Results contain at most five cited URLs, titles,
+and highlights. Search never forwards its key through a redirect. An explicit
+`--tools web_search` without a key gives a configuration error. Provider-native
+hosted search is not enabled by this change.
 
 **Attachments and tools**
 
@@ -815,9 +833,13 @@ valid answer exists. An empty workspace
 still has nothing to admit and stays untrusted.
 
 A standalone `@relative/path` line outside fenced or indented code loads an
-instruction file relative to the containing file. Ambient imports stay inside
-the discovery tree; imports from an explicit file stay inside that file's
-directory. Duplicate files load once. Cycles, missing or malformed imports,
+instruction file relative to the containing file. `@~/path` expands the launch
+home; absolute imports are also supported. External targets outside the discovery
+tree require workspace consent bound to each exact target and SHA-256 content.
+The trust question lists these targets; headless runs require `--trust-workspace`
+or a matching remembered answer. Explicit-file imports outside its directory
+require the same target to be covered by workspace consent. No tool read root is
+widened. Duplicate files load once. Cycles, missing or malformed imports,
 scope escapes, symlinks, non-text files, and size refusals are reported rather
 than silently ignored. One run loads at most eight files, 64 KiB per file and
 256 KiB in total, and attempts at most eight distinct imports. An answer —
@@ -826,8 +848,8 @@ than silently ignored. One run loads at most eight files, 64 KiB per file and
 declarations, *plus every program inside the workspace they name* —
 `[[hooks]].handler.command`, `[mcp.servers.*].command` and
 `[auth.*].credential_command` — so replacing a trusted hook script asks again
-even when the config that names it is byte-identical. Instruction and skill
-edits do not invalidate the answer. Terminal and ACP seats share this ledger.
+even when the config that names it is byte-identical. In-tree instruction and skill
+edits do not invalidate the answer. External instruction edits do invalidate it. Terminal and ACP seats share this ledger.
 Invalid config is never skipped silently: unknown keys and malformed MCP
 entries are hard errors (Codex's `--strict-config`, as the only behaviour).
 
@@ -920,6 +942,13 @@ code in the workspace reads one of those variables or formats an escape by
 hand. `--no-color` on a real terminal removes the *colour*, not the layout: the
 person asked for no colour, not for a file.
 
+`--plain` overrides the gate with unstyled, append-only output for CI. Non-TTY
+output and `TERM=dumb` also append retry notices. Interactive retries otherwise
+replace one live row with the cause, attempt, countdown and retry hint, then
+leave one settled cause receipt when the turn recovers or fails. `-q` suppresses
+ordinary diagnostics, not recovery controls; `--output json` and `jsonl` keep
+their machine-readable contracts.
+
 **Out of band**, on a screen only: OSC 133 C/D around the run (so a host
 segments the output into a command block instead of pattern-matching tool
 headers), OSC 9;4 for the progress indicator — cleared on every exit path,
@@ -1009,11 +1038,17 @@ executables).
 
 ### 5.1 Skills are in-session capabilities, not agent files
 
-A skill is a strict `SKILL.md` under `/etc/ego/skills`, `$EGO_HOME/skills`, or
-trusted `<workspace>/.ego/skills`. It uses current Agent Skills frontmatter and
-the supported current Claude extensions documented in `ARCHITECTURE.md`.
-εgo does not scan `.claude/skills`: compatible metadata and bodies are portable,
-while storage aliases would create a second trust and precedence namespace.
+A skill is a strict `<name>/SKILL.md`. Roots, in highest-precedence order:
+trusted project `.ego/skills`, `.agents/skills`, `.claude/skills` at each directory
+from the workspace up to the nearest repository root (nearest directory first);
+user `$EGO_HOME/skills` (default `~/.ego/skills`), `~/.agents/skills`,
+`~/.claude/skills`; then `/etc/ego/skills`. Outside a repository, only the
+workspace directory contributes project roots. Project roots are not inspected
+without workspace trust. Bare headless runs do not discover ambient skills.
+The first valid definition of a name wins. Canonical file aliases are read once;
+fixed actions and the bundled `context-management` name remain reserved.
+The skill listing shows the selected file path. Current Agent Skills frontmatter
+and supported Claude extensions are documented in `ARCHITECTURE.md`.
 
 `/skills`, `/skills list`, and `/skills diagnose` inspect the one admitted
 catalogue; `/skills rescan` prepares and atomically publishes a complete

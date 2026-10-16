@@ -37,6 +37,9 @@ impl SessionTrustAdmission for CliSessionTrustAdmission {
     fn attest_trusted(&self, root: &RunRoot) {
         if self.host_profile {
             let surface = crate::trust::executable_surface(root.as_path());
+            if !surface.external_instructions.is_empty() {
+                return; // Generic host trust is not external disclosure consent.
+            }
             if !self.record_answer(root, &surface.fingerprint(), Trust::Trusted) {
                 tracing::warn!("the host workspace trust attestation could not be recorded");
             }
@@ -54,7 +57,16 @@ impl SessionTrustAdmission for CliSessionTrustAdmission {
             return SessionTrustStatus::Remembered(decision);
         }
         let content = match crate::trust::executable_changes(path, home, &surface) {
-            Some(changes) => format!("Executable changes since the last answer:\n{changes}\n"),
+            Some(changes) => {
+                let mut disclosure = String::new();
+                for (path, digest) in &surface.external_instructions {
+                    disclosure.push_str(&format!("- {path:?} SHA-256 {digest}\n"));
+                }
+                format!(
+                    "Authority changes since the last answer:\n{changes}\n\
+                         External instructions offered for disclosure to the model:\n{disclosure}"
+                )
+            }
             None => content,
         };
         SessionTrustStatus::Question {

@@ -472,6 +472,7 @@ mod registration {
                 "grep",
                 "read",
                 "read_tool_result",
+                "web_fetch",
                 "write"
             ]
         );
@@ -540,6 +541,7 @@ mod registration {
             ("read", json!({ "path": "src/main.rs" })),
             ("glob", json!({ "pattern": "src/**/*.rs" })),
             ("grep", json!({ "query": "TODO", "path": "src" })),
+            ("web_fetch", json!({ "url": "https://example.com/" })),
             ("write", json!({ "path": "src/new.rs", "contents": "hi\n" })),
             (
                 "edit",
@@ -2368,5 +2370,425 @@ struct NoRetryPause;
 impl ego_core::turn::RetryPause for NoRetryPause {
     fn pause(&self, _delay: std::time::Duration) -> futures::future::BoxFuture<'static, ()> {
         Box::pin(futures::future::ready(()))
+    }
+}
+
+mod native_web {
+    use super::*;
+    use ego_core::permit::{DnsResolution, HttpHeader, NetworkTarget, OneHopResponse};
+    use std::io::{Read as _, Write as _};
+    use std::net::{IpAddr, Ipv4Addr, TcpListener};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fixture {
+        address: std::net::SocketAddr,
+        hits: AtomicUsize,
+    }
+    impl Resolver for Fixture {
+        fn resolve(
+            &self,
+            target: NetworkTarget,
+            _deadline: Instant,
+        ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
+            Box::pin(async move {
+                let address = if target.host() == "private.test" {
+                    Ipv4Addr::LOCALHOST
+                } else {
+                    Ipv4Addr::new(93, 184, 216, 34)
+                };
+                Ok(DnsResolution::new(target, vec![IpAddr::V4(address)]).unwrap())
+            })
+        }
+    }
+    impl OneHop for Fixture {
+        fn begin_call(&self) -> Instant {
+            Instant::now() + std::time::Duration::from_secs(30)
+        }
+        fn execute(
+            &self,
+            connect: ResolvedConnect,
+            request: HttpRequest,
+            _deadline: Instant,
+        ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            assert_eq!(
+                connect.selected(),
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))
+            );
+            assert!(request.headers().is_empty());
+            assert!(request.body().is_empty());
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            let address = self.address;
+            Box::pin(async move {
+                // Fixture transport maps an admitted public identity to the local
+                // server. Production DNS and sockets are never replaced in code.
+                let mut stream = std::net::TcpStream::connect(address).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                write!(
+                    stream,
+                    "GET {} HTTP/1.0\r\nHost: fixture.test\r\n\r\n",
+                    request.path()
+                )
+                .unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                let separator = bytes
+                    .windows(4)
+                    .position(|part| part == b"\r\n\r\n")
+                    .unwrap();
+                let header = std::str::from_utf8(&bytes[..separator]).unwrap();
+                let body = bytes[separator + 4..].to_vec();
+                if header.contains("302 Found") {
+                    return Ok(OneHopResponse::redirect(
+                        302,
+                        vec![],
+                        b"http://private.test/secret".to_vec(),
+                    ));
+                }
+                let media = if request.path() == "/html" {
+                    "text/html"
+                } else {
+                    "text/plain"
+                };
+                Ok(OneHopResponse::response(
+                    200,
+                    vec![HttpHeader::new("content-type", media.as_bytes().to_vec()).unwrap()],
+                    body,
+                ))
+            })
+        }
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let mut chunk = [0; 4096];
+            let count = stream.read(&mut chunk).unwrap();
+            assert_ne!(count, 0, "request ended before headers");
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
+                let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .map(|value| value.parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                if bytes.len() >= end + 4 + length {
+                    return bytes;
+                }
+            }
+            assert!(bytes.len() <= 16384);
+        }
+    }
+
+    fn fixture(path: &str) -> (Arc<Fixture>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let path = path.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            let request = std::str::from_utf8(&request).unwrap();
+            assert!(request.starts_with(&format!("GET {path} HTTP/1.0")));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            assert!(!request.to_ascii_lowercase().contains("cookie:"));
+            let body = match path.as_str() {
+                "/html" => "<html><head><title>Fixture</title><style>hidden-style</style></head><body><h1>Hello &amp; world</h1><p>Recorded from local HTTP fixture.</p><script>hidden-script</script></body></html>".to_owned(),
+                "/oversized" => "x".repeat(1024 * 1024 + 1),
+                _ => "redirect".to_owned(),
+            };
+            let status = if path == "/redirect" {
+                "302 Found"
+            } else {
+                "200 OK"
+            };
+            write!(
+                stream,
+                "HTTP/1.0 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        (
+            Arc::new(Fixture {
+                address,
+                hits: AtomicUsize::new(0),
+            }),
+            server,
+        )
+    }
+
+    fn run(
+        ws: &Workspace,
+        params: serde_json::Value,
+        resolver: Arc<dyn Resolver>,
+        hop: Arc<dyn OneHop>,
+    ) -> Result<String, ToolError> {
+        let tool = ws.tool("web_fetch");
+        let call = tool.prepare(params, &ws.ctx())?;
+        let authorized = ws.authorize(call).expect("yolo fixture authorizes network");
+        let (call, permit) = authorized.into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &ws.fs,
+            &ws.process,
+            &ws.evidence,
+            resolver,
+            hop,
+            Arc::new(NoDuplex),
+        );
+        match block_on(tool.execute(call, &guarded))? {
+            ToolExecution::Complete(result) => Ok(result.model_text()),
+            _ => panic!("unexpected suspension"),
+        }
+    }
+
+    #[test]
+    fn web_fetch_cites_real_local_http_html_and_omits_active_content() {
+        let ws = Workspace::in_mode(Mode::Yolo);
+        let (fixture, server) = fixture("/html");
+        let result = run(
+            &ws,
+            json!({"url":"http://fixture.test/html"}),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert!(result.contains("Source: http://fixture.test/html"));
+        assert!(result.contains("Hello & world"));
+        assert!(result.contains("Recorded from local HTTP fixture."));
+        assert!(!result.contains("hidden-script"));
+        assert!(!result.contains("hidden-style"));
+        assert_eq!(fixture.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn web_fetch_does_not_follow_redirect_escape_on_inherited_authority() {
+        let ws = Workspace::in_mode(Mode::Yolo);
+        let (fixture, server) = fixture("/redirect");
+        let result = run(
+            &ws,
+            json!({"url":"http://fixture.test/redirect"}),
+            fixture.clone(),
+            fixture.clone(),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert!(result.contains("Redirect (not fetched): http://private.test/secret"));
+        assert_eq!(fixture.hits.load(Ordering::SeqCst), 1);
+        assert!(
+            run(
+                &ws,
+                json!({"url":"http://private.test/secret"}),
+                fixture.clone(),
+                fixture.clone()
+            )
+            .is_err()
+        );
+        assert_eq!(fixture.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn web_fetch_rejects_oversized_response_instead_of_citing_partial_data() {
+        let ws = Workspace::in_mode(Mode::Yolo);
+        let (fixture, server) = fixture("/oversized");
+        let error = run(
+            &ws,
+            json!({"url":"http://fixture.test/oversized"}),
+            fixture.clone(),
+            fixture,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("exceeds 1 MiB"));
+    }
+
+    #[test]
+    fn web_fetch_rejects_private_literals_before_transport_and_offline_before_dns() {
+        let ws = Workspace::in_mode(Mode::Yolo);
+        for url in [
+            "http://127.0.0.1/",
+            "http://[::1]/",
+            "http://169.254.169.254/",
+            "http://10.0.0.1/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            let error = run(
+                &ws,
+                json!({"url":url}),
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("AuthorityMismatch"),
+                "{url}: {error}"
+            );
+        }
+        let error = run(
+            &ws,
+            json!({"url":"http://public.test/"}),
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Offline"));
+    }
+
+    #[test]
+    fn web_fetch_credentials_are_refused_and_search_has_no_paid_default() {
+        let ws = Workspace::in_mode(Mode::Yolo);
+        for url in [
+            "http://user:password@public.test/",
+            "file:///secret",
+            "ftp://public.test/",
+        ] {
+            assert!(
+                ws.tool("web_fetch")
+                    .prepare(json!({"url":url}), &ws.ctx())
+                    .is_err()
+            );
+        }
+        let error = ws
+            .run(
+                &Typed(ego_tools::tools::WebSearch::default()),
+                json!({"query":"rust", "allow_paid":true}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("no search backend configured"));
+    }
+
+    #[test]
+    fn web_search_exa_uses_exact_paid_request_and_returns_attributed_results() {
+        use ego_tools::tools::{ExaSearch, WebSearch};
+        let ws = Workspace::in_mode(Mode::Yolo);
+        let tool = Typed(WebSearch::with_backend(Arc::new(ExaSearch::new(
+            ego_core::credentials::SecretMaterial::new(b"fixture-key".to_vec()),
+        ))));
+        assert!(
+            tool.prepare(json!({"query":"rust", "allow_paid":false}), &ws.ctx())
+                .unwrap_err()
+                .to_string()
+                .contains("cost consent")
+        );
+        let call = tool
+            .prepare(json!({"query":"rust", "allow_paid":true}), &ws.ctx())
+            .unwrap();
+        let (route, request) = call.web_http_envelope().unwrap();
+        assert_eq!(route.target().host(), "api.exa.ai");
+        assert_eq!(request.method(), "POST");
+        assert_eq!(request.path(), "/search");
+        assert!(!format!("{call:?}").contains("fixture-key"));
+        let body: serde_json::Value = serde_json::from_slice(request.body()).unwrap();
+        assert_eq!(body["numResults"], 5);
+        assert_eq!(body["query"], "rust");
+        assert_eq!(body["type"], "instant");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            assert!(
+                std::str::from_utf8(&request)
+                    .unwrap()
+                    .starts_with("POST /search HTTP/1.0")
+            );
+            let body = r#"{"results":[{"title":"Rust","url":"https://www.rust-lang.org/","highlights":["A language for reliable software"]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        struct SearchHop(std::net::SocketAddr);
+        impl OneHop for SearchHop {
+            fn begin_call(&self) -> Instant {
+                Instant::now() + std::time::Duration::from_secs(30)
+            }
+            fn execute(
+                &self,
+                _connect: ResolvedConnect,
+                request: HttpRequest,
+                _deadline: Instant,
+            ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+                let address = self.0;
+                assert!(request.headers().iter().any(|h| h.name() == "x-api-key"
+                    && h.is_secret()
+                    && h.value() == b"fixture-key"));
+                Box::pin(async move {
+                    let mut stream = std::net::TcpStream::connect(address).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    write!(
+                        stream,
+                        "POST /search HTTP/1.0\r\nHost: api.exa.ai\r\nContent-Length: {}\r\n\r\n",
+                        request.body().len()
+                    )
+                    .unwrap();
+                    stream.write_all(request.body()).unwrap();
+                    let mut bytes = Vec::new();
+                    stream.read_to_end(&mut bytes).unwrap();
+                    let separator = bytes.windows(4).position(|p| p == b"\r\n\r\n").unwrap();
+                    Ok(OneHopResponse::response(
+                        200,
+                        vec![],
+                        bytes[separator + 4..].to_vec(),
+                    ))
+                })
+            }
+        }
+        let fixture = Arc::new(Fixture {
+            address,
+            hits: AtomicUsize::new(0),
+        });
+        let authorized = ws.authorize(call).unwrap();
+        let (call, permit) = authorized.into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &ws.fs,
+            &ws.process,
+            &ws.evidence,
+            fixture,
+            Arc::new(SearchHop(address)),
+            Arc::new(NoDuplex),
+        );
+        let result = match block_on(tool.execute(call, &guarded)).unwrap() {
+            ToolExecution::Complete(result) => result.model_text(),
+            _ => panic!("unexpected suspension"),
+        };
+        server.join().unwrap();
+        assert!(result.contains("Search provider: Exa"));
+        assert!(result.contains("https://www.rust-lang.org/"));
+        assert!(result.contains("A language for reliable software"));
+        assert!(!result.contains("fixture-key"));
+    }
+
+    #[test]
+    fn web_fetch_domain_deny_cannot_be_overridden_by_yolo() {
+        let rule = Rule::load("net(blocked.test)").unwrap();
+        let rules = Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![],
+                deny: vec![rule],
+            },
+            Source::Project,
+        );
+        let ws = Workspace::with_rules(Mode::Yolo, rules);
+        let call = ws
+            .tool("web_fetch")
+            .prepare(json!({"url":"https://blocked.test/"}), &ws.ctx())
+            .unwrap();
+        assert!(ws.authorize(call).is_err());
     }
 }

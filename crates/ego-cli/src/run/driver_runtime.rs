@@ -535,9 +535,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                 && let Some(output) = text_output
             {
                 let environment = crate::render::caps::Environment::read();
-                let capabilities = crate::render::Capabilities::of(
-                    &crate::render::caps::Terminal::from_process(args.no_color, &environment),
-                );
+                let capabilities =
+                    crate::render::Capabilities::of(&crate::render::caps::Terminal {
+                        flag_plain: args.plain,
+                        ..crate::render::caps::Terminal::from_process(args.no_color, &environment)
+                    });
                 if let Err(error) = crate::render::replay::replay(
                     active.writer(),
                     active.id(),

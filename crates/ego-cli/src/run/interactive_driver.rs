@@ -412,7 +412,10 @@ pub(super) async fn run_process(
     // document acquires an escape sequence.
     let environment = Environment::read();
     let capabilities = match output {
-        Output::Text => Capabilities::of(&Terminal::from_process(args.no_color, &environment)),
+        Output::Text => Capabilities::of(&Terminal {
+            flag_plain: args.plain,
+            ..Terminal::from_process(args.no_color, &environment)
+        }),
         Output::Json | Output::Jsonl => Capabilities::plain(),
     };
     let text_sink = TextSink::new(out, quiet, capabilities);
@@ -493,7 +496,10 @@ pub(super) async fn interactive_process(
 
     let quiet = args.quiet;
     let environment = Environment::read();
-    let capabilities = Capabilities::of(&Terminal::from_process(args.no_color, &environment));
+    let capabilities = Capabilities::of(&Terminal {
+        flag_plain: args.plain,
+        ..Terminal::from_process(args.no_color, &environment)
+    });
     let (seat, surface) = match repl::Seat::new(cancel.clone()) {
         Ok(built) => built,
         Err(err) => {
@@ -957,3 +963,7 @@ pub(super) async fn run_with_registry<S: EventSink>(
 #[cfg(test)]
 #[path = "../../tests/live_surface_pty/held_permission_receipt.rs"]
 mod held_permission_receipt;
+
+#[cfg(all(test, unix))]
+#[path = "../../tests/live_surface_pty/image_symptoms.rs"]
+mod image_symptoms;

@@ -78,6 +78,7 @@ _arguments "${_arguments_options[@]}" : \
 '-q[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
+'--plain[Append plain output without terminal styling or live retry updates]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::prompt -- The prompt. `-` reads it from stdin:_default' \
@@ -136,6 +137,7 @@ _arguments "${_arguments_options[@]}" : \
 '-q[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
+'--plain[Append plain output without terminal styling or live retry updates]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::id -- The session to continue. Omit it for the latest in this workspace:_default' \
@@ -195,6 +197,7 @@ _arguments "${_arguments_options[@]}" : \
 '-q[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
+'--plain[Append plain output without terminal styling or live retry updates]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::id -- The session to continue. Omit it for the latest in this workspace:_default' \

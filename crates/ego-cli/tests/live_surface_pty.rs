@@ -1,13 +1,19 @@
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
+#[path = "live_surface_pty/finish_queue.rs"]
+mod finish_queue;
 #[path = "live_surface_pty/foreign_judge_reason.rs"]
 mod foreign_judge_reason;
+#[path = "live_surface_pty/image_refusal.rs"]
+mod image_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
+#[path = "live_surface_pty/retry_line.rs"]
+mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
 #[path = "live_surface_pty/startup_provenance.rs"]
