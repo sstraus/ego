@@ -1906,25 +1906,7 @@ impl SessionState {
                 }
             }
             EventKind::GoalTransitioned { id, transition } => {
-                let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) else {
-                    return;
-                };
-                if goal.admits(transition).is_err() {
-                    return;
-                }
-                match transition {
-                    GoalTransition::BlockerObserved { reason } => {
-                        goal.observe_blocker(ev.env.turn, reason);
-                    }
-                    GoalTransition::Achieved {
-                        attested_by,
-                        evidence,
-                    } => {
-                        goal.state = GoalState::Achieved;
-                        goal.achieved_by = Some(*attested_by);
-                        goal.achievement_evidence = evidence.clone();
-                    }
-                }
+                self.transition_goal(ev, id, transition)
             }
             EventKind::PromptQueued { id, text, images } => {
                 self.accept_prompt(ev, *id, text, images)
@@ -2026,60 +2008,9 @@ impl SessionState {
                 }
             }
             EventKind::QuestionRequested { request, target } => {
-                let Some(item) = ev.env.item else {
-                    return;
-                };
-                if request.validate().is_err()
-                    || target.validate().is_err()
-                    || self.pending_question.is_some()
-                    || self.settled_questions.contains_key(&item)
-                {
-                    return;
-                }
-                self.turns.entry(ev.env.turn).or_default();
-                let _ = self.item_mut(ev, ItemKind::Question);
-                self.pending_question = Some(PendingQuestion {
-                    item,
-                    turn: ev.env.turn,
-                    request_event: ev.env.id,
-                    target: target.clone(),
-                    request: request.clone(),
-                });
+                self.request_question(ev, request, target)
             }
-            EventKind::QuestionSettled { outcome } => {
-                let Some(item) = ev.env.item else {
-                    return;
-                };
-                let Some(pending) = self.pending_question.as_ref() else {
-                    return;
-                };
-                let valid = pending.item == item
-                    && pending.turn == ev.env.turn
-                    && ev.env.parent == Some(pending.request_event)
-                    && match outcome {
-                        QuestionOutcome::Answered(answer) => {
-                            answer.validate_for(&pending.request).is_ok()
-                        }
-                        QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
-                        // `Unavailable` is a host result, never a settlement:
-                        // it is exactly the state in which the request stays pending.
-                        QuestionOutcome::Unavailable => false,
-                    };
-                if valid && let Some(pending) = self.pending_question.take() {
-                    if let Some(question) = self.items.get_mut(&item) {
-                        question.completed = true;
-                        question.ok = Some(matches!(outcome, QuestionOutcome::Answered(_)));
-                    }
-                    self.settled_questions.insert(
-                        item,
-                        SettledQuestion {
-                            pending,
-                            settlement_event: ev.env.id,
-                            outcome: outcome.clone(),
-                        },
-                    );
-                }
-            }
+            EventKind::QuestionSettled { outcome } => self.settle_question(ev, outcome),
             EventKind::PermissionRequested { escalation, .. } => {
                 self.permissions.push(PermissionEvent::Requested {
                     item: ev.env.item,
@@ -2293,6 +2224,93 @@ impl SessionState {
             // Adding a field no reader consults would be a second place for
             // the classification to drift from the log's own copy.
             EventKind::Error { message, .. } => self.errors.push(message.clone()),
+        }
+    }
+
+    fn request_question(
+        &mut self,
+        ev: &DomainEvent,
+        request: &crate::question::QuestionRequest,
+        target: &crate::question::QuestionTarget,
+    ) {
+        let Some(item) = ev.env.item else {
+            return;
+        };
+        if request.validate().is_err()
+            || target.validate().is_err()
+            || self.pending_question.is_some()
+            || self.settled_questions.contains_key(&item)
+        {
+            return;
+        }
+        self.turns.entry(ev.env.turn).or_default();
+        let _ = self.item_mut(ev, ItemKind::Question);
+        self.pending_question = Some(PendingQuestion {
+            item,
+            turn: ev.env.turn,
+            request_event: ev.env.id,
+            target: target.clone(),
+            request: request.clone(),
+        });
+    }
+
+    fn settle_question(&mut self, ev: &DomainEvent, outcome: &crate::question::QuestionOutcome) {
+        let Some(item) = ev.env.item else {
+            return;
+        };
+        let Some(pending) = self.pending_question.as_ref() else {
+            return;
+        };
+        let valid = pending.item == item
+            && pending.turn == ev.env.turn
+            && ev.env.parent == Some(pending.request_event)
+            && match outcome {
+                QuestionOutcome::Answered(answer) => answer.validate_for(&pending.request).is_ok(),
+                QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
+                // `Unavailable` is a host result, never a settlement:
+                // it is exactly the state in which the request stays pending.
+                QuestionOutcome::Unavailable => false,
+            };
+        if valid && let Some(pending) = self.pending_question.take() {
+            if let Some(question) = self.items.get_mut(&item) {
+                question.completed = true;
+                question.ok = Some(matches!(outcome, QuestionOutcome::Answered(_)));
+            }
+            self.settled_questions.insert(
+                item,
+                SettledQuestion {
+                    pending,
+                    settlement_event: ev.env.id,
+                    outcome: outcome.clone(),
+                },
+            );
+        }
+    }
+
+    fn transition_goal(
+        &mut self,
+        ev: &DomainEvent,
+        id: &crate::event::id::GoalId,
+        transition: &GoalTransition,
+    ) {
+        let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) else {
+            return;
+        };
+        if goal.admits(transition).is_err() {
+            return;
+        }
+        match transition {
+            GoalTransition::BlockerObserved { reason } => {
+                goal.observe_blocker(ev.env.turn, reason);
+            }
+            GoalTransition::Achieved {
+                attested_by,
+                evidence,
+            } => {
+                goal.state = GoalState::Achieved;
+                goal.achieved_by = Some(*attested_by);
+                goal.achievement_evidence = evidence.clone();
+            }
         }
     }
 

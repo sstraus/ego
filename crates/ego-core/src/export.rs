@@ -921,50 +921,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::HostContextAppended
         }
         EventKind::DetachedExecStarted { id } => ExportEvent::DetachedExecStarted { id: *id },
-        EventKind::DetachedExecSettled { snapshot } => {
-            use crate::permit::DetachedExecOutcome;
-            let crate::permit::DetachedExecSnapshot {
-                id,
-                outcome,
-                stdout_tail,
-                stderr_tail,
-                stdout_omitted,
-                stderr_omitted,
-            } = snapshot;
-            let (state, exit_code) = match outcome {
-                Some(DetachedExecOutcome::Exited { code, result }) => {
-                    redactions.tool_material += 1;
-                    let _ = result;
-                    ("exited", Some(*code))
-                }
-                Some(DetachedExecOutcome::Signalled { signal, result }) => {
-                    redactions.tool_material += 1;
-                    let _ = (signal, result);
-                    ("signalled", None)
-                }
-                Some(DetachedExecOutcome::Cancelled) => ("cancelled", None),
-                Some(DetachedExecOutcome::TimedOut { timeout_ms }) => {
-                    let _ = timeout_ms;
-                    ("timed_out", None)
-                }
-                Some(DetachedExecOutcome::Interrupted) => ("interrupted", None),
-                Some(DetachedExecOutcome::Failed { reason }) => {
-                    redactions.raw_error += 1;
-                    let _ = reason;
-                    ("failed", None)
-                }
-                None => ("running", None),
-            };
-            redactions.tool_material +=
-                u64::from(!stdout_tail.is_empty()) + u64::from(!stderr_tail.is_empty());
-            ExportEvent::DetachedExecSettled {
-                id: *id,
-                state: state.to_owned(),
-                exit_code,
-                stdout_omitted: *stdout_omitted,
-                stderr_omitted: *stderr_omitted,
-            }
-        }
+        EventKind::DetachedExecSettled { snapshot } => project_detached_exec(snapshot, redactions),
         EventKind::QuestionRequested { request, target } => {
             redactions.opaque_prose += 1 + (request.options.len() as u64 * 2);
             ExportEvent::QuestionRequested {
@@ -974,23 +931,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 free_text: request.free_text,
             }
         }
-        EventKind::QuestionSettled { outcome } => {
-            let outcome = match outcome {
-                QuestionOutcome::Answered(answer) => {
-                    redactions.opaque_prose += match answer {
-                        crate::question::QuestionAnswer::Multiple(values) => values.len() as u64,
-                        crate::question::QuestionAnswer::Single(_)
-                        | crate::question::QuestionAnswer::FreeText(_) => 1,
-                        crate::question::QuestionAnswer::Form(value) => value.len() as u64,
-                    };
-                    ExportQuestionOutcome::Answered
-                }
-                QuestionOutcome::Declined => ExportQuestionOutcome::Declined,
-                QuestionOutcome::Cancelled => ExportQuestionOutcome::Cancelled,
-                QuestionOutcome::Unavailable => ExportQuestionOutcome::Unavailable,
-            };
-            ExportEvent::QuestionSettled { outcome }
-        }
+        EventKind::QuestionSettled { outcome } => project_question_outcome(outcome, redactions),
         EventKind::PermissionRequested {
             tool: _,
             escalation,
@@ -1565,4 +1506,70 @@ impl Redactions {
         .filter_map(|(category, count)| (count != 0).then_some(RedactionCount { category, count }))
         .collect()
     }
+}
+
+fn project_detached_exec(
+    snapshot: &crate::permit::DetachedExecSnapshot,
+    redactions: &mut Redactions,
+) -> ExportEvent {
+    use crate::permit::DetachedExecOutcome;
+    let crate::permit::DetachedExecSnapshot {
+        id,
+        outcome,
+        stdout_tail,
+        stderr_tail,
+        stdout_omitted,
+        stderr_omitted,
+    } = snapshot;
+    let (state, exit_code) = match outcome {
+        Some(DetachedExecOutcome::Exited { code, result }) => {
+            redactions.tool_material += 1;
+            let _ = result;
+            ("exited", Some(*code))
+        }
+        Some(DetachedExecOutcome::Signalled { signal, result }) => {
+            redactions.tool_material += 1;
+            let _ = (signal, result);
+            ("signalled", None)
+        }
+        Some(DetachedExecOutcome::Cancelled) => ("cancelled", None),
+        Some(DetachedExecOutcome::TimedOut { timeout_ms }) => {
+            let _ = timeout_ms;
+            ("timed_out", None)
+        }
+        Some(DetachedExecOutcome::Interrupted) => ("interrupted", None),
+        Some(DetachedExecOutcome::Failed { reason }) => {
+            redactions.raw_error += 1;
+            let _ = reason;
+            ("failed", None)
+        }
+        None => ("running", None),
+    };
+    redactions.tool_material +=
+        u64::from(!stdout_tail.is_empty()) + u64::from(!stderr_tail.is_empty());
+    ExportEvent::DetachedExecSettled {
+        id: *id,
+        state: state.to_owned(),
+        exit_code,
+        stdout_omitted: *stdout_omitted,
+        stderr_omitted: *stderr_omitted,
+    }
+}
+
+fn project_question_outcome(outcome: &QuestionOutcome, redactions: &mut Redactions) -> ExportEvent {
+    let outcome = match outcome {
+        QuestionOutcome::Answered(answer) => {
+            redactions.opaque_prose += match answer {
+                crate::question::QuestionAnswer::Multiple(values) => values.len() as u64,
+                crate::question::QuestionAnswer::Single(_)
+                | crate::question::QuestionAnswer::FreeText(_) => 1,
+                crate::question::QuestionAnswer::Form(value) => value.len() as u64,
+            };
+            ExportQuestionOutcome::Answered
+        }
+        QuestionOutcome::Declined => ExportQuestionOutcome::Declined,
+        QuestionOutcome::Cancelled => ExportQuestionOutcome::Cancelled,
+        QuestionOutcome::Unavailable => ExportQuestionOutcome::Unavailable,
+    };
+    ExportEvent::QuestionSettled { outcome }
 }

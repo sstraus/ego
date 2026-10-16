@@ -663,7 +663,12 @@ fn no_sanitizer_drops_a_field_without_naming_it() {
     // Only the two disclosure boundaries. Evidence validation reads fields to
     // build keys and discloses nothing, so a rest pattern there is ordinary
     // Rust rather than an unclassified redaction.
-    for function in ["fn project_event(", "fn project_run_command("] {
+    for function in [
+        "fn project_event(",
+        "fn project_run_command(",
+        "fn project_detached_exec(",
+        "fn project_question_outcome(",
+    ] {
         let start = SOURCE
             .find(function)
             .unwrap_or_else(|| panic!("{function} still exists"));
