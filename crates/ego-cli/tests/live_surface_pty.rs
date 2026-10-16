@@ -4606,7 +4606,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     session.quit(input);
 }
 
-/// Catches: cancelling an unmetered stream marks known session cost unknown and hides its status cell.
+/// Catches: cancelling an unmetered stream loses token usage or its noncurrency cost status.
 #[test]
 fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     let stub = Stub::start(Plan {
@@ -4639,7 +4639,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
         .expect("submit completed turn");
     input.flush().expect("completed turn flush");
     until_normalized(&reader, &mut output, 0, "KNOWN-USAGE");
-    until_normalized(&reader, &mut output, 0, "$0.000");
+    until_normalized(&reader, &mut output, 0, "unpriced");
     let turn_start = output.len();
     input.write_all(b"cancel check\r").expect("submit turn");
     input.flush().expect("submit flush");
@@ -4682,8 +4682,8 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
         .find(|line| line.contains("qwen3 · "))
         .expect("idle status row");
     assert!(
-        status.contains("$0.000"),
-        "cancel must retain status cost: {visible:?}"
+        status.contains("unpriced"),
+        "cancel must retain noncurrency cost status: {visible:?}"
     );
     let usage_start = output.len();
     input.write_all(b"/usage\r").expect("usage command");
