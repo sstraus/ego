@@ -320,3 +320,45 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
     }
     assert!(stub.generations().is_empty());
 }
+
+// Catches: consent inventories an unnormalized --instructions path while prompt
+// assembly canonicalizes it, silently omitting explicitly approved imports.
+#[test]
+fn parent_relative_selected_file_keeps_approved_external_imports() {
+    let places = Places::new();
+    places.file("AGENTS.md", "Ambient instructions.\n");
+    places.file("nested/.keep", "");
+    places.file("selected.md", "@~/shared.md\n");
+    std::fs::write(
+        places.home_path().join("shared.md"),
+        "REGRESSION-MARKER",
+    )
+    .unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK"))],
+        ..Plan::default()
+    });
+    let result = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--trust-workspace",
+            "--instructions",
+            "nested/../selected.md",
+            "task",
+        ])
+        .run();
+    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]["messages"]
+            .to_string()
+            .contains("REGRESSION-MARKER"),
+        "parent-relative selection lost approved import: {}",
+        result.stderr
+    );
+}
