@@ -1618,7 +1618,11 @@ fn status_row(status: &SurfaceStatus) -> String {
 
 impl Prompt for Waiting {
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
-        background_notice::row(buffer, usize::from(width).saturating_sub(1))
+        // Commit only the input, never the live status or composer notices.
+        Some(
+            background_notice::row(buffer, usize::from(width).saturating_sub(1))
+                .unwrap_or_else(|| format!("> {}", buffer.replace('\n', "\n… "))),
+        )
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {

@@ -20,6 +20,8 @@ mod retry_line;
 mod setup;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
+#[path = "live_surface_pty/status_history.rs"]
+mod status_history;
 mod support;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
@@ -4396,8 +4398,8 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
     );
     assert_eq!(
         visible.matches("qwen3 · ").count(),
-        1,
-        "status must occur once before the user turn: {visible:?}"
+        0,
+        "the submitted status must not remain above the user turn: {visible:?}"
     );
 
     gate.release();
