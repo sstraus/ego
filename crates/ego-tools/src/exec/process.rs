@@ -690,137 +690,26 @@ async fn execute(
         drop(stdin);
     }
     let started = ActiveClock::start();
-    let mut status = None;
-    let mut descendants_cleaned = false;
-    let mut stdout_pending = None;
-    let mut stderr_pending = None;
-
+    let mut running = RunningProcess {
+        child,
+        stdout_task,
+        stderr_task,
+        status: None,
+        descendants_cleaned: false,
+        stdout_pending: None,
+        stderr_pending: None,
+    };
     loop {
-        if cancel.is_cancelled()
-            || background_cancel
-                .as_ref()
-                .is_some_and(CancelToken::is_cancelled)
-            || handler
-                .as_ref()
-                .is_some_and(|(_, scope)| scope.is_cancelled())
-        {
-            request_abort(&mut stdout_task);
-            request_abort(&mut stderr_task);
-            child.terminate(limits.termination_grace()).await;
-            let _ = abort_outputs(
-                stdout_task.take(),
-                stderr_task.take(),
-                stdout_pending.take(),
-                stderr_pending.take(),
-            )
-            .await;
-            return Err(ProcessError::Cancelled);
+        if let Err(error) = running.tick(spec, &cancel, background_cancel.as_ref(), handler.as_ref().map(|(_, scope)| scope), &started, limits.termination_grace()).await {
+            running.abort(limits.termination_grace()).await;
+            return Err(error);
         }
-        if let Some((_, scope)) = &handler
-            && Instant::now() >= scope.deadline()
-        {
-            request_abort(&mut stdout_task);
-            request_abort(&mut stderr_task);
-            child.terminate(limits.termination_grace()).await;
-            let _ = abort_outputs(
-                stdout_task.take(),
-                stderr_task.take(),
-                stdout_pending.take(),
-                stderr_pending.take(),
-            )
-            .await;
-            return Err(ProcessError::Timeout {
-                timeout: scope.timeout(),
-            });
-        }
-        if spec
-            .timeout()
-            .is_some_and(|timeout| started.elapsed() >= timeout)
-        {
-            let timeout = spec.timeout().expect("checked as present");
-            tracing::warn!(
-                elapsed_ms = started.elapsed().as_millis(),
-                timeout_ms = timeout.as_millis(),
-                child_exited = status.is_some(),
-                descendants_cleaned,
-                stdout_drained = stdout_pending.is_some(),
-                stderr_drained = stderr_pending.is_some(),
-                "process deadline expired"
-            );
-            request_abort(&mut stdout_task);
-            request_abort(&mut stderr_task);
-            child.terminate(limits.termination_grace()).await;
-            let _ = abort_outputs(
-                stdout_task.take(),
-                stderr_task.take(),
-                stdout_pending.take(),
-                stderr_pending.take(),
-            )
-            .await;
-            return Err(ProcessError::Timeout { timeout });
-        }
-
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(observed) => status = observed,
-                Err(error) => {
-                    request_abort(&mut stdout_task);
-                    request_abort(&mut stderr_task);
-                    child.terminate(limits.termination_grace()).await;
-                    let _ = abort_outputs(
-                        stdout_task.take(),
-                        stderr_task.take(),
-                        stdout_pending.take(),
-                        stderr_pending.take(),
-                    )
-                    .await;
-                    return Err(ProcessError::Backend(error.to_string()));
-                }
-            }
-        }
-        if status.is_some() && !descendants_cleaned {
-            child.cleanup_after_exit(limits.termination_grace()).await;
-            descendants_cleaned = true;
-        }
-        if stdout_task.as_ref().is_some_and(DrainHandle::is_finished) {
-            match join_drain(stdout_task.take().expect("present")).await {
-                Ok(pending) => stdout_pending = Some(pending),
-                Err(error) => {
-                    request_abort(&mut stderr_task);
-                    child.terminate(limits.termination_grace()).await;
-                    let _ = abort_outputs(
-                        None,
-                        stderr_task.take(),
-                        stdout_pending.take(),
-                        stderr_pending.take(),
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
-        }
-        if stderr_task.as_ref().is_some_and(DrainHandle::is_finished) {
-            match join_drain(stderr_task.take().expect("present")).await {
-                Ok(pending) => stderr_pending = Some(pending),
-                Err(error) => {
-                    request_abort(&mut stdout_task);
-                    child.terminate(limits.termination_grace()).await;
-                    let _ = abort_outputs(
-                        stdout_task.take(),
-                        None,
-                        stdout_pending.take(),
-                        stderr_pending.take(),
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
-        }
-        if status.is_some() && stdout_pending.is_some() && stderr_pending.is_some() {
+        if running.outputs_ready() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    let RunningProcess { status, stdout_pending, stderr_pending, .. } = running;
 
     let stdout = match commit_stream(stdout_pending.expect("stdout reached EOF")).await {
         Ok(block) => block,
@@ -837,6 +726,98 @@ async fn execute(
     }
 
     Ok(result)
+}
+
+struct RunningProcess {
+    child: ManagedChild,
+    stdout_task: Option<DrainHandle>,
+    stderr_task: Option<DrainHandle>,
+    status: Option<ExitStatus>,
+    descendants_cleaned: bool,
+    stdout_pending: Option<PendingStream>,
+    stderr_pending: Option<PendingStream>,
+}
+
+impl RunningProcess {
+    fn outputs_ready(&self) -> bool {
+        self.status.is_some() && self.stdout_pending.is_some() && self.stderr_pending.is_some()
+    }
+
+    async fn abort(&mut self, grace: Duration) {
+        request_abort(&mut self.stdout_task);
+        request_abort(&mut self.stderr_task);
+        self.child.terminate(grace).await;
+        let _ = abort_outputs(
+            self.stdout_task.take(), self.stderr_task.take(),
+            self.stdout_pending.take(), self.stderr_pending.take(),
+        ).await;
+    }
+
+    fn check_stop(
+        &self,
+        spec: &SpawnSpec,
+        cancel: &CancelToken,
+        background_cancel: Option<&CancelToken>,
+        scope: Option<&EffectScope>,
+        started: &ActiveClock,
+    ) -> Result<(), ProcessError> {
+        if cancel.is_cancelled()
+            || background_cancel.is_some_and(CancelToken::is_cancelled)
+            || scope.is_some_and(EffectScope::is_cancelled)
+        {
+            return Err(ProcessError::Cancelled);
+        }
+        if let Some(scope) = scope
+            && Instant::now() >= scope.deadline()
+        {
+            return Err(ProcessError::Timeout { timeout: scope.timeout() });
+        }
+        if spec.timeout().is_some_and(|timeout| started.elapsed() >= timeout) {
+            let timeout = spec.timeout().expect("checked as present");
+            tracing::warn!(
+                elapsed_ms = started.elapsed().as_millis(),
+                timeout_ms = timeout.as_millis(),
+                child_exited = self.status.is_some(),
+                descendants_cleaned = self.descendants_cleaned,
+                stdout_drained = self.stdout_pending.is_some(),
+                stderr_drained = self.stderr_pending.is_some(),
+                "process deadline expired"
+            );
+            return Err(ProcessError::Timeout { timeout });
+        }
+        Ok(())
+    }
+
+    async fn tick(
+        &mut self,
+        spec: &SpawnSpec,
+        cancel: &CancelToken,
+        background_cancel: Option<&CancelToken>,
+        scope: Option<&EffectScope>,
+        started: &ActiveClock,
+        grace: Duration,
+    ) -> Result<(), ProcessError> {
+        self.check_stop(spec, cancel, background_cancel, scope, started)?;
+        self.observe_exit(grace).await?;
+        if self.stdout_task.as_ref().is_some_and(DrainHandle::is_finished) {
+            self.stdout_pending = Some(join_drain(self.stdout_task.take().expect("present")).await?);
+        }
+        if self.stderr_task.as_ref().is_some_and(DrainHandle::is_finished) {
+            self.stderr_pending = Some(join_drain(self.stderr_task.take().expect("present")).await?);
+        }
+        Ok(())
+    }
+
+    async fn observe_exit(&mut self, grace: Duration) -> Result<(), ProcessError> {
+        if self.status.is_none() {
+            self.status = self.child.try_wait().map_err(|error| ProcessError::Backend(error.to_string()))?;
+        }
+        if self.status.is_some() && !self.descendants_cleaned {
+            self.child.cleanup_after_exit(grace).await;
+            self.descendants_cleaned = true;
+        }
+        Ok(())
+    }
 }
 
 async fn write_handler_input(
