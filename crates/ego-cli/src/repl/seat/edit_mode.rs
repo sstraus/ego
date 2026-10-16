@@ -32,6 +32,31 @@ impl SurfaceEditMode {
     }
 }
 
+fn pasted_image(text: &str) -> bool {
+    let path = std::path::Path::new(text);
+    let image_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["png", "jpg", "jpeg", "gif", "webp"]
+                .iter()
+                .any(|image| extension.eq_ignore_ascii_case(image))
+        });
+    // A file this process cannot open (permissions, a race) is
+    // still staged: the model-capability refusal or the read
+    // error surfaces downstream, before or without any bytes
+    // being sent. Only a header this process *did* read and that
+    // fails to decode as a supported image falls back to text.
+    image_extension && path.is_file() && {
+        use std::io::Read;
+        let mut header = [0_u8; 12];
+        match std::fs::File::open(path).and_then(|mut file| file.read(&mut header)) {
+            Ok(read) => crate::attachment::media_type(&header[..read]).is_some(),
+            Err(_) => true,
+        }
+    }
+}
+
 impl EditMode for SurfaceEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let raw: Event = event.into();
@@ -73,29 +98,7 @@ impl EditMode for SurfaceEditMode {
 
         match &raw {
             Event::Paste(text) if !picker_open && !question_selector_open => {
-                let path = std::path::Path::new(text);
-                let image_extension = path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        ["png", "jpg", "jpeg", "gif", "webp"]
-                            .iter()
-                            .any(|image| extension.eq_ignore_ascii_case(image))
-                    });
-                // A file this process cannot open (permissions, a race) is
-                // still staged: the model-capability refusal or the read
-                // error surfaces downstream, before or without any bytes
-                // being sent. Only a header this process *did* read and that
-                // fails to decode as a supported image falls back to text.
-                let sniffed_image = image_extension && path.is_file() && {
-                    use std::io::Read;
-                    let mut header = [0_u8; 12];
-                    match std::fs::File::open(path).and_then(|mut file| file.read(&mut header)) {
-                        Ok(read) => crate::attachment::media_type(&header[..read]).is_some(),
-                        Err(_) => true,
-                    }
-                };
-                if sniffed_image {
+                if pasted_image(text) {
                     return ReedlineEvent::ExecuteHostCommand(format!(
                         "{PASTE_PATH_COMMAND}{text}"
                     ));
