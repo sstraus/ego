@@ -2610,7 +2610,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             )
             .await
             {
-                return Ok(CommandOutcome::Transition(transition));
+                return Ok(CommandOutcome::Transition(Box::new(transition)));
             }
             Ok(CommandOutcome::Continue)
         }
@@ -2650,7 +2650,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 new_session_transition(seat.as_ref(), pending_work, jsonl_store, clock, diagnostics)
                     .await
             {
-                return Ok(CommandOutcome::Transition(transition));
+                return Ok(CommandOutcome::Transition(Box::new(transition)));
             }
             Ok(CommandOutcome::Continue)
         }
@@ -2669,7 +2669,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             )
             .await
             {
-                return Ok(CommandOutcome::Transition(transition));
+                return Ok(CommandOutcome::Transition(Box::new(transition)));
             }
             Ok(CommandOutcome::Continue)
         }
@@ -2887,7 +2887,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
             skills,
             jsonl_store,
             confinement,
-            active: active,
+            active,
             cancel: &compaction_cancel,
             run_deadline,
             source,
