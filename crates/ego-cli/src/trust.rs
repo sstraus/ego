@@ -348,6 +348,27 @@ pub(crate) fn executable_surface(root: &Path) -> ExecutableSurface {
             },
         );
     }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if let Ok(discovery_root) = instruction_discovery_root(root, &home)
+            && let Ok(set) = ego_core::config::load_with_home(
+                &OsInstructionIo,
+                &discovery_root,
+                root,
+                &ego_core::config::Selection::Ambient,
+                ego_core::config::Limits::default(),
+                Some(&home),
+            )
+        {
+            for file in set.loaded {
+                if !file.path.starts_with(&discovery_root) {
+                    surface
+                        .external_instructions
+                        .insert(file.path.display().to_string(), file.digest);
+                }
+            }
+        }
+    }
     surface
 }
 
@@ -563,6 +584,13 @@ pub(crate) fn trustable_content(root: &Path) -> Option<String> {
         rendered.push_str("\nand runs:\n");
         for entry in runs {
             rendered.push_str(&format!("- {}\n", entry.path()));
+        }
+    }
+    let external = executable_surface(root).external_instructions;
+    if !external.is_empty() {
+        rendered.push_str("\nExternal instructions offered for disclosure to the model:\n");
+        for (path, digest) in external {
+            rendered.push_str(&format!("- {path:?} SHA-256 {digest}\n"));
         }
     }
     rendered.push_str(

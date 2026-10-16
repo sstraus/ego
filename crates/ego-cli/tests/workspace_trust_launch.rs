@@ -165,3 +165,62 @@ fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
     }
     assert!(places.home_path().join("trust.json").exists());
 }
+
+// Catches: an external import leaks before consent, or remembered consent
+// survives replacement bytes. Uses the built CLI with isolated HOME/workspace.
+#[test]
+fn external_import_disclosure_requires_content_bound_workspace_consent() {
+    let places = Places::new();
+    let home = places.home_path();
+    let maintainer = home.join("workspace/example-project/maintainer.md");
+    std::fs::create_dir_all(maintainer.parent().unwrap()).unwrap();
+    std::fs::write(&maintainer, "EXTERNAL-maintainer-477-ORIGINAL").unwrap();
+    places.file("AGENTS.md", "@~/workspace/example-project/maintainer.md\n");
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("OK")); 5],
+        ..Plan::default()
+    });
+    for (index, grant, expected) in [(0, false, false), (1, true, true), (2, false, true)] {
+        let id = format!("01900000-0000-7000-8000-{index:012}");
+        let ego = places.ego(&stub).args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--session-id",
+            &id,
+            "task",
+        ]);
+        let result = if grant {
+            ego.args(["--trust-workspace"]).run()
+        } else {
+            ego.run()
+        };
+        assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+        assert_eq!(
+            stub.generations()[index]["messages"]
+                .to_string()
+                .contains("EXTERNAL-maintainer-477-ORIGINAL"),
+            expected
+        );
+    }
+    std::fs::write(&maintainer, "EXTERNAL-maintainer-477-CHANGED").unwrap();
+    let result = places
+        .ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--session-id",
+            "01900000-0000-7000-8000-000000000003",
+            "task",
+        ])
+        .run();
+    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+    assert!(
+        !stub.generations()[3]["messages"]
+            .to_string()
+            .contains("EXTERNAL-maintainer-477")
+    );
+}

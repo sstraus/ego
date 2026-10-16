@@ -815,9 +815,13 @@ valid answer exists. An empty workspace
 still has nothing to admit and stays untrusted.
 
 A standalone `@relative/path` line outside fenced or indented code loads an
-instruction file relative to the containing file. Ambient imports stay inside
-the discovery tree; imports from an explicit file stay inside that file's
-directory. Duplicate files load once. Cycles, missing or malformed imports,
+instruction file relative to the containing file. `@~/path` expands the launch
+home; absolute imports are also supported. External targets outside the discovery
+tree require workspace consent bound to each exact target and SHA-256 content.
+The trust question lists these targets; headless runs require `--trust-workspace`
+or a matching remembered answer. Explicit-file imports outside its directory
+require the same target to be covered by workspace consent. No tool read root is
+widened. Duplicate files load once. Cycles, missing or malformed imports,
 scope escapes, symlinks, non-text files, and size refusals are reported rather
 than silently ignored. One run loads at most eight files, 64 KiB per file and
 256 KiB in total, and attempts at most eight distinct imports. An answer —
@@ -826,8 +830,8 @@ than silently ignored. One run loads at most eight files, 64 KiB per file and
 declarations, *plus every program inside the workspace they name* —
 `[[hooks]].handler.command`, `[mcp.servers.*].command` and
 `[auth.*].credential_command` — so replacing a trusted hook script asks again
-even when the config that names it is byte-identical. Instruction and skill
-edits do not invalidate the answer. Terminal and ACP seats share this ledger.
+even when the config that names it is byte-identical. In-tree instruction and skill
+edits do not invalidate the answer. External instruction edits do invalidate it. Terminal and ACP seats share this ledger.
 Invalid config is never skipped silently: unknown keys and malformed MCP
 entries are hard errors (Codex's `--strict-config`, as the only behaviour).
 

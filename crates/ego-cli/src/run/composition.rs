@@ -155,14 +155,50 @@ pub(super) fn instructions(
         } else {
             root.to_path_buf()
         };
-        let set = ego_core::config::load(
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut set = ego_core::config::load_with_home(
             &OsInstructionIo,
             &discovery_root,
             cwd,
             &selection,
             Limits::default(),
+            home.as_deref(),
         )
         .map_err(|err| UsageError(err.to_string()))?;
+
+        // Consent covers the exact bytes staged above, not a later path read.
+        let surface = if matches!(selection, Selection::Disabled) {
+            ego_core::config::ExecutableSurface::default()
+        } else {
+            crate::trust::executable_surface(root)
+        };
+        let approved = !matches!(selection, Selection::Disabled)
+            && crate::trust::remembered_decision(
+                root,
+                crate::config::ego_home().as_deref(),
+                &surface,
+            ) == Some(ego_core::config::Trust::Trusted);
+        let scope = match &selection {
+            Selection::Explicit(path) => path.parent().unwrap_or(&discovery_root),
+            _ => &discovery_root,
+        };
+        let mut rejected = Vec::new();
+        set.loaded.retain(|file| {
+            let allowed = file.path.starts_with(scope)
+                || (approved
+                    && surface
+                        .external_instructions
+                        .get(&file.path.display().to_string())
+                        == Some(&file.digest));
+            if !allowed {
+                rejected.push(ego_core::config::Skipped {
+                    path: file.path.clone(),
+                    reason: ego_core::config::Refusal::ExternalApprovalRequired,
+                });
+            }
+            allowed
+        });
+        set.skipped.extend(rejected);
 
         for skipped in &set.skipped {
             diagnostics.note(&format!(

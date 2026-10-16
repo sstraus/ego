@@ -279,3 +279,112 @@ fn the_port_reports_a_missing_file_as_absent_not_as_an_error() {
         Found::Absent
     );
 }
+
+/// Catches treating ~/ as a literal directory and refusing reviewed siblings.
+#[test]
+fn external_home_and_sibling_imports_stage_the_exact_boss_layout() {
+    let tree = Tree::new();
+    let home = tree.dir("home");
+    let root = tree.dir("home/workspace/example-project");
+    tree.write(
+        "home/workspace/example-project/AGENTS.md",
+        "@~/workspace/example-project/maintainer.md\n@../sibling.md\n",
+    );
+    let maintainer = tree.write("home/workspace/example-project/maintainer.md", "maintainer contract");
+    let sibling = tree.write("home/workspace/sibling.md", "Sibling contract");
+    let staged = ego_core::config::load_with_home(
+        &OsInstructionIo,
+        &root,
+        &root,
+        &Selection::Ambient,
+        Limits::default(),
+        Some(&home),
+    )
+    .unwrap();
+    assert_eq!(
+        staged
+            .loaded
+            .iter()
+            .map(|file| &file.path)
+            .collect::<Vec<_>>(),
+        vec![&root.join("AGENTS.md"), &maintainer, &sibling]
+    );
+    assert!(staged.skipped.is_empty());
+    // The old contained-only entry point still cannot disclose these files.
+    assert_eq!(
+        load(
+            &OsInstructionIo,
+            &root,
+            &root,
+            &Selection::Ambient,
+            Limits::default()
+        )
+        .unwrap()
+        .loaded
+        .len(),
+        1
+    );
+}
+
+/// Catches trusting an approved name after substitution by a leaf or parent link.
+#[test]
+fn external_import_substitution_never_follows_leaf_or_parent_links() {
+    let tree = Tree::new();
+    let target = tree.write("external/rules.md", "original");
+    let secret = tree.write("secret/rules.md", "must not disclose");
+    std::fs::remove_file(&target).unwrap();
+    symlink(&secret, &target).unwrap();
+    assert_eq!(
+        OsInstructionIo.load(&target, 100),
+        Found::Refused(Refusal::Symlink)
+    );
+    std::fs::remove_file(&target).unwrap();
+    std::fs::remove_dir(target.parent().unwrap()).unwrap();
+    symlink(secret.parent().unwrap(), target.parent().unwrap()).unwrap();
+    assert_eq!(
+        OsInstructionIo.load(&target, 100),
+        Found::Refused(Refusal::Symlink)
+    );
+}
+
+/// Catches unbounded traversal after imports leave the original scope.
+#[test]
+fn external_imports_keep_cycles_and_byte_budgets() {
+    let tree = Tree::new();
+    let root = tree.dir("workspace");
+    tree.write("workspace/AGENTS.md", "@../external.md");
+    tree.write("external.md", "@workspace/AGENTS.md");
+    let set = ego_core::config::load_with_home(
+        &OsInstructionIo,
+        &root,
+        &root,
+        &Selection::Ambient,
+        Limits::default(),
+        Some(&tree.root),
+    )
+    .unwrap();
+    assert_eq!(set.loaded.len(), 2);
+    assert!(
+        set.skipped
+            .iter()
+            .any(|skip| skip.reason == Refusal::ImportCycle)
+    );
+    let set = ego_core::config::load_with_home(
+        &OsInstructionIo,
+        &root,
+        &root,
+        &Selection::Ambient,
+        Limits {
+            max_total_bytes: 15,
+            ..Limits::default()
+        },
+        Some(&tree.root),
+    )
+    .unwrap();
+    assert_eq!(set.loaded.len(), 1);
+    assert!(
+        set.skipped
+            .iter()
+            .any(|skip| matches!(skip.reason, Refusal::TotalTooLarge { .. }))
+    );
+}
