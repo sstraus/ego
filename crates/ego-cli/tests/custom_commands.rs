@@ -221,3 +221,45 @@ fn custom_commands_project_review_sends_real_git_diff_after_trust() {
     assert!(request.contains("Review foo"), "{request}");
     assert!(request.contains("+REGRESSION-MARKER-REAL-DIFF"), "{request}");
 }
+
+// Catches: core slash interception executes bracketed-paste data as a command.
+#[test]
+fn pasted_custom_command_stays_literal_and_never_runs_its_shell() {
+    let stub = Stub::start(plan());
+    let places = Places::new();
+    let ego = places.ego(&stub);
+    ego.home_file(
+        "config.toml",
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    );
+    ego.home_file("commands/review.md", "EXPANDED !`touch pasted-command-effect`");
+    let marker = ego.workspace_path().join("pasted-command-effect");
+    let result = places
+        .ego(&stub)
+        .conversing()
+        .args(["--mode", "yolo", "--sandbox", "off"])
+        .run_pty("\x1b[200~/review\x1b[201~");
+    assert_eq!(result.code, Some(0), "{}", result.stdout);
+    assert!(!marker.exists(), "bracketed paste executed the command shell");
+    assert!(stub.generations()[0].to_string().contains("/review"));
+}
+
+// Catches: lexical ./ components refuse a permitted workspace import.
+#[test]
+fn custom_command_dot_relative_import_reaches_provider() {
+    let stub = Stub::start(plan());
+    let places = Places::new();
+    let ego = places.ego(&stub);
+    ego.home_file(
+        "config.toml",
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
+    );
+    ego.home_file("commands/review.md", "Review @./context.txt");
+    ego.file("context.txt", "DOT-RELATIVE-CONTEXT");
+    let result = places
+        .ego(&stub)
+        .args(["/review", "--mode", "yolo", "--sandbox", "off"])
+        .run();
+    assert_eq!(result.code, Some(0), "{} {}", result.stdout, result.stderr);
+    assert!(stub.generations()[0].to_string().contains("DOT-RELATIVE-CONTEXT"));
+}
