@@ -56,8 +56,11 @@ pub(super) fn commit(editor: &mut Reedline, status: &SharedStatus, text: &str) -
     let Some(row) = row(text, width.saturating_sub(1)) else {
         return false;
     };
-    // A completed read owns this footprint until anything else writes. Remove
-    // its prompt prefix before sending the receipt through the existing pump.
+    // A successful read restores cooked mode. Cursor reports must remain raw:
+    // otherwise a report following a large input burst can be echoed and held
+    // by the line discipline instead of reaching Reedline's footprint check.
+    let _ = crossterm::terminal::enable_raw_mode();
+    // Remove the completed prompt before anything else writes to its rows.
     let _ = editor.erase_last_prompt();
     commit_to_transcript(status, &row);
     true

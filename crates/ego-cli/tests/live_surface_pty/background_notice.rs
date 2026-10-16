@@ -101,9 +101,6 @@ fn notice_contract(notice: &str, width: u16, busy: bool) {
     input.flush().unwrap();
     assert!(session.quit(input).success());
     println!("regression_case PTY CAPTURE width={width}:\n{capture}");
-    if notice.len() > 10_000 {
-        println!("regression_case RAW: {:?}", String::from_utf8_lossy(&output));
-    }
     assert_eq!(
         count_exact_strings(&stub.generations()[usize::from(busy)]["messages"], notice),
         1
