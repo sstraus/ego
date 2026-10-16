@@ -442,6 +442,13 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (login)
 _arguments "${_arguments_options[@]}" : \
+'(--cimd --dcr)--client-id=[Operator-issued public client ID]:CLIENT_ID:_default' \
+'(--client-id --dcr)--cimd=[Published HTTPS client metadata document URL]:CIMD:_default' \
+'--callback-port=[Loopback port registered with the authorization server (0 selects a free port)]:CALLBACK_PORT:_default' \
+'--issuer=[]:ISSUER:_default' \
+'--account=[]:ACCOUNT:_default' \
+'(--client-id --cimd)--dcr[Explicitly use issuer-advertised dynamic registration]' \
+'--refresh[Refresh an existing issuer/resource/account-bound credential without interaction]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -860,7 +867,7 @@ _ego__subcmd__mcp_commands() {
 'add:Add or replace one complete server entry' \
 'rm:Remove, mask, or reveal one configured server entry' \
 'ls:List configured and admitted MCP state' \
-'login:Authorize one configured HTTP server through the product CIMD binding' \
+'login:Authorize a public OAuth client with an explicit registration strategy' \
 'reload:Reconcile every configured server, or one named server' \
     )
     _describe -t commands 'ego mcp commands' commands "$@"
