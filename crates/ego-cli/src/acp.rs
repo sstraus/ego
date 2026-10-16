@@ -940,6 +940,19 @@ fn confinement_ceiling(
     endpoint.map_or(selected, |endpoint| endpoint.cap_confinement(selected))
 }
 
+fn permission_rule_target(
+    effective: &ego_core::config::Effective,
+) -> Result<UserConfigTarget, RunTermination> {
+    match effective.active_profile.as_ref() {
+        Some(profile) => ProfileName::parse(&profile.name)
+            .map(UserConfigTarget::Profile)
+            .map_err(|error| RunTermination::UsageError {
+                message: format!("the ACP profile cannot target user rules: {error}"),
+            }),
+        None => Ok(UserConfigTarget::Base),
+    }
+}
+
 /// Serve the protocol on stdio or an explicitly selected endpoint.
 pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> RunTermination {
     let listener = match prepare_listener(args).await {
@@ -1052,18 +1065,9 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 // reached for is the one an untrusted headless resolution
                 // discards.
                 let ceiling = confinement_ceiling(args, effective.sandbox, admitted);
-                let rule_target = match effective.active_profile.as_ref() {
-                    Some(profile) => match ProfileName::parse(&profile.name) {
-                        Ok(name) => UserConfigTarget::Profile(name),
-                        Err(error) => {
-                            return RunTermination::UsageError {
-                                message: format!(
-                                    "the ACP profile cannot target user rules: {error}"
-                                ),
-                            };
-                        }
-                    },
-                    None => UserConfigTarget::Base,
+                let rule_target = match permission_rule_target(&effective) {
+                    Ok(target) => target,
+                    Err(termination) => return termination,
                 };
                 (
                     Arc::new(
