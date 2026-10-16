@@ -597,7 +597,8 @@ pub(super) async fn interactive_through(
                 rooted_path(&root, session::store_root(args.session_dir.as_ref())?),
                 root.clone(),
             );
-            crate::catalogue::saved_sessions(&store).map_err(|error| UsageError(error.to_string()))
+            crate::catalogue::saved_sessions(&store, output)
+                .map_err(|error| UsageError(error.to_string()))
         })();
         let metas = match metas {
             Ok(metas) => metas,

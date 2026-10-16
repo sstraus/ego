@@ -1121,7 +1121,7 @@ async fn select_session_transition<'store>(
 ) -> Option<EpochTransition<'store>> {
     let (clock, diagnostics) = journal_ports;
     if !seat.has_human() {
-        match crate::catalogue::listing(store.as_ref(), root, true) {
+        match crate::catalogue::saved_sessions(store.as_ref(), diagnostics) {
             Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
             Err(error) => {
                 diagnostics.note(&format!("the session catalogue could not be read: {error}"))
@@ -1133,7 +1133,7 @@ async fn select_session_transition<'store>(
         diagnostics.note("a session cannot be selected while source work is pending");
         return None;
     }
-    let mut metas: Vec<_> = match crate::catalogue::saved_sessions(store.as_ref()) {
+    let mut metas: Vec<_> = match crate::catalogue::saved_sessions(store.as_ref(), diagnostics) {
         Ok(metas) => metas
             .into_iter()
             .filter(|meta| meta.id != session_id)
@@ -1693,7 +1693,9 @@ async fn report_session_usage(
     context: ego_core::state::ContextWindow,
     diagnostics: &dyn Diagnostics,
 ) {
-    let metadata = match crate::catalogue::listing(store, root, false) {
+    let metadata = match crate::catalogue::saved_sessions(store, diagnostics)
+        .map(|metas| crate::catalogue::in_workspace(metas, root))
+    {
         Ok(metadata) => metadata,
         Err(error) => {
             diagnostics.note(&format!("the session catalogue could not be read: {error}"));
