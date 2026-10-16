@@ -2609,7 +2609,10 @@ mod turn {
                     },
                     AiEvent::Stop(StopReason::Stop),
                 ],
-                goal_reply(false, "artifact is not verified"),
+                goal_reply(
+                    false,
+                    "operator login is complete; artifact is not verified",
+                ),
                 vec![
                     AiEvent::TextDelta {
                         text: "artifact verified".into(),
@@ -2658,6 +2661,12 @@ mod turn {
                 |m| m["role"] == "system" && m.to_string().contains("artifact is not verified")
             )
         );
+        // Operator-related words alone do not override an explicit continue verdict.
+        assert!(continuation.as_array().unwrap().iter().any(|m| {
+            m["role"] == "system"
+                && m.to_string()
+                    .contains("operator login is complete; artifact is not verified")
+        }));
         assert_eq!(SessionState::replay(events).goal, Some(goal));
     }
 
