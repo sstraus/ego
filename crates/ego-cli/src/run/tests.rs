@@ -2682,3 +2682,25 @@ fn resumed_terminal_round_prompts_remaining_members_and_fresh_retry_consent() {
     let pending = state.pending_question().unwrap();
     crate::repl::test_resumed_round_terminal(pending.request().clone());
 }
+
+// Catches: native providers require EXA_API_KEY or expose Exa as a silent fallback.
+#[test]
+fn native_search_registry_does_not_require_or_select_exa() {
+    for model in ["openai/fixture", "anthropic/fixture"] {
+        let tools = composition::tools_with_mode(
+            Some(&vec!["web_search".into()]),
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            ego_core::orchestrator::Mode::Observe,
+            Some(model),
+        )
+        .unwrap();
+        assert_eq!(tools.len(), 1);
+        let descriptor = tools[0].descriptor();
+        assert_eq!(descriptor.name, "web_search");
+        assert!(descriptor.description.contains("provider hosted tool"));
+        assert!(!descriptor.description.contains("EXA_API_KEY"));
+    }
+}

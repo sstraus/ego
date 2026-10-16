@@ -1960,6 +1960,9 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
             .policy()
             .map_err(|error| CompactionError::Internal(error.to_string()))?,
         super::composition::orchestration_mode(effective),
+        args.model
+            .as_deref()
+            .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),
     )
     .map_err(|error| CompactionError::Internal(error.to_string()))?;
     if !args.no_context_tool && args.tools.is_none() {
@@ -2207,6 +2210,9 @@ fn rescan_session_skills(
         Some(Arc::new(jsonl_store.history())),
         exec_environment,
         super::composition::orchestration_mode(effective),
+        args.model
+            .as_deref()
+            .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),
     ) {
         Ok(registry) => registry,
         Err(error) => {
