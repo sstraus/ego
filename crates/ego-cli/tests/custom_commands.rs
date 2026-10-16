@@ -147,7 +147,7 @@ fn custom_commands_acp_catalogue_precedes_first_prompt_and_expands_same_body() {
     );
     ego.home_file(
         "commands/review.md",
-        "---\ndescription: ACP review\nargument-hint: '[file]'\n---\nACP-EXPANDED $1",
+        "---\ndescription: ACP review\nargument-hint: '[file]'\n---\nACP-EXPANDED ${1:-default} ${@:2:1}",
     );
     let mut host = support::AcpHost::adopt(places.ego(&stub).subcommand("acp").spawn_conversing());
     host.initialize();

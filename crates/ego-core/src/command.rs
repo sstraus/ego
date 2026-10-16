@@ -121,6 +121,61 @@ fn token(
     values: &[String],
     shell: bool,
 ) -> Result<(String, usize), SkillError> {
+    if !shell && let Some(tail) = text.strip_prefix("${") {
+        let end = tail
+            .find('}')
+            .ok_or_else(|| SkillError::new("unclosed command argument expression"))?;
+        let expression = &tail[..end];
+        let value = if let Some((selector, default)) = expression.split_once(":-") {
+            let selected = if selector == "@" {
+                values.join(" ")
+            } else {
+                let index = selector
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| n.checked_sub(1))
+                    .ok_or_else(|| {
+                        SkillError::new("unsupported command argument default expression")
+                    })?;
+                values.get(index).cloned().unwrap_or_default()
+            };
+            if selected.is_empty() {
+                default.to_owned()
+            } else {
+                selected
+            }
+        } else if let Some(slice) = expression.strip_prefix("@:") {
+            let mut bounds = slice.split(':');
+            let start = bounds
+                .next()
+                .and_then(|s| s.parse::<usize>().ok())
+                .and_then(|n| n.checked_sub(1))
+                .ok_or_else(|| SkillError::new("invalid command argument slice start"))?;
+            let length = bounds
+                .next()
+                .map(str::parse::<usize>)
+                .transpose()
+                .map_err(|_| SkillError::new("invalid command argument slice length"))?;
+            if bounds.next().is_some() {
+                return Err(SkillError::new("unsupported command argument slice"));
+            }
+            values
+                .iter()
+                .skip(start)
+                .take(length.unwrap_or(usize::MAX))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            return Err(SkillError::new(format!(
+                "unsupported command argument expression ${{{expression}}}"
+            )));
+        };
+        return Ok((value, end + 3));
+    }
+    if !shell && text.starts_with("$@") {
+        return Ok((values.join(" "), 2));
+    }
     if let Some(tail) = text.strip_prefix("$ARGUMENTS")
         && !tail.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
     {
@@ -155,6 +210,27 @@ fn token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_defaults_and_slices_do_not_remain_active_looking_literals() {
+        assert_eq!(
+            prepare(
+                "${1:-fallback}|${@:-all default}|${@:2}|${@:2:1}|$@",
+                "'one two' three four"
+            )
+            .unwrap(),
+            vec![Part::Text(
+                "one two|one two three four|three four|three|one two three four".into()
+            )]
+        );
+        assert_eq!(
+            prepare("${1:-fallback}|${@:-all default}|${@:2:0}", "").unwrap(),
+            vec![Part::Text("fallback|all default|".into())]
+        );
+        for expression in ["${@:0}", "${@:1:bad}", "${unsupported}", "${1:-unclosed"] {
+            assert!(prepare(expression, "").is_err(), "{expression}");
+        }
+    }
 
     #[test]
     fn inserted_arguments_cannot_create_shell_execution() {

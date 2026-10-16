@@ -2138,7 +2138,9 @@ A nested `git/review.md` is `/git:review`. Built-ins and skill-name collisions
 are refused visibly rather than shadowed.
 
 `$ARGUMENTS` inserts raw arguments; `$1`, `$2`, and later positions use shell-like
-argument grouping. With no placeholder, raw arguments are appended. `@path`
+argument grouping. Pi `$@`, `${1:-default}`, `${@:-default}`, `${@:N}` and `${@:N:L}`
+expressions are also supported in prompt text; malformed expressions fail visibly.
+With no placeholder, raw arguments are appended. `@path`
 inlines a workspace file under the instruction byte and file-count limits.
 `!` followed by a backtick-delimited shell command captures stdout before the
 prompt is sent. Shell execution uses the existing exec permission, approval,
