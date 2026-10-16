@@ -220,11 +220,14 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 }
                 .await;
                 let inventory = inventory.map_err(|error| {
-                    if server_admission.oauth_session().is_some()
-                        && matches!(
-                            error.failure(),
-                            crate::McpFailure::Credential | crate::McpFailure::Authorization
-                        )
+                    if server_admission
+                        .oauth_session()
+                        .is_some_and(|session| session.credential_required())
+                        || (server_admission.oauth_session().is_some()
+                            && matches!(
+                                error.failure(),
+                                crate::McpFailure::Credential | crate::McpFailure::Authorization
+                            ))
                     {
                         McpCandidateError::CredentialRequired
                     } else {

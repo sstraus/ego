@@ -1117,6 +1117,9 @@ pub struct McpOAuthSession {
     credentials: Arc<dyn CredentialStore>,
     state: tokio::sync::Mutex<Option<Arc<dyn McpHttpEffects>>>,
     refresh_lock: Option<Arc<dyn McpOAuthRefreshLock>>,
+    // rmcp can erase typed transport failures. Retain only this sanitized
+    // credential outcome so admission never diagnoses revocation as config.
+    credential_required: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for McpOAuthSession {
@@ -1148,7 +1151,13 @@ impl McpOAuthSession {
             credentials,
             state: tokio::sync::Mutex::new(None),
             refresh_lock: None,
+            credential_required: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub(crate) fn credential_required(&self) -> bool {
+        self.credential_required
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn matches(&self, name: &McpServerName, config: &McpHttpConfig) -> bool {
@@ -1161,6 +1170,8 @@ impl McpOAuthSession {
     }
 
     fn hint(&self) -> McpError {
+        self.credential_required
+            .store(true, std::sync::atomic::Ordering::Release);
         McpError::new(
             McpFailure::Credential,
             format!(
@@ -1227,6 +1238,8 @@ impl McpOAuthSession {
         let bundle = self.load()?;
         let mut value = SecretMaterial::new(b"Bearer ".to_vec());
         value.extend_from_slice(bundle.access_token.expose_secret_bytes());
+        self.credential_required
+            .store(false, std::sync::atomic::Ordering::Release);
         Ok(vec![
             ego_core::permit::HttpHeader::secret("authorization", value)
                 .map_err(|_| self.hint())?,
@@ -1571,6 +1584,7 @@ mod runtime_tests {
                 .to_string()
                 .contains("ego mcp login linear")
         );
+        assert!(session.credential_required());
         assert_eq!(*store.0.lock().unwrap(), original);
         store.0.lock().unwrap().clear();
         assert!(
