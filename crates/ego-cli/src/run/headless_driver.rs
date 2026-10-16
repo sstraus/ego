@@ -155,9 +155,9 @@ pub(super) async fn drive_headless_turn(
         invocation,
         retry_pause: Arc::new(TokioRetryPause),
     };
-    let fs = OsFs;
+    let fs = &active.checkpoint_fs;
     let effect_ports = ToolEffectPorts::new(
-        &fs,
+        fs,
         ports.process(),
         active.evidence(),
         ports.resolver_handle(),

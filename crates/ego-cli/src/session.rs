@@ -201,6 +201,7 @@ impl Opened<'_> {
 /// whole-value move. A published target cannot leave the old writer paired
 /// with the new id, or the old evidence namespace paired with the new state.
 pub struct ActiveSession<'a> {
+    pub(crate) checkpoint_fs: ego_tools::checkpoint::CheckpointFs,
     id: SessionId,
     state: SessionState,
     opened: Opened<'a>,
@@ -225,6 +226,7 @@ impl<'a> ActiveSession<'a> {
             .replay(&id)
             .map_err(|error| error.to_string())?;
         Ok(Self {
+            checkpoint_fs: ego_tools::checkpoint::CheckpointFs::new(id),
             id,
             state,
             opened,

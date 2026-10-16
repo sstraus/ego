@@ -2793,3 +2793,55 @@ mod native_web {
         assert!(ws.authorize(call).is_err());
     }
 }
+
+#[test]
+fn builtin_write_and_edit_checkpoint_real_preimages_but_failed_edit_does_not() {
+    // Catches: wiring capture only to write, or capturing an edit that never mutates.
+    use ego_tools::checkpoint::CheckpointFs;
+    let ws = Workspace::in_mode(Mode::Yolo);
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.root)
+        .args(["init", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let path = ws.file("target", "original bytes");
+    let session = SessionId::new();
+    let filesystem = CheckpointFs::new(session);
+    let invoke = |name: &str, params| {
+        let tool = ws.tool(name);
+        let call = tool.prepare(params, &ws.ctx()).unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &filesystem,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        block_on(tool.execute(call, &guarded))
+    };
+    invoke("write", json!({"path":"target", "contents":"one"})).unwrap();
+    invoke(
+        "edit",
+        json!({"path":"target", "old_string":"one", "new_string":"two"}),
+    )
+    .unwrap();
+    assert!(
+        invoke(
+            "edit",
+            json!({"path":"target", "old_string":"missing", "new_string":"three"})
+        )
+        .is_err()
+    );
+    let preview = CheckpointFs::preview(&ws.root, session).unwrap();
+    assert_eq!(preview.len(), 2);
+    assert_eq!(fs::read(&path).unwrap(), b"two");
+    CheckpointFs::restore(&ws.root, session, &preview[0].checkpoint).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"one");
+    CheckpointFs::restore(&ws.root, session, &preview[1].checkpoint).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"original bytes");
+}
