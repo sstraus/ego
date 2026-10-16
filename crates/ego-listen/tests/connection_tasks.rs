@@ -310,3 +310,60 @@ async fn handler_panic_is_fatal_and_cleans_up_the_listener() {
     );
     let _ = stop.send(());
 }
+
+// Catches: shutdown reports success after owned handlers fail while being dropped.
+#[tokio::test]
+async fn shutdown_reports_handler_drop_failures_and_drains_every_handler() {
+    struct FailingDrop(Arc<AtomicUsize>);
+    impl Drop for FailingDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("owned handler failed during shutdown");
+        }
+    }
+
+    let bound = bound_loopback().await;
+    let address = bound.advertised().unwrap();
+    let gate =
+        ConnectionGate::new(ConnectionLimits::new(2, Duration::from_secs(60), 1024).unwrap());
+    let started = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let (stop, shutdown) = oneshot::channel::<()>();
+    let task = tokio::spawn(serve_connections(
+        bound,
+        gate,
+        {
+            let started = Arc::clone(&started);
+            let dropped = Arc::clone(&dropped);
+            move |accepted: GuardedAccepted| {
+                let started = Arc::clone(&started);
+                let dropped = Arc::clone(&dropped);
+                async move {
+                    let _failure = FailingDrop(dropped);
+                    let _accepted = accepted;
+                    started.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<()>().await;
+                }
+            }
+        },
+        async move {
+            let _ = shutdown.await;
+        },
+    ));
+    let first = TcpStream::connect(&address).await.unwrap();
+    let second = TcpStream::connect(&address).await.unwrap();
+    wait_for_count(&started, 2).await;
+    stop.send(()).unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("shutdown joins failing handlers")
+        .unwrap()
+        .expect_err("handler drop failure is not clean shutdown");
+    assert!(
+        error
+            .to_string()
+            .contains("owned handler failed during shutdown")
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    drop((first, second));
+}
