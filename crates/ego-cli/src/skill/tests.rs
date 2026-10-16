@@ -225,7 +225,7 @@ mod regression_case {
     }
 
     #[test]
-    fn duplicate_names_and_fixed_action_collisions_are_unavailable_without_shadowing() {
+    fn precedence_selects_user_over_system_but_fixed_actions_remain_reserved() {
         let roots = Roots::new();
         roots.write(
             &roots.system,
@@ -247,24 +247,24 @@ mod regression_case {
         );
         let catalogue = SkillCatalogue::discover(roots.discovery(false), &["skills", "help"])
             .expect("collisions are projected diagnostics");
-        assert!(capture(&catalogue)
-            .descriptors()
-            .iter()
-            .all(|descriptor| descriptor.name() != "duplicate" && descriptor.name() != "skills"));
-        for name in ["duplicate", "skills"] {
-            assert!(
-                capture(&catalogue)
-                    .diagnostics()
-                    .iter()
-                    .any(|diagnostic| diagnostic.name() == name && diagnostic.is_collision())
-            );
-        }
+        let captured = capture(&catalogue);
+        assert_eq!(
+            captured.descriptor("duplicate").unwrap().source(),
+            SkillSourceAuthority::User
+        );
+        assert!(captured.descriptor("skills").is_none());
+        assert!(
+            captured
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.name() == "skills" && diagnostic.is_collision())
+        );
     }
 
     #[test]
     fn untrusted_project_skills_are_not_read_or_admitted() {
         let roots = Roots::new();
-        let project = roots.write(
+        roots.write(
             &roots.project,
             "project-only",
             &valid_for("project-only", ""),
@@ -277,15 +277,7 @@ mod regression_case {
                 .iter()
                 .all(|descriptor| descriptor.name() != "project-only")
         );
-        assert!(
-            capture(&catalogue)
-                .diagnostics()
-                .iter()
-                .any(
-                    |diagnostic| diagnostic.source() == SkillSourceAuthority::Project
-                        && diagnostic.source_path() == project
-                )
-        );
+        assert!(capture(&catalogue).diagnostics().is_empty());
     }
 
     #[test]
@@ -673,4 +665,122 @@ fn bundled_context_skill_does_not_hide_a_collision() {
             .any(|entry| entry.name() == "context-management" && entry.is_collision())
     );
     assert!(captured.descriptor("context-management").is_none());
+}
+
+mod regression_case {
+    use super::*;
+    use crate::capability_roots::discover_capability_roots;
+
+    fn discovery(roots: &Roots, workspace: &Path, trusted: bool) -> SkillDiscovery {
+        SkillDiscovery {
+            roots: discover_capability_roots(
+                workspace,
+                trusted,
+                roots.system.parent().unwrap(),
+                roots.user.parent().unwrap(),
+                roots.user.parent().unwrap().parent(),
+                "skills",
+            ),
+            trusted_project: trusted,
+        }
+    }
+
+    #[test]
+    fn ancestor_and_user_roots_are_not_missed_or_scanned_beyond_repository() {
+        // Catches: nested launches miss portable roots or inherit outside-repo skills.
+        let roots = Roots::new();
+        let workspace = roots.project.parent().unwrap().parent().unwrap();
+        fs::create_dir(workspace.join(".git")).unwrap();
+        let nested = workspace.join("src/nested");
+        fs::create_dir_all(&nested).unwrap();
+        for (base, name) in [
+            (workspace.join(".agents/skills"), "ancestor-agents"),
+            (nested.join(".claude/skills"), "nested-claude"),
+            (roots._dir.path().join("home/.agents/skills"), "user-agents"),
+            (roots._dir.path().join("home/.claude/skills"), "user-claude"),
+            (roots._dir.path().join(".agents/skills"), "outside-repo"),
+        ] {
+            roots.write(&base, name, &valid_for(name, ""), name);
+        }
+        let catalogue = SkillCatalogue::discover(discovery(&roots, &nested, true), &[]).unwrap();
+        let captured = capture(&catalogue);
+        for name in [
+            "ancestor-agents",
+            "nested-claude",
+            "user-agents",
+            "user-claude",
+        ] {
+            assert!(captured.descriptor(name).is_some(), "{name}");
+        }
+        assert!(captured.descriptor("outside-repo").is_none());
+        let untrusted = SkillCatalogue::discover(discovery(&roots, &nested, false), &[]).unwrap();
+        assert!(capture(&untrusted).descriptor("ancestor-agents").is_none());
+        assert!(capture(&untrusted).descriptor("nested-claude").is_none());
+        assert!(capture(&untrusted).descriptor("user-agents").is_some());
+    }
+
+    #[test]
+    fn nearest_project_then_namespace_then_user_then_system_wins() {
+        // Catches: directory iteration order selects the wrong instruction body.
+        let roots = Roots::new();
+        let workspace = roots.project.parent().unwrap().parent().unwrap();
+        fs::write(workspace.join(".git"), "gitdir: elsewhere").unwrap();
+        let nested = workspace.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        for root in [
+            &roots.system,
+            &roots.user,
+            &roots.project,
+            &workspace.join(".agents/skills"),
+            &nested.join(".agents/skills"),
+            &nested.join(".ego/skills"),
+        ] {
+            roots.write(root, "winner", &valid_for("winner", ""), "body");
+        }
+        let catalogue = SkillCatalogue::discover(discovery(&roots, &nested, true), &[]).unwrap();
+        let captured = capture(&catalogue);
+        assert!(
+            captured.render_list().contains(
+                &nested
+                    .join(".ego/skills/winner/SKILL.md")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            captured.descriptor("winner").unwrap().source(),
+            SkillSourceAuthority::Project
+        );
+        assert!(captured.diagnostics().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boss_layout_symlink_is_one_invocable_skill() {
+        // Catches: portable aliases cause collisions and remove the usable skill.
+        let roots = Roots::new();
+        let workspace = roots.project.parent().unwrap().parent().unwrap();
+        let agents = workspace.join(".agents/skills");
+        roots.write(&agents, "foo", &valid_for("foo", ""), "Portable body.");
+        let claude = workspace.join(".claude/skills");
+        fs::create_dir_all(&claude).unwrap();
+        std::os::unix::fs::symlink("../../.agents/skills/foo", claude.join("foo")).unwrap();
+        let catalogue = SkillCatalogue::discover(discovery(&roots, workspace, true), &[]).unwrap();
+        let captured = capture(&catalogue);
+        assert_eq!(
+            captured
+                .descriptors()
+                .iter()
+                .filter(|spec| spec.name() == "foo")
+                .count(),
+            1
+        );
+        assert!(captured.core().authorize_user("foo").is_ok());
+        assert!(captured.diagnostics().is_empty());
+        assert!(
+            captured
+                .render_list()
+                .contains(&agents.join("foo/SKILL.md").display().to_string())
+        );
+    }
 }

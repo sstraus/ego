@@ -1016,11 +1016,17 @@ executables).
 
 ### 5.1 Skills are in-session capabilities, not agent files
 
-A skill is a strict `SKILL.md` under `/etc/ego/skills`, `$EGO_HOME/skills`, or
-trusted `<workspace>/.ego/skills`. It uses current Agent Skills frontmatter and
-the supported current Claude extensions documented in `ARCHITECTURE.md`.
-εgo does not scan `.claude/skills`: compatible metadata and bodies are portable,
-while storage aliases would create a second trust and precedence namespace.
+A skill is a strict `<name>/SKILL.md`. Roots, in highest-precedence order:
+trusted project `.ego/skills`, `.agents/skills`, `.claude/skills` at each directory
+from the workspace up to the nearest repository root (nearest directory first);
+user `$EGO_HOME/skills` (default `~/.ego/skills`), `~/.agents/skills`,
+`~/.claude/skills`; then `/etc/ego/skills`. Outside a repository, only the
+workspace directory contributes project roots. Project roots are not inspected
+without workspace trust. Bare headless runs do not discover ambient skills.
+The first valid definition of a name wins. Canonical file aliases are read once;
+fixed actions and the bundled `context-management` name remain reserved.
+The skill listing shows the selected file path. Current Agent Skills frontmatter
+and supported Claude extensions are documented in `ARCHITECTURE.md`.
 
 `/skills`, `/skills list`, and `/skills diagnose` inspect the one admitted
 catalogue; `/skills rescan` prepares and atomically publishes a complete

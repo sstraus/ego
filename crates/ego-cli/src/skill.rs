@@ -34,34 +34,53 @@ pub(crate) use ego_core::event::skill::SkillSourceAuthority;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SkillDiscovery {
-    system: PathBuf,
-    user: PathBuf,
-    project: PathBuf,
+    roots: Vec<crate::capability_roots::CapabilityRoot>,
     trusted_project: bool,
 }
 
 impl SkillDiscovery {
+    #[cfg(test)]
     pub(crate) fn new(
         system: PathBuf,
         user: PathBuf,
         project: PathBuf,
         trusted_project: bool,
     ) -> Self {
+        use crate::capability_roots::CapabilityRoot;
+        let mut roots = Vec::new();
+        if trusted_project {
+            roots.push(CapabilityRoot {
+                source: SkillSourceAuthority::Project,
+                path: project,
+            });
+        }
+        roots.push(CapabilityRoot {
+            source: SkillSourceAuthority::User,
+            path: user,
+        });
+        roots.push(CapabilityRoot {
+            source: SkillSourceAuthority::System,
+            path: system,
+        });
         Self {
-            system,
-            user,
-            project,
+            roots,
             trusted_project,
         }
     }
 
     pub(crate) fn for_workspace(workspace: &Path, trusted_project: bool) -> Option<Self> {
-        Some(Self::new(
-            PathBuf::from("/etc/ego/skills"),
-            crate::config::ego_home()?.join("skills"),
-            workspace.join(".ego/skills"),
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        Some(Self {
+            roots: crate::capability_roots::discover_capability_roots(
+                workspace,
+                trusted_project,
+                Path::new("/etc/ego"),
+                &crate::config::ego_home()?,
+                home.as_deref(),
+                "skills",
+            ),
             trusted_project,
-        ))
+        })
     }
 }
 
@@ -118,6 +137,7 @@ pub(crate) struct SkillCatalogueCapture {
     catalogue: Arc<CoreSkillCatalogue>,
     diagnostics: Arc<[SkillDiagnostic]>,
     snapshot_digest: Arc<str>,
+    source_paths: Arc<BTreeMap<String, PathBuf>>,
     attempt: u64,
     publication: u64,
 }
@@ -180,7 +200,7 @@ impl SkillCatalogueCapture {
                 spec.name(),
                 descriptor.description,
                 source_authority,
-                descriptor.location,
+                self.source_paths.get(spec.name()).map(|path| path.display().to_string()).unwrap_or_else(|| descriptor.location.to_string()),
                 descriptor.source_digest,
                 descriptor.user_invocable,
                 descriptor.model_invocable,
@@ -224,6 +244,7 @@ struct SkillPublication {
     catalogue: Arc<CoreSkillCatalogue>,
     diagnostics: Arc<[SkillDiagnostic]>,
     snapshot_digest: Arc<str>,
+    source_paths: Arc<BTreeMap<String, PathBuf>>,
     attempt: u64,
     publication: u64,
 }
@@ -234,6 +255,7 @@ impl SkillPublication {
             catalogue: Arc::clone(&self.catalogue),
             diagnostics: Arc::clone(&self.diagnostics),
             snapshot_digest: Arc::clone(&self.snapshot_digest),
+            source_paths: Arc::clone(&self.source_paths),
             attempt: self.attempt,
             publication: self.publication,
         }
@@ -332,6 +354,7 @@ impl SkillCatalogue {
         })?;
         let retained_catalogue = Arc::clone(&base.catalogue);
         let retained_digest = Arc::clone(&base.snapshot_digest);
+        let base_source_paths = Arc::clone(&base.source_paths);
         let retained_publication = base.publication;
         drop(base);
 
@@ -353,6 +376,7 @@ impl SkillCatalogue {
                 catalogue: retained_catalogue,
                 diagnostics,
                 snapshot_digest: retained_digest,
+                source_paths: base_source_paths,
                 attempt,
                 publication: retained_publication,
             },
@@ -412,16 +436,15 @@ impl Candidate {
             PathBuf::from("bundled/context-management/SKILL.md"),
         )];
         let mut diagnostics = Vec::new();
-        for (source, root, enabled) in [
-            (SkillSourceAuthority::System, discovery.system, true),
-            (SkillSourceAuthority::User, discovery.user, true),
-            (
-                SkillSourceAuthority::Project,
-                discovery.project,
-                discovery.trusted_project,
-            ),
-        ] {
-            discover_root(source, &root, enabled, &mut admitted, &mut diagnostics);
+        let mut seen_paths = BTreeSet::new();
+        for root in discovery.roots {
+            discover_root(
+                root.source,
+                &root.path,
+                &mut seen_paths,
+                &mut admitted,
+                &mut diagnostics,
+            );
         }
 
         if let Some(profile_layers) = profile_layers {
@@ -448,38 +471,28 @@ impl Candidate {
         }
 
         let fixed = fixed_unique;
-        let mut occurrences: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (index, (spec, _)) in admitted.iter().enumerate() {
-            occurrences
-                .entry(spec.name().to_owned())
-                .or_default()
-                .push(index);
-        }
-        let mut rejected = BTreeSet::new();
-        for (name, indices) in occurrences {
-            if indices.len() > 1 || fixed.contains(name.as_str()) {
-                for index in indices {
-                    rejected.insert(index);
-                    let (spec, source_path) = &admitted[index];
-                    diagnostics.push(SkillDiagnostic {
-                        name: name.clone(),
-                        source: spec.source(),
-                        source_path: source_path.clone(),
-                        message: if fixed.contains(name.as_str()) {
-                            format!("collides with fixed action `{name}`")
-                        } else {
-                            format!("collides with another admitted skill named `{name}`")
-                        },
-                        collision: true,
-                    });
-                }
+        let bundled_collision = admitted
+            .iter()
+            .skip(1)
+            .any(|(spec, _)| spec.name() == "context-management");
+        let mut names = BTreeSet::new();
+        admitted.retain(|(spec, source_path)| {
+            let name = spec.name();
+            if fixed.contains(name) || (bundled_collision && name == "context-management") {
+                diagnostics.push(SkillDiagnostic {
+                    name: name.to_owned(),
+                    source: spec.source(),
+                    source_path: source_path.clone(),
+                    message: format!("collides with fixed action `{name}`"),
+                    collision: true,
+                });
+                false
+            } else {
+                // Roots arrive in precedence order. The bundled capability is
+                // reserved and always wins over filesystem definitions.
+                names.insert(name.to_owned())
             }
-        }
-        admitted = admitted
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, descriptor)| (!rejected.contains(&index)).then_some(descriptor))
-            .collect();
+        });
         admitted.sort_by(|(left, _), (right, _)| left.name().cmp(right.name()));
         diagnostics.sort_by(|left, right| {
             left.name
@@ -494,6 +507,12 @@ impl Candidate {
     }
 
     fn publish(self, attempt: u64, publication: u64) -> SkillPublication {
+        let source_paths = Arc::new(
+            self.admitted
+                .iter()
+                .map(|(spec, path)| (spec.name().to_owned(), path.clone()))
+                .collect(),
+        );
         let catalogue =
             CoreSkillCatalogue::new(self.admitted.into_iter().map(|(spec, _)| spec).collect())
                 .expect("the candidate already rejects duplicate and unreachable skills");
@@ -502,6 +521,7 @@ impl Candidate {
             catalogue: Arc::new(catalogue),
             diagnostics: self.diagnostics.into(),
             snapshot_digest,
+            source_paths,
             attempt,
             publication,
         }
@@ -527,7 +547,7 @@ fn bundled_context_skill() -> SkillSpec {
 fn discover_root(
     source: SkillSourceAuthority,
     root: &Path,
-    enabled: bool,
+    seen_paths: &mut BTreeSet<PathBuf>,
     admitted: &mut Vec<(SkillSpec, PathBuf)>,
     diagnostics: &mut Vec<SkillDiagnostic>,
 ) {
@@ -547,17 +567,18 @@ fn discover_root(
             .and_then(|name| name.to_str())
             .unwrap_or("<invalid>")
             .to_owned();
-        if !enabled {
-            diagnostics.push(diagnostic(
-                directory_name,
-                source,
-                path,
-                "project skill is unavailable because the workspace is untrusted",
-            ));
+        if let Ok(canonical) = fs::canonicalize(&path)
+            && seen_paths.contains(&canonical)
+        {
             continue;
         }
         match load_skill(source, root, &path, &directory_name) {
-            Ok(spec) => admitted.push((spec, path.clone())),
+            Ok(spec) => {
+                if let Ok(canonical) = fs::canonicalize(&path) {
+                    seen_paths.insert(canonical);
+                }
+                admitted.push((spec, path.clone()));
+            }
             Err(message) => diagnostics.push(diagnostic(directory_name, source, path, message)),
         }
     }

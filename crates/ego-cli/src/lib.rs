@@ -27,6 +27,7 @@ pub(crate) mod attachment;
 pub mod auth;
 pub mod budget;
 pub mod build_info;
+pub(crate) mod capability_roots;
 pub mod catalogue;
 pub mod cli;
 pub mod config;
