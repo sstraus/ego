@@ -441,8 +441,16 @@ async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> 
     .map_err(|error| RunTermination::Failed {
         message: format!("the fork failed: {error}"),
     })?;
-    let target = created.id;
-    match &created.publication {
+    render_fork_result(created.id, &created.publication, args.output, out)
+}
+
+fn render_fork_result(
+    target: SessionId,
+    publication: &LifecyclePublication,
+    output: Output,
+    out: &Stdout,
+) -> Result<Ended, RunTermination> {
+    match publication {
         LifecyclePublication::PublishedWithProjectionWarning { diagnostic }
         | LifecyclePublication::PublishedDurabilityUncertain { diagnostic } => out.note(&format!(
             "fork target {target} is authoritative with a durability warning: {diagnostic}"
@@ -458,7 +466,7 @@ async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> 
         selected_session: None,
         mcp_errors: Vec::new(),
     };
-    let rendered = match args.output {
+    let rendered = match output {
         Output::Text => {
             out.line(&target.to_string());
             Ok(())

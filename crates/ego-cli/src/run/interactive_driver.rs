@@ -212,7 +212,7 @@ pub(super) enum ResumePlan {
     Foreign {
         question: ItemId,
         continuation_id: String,
-        answer: QuestionAnswer,
+        answer: Option<QuestionAnswer>,
     },
 }
 
@@ -222,6 +222,23 @@ pub(super) fn plan_resume_answer(
 ) -> Result<ResumePlan, RunTermination> {
     let usage = |message: String| RunTermination::UsageError { message };
     if answers.is_empty() {
+        let pending = state.pending_question().filter(|pending| {
+            matches!(
+                pending.request().mode,
+                ego_core::question::QuestionMode::Round(_)
+            ) && state.settled_question(pending.item_id()).is_none()
+        });
+        if let Some(pending) = pending
+            && let QuestionTarget::ForeignContinuation {
+                continuation_id, ..
+            } = pending.target()
+        {
+            return Ok(ResumePlan::Foreign {
+                question: pending.item_id(),
+                continuation_id: continuation_id.clone(),
+                answer: None,
+            });
+        }
         return Err(usage("resume answer batch is empty".to_string()));
     }
     let distinct = answers
@@ -262,7 +279,7 @@ pub(super) fn plan_resume_answer(
         } => Ok(ResumePlan::Foreign {
             question: pending.item_id(),
             continuation_id: continuation_id.clone(),
-            answer,
+            answer: Some(answer),
         }),
     }
 }

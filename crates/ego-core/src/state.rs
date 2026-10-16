@@ -1332,7 +1332,29 @@ impl SessionState {
     }
 
     pub fn pending_question(&self) -> Option<&PendingQuestion> {
-        self.pending_question.as_ref()
+        self.pending_question.as_ref().or_else(|| {
+            // A durable answer can precede continuation acceptance/claim. Recovery
+            // requires a fresh explicit resume; it never repeats an effect itself.
+            self.settled_questions
+                .values()
+                .filter(|settled| {
+                    matches!(settled.outcome, QuestionOutcome::Answered(_))
+                        && matches!(
+                            settled.pending.request.mode,
+                            crate::question::QuestionMode::Round(_)
+                        )
+                        && matches!(
+                            settled.pending.target,
+                            QuestionTarget::ForeignContinuation { .. }
+                        )
+                        && self
+                            .items
+                            .get(&settled.pending.target.tool_call())
+                            .is_some_and(|item| !item.completed)
+                })
+                .max_by_key(|settled| self.items.get(&settled.pending.item).map(|item| item.seq))
+                .map(|settled| &settled.pending)
+        })
     }
 
     pub fn settled_question(&self, question: ItemId) -> Option<&SettledQuestion> {
@@ -1370,7 +1392,13 @@ impl SessionState {
         json: &str,
     ) -> Result<QuestionAnswer, QuestionError> {
         let pending = self.pending_for(question)?;
-        QuestionAnswer::from_json(&pending.request, json)
+        let answer = QuestionAnswer::from_json(&pending.request, json)?;
+        if let Some(settled) = self.settled_questions.get(&question)
+            && settled.outcome != QuestionOutcome::Answered(answer.clone())
+        {
+            return Err(QuestionError::AlreadySettled);
+        }
+        Ok(answer)
     }
 
     /// Validate an already parsed answer and prepare the pure tool result for
@@ -1396,7 +1424,7 @@ impl SessionState {
     }
 
     fn pending_for(&self, question: ItemId) -> Result<&PendingQuestion, QuestionError> {
-        match &self.pending_question {
+        match self.pending_question() {
             Some(pending) if pending.item == question => Ok(pending),
             Some(_) => Err(QuestionError::WrongQuestion),
             None if self.settled_questions.contains_key(&question) => {
@@ -1433,7 +1461,9 @@ impl SessionState {
             QuestionOutcome::Answered(answer) => (true, answer.model_text()),
             QuestionOutcome::Declined => (false, "question declined".to_string()),
             QuestionOutcome::Cancelled => (false, "question cancelled".to_string()),
-            QuestionOutcome::Unavailable => return Err(QuestionError::NoPendingQuestion),
+            QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => {
+                return Err(QuestionError::NoPendingQuestion);
+            }
         };
         Ok(QuestionContinuation {
             question,
@@ -1478,7 +1508,7 @@ impl SessionState {
     }
 
     pub fn refuse_new_prompt(&self, _turn: TurnId) -> Result<(), QuestionError> {
-        if self.pending_question.is_some() {
+        if self.pending_question().is_some() {
             Err(QuestionError::PendingQuestion)
         } else {
             Ok(())
@@ -2045,6 +2075,17 @@ impl SessionState {
             EventKind::QuestionRequested { request, target } => {
                 self.request_question(ev, request, target)
             }
+            EventKind::QuestionMemberSettled { key, answer } => {
+                if let Some(pending) = self.pending_question.as_mut()
+                    && ev.env.item == Some(pending.item)
+                    && ev.env.turn == pending.turn
+                    && ev.env.parent == Some(pending.request_event)
+                    && matches!(pending.target, QuestionTarget::ForeignContinuation { .. })
+                    && let crate::question::QuestionMode::Round(round) = &mut pending.request.mode
+                {
+                    let _ = round.complete_member(key, answer.clone());
+                }
+            }
             EventKind::QuestionSettled { outcome } => self.settle_question(ev, outcome),
             EventKind::PermissionRequested { escalation, .. } => {
                 self.permissions.push(PermissionEvent::Requested {
@@ -2254,6 +2295,8 @@ impl SessionState {
             return;
         };
         if request.validate().is_err()
+            || (matches!(request.mode, crate::question::QuestionMode::Round(_))
+                && matches!(target, QuestionTarget::ModelTool { .. }))
             || target.validate().is_err()
             || self.pending_question.is_some()
             || self.settled_questions.contains_key(&item)
@@ -2286,7 +2329,7 @@ impl SessionState {
                 QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
                 // `Unavailable` is a host result, never a settlement:
                 // it is exactly the state in which the request stays pending.
-                QuestionOutcome::Unavailable => false,
+                QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => false,
             };
         if valid && let Some(pending) = self.pending_question.take() {
             if let Some(question) = self.items.get_mut(&item) {

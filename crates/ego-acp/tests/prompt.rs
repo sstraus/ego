@@ -336,6 +336,9 @@ impl SessionMcpAdmission for RecordingMcpAdmission {
 struct RejectingMcpPort;
 
 impl ForeignQuestionPort for RejectingMcpPort {
+    fn cancel(&self, _id: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn resume<'a>(
         &'a self,
         _continuation_id: &'a str,

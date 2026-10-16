@@ -194,7 +194,7 @@ impl McpContinuationOwner {
     pub async fn record_input_required(
         &self,
         envelope: ego_core::permit::McpPreparedEnvelope,
-        required: crate::McpMappedInput,
+        mut required: crate::McpMappedInput,
         guarded: GuardedMcpResume<'_>,
     ) -> Result<ForeignInputRequired, McpError> {
         let (resume, context) = guarded.into_parts().map_err(continuation)?;
@@ -205,12 +205,22 @@ impl McpContinuationOwner {
                 "MCP resume context capture does not match its operation",
             ));
         }
+        required.bind_deadline(resume.expires_at().as_millis());
         let policy_snapshot = context.policy_snapshot();
         let policy_digest = policy_snapshot.digest();
-        let schema = serde_json::to_vec(required.schema())
+        let binding = match &required.question_request().mode {
+            ego_core::question::QuestionMode::Round(round) => serde_json::to_value(round)?,
+            _ => required.schema().clone(),
+        };
+        let schema = serde_json::to_vec(&binding)
             .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
-        let id = continuation_id(&envelope, &required, &schema);
-        let record = resume
+        let id = continuation_id(
+            &envelope,
+            &required,
+            &schema,
+            resume.used_rounds().map_err(continuation)?,
+        );
+        let mut record = resume
             .into_record(
                 id.clone(),
                 policy_digest.clone(),
@@ -220,6 +230,9 @@ impl McpContinuationOwner {
                 envelope.transport_fingerprint(),
             )
             .map_err(continuation)?;
+        if let ego_core::question::QuestionMode::Round(round) = &required.question_request().mode {
+            record = record.with_round(round.clone()).map_err(continuation)?;
+        }
         if record.capture() != context.capture()
             || record.fingerprints().capture() != context.capture()
             || record.subject().server() != envelope.subject().server()
@@ -262,7 +275,12 @@ impl McpContinuationOwner {
         {
             return Err(self.terminalize_pending_failure(&id, &policy_digest, primary));
         }
-        ForeignInputRequired::new(id.clone(), required.question_request().clone()).map_err(|_| {
+        let mut question = required.question_request().clone();
+        question.prompt = format!(
+            "MCP server {} requires input before retrying the original operation",
+            envelope.subject().server()
+        );
+        ForeignInputRequired::new(id.clone(), question).map_err(|_| {
             self.terminalize_pending_failure(
                 &id,
                 &policy_digest,
@@ -291,9 +309,15 @@ impl McpContinuationOwner {
         }
         let capture = &pinned.capture;
         let now = self.clock.now();
-        self.journal
-            .accept_answer(id, raw_answer, now)
-            .map_err(continuation)?;
+        match pending.state() {
+            ContinuationState::Pending => self
+                .journal
+                .accept_answer(id, raw_answer, now)
+                .map_err(continuation)?,
+            ContinuationState::Accepted
+                if pending.round().is_some() && pending.accepted_answer() == Some(raw_answer) => {}
+            _ => return Err(continuation(ContinuationError::InvalidTransition)),
+        }
         let accepted = self
             .journal
             .load(id)
@@ -385,7 +409,10 @@ impl McpContinuationOwner {
             .journal
             .load(id)
             .map_err(|_| authority("MCP pending continuation record is unavailable"))?;
-        if record.state() != ContinuationState::Pending {
+        if !matches!(
+            record.state(),
+            ContinuationState::Pending | ContinuationState::Accepted
+        ) {
             return Err(authority("MCP continuation is not pending"));
         }
         Ok(record)
@@ -533,6 +560,21 @@ impl<'session, 'turn> McpForeignQuestionPort<'session, 'turn> {
 }
 
 impl ForeignQuestionPort for McpForeignQuestionPort<'_, '_> {
+    fn cancel(&self, continuation_id: &str) -> Result<(), String> {
+        let record = self
+            .owner
+            .journal
+            .load(continuation_id)
+            .map_err(|error| error.to_string())?;
+        self.owner
+            .journal
+            .fail_pending(continuation_id)
+            .map_err(|error| error.to_string())?;
+        self.owner
+            .cleanup_terminal(continuation_id, record.generation_policy_digest());
+        Ok(())
+    }
+
     fn resume<'a>(
         &'a self,
         continuation_id: &'a str,
@@ -582,9 +624,21 @@ fn validate_recorded_answer(
     record: &ContinuationRecord,
     raw_answer: &[u8],
 ) -> Result<(), McpError> {
-    let schema: Value = serde_json::from_slice(record.correlation_schema())?;
+    if let Some(round) = record.round() {
+        let answers = serde_json::from_slice(raw_answer)?;
+        return round
+            .validate_answers(&answers)
+            .map_err(|_| authority("invalid complete elicitation answer map"));
+    }
+    let legacy_round = record.question_round().map_err(continuation)?;
+    let Some(member) = legacy_round.requests.values().next() else {
+        return Err(continuation(ContinuationError::InvalidRecord));
+    };
+    let ego_core::question::ElicitationKind::Form { schema } = &member.kind else {
+        return Err(continuation(ContinuationError::InvalidRecord));
+    };
     let answer: Value = serde_json::from_slice(raw_answer)?;
-    let validator = compile_schema(&schema)?;
+    let validator = compile_schema(schema)?;
     validate_answer(&validator, &answer)
 }
 
@@ -595,6 +649,13 @@ pub struct McpResumeAdmission {
 
 impl McpResumeAdmission {
     pub fn validate(opened: OpenedContinuation) -> Result<Self, McpError> {
+        if let Some(round) = opened.round() {
+            let answers = serde_json::from_slice(opened.accepted_answer())?;
+            round
+                .validate_answers(&answers)
+                .map_err(|_| authority("invalid complete elicitation answer map"))?;
+            return Ok(Self { opened });
+        }
         let schema: Value = serde_json::from_slice(opened.correlation_schema())?;
         let answer: Value = serde_json::from_slice(opened.accepted_answer())?;
         let validator = compile_schema(&schema)?;
@@ -623,9 +684,11 @@ fn continuation_id(
     envelope: &ego_core::permit::McpPreparedEnvelope,
     required: &crate::McpMappedInput,
     schema: &[u8],
+    used_rounds: u8,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"ego:mcp:continuation:v1\0");
+    digest.update(b"ego:mcp:continuation:v2\0");
+    digest.update([used_rounds]);
     digest.update(envelope.subject().server().as_bytes());
     digest.update([0]);
     digest.update(envelope.operation().method().as_bytes());

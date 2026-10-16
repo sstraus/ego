@@ -83,3 +83,38 @@ fn capability_absence_becomes_an_unavailable_question_outcome() {
 fn acp_exposes_the_core_elicitor(adapter: &AcpQuestionAdapter) -> Arc<dyn Elicitor> {
     adapter.elicitor()
 }
+
+#[test]
+fn url_member_without_host_capability_stays_pending_instead_of_becoming_a_secret_prompt() {
+    // Catches: the form-only ACP capability is used to solicit a password or copied URL code.
+    use ego_core::question::{
+        ElicitationKind, ElicitationMember, ElicitationRound, QuestionOutcome,
+    };
+    let request = QuestionRequest::new(
+        "MCP server alpha requires input",
+        QuestionMode::Round(ElicitationRound {
+            expires_at_ms: None,
+            requests: std::collections::BTreeMap::from([(
+                "verify".to_owned(),
+                ElicitationMember {
+                    prompt: "Complete on page".to_owned(),
+                    kind: ElicitationKind::Url {
+                        url: "https://example.test/verify".to_owned(),
+                        elicitation_id: "verify-42".to_owned(),
+                    },
+                },
+            )]),
+            completed: Default::default(),
+        }),
+        vec![],
+        false,
+    );
+    let adapter = AcpQuestionAdapter::new(
+        v1::SessionId::new("session-round"),
+        CapabilityCapture::form(),
+    );
+    assert_eq!(
+        block_on(adapter.elicit(ItemId::new(), request)).unwrap(),
+        QuestionOutcome::Unavailable
+    );
+}

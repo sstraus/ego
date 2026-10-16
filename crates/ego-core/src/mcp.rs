@@ -197,6 +197,9 @@ pub enum ToolExecution {
 /// Consumer-owned boundary for resuming one already-recorded foreign
 /// continuation with a validated canonical form answer.
 pub trait ForeignQuestionPort: Send + Sync {
+    /// Terminal local settlement. It must never invoke the remote operation.
+    fn cancel(&self, continuation_id: &str) -> Result<(), String>;
+
     fn resume<'a>(
         &'a self,
         continuation_id: &'a str,
