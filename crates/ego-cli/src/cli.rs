@@ -57,6 +57,7 @@ pub enum Invocation {
     Hooks(HooksArgs),
     /// `ego doctor [--json]` — the read-only redacted health snapshot.
     Doctor(DoctorArgs),
+    Checkpoint(CheckpointArgs),
     /// Transient read-only setup diagnostics, outside the ordinary run pipeline.
     Setup(SetupArgs),
     /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
@@ -179,6 +180,7 @@ pub const BUILT: &[&str] = &[
     "models",
     "hooks",
     "doctor",
+    "checkpoint",
     "setup",
     "acp",
     "a2a",
@@ -263,6 +265,7 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("models", ModelsCommand::command()))
         .subcommand(named("hooks", HooksCommand::command()))
         .subcommand(named("doctor", DoctorCommand::command()))
+        .subcommand(named("checkpoint", CheckpointArgs::command()))
         .subcommand(named("setup", SetupCommand::command()))
         .subcommand(named("acp", AcpCommand::command()))
         .subcommand(named("a2a", A2aCommand::command()))
@@ -1214,6 +1217,7 @@ fn overview(program: &str) -> String {
             "a2a" => "Serve Agent2Agent discovery information",
             "setup" => "Inspect expected work without running effects",
             "doctor" => "Print a read-only redacted health snapshot",
+            "checkpoint" => "Preview and selectively restore session-owned file edits",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "orchestrator" => "Inspect native orchestration without model generation",
             "auth" => "Manage subscription credentials",
@@ -1428,6 +1432,10 @@ fn parse_subcommand(
                 profile: parsed.profile,
                 directory: parsed.directory,
             })),
+        },
+        Some("checkpoint") => match clap_or_answer::<CheckpointArgs>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Checkpoint(parsed)),
         },
         Some("doctor") => match clap_or_answer::<DoctorCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
@@ -2217,6 +2225,75 @@ mod root_access_mapping_tests {
         assert!(
             RootsCommand::try_parse_from(["roots", "add", "--access", "write", "/tmp/root"])
                 .is_err()
+        );
+    }
+}
+
+/// Explicit operator-only filesystem restore. This never becomes prompt text.
+#[derive(Debug, Clone, PartialEq, Eq, Parser)]
+#[command(
+    name = "ego checkpoint",
+    about = "Preview or selectively restore session-owned Git file checkpoints."
+)]
+pub struct CheckpointArgs {
+    #[arg(short = 'C', long = "directory", default_value = ".")]
+    pub directory: PathBuf,
+    pub session: SessionId,
+    #[command(subcommand)]
+    pub action: CheckpointAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum CheckpointAction {
+    /// List checkpoint IDs, paths, effects, and external-change conflicts as JSON.
+    Preview,
+    /// Restore one selected checkpoint; external changes are never forced.
+    Restore { checkpoint: String },
+    /// Close checkpoint ownership and delete the session's private Git ref.
+    Close,
+}
+
+#[cfg(test)]
+mod checkpoint_contract {
+    use super::*;
+
+    #[test]
+    fn checkpoint_is_an_operator_action_not_model_prompt_text() {
+        // Catches: root dispatch treating a destructive operator action as a prompt.
+        let session = SessionId::new();
+        let parsed = parse(vec![
+            "ego".into(),
+            "checkpoint".into(),
+            session.to_string(),
+            "preview".into(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed,
+            Invocation::Checkpoint(CheckpointArgs {
+                action: CheckpointAction::Preview,
+                ..
+            })
+        ));
+        assert!(
+            parse(vec![
+                "ego".into(),
+                "checkpoint".into(),
+                session.to_string(),
+                "restore".into()
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(vec![
+                "ego".into(),
+                "checkpoint".into(),
+                session.to_string(),
+                "restore".into(),
+                "abc".into(),
+                "--force".into()
+            ])
+            .is_err()
         );
     }
 }

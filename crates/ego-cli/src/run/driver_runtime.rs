@@ -1783,7 +1783,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         retry_pause: Arc::new(TokioRetryPause),
     };
     let effect_ports = ToolEffectPorts::new(
-        &OsFs,
+        &active.checkpoint_fs,
         ports.process(),
         active.evidence(),
         ports.resolver_handle(),
@@ -1933,7 +1933,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         model_compaction,
         prepared_runtime,
     } = input;
-    let fs = OsFs;
+    let fs = &active.checkpoint_fs;
 
     let target_system = instructions(effective, args, root, cwd, diagnostics)
         .map_err(|error| CompactionError::Internal(error.to_string()))?;
@@ -1990,7 +1990,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         retry_pause: Arc::new(TokioRetryPause),
     };
     let effect_ports = ToolEffectPorts::new(
-        &fs,
+        fs,
         ports.process(),
         active.evidence(),
         ports.resolver_handle(),

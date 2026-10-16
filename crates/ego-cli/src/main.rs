@@ -287,6 +287,14 @@ async fn ordinary_main() -> std::process::ExitCode {
                     mcp_errors: Vec::new(),
                 }
             }
+            Ok(Invocation::Checkpoint(args)) => Ended {
+                termination: ego_cli::checkpoint::execute(&args, &out),
+                session: args.session,
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                selected_session: None,
+                mcp_errors: Vec::new(),
+            },
             Ok(Invocation::Doctor(args)) => Ended {
                 termination: ego_cli::doctor::execute(&args, &out),
                 session: ego_core::event::id::SessionId::new(),

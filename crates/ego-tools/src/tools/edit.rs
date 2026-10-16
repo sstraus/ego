@@ -136,7 +136,10 @@ impl TypedTool for EditTool {
             let after = before.replace(&old_string, &new_string);
             io.write(&path, after.as_bytes())?;
             Ok(ToolResult::builtin(format!(
-                "replaced 1 occurrence in {path}"
+                "replaced 1 occurrence in {path}{}",
+                io.write_notice(&path)
+                    .map(|notice| format!("\n{notice}"))
+                    .unwrap_or_default()
             )))
         })
     }
