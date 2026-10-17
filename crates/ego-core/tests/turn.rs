@@ -2622,10 +2622,12 @@ mod turn {
                 if self.fail {
                     return Err(ToolError::InvalidParams("progress rejected".into()));
                 }
-                let mut captured: serde_json::Value = serde_json::from_str(include_str!(
-                    "fixtures/tuic-blocked-progress-2026-10-17.json"
-                ))
-                .unwrap();
+                let recorded = if self.name == "call_tool" {
+                    include_str!("fixtures/tuic-wrapped-progress-2026-10-17.json")
+                } else {
+                    include_str!("fixtures/tuic-blocked-progress-2026-10-17.json")
+                };
+                let mut captured: serde_json::Value = serde_json::from_str(recorded).unwrap();
                 captured["provenance"]["result"]["server"] = json!(self.server);
                 Ok(serde_json::from_value(captured).unwrap())
             })
