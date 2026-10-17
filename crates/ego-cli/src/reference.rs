@@ -44,7 +44,7 @@ pub fn completion(shell: clap_complete::Shell) -> String {
     String::from_utf8(rendered).expect("clap_complete writes UTF-8")
 }
 
-/// The command reference, one section per subcommand.
+/// The command reference, one section per visible command path.
 ///
 /// Deliberately not a man page and not `--help` dumped to a file. It is the
 /// flat list of every command and every flag, which is what someone checks a
@@ -59,17 +59,16 @@ pub fn reference() -> String {
     out.push_str(
         "Generated from the clap definitions in `crates/ego-cli/src/cli.rs`.\n\
          Do not edit: `crates/ego-cli/tests/reference.rs` regenerates and compares it.\n\n\
-         `ego PROMPT` with no subcommand starts an interactive session and is not\n\
-         listed below, because it is the absence of a subcommand rather than one.\n\n",
+         `ego PROMPT` with no subcommand starts an interactive session.\n\n",
     );
-    for command in root.get_subcommands() {
-        section(&mut out, command);
-    }
+    section(&mut out, &root, "ego");
     out
 }
 
-fn section(out: &mut String, command: &Command) {
-    let _ = writeln!(out, "## `ego {}`\n", command.get_name());
+fn section(out: &mut String, command: &Command, path: &str) {
+    let _ = writeln!(out, "## `{path}`\n");
+    let usage = command.clone().render_usage();
+    let _ = writeln!(out, "```text\n{usage}\n```\n");
     if let Some(about) = command.get_about() {
         let _ = writeln!(out, "{about}\n");
     }
@@ -77,7 +76,7 @@ fn section(out: &mut String, command: &Command) {
         let _ = writeln!(
             out,
             "- `{} {}` — {}",
-            command.get_name(),
+            path,
             sub.get_name(),
             sub.get_about().map_or(String::new(), |a| a.to_string())
         );
@@ -137,6 +136,9 @@ fn section(out: &mut String, command: &Command) {
              See [session initialization prompt](../integrations/acp.md#session-initialization-prompt)\n\
              for the wire example and launch-default precedence.\n\n",
         );
+    }
+    for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+        section(out, sub, &format!("{path} {}", sub.get_name()));
     }
 }
 

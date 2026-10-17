@@ -106,21 +106,21 @@ fn a_completion_script_names_every_command_the_operator_can_type() {
 #[test]
 fn the_reference_documents_every_command_and_no_others() {
     let reference = reference();
-    let headings: Vec<String> = reference
+    fn command_paths(command: &clap::Command, path: &str, paths: &mut Vec<String>) {
+        paths.push(path.to_owned());
+        for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            command_paths(sub, &format!("{path} {}", sub.get_name()), paths);
+        }
+    }
+    let headings: Vec<_> = reference
         .lines()
-        .filter_map(|line| line.strip_prefix("## `ego "))
-        .filter_map(|line| line.strip_suffix("`"))
+        .filter_map(|line| line.strip_prefix("## `"))
+        .filter_map(|line| line.strip_suffix('`'))
         .map(str::to_owned)
         .collect();
-
-    assert_eq!(
-        headings,
-        BUILT
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>(),
-        "the reference's sections are the parser's commands, in the parser's order",
-    );
+    let mut paths = Vec::new();
+    command_paths(&root_command(), "ego", &mut paths);
+    assert_eq!(headings, paths, "every visible command path has a section");
 }
 
 #[test]
@@ -138,5 +138,29 @@ fn docs_review_root_completion_does_not_omit_interactive_options() {
             root.get_arguments().any(|arg| arg.get_id() == option),
             "missing root {option}"
         );
+    }
+}
+
+#[test]
+fn docs_review_reference_does_not_drop_nested_leaf_arguments() {
+    let rendered = reference();
+    for (path, argument) in [
+        ("config batch", "--if-revision"),
+        ("roots add", "--access"),
+        ("mcp login", "--callback-port"),
+        ("hooks ls", "--json"),
+        ("orchestrator brief", "--root"),
+        ("worktree cleanup", "RECEIPT"),
+    ] {
+        let heading = format!("## `ego {path}`\n");
+        let section = rendered
+            .split_once(&heading)
+            .unwrap_or_else(|| panic!("missing {path}"))
+            .1
+            .split("\n## ")
+            .next()
+            .unwrap();
+        assert!(section.contains(argument), "{path}: missing {argument}");
+        assert!(section.contains("Usage:"), "{path}: missing usage");
     }
 }
