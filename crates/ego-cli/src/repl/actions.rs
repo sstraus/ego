@@ -77,6 +77,29 @@ impl Submission {
     }
 }
 
+/// The immutable authority selected by a typed user context command.
+#[derive(Clone)]
+pub struct McpContextCommand {
+    pub catalogue: ego_core::turn::CapturedToolCatalogue,
+    pub name: String,
+    pub parameters: serde_json::Value,
+}
+impl std::fmt::Debug for McpContextCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpContextCommand")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for McpContextCommand {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.parameters == other.parameters
+            && self.catalogue.generation() == other.catalogue.generation()
+    }
+}
+impl Eq for McpContextCommand {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
@@ -92,10 +115,12 @@ pub enum Dispatch {
     Setup(String),
     Tasks(String),
     Mcp(String),
+    McpContext(McpContextCommand),
     Prompt,
     Immediate,
     InteractiveIngress,
     Refused { reason: &'static str },
+    UnknownSlash(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -413,12 +438,22 @@ impl std::fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
+#[derive(Clone, Default)]
+struct McpCommandView(Option<Arc<dyn ego_core::mcp::McpRuntimeBinding>>);
+impl std::fmt::Debug for McpCommandView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("McpCommandView")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
     bindings: Vec<KeyBinding>,
+    custom_shortcuts: HashMap<ActionId, Vec<super::keyboard::Shortcut>>,
     live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
     skill_view: Arc<Mutex<Option<SkillCatalogueView>>>,
+    mcp_view: Arc<Mutex<McpCommandView>>,
 }
 
 impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
@@ -453,8 +488,10 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         Ok(Self {
             registrations: value.into(),
             bindings: Vec::new(),
+            custom_shortcuts: HashMap::new(),
             live_availability: Arc::new(Mutex::new(HashMap::new())),
             skill_view: Arc::new(Mutex::new(None)),
+            mcp_view: Arc::new(Mutex::new(McpCommandView::default())),
         })
     }
 }
@@ -528,7 +565,7 @@ impl ActionRegistry {
             enabled(
                 Expand,
                 "expand",
-                "Show the full output of the last tool call",
+                "Show the last tool output or collapsed prompt",
             )
             .shortcut('o'),
             enabled(Skills, "skills", "List or invoke admitted skills")
@@ -590,11 +627,13 @@ impl ActionRegistry {
             description: binding.description,
         });
         let shortcuts = self.iter().flat_map(|action| {
-            action.shortcuts.iter().map(|shortcut| KeyEntry {
-                label: format!("Option+{}", shortcut.to_ascii_uppercase()),
-                hint: action.shortcut_hint,
-                description: action.description,
-            })
+            self.action_shortcuts(action)
+                .into_iter()
+                .map(|shortcut| KeyEntry {
+                    label: shortcut.label,
+                    hint: action.shortcut_hint,
+                    description: action.description,
+                })
         });
         chords.chain(shortcuts).collect()
     }
@@ -629,20 +668,82 @@ impl ActionRegistry {
             .map(|a| a.id)
     }
     pub fn resolve_shortcut(&self, shortcut: char) -> Option<ActionId> {
-        self.iter()
-            .find(|a| a.shortcuts.contains(&shortcut))
-            .map(|a| a.id)
+        self.resolve_key(KeyEvent::new(KeyCode::Char(shortcut), KeyModifiers::ALT))
     }
-    pub fn resolve_key(&self, key: KeyEvent) -> Option<ActionId> {
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('π'), KeyModifiers::NONE) => self.resolve_shortcut('p'),
-            (KeyCode::Char(character), modifiers)
-                if modifiers == KeyModifiers::ALT || modifiers == KeyModifiers::META =>
-            {
-                self.resolve_shortcut(character)
-            }
-            _ => None,
+
+    pub(crate) fn shortcut_labels(&self, id: ActionId) -> Vec<String> {
+        self.action_shortcuts(self.registration(id))
+            .into_iter()
+            .map(|key| key.label)
+            .collect()
+    }
+
+    /// Replace each named action's complete shortcut list. An empty list
+    /// disables its default; validate the final map so atomic swaps are legal.
+    pub fn with_keybindings(
+        mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Result<Self, String> {
+        for (name, keys) in overrides {
+            let action = self
+                .iter()
+                .find(|action| action.name == name)
+                .ok_or_else(|| {
+                    format!("unknown keybinding action `{name}`; use a canonical /help action name")
+                })?;
+            let id = action.id;
+            let shortcuts = keys
+                .iter()
+                .map(|key| super::keyboard::Shortcut::parse(key))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.custom_shortcuts.insert(id, shortcuts);
         }
+        let mut occupied = HashMap::new();
+        for action in self.iter() {
+            for shortcut in self.action_shortcuts(action) {
+                if let Some(previous) =
+                    occupied.insert((shortcut.code, shortcut.modifiers), action.name)
+                {
+                    return Err(format!(
+                        "shortcut {} conflicts between /{previous} and /{}",
+                        shortcut.label, action.name
+                    ));
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    fn action_shortcuts(&self, action: &ActionRegistration) -> Vec<super::keyboard::Shortcut> {
+        self.custom_shortcuts
+            .get(&action.id)
+            .cloned()
+            .unwrap_or_else(|| {
+                action
+                    .shortcuts
+                    .iter()
+                    .map(|letter| super::keyboard::Shortcut {
+                        code: KeyCode::Char(*letter),
+                        modifiers: KeyModifiers::ALT,
+                        label: format!("Option+{}", letter.to_ascii_uppercase()),
+                    })
+                    .collect()
+            })
+    }
+
+    pub fn resolve_key(&self, mut key: KeyEvent) -> Option<ActionId> {
+        // macOS terminals may send Option+P as its text equivalent.
+        if key.code == KeyCode::Char('π') && key.modifiers.is_empty() {
+            key.code = KeyCode::Char('p');
+            key.modifiers = KeyModifiers::ALT;
+        }
+        self.iter()
+            .find(|action| {
+                self.action_shortcuts(action)
+                    .iter()
+                    .any(|shortcut| shortcut.matches(key))
+            })
+            .map(|action| action.id)
     }
     fn registration(&self, id: ActionId) -> &ActionRegistration {
         self.iter()
@@ -711,6 +812,101 @@ impl ActionRegistry {
                 .map_err(|_| RegistryError("the skill catalogue view is unavailable"))
         })
         .transpose()
+    }
+
+    pub(crate) fn bind_mcp_view(&self, runtime: Arc<dyn ego_core::mcp::McpRuntimeBinding>) {
+        self.mcp_view.lock().expect("MCP command view").0 = Some(runtime);
+    }
+
+    fn mcp_capture(&self) -> Option<ego_core::turn::CapturedToolCatalogue> {
+        self.mcp_view
+            .lock()
+            .expect("MCP command view")
+            .0
+            .as_ref()?
+            .context_commands()
+            .ok()
+    }
+
+    pub(crate) fn mcp_menu(&self, filter: &str) -> Vec<(String, String)> {
+        self.mcp_capture()
+            .map(|capture| {
+                capture
+                    .tools()
+                    .iter()
+                    .filter_map(|tool| {
+                        let ego_core::turn::RegisteredTool::Effect(tool) = tool else {
+                            return None;
+                        };
+                        let descriptor = tool.descriptor();
+                        let schema = serde_json::to_value(&descriptor.schema).ok()?;
+                        let arguments = schema["properties"]
+                            .as_object()
+                            .filter(|properties| !properties.is_empty())
+                            .map(|properties| {
+                                let keys = properties
+                                    .keys()
+                                    .map(|key| format!("\"{key}\":\"...\""))
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                format!(" — {{{keys}}}")
+                            })
+                            .unwrap_or_default();
+                        descriptor.name.starts_with(filter).then_some((
+                            descriptor.name,
+                            format!("{}{arguments}", descriptor.description),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn classify_mcp_context(&self, name: &str, raw: &str) -> Dispatch {
+        let refused = || Dispatch::Refused {
+            reason: "MCP context command is unavailable or arguments do not match its schema; use a JSON object of string arguments",
+        };
+        let Some(catalogue) = self.mcp_capture() else {
+            return refused();
+        };
+        let Some(descriptor) = catalogue.tools().iter().find_map(|tool| match tool {
+            ego_core::turn::RegisteredTool::Effect(tool) if tool.descriptor().name == name => {
+                Some(tool.descriptor())
+            }
+            _ => None,
+        }) else {
+            return refused();
+        };
+        let parameters = if raw.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            match serde_json::from_str(raw) {
+                Ok(value) => value,
+                Err(_) => return refused(),
+            }
+        };
+        let Some(object) = parameters.as_object() else {
+            return refused();
+        };
+        let Ok(schema) = serde_json::to_value(descriptor.schema) else {
+            return refused();
+        };
+        let properties = schema["properties"].as_object();
+        if object.iter().any(|(key, value)| {
+            !value.is_string() || !properties.is_some_and(|properties| properties.contains_key(key))
+        }) || schema["required"].as_array().is_some_and(|required| {
+            required
+                .iter()
+                .filter_map(|key| key.as_str())
+                .any(|key| !object.contains_key(key))
+        }) {
+            return refused();
+        }
+        Dispatch::McpContext(McpContextCommand {
+            catalogue,
+            name: name.to_owned(),
+            parameters,
+        })
     }
 
     pub(crate) fn skill_menu(&self, filter: &str) -> Vec<(String, String)> {
@@ -935,6 +1131,28 @@ impl ActionRegistry {
         })
     }
 
+    fn unknown_slash(&self, name: &str) -> Dispatch {
+        let mut candidates = self
+            .names()
+            .into_iter()
+            .chain(self.aliases())
+            .map(str::to_owned)
+            .chain(self.skill_menu("").into_iter().map(|(name, _)| name))
+            .map(|candidate| (command_distance(name, &candidate), candidate))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        let suggestions = candidates
+            .into_iter()
+            .take(3)
+            .map(|(_, name)| format!("/{name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Dispatch::UnknownSlash(format!(
+            "Unknown slash command. Nearest commands: {suggestions}. Use /help for syntax; add a leading space to send literal text that starts with /."
+        ))
+    }
+
     pub fn classify(&self, submission: Submission) -> Dispatch {
         if submission.origin == InputOrigin::Typed
             && let Some(command) = submission.text.strip_prefix('/')
@@ -942,6 +1160,9 @@ impl ActionRegistry {
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if name.starts_with("mcp__") || name.starts_with("mcp_resource__") {
+                return self.classify_mcp_context(name, raw_arguments);
+            }
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
             }
@@ -1014,7 +1235,7 @@ impl ActionRegistry {
             }
             let capture = match self.skill_capture() {
                 Ok(Some(capture)) => capture,
-                Ok(None) => return Dispatch::Prompt,
+                Ok(None) => return self.unknown_slash(name),
                 Err(_) => {
                     return Dispatch::Refused {
                         reason: "the skill catalogue view is unavailable",
@@ -1024,9 +1245,27 @@ impl ActionRegistry {
             if let Some(operation) = admitted_skill_operation(&capture, name, raw_arguments) {
                 return Dispatch::Skill(operation);
             }
+            return self.unknown_slash(name);
         }
         Dispatch::Prompt
     }
+}
+
+// Bound typo matching independently of a pasted or accidentally huge command name.
+fn command_distance(left: &str, right: &str) -> usize {
+    let mut row = (0..=right.chars().count()).collect::<Vec<_>>();
+    for (i, a) in left.chars().take(64).enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b) in right.chars().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(a != b));
+            diagonal = above;
+        }
+    }
+    row[right.chars().count()]
 }
 
 /// `/export [local|sanitized] [md|json|jsonl]`, in either order.
@@ -1149,6 +1388,52 @@ fn admitted_skill_operation(
         .descriptor(name)
         .filter(|spec| spec.descriptor().user_invocable)
         .map(|spec| AdmittedSkillOperation::invoke(spec.descriptor(), raw_arguments))
+}
+
+#[cfg(test)]
+mod unknown_slash_tests {
+    use super::*;
+
+    // Catches: literal slash text is refused even when its origin or leading space escapes it.
+    #[test]
+    fn literal_slash_text_keeps_its_prompt_boundary() {
+        let registry = ActionRegistry::final_surface();
+        for (input, origin) in [
+            (" /tmp/x", InputOrigin::Typed),
+            ("/histor", InputOrigin::BracketedPaste),
+            ("ordinary prompt", InputOrigin::Typed),
+        ] {
+            assert_eq!(
+                registry.classify(registry.submit(input, origin)),
+                Dispatch::Prompt
+            );
+        }
+        for input in ["/tmp/x", "/", "/model-only"] {
+            assert!(matches!(
+                registry.classify(registry.submit(input, InputOrigin::Typed)),
+                Dispatch::UnknownSlash(_)
+            ));
+        }
+        assert_eq!(
+            registry.classify(registry.submit("/help", InputOrigin::Typed)),
+            Dispatch::Action(ActionId::Help)
+        );
+    }
+
+    // Catches: a mistyped command crosses the prompt boundary and starts a paid turn.
+    #[test]
+    fn unknown_slash_input_is_refused_locally_with_suggestions() {
+        let registry = ActionRegistry::final_surface();
+        for (input, suggestion) in [("/histor", "/history"), ("/resum", "/resume")] {
+            let dispatch = registry.classify(registry.submit(input, InputOrigin::Typed));
+            assert_ne!(
+                dispatch,
+                Dispatch::Prompt,
+                "{input} must never start a generation"
+            );
+            assert!(format!("{dispatch:?}").contains(suggestion));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1597,11 +1597,12 @@ fn status_row(status: &SurfaceStatus) -> String {
     if status.activity {
         let elapsed = status
             .activity_since
-            .map(|started| started.elapsed().as_secs())
-            .unwrap_or(0);
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
         return format!(
-            "{} Working {elapsed}s \x1b[2m· Esc to interrupt\x1b[22m\n",
-            ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
+            "{} Working {} \x1b[2m· Esc to interrupt\x1b[22m\n",
+            ACTIVITY_FRAMES[(elapsed.as_secs() as usize) % ACTIVITY_FRAMES.len()],
+            crate::render::duration(elapsed)
         );
     }
     let text = status
@@ -1618,11 +1619,20 @@ fn status_row(status: &SurfaceStatus) -> String {
 
 impl Prompt for Waiting {
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
+        let width = usize::from(width).saturating_sub(1);
+        if let Some(receipt) = background_notice::row(buffer, width) {
+            return Some(receipt);
+        }
+        if let Some((receipt, detail)) = crate::render::prompt_echo::collapsed(buffer, width) {
+            self.status
+                .lock()
+                .expect("surface status lock")
+                .details
+                .remember(detail);
+            return Some(receipt);
+        }
         // Commit only the input, never the live status or composer notices.
-        Some(
-            background_notice::row(buffer, usize::from(width).saturating_sub(1))
-                .unwrap_or_else(|| format!("> {}", buffer.replace('\n', "\n… "))),
-        )
+        Some(format!("> {}", buffer.replace('\n', "\n… ")))
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {
@@ -1633,10 +1643,16 @@ impl Prompt for Waiting {
         Cow::Borrowed("")
     }
 
-    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+    fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
         let status = self.status.lock().expect("surface status lock");
         let row = status_row(&status);
-        Cow::Owned(format!("{row}{}> ", status_prefix(&status)))
+        let mode = match mode {
+            PromptEditMode::Vi(reedline::PromptViMode::Normal) => "[NORMAL] ",
+            PromptEditMode::Vi(reedline::PromptViMode::Visual) => "[VISUAL] ",
+            PromptEditMode::Vi(reedline::PromptViMode::Insert) => "[INSERT] ",
+            _ => "",
+        };
+        Cow::Owned(format!("{row}{}{mode}> ", status_prefix(&status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,

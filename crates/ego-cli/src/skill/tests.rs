@@ -857,3 +857,110 @@ mod regression_case {
         }
     }
 }
+
+#[cfg(unix)]
+mod regression_case {
+    use super::*;
+    use crate::capability_roots::CapabilityRoot;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn user_owned_external_symlink_loads_once_and_is_invocable() {
+        // Catches: user skill symlinks outside their roots are refused or duplicated.
+        let roots = Roots::new();
+        let external = roots._dir.path().join("external");
+        let source = roots.write(
+            &external,
+            "linked",
+            &valid_for("linked", ""),
+            "Linked body.",
+        );
+        let home = roots._dir.path().join("home");
+        let mut discovery = roots.discovery(false);
+        for namespace in [".agents", ".claude", ".codex"] {
+            let root = home.join(namespace).join("skills");
+            fs::create_dir_all(&root).unwrap();
+            symlink(source.parent().unwrap(), root.join("linked")).unwrap();
+            discovery.roots.insert(
+                0,
+                CapabilityRoot {
+                    source: SkillSourceAuthority::User,
+                    path: root.clone(),
+                },
+            );
+            let catalogue = SkillCatalogue::discover(discovery.clone(), &[]).unwrap();
+            let captured = capture(&catalogue);
+            assert!(
+                captured.diagnostics().is_empty(),
+                "{:?}",
+                captured.diagnostics()
+            );
+            assert_eq!(
+                captured
+                    .descriptors()
+                    .iter()
+                    .filter(|spec| spec.name() == "linked")
+                    .count(),
+                1
+            );
+            let skill = captured
+                .descriptor("linked")
+                .expect("user symlink admitted");
+            assert_eq!(skill.source(), SkillSourceAuthority::User);
+            assert_eq!(
+                skill
+                    .render(&ego_core::skill::SkillOperation::Invoke {
+                        name: "linked".to_owned(),
+                        arguments: String::new(),
+                        bare: false,
+                    })
+                    .unwrap(),
+                "Linked body.\n"
+            );
+            assert!(captured.core().authorize_user("linked").is_ok());
+            assert!(
+                captured
+                    .render_list()
+                    .contains(&root.join("linked/SKILL.md").display().to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn project_and_system_external_symlinks_remain_refused() {
+        // Catches: relaxing user symlinks also admits an external project or system skill.
+        let roots = Roots::new();
+        let external = roots._dir.path().join("external");
+        let source = roots.write(
+            &external,
+            "linked",
+            &valid_for("linked", ""),
+            "Outside body.",
+        );
+        for (authority, root) in [
+            (SkillSourceAuthority::Project, &roots.project),
+            (SkillSourceAuthority::System, &roots.system),
+        ] {
+            symlink(source.parent().unwrap(), root.join("linked")).unwrap();
+            let discovery = SkillDiscovery {
+                roots: vec![CapabilityRoot {
+                    source: authority,
+                    path: root.clone(),
+                }],
+                command_roots: Vec::new(),
+                trusted_project: true,
+            };
+            let catalogue = SkillCatalogue::discover(discovery, &[]).unwrap();
+            let captured = capture(&catalogue);
+            assert!(captured.descriptor("linked").is_none());
+            assert!(captured.core().authorize_user("linked").is_err());
+            assert_eq!(captured.diagnostics().len(), 1);
+            let diagnostic = &captured.diagnostics()[0];
+            assert_eq!(diagnostic.source(), authority);
+            assert_eq!(
+                diagnostic.message(),
+                "resolves outside its canonical skill root"
+            );
+        }
+    }
+}

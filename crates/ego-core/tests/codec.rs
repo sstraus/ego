@@ -520,6 +520,7 @@ mod codec {
                         cache_write_tokens: 60,
                         cache_write_extended_tokens: 0,
                         output_tokens: 45,
+                        web_search_requests: 0,
                         reasoning_tokens: None,
                     },
                     cost_delta: CostDelta::Known {
@@ -562,6 +563,7 @@ mod codec {
                         cache_write_tokens: 60,
                         cache_write_extended_tokens: 0,
                         output_tokens: 45,
+                        web_search_requests: 0,
                         reasoning_tokens: None,
                     },
                     cost_delta: CostDelta::Known {
@@ -590,6 +592,7 @@ mod codec {
                             cache_write_tokens: 60,
                             cache_write_extended_tokens: 0,
                             output_tokens: 45,
+                            web_search_requests: 0,
                             reasoning_tokens: None,
                         }),
                     ),

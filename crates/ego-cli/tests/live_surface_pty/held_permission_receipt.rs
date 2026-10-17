@@ -1,8 +1,7 @@
 //! A test-only child runs the real interactive driver and Seat::new. Unlike
 //! the CLI binary, its terminal owner can hold its actual printer deterministically.
 
-#[path = "../support/mod.rs"]
-pub(super) mod support;
+use crate::run::test_support as support;
 
 use std::io::{Read, Write};
 use std::sync::{Arc, mpsc};

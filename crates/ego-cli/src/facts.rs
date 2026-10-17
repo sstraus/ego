@@ -182,6 +182,7 @@ struct Quote {
 impl From<Quote> for PricingQuote {
     fn from(quote: Quote) -> Self {
         PricingQuote {
+            web_search: None,
             revision: quote.revision,
             currency: quote.currency,
             uncached_input: quote.uncached_input,

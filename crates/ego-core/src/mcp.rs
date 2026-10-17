@@ -211,6 +211,11 @@ pub trait ForeignQuestionPort: Send + Sync {
 /// Session-owned factory for a foreign-question adapter bound to the exact
 /// hook dispatcher, resume floor and effect authority of one turn.
 pub trait McpRuntimeBinding: Send + Sync {
+    /// User-visible context commands from one immutable admitted generation.
+    fn context_commands(&self) -> Result<crate::turn::CapturedToolCatalogue, String> {
+        crate::turn::CapturedToolCatalogue::new("empty", Vec::new()).map_err(|e| e.to_string())
+    }
+
     /// Runtimes without an admitted foreign tool catalogue need no sealer.
     fn resume_sealer(&self) -> Option<Arc<crate::suspension::ResumeSealer>> {
         None

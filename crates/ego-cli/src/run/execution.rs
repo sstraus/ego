@@ -657,6 +657,12 @@ async fn admit_run_phase<'store>(
             unreachable!("model recovery is converted before context admission")
         }
     }
+    if let Some(status) = host.status.as_ref() {
+        status
+            .seat
+            .action_registry()
+            .bind_mcp_view(scoped.mcp_runtime.clone());
+    }
     if let (Some(status), Some(skills)) = (host.status.as_ref(), materialized.skills.as_ref()) {
         status
             .seat

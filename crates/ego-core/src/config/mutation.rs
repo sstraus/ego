@@ -254,6 +254,11 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
             | (ManagedConfigKey::Budget, ManagedConfigValue::Budget(_))
             | (ManagedConfigKey::Bare, ManagedConfigValue::Bare(_))
             | (
+                ManagedConfigKey::Keybindings,
+                ManagedConfigValue::Keybindings(_)
+            )
+            | (ManagedConfigKey::Vim, ManagedConfigValue::Vim(_))
+            | (
                 ManagedConfigKey::PermissionsJudge,
                 ManagedConfigValue::PermissionsJudge(_)
             )

@@ -61,6 +61,7 @@ mod budget {
     /// $3.75/MTok cache write, $15/MTok output.
     fn quote() -> PricingQuote {
         PricingQuote {
+            web_search: None,
             revision: revision(),
             currency: CurrencyCode::new("USD").expect("USD is valid"),
             uncached_input: Some(amount("0.000003")),
@@ -109,6 +110,7 @@ mod budget {
 
     fn request(max_output_tokens: Option<u64>) -> GenRequest {
         GenRequest {
+            web_search: None,
             cache: None,
             model: "claude-opus-5".to_string(),
             messages: Conversation::new(vec![Message::text(Role::User, "x".repeat(200_000))])
@@ -127,6 +129,7 @@ mod budget {
             cache_write_tokens: cache_write,
             cache_write_extended_tokens: 0,
             output_tokens: output,
+            web_search_requests: 0,
             reasoning_tokens: None,
         }
     }
@@ -877,6 +880,7 @@ mod budget {
     /// The standard fixture request against a named model.
     fn request_for(model: &str, max_output_tokens: Option<u64>) -> GenRequest {
         GenRequest {
+            web_search: None,
             cache: None,
             model: model.to_string(),
             ..request(max_output_tokens)
@@ -1750,6 +1754,7 @@ mod budget {
         );
 
         let elsewhere = GenRequest {
+            web_search: None,
             cache: None,
             model: "claude-haiku-5".to_string(),
             ..request(Some(1_024))
@@ -1973,5 +1978,34 @@ mod budget {
                 "{metered_by_policy:?} takes no rates from any source"
             );
         }
+    }
+
+    #[test]
+    fn hosted_search_bound_catches_fees_and_provider_side_context_reentry() {
+        let mut quote = quote();
+        quote.web_search = Some(amount("0.01"));
+        let mut req = request(Some(10));
+        req.web_search = Some(ego_core::generator::types::HostedSearch {
+            max_requests: std::num::NonZeroU32::new(5).unwrap(),
+        });
+        // Six model inputs of at most 100 tokens, ten output tokens, five search fees.
+        assert_eq!(
+            quote.upper_bound(&req, &caps(Some(100), Some(10))).unwrap(),
+            usd("0.0524")
+        );
+        let usage = Usage {
+            web_search_requests: 2,
+            ..Usage::IDENTITY
+        };
+        assert!(
+            matches!(quote.price(&usage), CostDelta::Known { amount, .. } if amount == usd("0.02"))
+        );
+        quote.web_search = None;
+        assert_eq!(
+            quote.upper_bound(&req, &caps(Some(100), Some(10))),
+            Err(UnknownCost::UnpricedCategory {
+                category: TokenCategory::WebSearch
+            })
+        );
     }
 }

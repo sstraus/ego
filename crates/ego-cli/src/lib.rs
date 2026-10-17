@@ -45,10 +45,12 @@ pub mod metadata;
 pub mod model;
 pub mod model_picker;
 pub mod models;
+pub(crate) mod named_agents;
 pub(crate) mod onboarding;
 pub(crate) mod orchestration_observer;
 pub mod orchestrator;
 pub mod output;
+pub(crate) mod output_style;
 pub mod perimeter;
 pub mod prompt;
 pub mod provider_http;
@@ -65,6 +67,7 @@ mod setup_proposals;
 pub(crate) mod skill;
 pub mod trust;
 pub mod usage;
+pub mod worktree;
 pub(crate) mod yaml_envelope;
 
 // Hosts the same child envelope as the production offline probe. The script

@@ -25,6 +25,28 @@ pub fn terminal_safe(text: &str) -> String {
     TerminalSafe(text).to_string()
 }
 
+/// Render tool output without SGR decoration. Other terminal and directional
+/// controls keep the same visible encoding as [`terminal_safe`].
+/// Only complete SGR sequences are removed, not cursor commands or OSC payloads.
+pub fn terminal_output_safe(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character == '\x1b' {
+            let mut sequence = characters.clone();
+            if sequence.next() == Some('[') {
+                let end = sequence.find(|c| !c.is_ascii_digit() && *c != ';' && *c != ':');
+                if end == Some('m') {
+                    characters = sequence;
+                    continue;
+                }
+            }
+        }
+        plain.push(character);
+    }
+    terminal_safe(&plain)
+}
+
 /// Render one argument with shell quoting and visible control characters.
 /// This is display text, not a command to execute.
 pub fn shell_word(word: &str) -> String {

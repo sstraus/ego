@@ -64,6 +64,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
         Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
         Invocation::SessionMetadata(_) => panic!("metadata is covered by metadata grammar tests"),
+        Invocation::Worktree(_) => panic!("worktree lifecycle does not construct a run"),
         Invocation::Orchestrator(_) => {
             panic!("orchestration inspection is covered by its process tests")
         }
@@ -1618,4 +1619,32 @@ fn run_and_compact_accept_positive_output_caps_and_budget() {
     };
     assert_eq!(args.max_output_tokens.unwrap().get(), 100);
     assert_eq!(args.budget.as_deref(), Some("1$"));
+}
+
+// Catches: --vim is rejected interactively or silently accepted by a headless consumer.
+#[test]
+fn vim_flag_selects_only_interactive_composer_editing() {
+    assert!(converses(["--vim"]).vim);
+    assert!(converses(["--vim", "hello"]).vim);
+    assert!(converses(["resume", "--vim"]).vim);
+    assert!(!converses([]).vim);
+    assert!(refused(["run", "--vim", "hello"]).contains("interactive"));
+    assert!(refused(["resume", "--vim", "--", "hello"]).contains("interactive"));
+    assert!(answered(["--help"]).contains("--vim"));
+}
+
+#[test]
+fn output_style_is_shared_by_run_and_served_session_shape() {
+    // Catches: a served session silently dropping the launch output style.
+    let run = parsed(["run", "--output-style", "concise", "hello"]);
+    let acp = served(["acp", "--output-style", "concise"]);
+    assert_eq!(run.output_style.as_deref(), Some("concise"));
+    assert_eq!(acp.shape.output_style, run.output_style);
+    assert_eq!(
+        parsed(["resume", "--output-style", "concise", "next step"])
+            .output_style
+            .as_deref(),
+        Some("concise")
+    );
+    assert!(parsed(["run", "hello"]).output_style.is_none());
 }
