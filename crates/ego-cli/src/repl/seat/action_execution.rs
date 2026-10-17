@@ -299,6 +299,18 @@ pub(super) fn surface_line(
     drafts: &mut DraftStash,
 ) -> (Line, bool) {
     loop {
+        if phase.get() == EditPhase::Busy {
+            let notice = status.lock().expect("surface status lock").notice.take();
+            if let Some(notice) = notice {
+                // A host command suspends the live prompt in place. Retire it
+                // before the notice is queued, including at the bottom row
+                // where resuming the old footprint would scroll it into history.
+                if editor.erase_last_prompt().is_err() {
+                    return (Line::Ended, true);
+                }
+                commit_to_transcript(status, &format!("{}: {notice}", crate::DISPLAY_NAME));
+            }
+        }
         let signal = editor.read_line(prompt);
         // Hold only the isolated PTY child at the real suspended-read boundary.
         #[cfg(test)]
