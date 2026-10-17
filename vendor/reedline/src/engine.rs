@@ -1228,7 +1228,7 @@ impl Reedline {
         if accept_lone_value {
             // With a menu active this replaces in the buffer and deactivates, rather than
             // submitting the line.
-            self.handle_editor_event(prompt, ReedlineEvent::Enter)?;
+            self.accept_quick_completion(prompt)?;
         }
 
         // One paint for every outcome, since painting the menu and then the accepted or
@@ -1506,6 +1506,20 @@ impl Reedline {
         }
     }
 
+    fn accept_quick_completion(&mut self, prompt: &dyn Prompt) -> io::Result<EventStatus> {
+        if let Some(menu) = self
+            .menus
+            .iter_mut()
+            .find(|menu| menu.is_active() && menu.submit_on_accept())
+        {
+            menu.replace_in_buffer(&mut self.editor);
+            menu.menu_event(MenuEvent::Deactivate);
+            Ok(EventStatus::Handled)
+        } else {
+            self.handle_editor_event(prompt, ReedlineEvent::Enter)
+        }
+    }
+
     fn handle_editor_event(
         &mut self,
         prompt: &dyn Prompt,
@@ -1522,7 +1536,7 @@ impl Reedline {
                         );
 
                         if self.decide_menu_completion(index, false) {
-                            return self.handle_editor_event(prompt, ReedlineEvent::Enter);
+                            return self.accept_quick_completion(prompt);
                         }
 
                         // A final answer already had its say above, so only a
@@ -1552,7 +1566,7 @@ impl Reedline {
                         && menu.can_quick_complete()
                         && !menu.results_are_provisional()
                     {
-                        self.handle_editor_event(prompt, ReedlineEvent::Enter)
+                        self.accept_quick_completion(prompt)
                     } else {
                         if self.partial_completions {
                             menu.can_partially_complete(
@@ -1670,10 +1684,15 @@ impl Reedline {
             {
                 for menu in self.menus.iter_mut() {
                     if menu.is_active() {
+                        let submit = menu.submit_on_accept();
                         menu.replace_in_buffer(&mut self.editor);
                         menu.menu_event(MenuEvent::Deactivate);
 
-                        return Ok(EventStatus::Handled);
+                        return if submit {
+                            self.handle_editor_event(prompt, event)
+                        } else {
+                            Ok(EventStatus::Handled)
+                        };
                     }
                 }
                 unreachable!()
@@ -1774,8 +1793,7 @@ impl Reedline {
                                 );
                                 if let Some(&EditCommand::Complete) = commands.first() {
                                     if menu.get_values().len() == 1 {
-                                        return self
-                                            .handle_editor_event(prompt, ReedlineEvent::Enter);
+                                        return self.accept_quick_completion(prompt);
                                     } else if self.partial_completions
                                         && menu.can_partially_complete(
                                             self.quick_completions,

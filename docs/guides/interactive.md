@@ -21,8 +21,8 @@ Reasoning selection refuses unsupported values rather than silently substituting
 | Local presentation/export | `/clear`, `/export [local\|sanitized] [md\|json\|jsonl]` |
 
 Some actions require idle state or a registered owner; a disabled action names
-its reason. Exact registered slash commands execute with one Enter. Partial
-completion does not submit. Slash text in bracketed paste remains ordinary
+its reason. Exact registered slash commands execute with one Enter. Enter on a
+selected slash completion inserts and submits that command. Tab only inserts. Slash text in bracketed paste remains ordinary
 prompt text; it does not execute a pasted control command.
 
 `/clear` clears composer/menu state, not durable history. `/expand` pages the
