@@ -1,6 +1,7 @@
 # nothing-to-trust: first launch
 εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
-εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
+εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem
+access
 εgo: ego <version> · ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
@@ -12,7 +13,8 @@ a launch transcript
 
 # nothing-to-trust: next launch
 εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
-εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
+εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem
+access
 εgo: ego <version> · ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
