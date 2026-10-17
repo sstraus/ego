@@ -4801,14 +4801,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // Per candidate: a fallback runs on a different model, and the
         // model must be told the one actually answering.
         let identity = self.config.identity.as_ref().map(|identity| {
-            identity.render(
+            let local_datetime = self.journal.clock().local_datetime();
+            let mut text = identity.render(
                 self.session_id,
                 &profile.identity,
                 profile.thinking,
                 &policy_snapshot,
                 &descriptors,
                 &mcp_servers,
-            )
+            );
+            text.push_str(&format!("\n- Current local date-time: {local_datetime}"));
+            text
         });
         let (messages, stable_messages) = self.with_host_context(
             turn,

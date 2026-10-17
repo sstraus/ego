@@ -1377,6 +1377,7 @@ dependencies = [
 name = "ego-tools"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "async-tungstenite",
  "ego-core",
  "ego-mcp",

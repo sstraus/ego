@@ -806,6 +806,7 @@ fn the_runtime_identity_names_the_model_workspace_posture_tools_and_every_mcp_se
         .next()
         .expect("live identity");
     for line in [
+        "- Current local date-time: 2026-08-17T20:53:20.000Z",
         "- Model: catalogue-test (reasoning effort: off)",
         "- Workspace root: /workspace",
         "- Posture: permission mode: plan; sandbox: ro; network: offline",
