@@ -470,6 +470,7 @@ mod registration {
                 "exec_status",
                 "glob",
                 "grep",
+                "notebook_edit",
                 "read",
                 "read_tool_result",
                 "web_fetch",
@@ -530,6 +531,7 @@ mod registration {
     #[test]
     fn the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for() {
         let ws = populated();
+        ws.file("sample.ipynb", &notebook_edit::notebook().to_string());
         // One representative call per builtin. Not exhaustive over arguments
         // — a tool that asked for a *different* op shape depending on its
         // parameters would be a tool whose authority is unpredictable, which
@@ -543,6 +545,11 @@ mod registration {
             ("grep", json!({ "query": "TODO", "path": "src" })),
             ("web_fetch", json!({ "url": "https://example.com/" })),
             ("write", json!({ "path": "src/new.rs", "contents": "hi\n" })),
+            (
+                "notebook_edit",
+                json!({"path": "sample.ipynb", "edit_mode": "replace",
+                    "cell_id": "code-1", "new_source": "print(2)"}),
+            ),
             (
                 "edit",
                 json!({ "path": "src/main.rs", "old_string": "hello", "new_string": "goodbye" }),
@@ -2797,7 +2804,7 @@ mod native_web {
 mod notebook_edit {
     use super::*;
 
-    fn notebook() -> serde_json::Value {
+    pub(super) fn notebook() -> serde_json::Value {
         json!({
             "nbformat": 4, "nbformat_minor": 5,
             "metadata": {"custom": {"owner": "user"}},
@@ -2833,6 +2840,55 @@ mod notebook_edit {
         )
         .unwrap();
         expected["cells"][0]["source"] = json!("print(2)\n");
+        assert_eq!(disk(&path), expected);
+    }
+
+    // Catches: the Value codec rounds large integers in untouched notebook state.
+    #[test]
+    fn out_of_range_integers_refuse_edits_without_rounding_original_text() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        for numeral in ["18446744073709551617", "-9223372036854775809"] {
+            for location in ["metadata", "output"] {
+                let template = if location == "metadata" {
+                    r#"{"nbformat":4,"nbformat_minor":5,"metadata":{"seed":NUMBER},"cells":[{"id":"target","cell_type":"code","source":"old","metadata":{},"execution_count":null,"outputs":[]}]}"#
+                } else {
+                    r#"{"nbformat":4,"nbformat_minor":5,"metadata":{},"cells":[{"id":"target","cell_type":"code","source":"old","metadata":{},"execution_count":null,"outputs":[{"output_type":"display_data","metadata":{},"data":{"application/json":{"seed":NUMBER}}}]}]}"#
+                };
+                let before = template.replace("NUMBER", numeral);
+                let path = ws.file("sample.ipynb", &before);
+                let error = ws
+                    .call(
+                        "notebook_edit",
+                        json!({"path": "sample.ipynb", "edit_mode": "replace",
+                        "cell_id": "target", "new_source": "new"}),
+                    )
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("integer outside"), "{error}");
+                let after = fs::read_to_string(path).unwrap();
+                assert!(after.contains(numeral), "{after}");
+                assert_eq!(after, before);
+            }
+        }
+    }
+
+    // Catches: the loss-prevention scan rejects exact boundary integers or string contents.
+    #[test]
+    fn exact_integer_boundaries_and_escaped_numeral_strings_remain_editable() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let before = r#"{"nbformat":4,"nbformat_minor":5,"metadata":{"min":-9223372036854775808,"max":18446744073709551615,"float":1.5e+20,"text":"quoted \"18446744073709551617\" and slash \\"},"cells":[{"id":"target","cell_type":"markdown","source":"old","metadata":{}}]}"#;
+        let path = ws.file("sample.ipynb", before);
+        ws.call(
+            "notebook_edit",
+            json!({"path": "sample.ipynb", "edit_mode": "replace",
+                "cell_id": "target", "new_source": "new"}),
+        )
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains("-9223372036854775808"), "{after}");
+        assert!(after.contains("18446744073709551615"), "{after}");
+        let mut expected: serde_json::Value = serde_json::from_str(before).unwrap();
+        expected["cells"][0]["source"] = json!("new");
         assert_eq!(disk(&path), expected);
     }
 

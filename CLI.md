@@ -2432,8 +2432,9 @@ It accepts `path`, an explicit `edit_mode`, and mode-specific fields:
 
 The file must be a valid UTF-8 nbformat 4.5 notebook with unique stable IDs,
 no larger than 16 MiB before or after the edit. Invalid files and missing IDs
-are refused without a write. Inserted cells receive a new random ID. Existing
-IDs, metadata, outputs, execution counts, and attachments remain unchanged
+are refused without a write. Notebooks with integer tokens outside the i64/u64
+range are also refused to prevent rounding saved data. Inserted cells receive a
+new random ID. Existing IDs, metadata, outputs, execution counts, and attachments remain unchanged
 unless their cell is deleted. The tool does not execute a kernel or clear old
 outputs. JSON formatting can change; preservation is semantic, not byte-for-byte.
 

@@ -165,10 +165,51 @@ fn validate(notebook: &Value) -> Result<(), ToolError> {
     Ok(())
 }
 
+// Run only after JSON syntax validation. Inspect original tokens, not Value's
+// numbers: out-of-range integers have already fallen back to lossy f64 there.
+fn reject_lossy_integers(text: &str) -> Result<(), ToolError> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                let number = &text[start..i];
+                if !number.contains(['.', 'e', 'E'])
+                    && number.parse::<i64>().is_err()
+                    && number.parse::<u64>().is_err()
+                {
+                    return Err(invalid(
+                        "notebook contains an integer outside i64/u64 range; edit refused to avoid rounding saved data",
+                    ));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
 fn apply(before: &[u8], edit: &NotebookCellEdit) -> Result<(Vec<u8>, String), ToolError> {
     let text = std::str::from_utf8(before).map_err(|_| invalid("notebook is not UTF-8"))?;
     let mut notebook: Value =
         serde_json::from_str(text).map_err(|_| invalid("notebook is not valid JSON"))?;
+    reject_lossy_integers(text)?;
     validate(&notebook)?;
     let cells = notebook["cells"]
         .as_array_mut()
