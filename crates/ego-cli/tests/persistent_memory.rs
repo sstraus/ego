@@ -152,7 +152,7 @@ fn init_respects_plan_read_only_and_explicit_deny_before_confirmation() {
     for config in [
         "mode = 'plan'",
         "sandbox = 'ro'",
-        "[permissions]\ndeny = ['write:**']",
+        "[permissions]\ndeny = ['write(**)']",
     ] {
         let layer = ConfigLayer::parse(Source::User, config).unwrap();
         let effective = resolve(&[layer], Trust::Trusted, None).unwrap();

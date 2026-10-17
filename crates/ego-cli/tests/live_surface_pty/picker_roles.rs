@@ -137,7 +137,7 @@ fn capture(no_color: bool, moves: usize) -> (vt100::Screen, String) {
     ego.file("AGENTS.md", "# picker roles fixture\n");
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: rows,
+            rows,
             cols: 200,
             pixel_width: 0,
             pixel_height: 0,
@@ -169,7 +169,7 @@ fn capture(no_color: bool, moves: usize) -> (vt100::Screen, String) {
         .pair
         .master
         .resize(PtySize {
-            rows: rows,
+            rows,
             cols: COLS,
             pixel_width: 0,
             pixel_height: 0,

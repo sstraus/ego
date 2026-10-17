@@ -1917,7 +1917,15 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn key_hints(&self) -> String {
-        render_key_hints(&self.registry, self.width())
+        let width = self.width();
+        let width = if width == 0 {
+            crossterm::terminal::size()
+                .map(|(cols, _)| usize::from(cols))
+                .unwrap_or(0)
+        } else {
+            width
+        };
+        render_key_hints(&self.registry, width)
     }
 
     fn read_startup_model(

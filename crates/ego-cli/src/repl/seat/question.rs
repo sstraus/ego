@@ -1671,7 +1671,10 @@ impl Prompt for Waiting {
         if let Some(receipt) = background_notice::row(buffer, width) {
             return Some(receipt);
         }
-        let (receipt, detail) = crate::render::prompt_echo::collapsed(buffer, width)?;
+        let Some((receipt, detail)) = crate::render::prompt_echo::collapsed(buffer, width) else {
+            // A short submission still retires the live status and notices.
+            return Some(format!("> {}", buffer.replace('\n', "\n… ")));
+        };
         self.status
             .lock()
             .expect("surface status lock")

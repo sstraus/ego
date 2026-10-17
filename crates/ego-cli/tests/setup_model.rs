@@ -72,7 +72,10 @@ fn setup_configured_model_selects_only_closed_probes_without_store_writes() {
     let (report, home, workspace, stub) = setup(Some(
         r#"[{"kind":"tool","name":"missing-setup-tool","reason":"user need"}]"#,
     ));
-    assert!(report.contains("Configured provider inference"), "{report}");
+    assert!(
+        report.contains("Provider inference selected closed probes; network/spend exception."),
+        "{report}"
+    );
     assert!(report.contains("missing-setup-tool"), "{report}");
     let generations = stub.unwrap().generations();
     assert_eq!(generations.len(), 1);
@@ -103,7 +106,10 @@ fn setup_unsupported_model_operation_falls_back_without_effects() {
 #[test]
 fn setup_without_provider_reports_prompt_unknown_and_inventory_without_writes() {
     let (report, home, workspace, _) = setup(None);
-    assert!(report.contains("no configured model"), "{report}");
+    assert!(
+        report.contains("no persistent setup interpreter model; the session model is independent"),
+        "{report}"
+    );
     assert!(report.contains("interpretation is unknown"), "{report}");
     assert!(report.contains("AGENTS.md"), "{report}");
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
@@ -192,7 +198,7 @@ fn setup_provider_token_ceiling_binds_without_rates_or_store_writes() {
     for (budget, inferred, requests) in [("0k", false, 0), ("1k", false, 1), ("2k", true, 1)] {
         let (report, home, workspace, stub) = setup_budget(Some(response), Some(budget));
         assert_eq!(
-            report.contains("Configured provider inference"),
+            report.contains("Provider inference selected closed probes; network/spend exception."),
             inferred,
             "{budget}: {report}"
         );
@@ -239,7 +245,10 @@ fn setup_openai_valid_closed_response_selects_probes() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report = String::from_utf8(output.stdout).unwrap();
-    assert!(report.contains("Configured provider inference"), "{report}");
+    assert!(
+        report.contains("Provider inference selected closed probes; network/spend exception."),
+        "{report}"
+    );
     assert!(report.contains("hosted-setup-tool"), "{report}");
     assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
 }

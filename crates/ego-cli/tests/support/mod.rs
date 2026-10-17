@@ -1759,3 +1759,9 @@ pub fn permission_host(places: &Places, stub: &Stub) -> AcpHost {
             .spawn_conversing(),
     )
 }
+
+/// Reconstruct notice prose after the terminal adds physical word-wrap rows.
+/// This does not remove words, punctuation, or duplicate receipts.
+pub fn notice_prose(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
