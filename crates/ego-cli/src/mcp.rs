@@ -834,9 +834,6 @@ impl ConfigurationReport {
     }
 }
 
-pub(crate) const SESSION_USAGE: &str =
-    "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
-
 /// The terminal inventory exposes state labels, never registry debug metadata.
 pub(crate) fn session_inventory<'a>(
     status: &McpRegistryStatus,
@@ -979,7 +976,7 @@ mod session_presentation_tests {
     fn invalid_session_add_uses_slash_usage() {
         assert_eq!(
             repl_add_args("--invalid extra").unwrap_err().0,
-            SESSION_USAGE
+            crate::repl::actions::MCP_GRAMMAR
         );
     }
 
