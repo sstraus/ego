@@ -1599,10 +1599,26 @@ fn status_row(status: &SurfaceStatus) -> String {
             .activity_since
             .map(|started| started.elapsed().as_secs())
             .unwrap_or(0);
-        return format!(
-            "{} Working {elapsed}s \x1b[2m· Esc to interrupt\x1b[22m\n",
+        let tokens = if status.activity_output_chars > 0 {
+            format!(" · ↓ ~{} tokens", status.activity_output_chars.div_ceil(4))
+        } else {
+            String::new()
+        };
+        let thinking = status
+            .thinking_since
+            .map(|started| format!(" · thinking started {}s ago", started.elapsed().as_secs()))
+            .unwrap_or_default();
+        let activity = format!(
+            "{} Working {elapsed}s{tokens}{thinking} ",
             ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
         );
+        let width = status.permission_capabilities.width.saturating_sub(1);
+        let hint = "· Esc to interrupt";
+        let line = crate::render::line::Line::plain(&activity);
+        if line.width() + hint.len() <= width {
+            return format!("{activity}\x1b[2m{hint}\x1b[22m\n");
+        }
+        return format!("{}\n", line.truncate_to(width).text());
     }
     let text = status
         .painter

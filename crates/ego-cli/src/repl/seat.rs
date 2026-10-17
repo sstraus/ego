@@ -400,6 +400,8 @@ struct SurfaceStatus {
     drafts: usize,
     activity: bool,
     activity_since: Option<Instant>,
+    activity_output_chars: usize,
+    thinking_since: Option<Instant>,
     /// When the open modal began; the wait is the person's, not the turn's.
     modal_since: Option<Instant>,
     /// The part of the current turn spent waiting on modals.
@@ -443,10 +445,49 @@ impl SurfaceStatus {
     fn begin_activity(&mut self) {
         if !self.activity {
             self.activity_since = Some(Instant::now());
+            self.activity_output_chars = 0;
+            self.thinking_since = None;
             self.modal_waited = std::time::Duration::ZERO;
             self.reply_started.store(false, Ordering::Release);
         }
         self.activity = true;
+    }
+
+    fn observe_generation_progress(&mut self, event: &ego_core::public::PublicEvent) {
+        use ego_core::public::{ItemKind, PublicEvent};
+        if !self.activity {
+            return;
+        }
+        match event {
+            PublicEvent::ItemDelta {
+                kind: ItemKind::Reasoning,
+                text,
+                ..
+            } => {
+                self.thinking_since.get_or_insert_with(Instant::now);
+                self.activity_output_chars = self
+                    .activity_output_chars
+                    .saturating_add(text.chars().count());
+            }
+            PublicEvent::ItemDelta {
+                kind: ItemKind::AgentMessage,
+                text,
+                ..
+            } => {
+                self.thinking_since = None;
+                self.activity_output_chars = self
+                    .activity_output_chars
+                    .saturating_add(text.chars().count());
+            }
+            PublicEvent::ItemStarted {
+                kind: ItemKind::Tool,
+                ..
+            }
+            | PublicEvent::TurnCompleted { .. } => {
+                self.thinking_since = None;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -458,6 +499,8 @@ impl Default for SurfaceStatus {
             drafts: 0,
             activity: false,
             activity_since: None,
+            activity_output_chars: 0,
+            thinking_since: None,
             modal_since: None,
             modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
@@ -996,6 +1039,15 @@ impl std::fmt::Debug for Seat {
 }
 
 impl Seat {
+    pub(crate) fn observe_generation_progress(&self, event: &ego_core::public::PublicEvent) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status
+                .lock()
+                .expect("surface status lock")
+                .observe_generation_progress(event);
+        }
+    }
+
     /// Build the applicable editor and, for a terminal, its only output port.
     ///
     /// Bracketed paste is not a nicety: without it a pasted stack trace

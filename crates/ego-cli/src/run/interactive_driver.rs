@@ -451,6 +451,7 @@ pub(super) async fn run_process(
     let signalling = Signalling {
         inner: sink,
         announce: &announce,
+        seat: None,
     };
 
     let ended = run_with_registry(
@@ -577,6 +578,7 @@ pub(super) async fn interactive_through(
     let signalling = Signalling {
         inner: &text_sink,
         announce: &announce,
+        seat: Some(&seat),
     };
     seat.announce_waits(capabilities, quiet);
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
@@ -915,6 +917,7 @@ fn excerpt(text: Option<&str>, cells: usize) -> Option<String> {
 pub(super) struct Signalling<'a> {
     pub(super) inner: &'a dyn EventSink,
     pub(super) announce: &'a Announce<'a>,
+    pub(super) seat: Option<&'a repl::Seat>,
 }
 
 impl EventSink for Signalling<'_> {
@@ -928,6 +931,11 @@ impl EventSink for Signalling<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.inner.publish(event, state);
+        if !self.announce.quiet
+            && let Some(seat) = self.seat
+        {
+            seat.observe_generation_progress(event);
+        }
         self.announce.emit(self.announce.signal(event, state));
     }
 }

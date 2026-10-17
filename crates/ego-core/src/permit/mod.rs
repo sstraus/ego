@@ -67,9 +67,9 @@ pub use spawn::{
 };
 pub(crate) use tool::ToolResultProvenance;
 pub use tool::{
-    MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool, ToolContentBlock,
-    ToolDescriptor, ToolError, ToolOutputEncoding, ToolOutputProvenance, ToolResult, Typed,
-    TypedTool,
+    LineChange, MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool,
+    ToolContentBlock, ToolDescriptor, ToolError, ToolOutputEncoding, ToolOutputProvenance,
+    ToolResult, Typed, TypedTool,
 };
 
 mod terminal_text;
