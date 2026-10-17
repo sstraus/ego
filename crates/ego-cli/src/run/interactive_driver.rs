@@ -539,6 +539,7 @@ pub(super) async fn interactive_process(
         let output = Arc::new(InteractiveOutput::new(surface));
         let diagnostics: Arc<dyn crate::output::Diagnostics> = output.clone();
         seat.install_diagnostics(Arc::downgrade(&diagnostics));
+        drop(diagnostics);
         let ended = interactive_through(
             args,
             cancel,
