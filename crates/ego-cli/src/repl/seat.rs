@@ -1276,6 +1276,10 @@ impl Seat {
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
+                    Dispatch::UnknownSlash(message) => {
+                        eprintln!("{message}");
+                        Line::Blank
+                    }
                     Dispatch::Refused { reason } => Line::Refused(reason),
                     Dispatch::Action(ActionId::Config) => {
                         Line::HostCommand(HostCommand::Action(ActionId::Config))

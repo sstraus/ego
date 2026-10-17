@@ -1223,7 +1223,10 @@ opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
 checks are projections of one action registry rather than parallel command
 implementations. An exact registered action executes with one `Enter`; a
 partial completion remains inert until explicitly submitted, and pasted slash
-text remains ordinary prompt input.
+text remains ordinary prompt input. A submitted unknown slash command is refused
+locally with the nearest command names and never starts a model generation.
+To send literal text that starts with `/` (for example `/tmp/x`), add a leading
+space. Bracketed paste also remains literal prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
 25-command action registry: a typed complete slash is classified as an action,

@@ -234,6 +234,10 @@ fn submit_busy_line(
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             return Some((Line::HostCommand(HostCommand::Tasks(arguments)), false));
         }
+        Dispatch::UnknownSlash(message) => {
+            commit_to_transcript(status, &message);
+            return None;
+        }
         Dispatch::Refused { reason } => {
             status.lock().expect("surface status lock").notice = Some(reason.to_owned());
             repaint_status(status);
@@ -408,6 +412,10 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Hooks => {
                     return (Line::HostCommand(HostCommand::Hooks), failed);
+                }
+                Dispatch::UnknownSlash(message) => {
+                    commit_to_transcript(status, &message);
+                    continue;
                 }
                 Dispatch::Refused { reason } => {
                     status.lock().expect("surface status lock").notice = Some(reason.to_owned());
