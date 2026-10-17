@@ -404,32 +404,56 @@ mod text_red {
     /// Catches: equivalent estimates rendered as spend or missing estimates hidden.
     #[test]
     fn subscription_cost_cells_label_equivalents_and_preserve_metered_zero() {
+        let assert_cost_cells = |cost: CostBreakdown, expected: &str| {
+            let mut report = report(0, cost.clone());
+            let mut lines = report.totals.clone();
+            lines.main = line(cost);
+            report.sessions.push(ego_core::usage::SessionUsage {
+                session: "00000000-0000-0000-0000-000000000001"
+                    .parse()
+                    .expect("session id"),
+                model: Some("fixture".to_owned()),
+                lineage: None,
+                context: None,
+                lines,
+            });
+            let text = render_text(&report, false, None);
+            let rows: Vec<_> = text
+                .lines()
+                .skip(2)
+                .map(|row| row.split_whitespace().collect::<Vec<_>>())
+                .collect();
+            assert_eq!(rows.len(), 3, "main, session total and workspace: {text}");
+            assert_eq!(rows[0][2], "main", "cost-only role stays visible: {text}");
+            for row in rows {
+                assert_eq!(row[7..].join(" "), expected, "{text}");
+            }
+            text
+        };
         let mut subscription = none();
         subscription.subscription_equivalent = usd(11_458, 6).known;
         let label = "0.0115 USD subscription-equivalent (standard API)";
-        assert_eq!(cost_text(&subscription), label);
-        let text = render_text(&report(0, subscription.clone()), false, None);
-        assert!(text.contains(label), "{text}");
+        let text = assert_cost_cells(subscription.clone(), label);
         assert!(!text.contains("0.0000 USD"), "{text}");
         subscription.known = usd(0, 0).known;
-        assert_eq!(cost_text(&subscription), format!("0.0000 USD + {label}"));
+        assert_cost_cells(subscription.clone(), &format!("0.0000 USD + {label}"));
         subscription
             .subscription_unknown
             .push(UnknownCost::NoPricingQuote);
-        assert_eq!(
-            cost_text(&subscription),
-            format!(
+        assert_cost_cells(
+            subscription.clone(),
+            &format!(
                 "0.0000 USD + {label} (partial; unpriced) + unpriced subscription-equivalent (standard API)"
-            )
+            ),
         );
         subscription.subscription_equivalent.clear();
         subscription.known.clear();
-        assert_eq!(
-            cost_text(&subscription),
-            "unpriced subscription-equivalent (standard API)"
+        let text = assert_cost_cells(
+            subscription,
+            "unpriced subscription-equivalent (standard API)",
         );
-        assert!(spent(&line(subscription)));
-        assert_eq!(cost_text(&usd(0, 0)), "0.0000 USD");
+        assert!(!text.contains("0.0000 USD"), "{text}");
+        assert_cost_cells(usd(0, 0), "0.0000 USD");
     }
 
     /// Catches: `/usage` omitting the window, or computing the percent against
