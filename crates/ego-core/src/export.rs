@@ -236,6 +236,7 @@ pub enum ExportEvent {
     GoalCheckConfigured,
     GoalAllowanceInherited,
     GoalUpdated,
+    PlanUpdated,
     GoalCheckStopped,
     PromptQueued {
         id: QueuedPromptId,
@@ -839,6 +840,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         EventKind::GoalContinuation { id: _, text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::GoalContinuation
+        }
+        EventKind::PlanUpdated { update: _ } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::PlanUpdated
         }
         EventKind::GoalUpdated {
             id: _,

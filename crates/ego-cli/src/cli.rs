@@ -44,6 +44,7 @@ use crate::agent_file::{self, AgentFile};
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
+    Worktree(WorktreeAction),
     Orchestrator(Box<OrchestratorArgs>),
     /// `ego config get|set|unset|ls|edit` — typed user configuration management.
     Config(Box<ConfigArgs>),
@@ -189,6 +190,7 @@ pub const BUILT: &[&str] = &[
     "rules",
     "mcp-server",
     "orchestrator",
+    "worktree",
 ];
 
 /// A command `CLI.md` §2 documents that this build does not implement, and the
@@ -244,7 +246,9 @@ pub fn root_command() -> clap::Command {
     fn named(name: &'static str, command: clap::Command) -> clap::Command {
         command.name(name)
     }
-    clap::Command::new("ego")
+    RunCommand::command()
+        .name("ego")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("Run an agent, from one command line.")
         // `ego help` is not one of the 17 commands `CLI.md` §2 documents, and
         // building the tree would otherwise invent it — putting a subcommand in
@@ -273,6 +277,25 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("rules", RulesCommand::command()))
         .subcommand(named("mcp-server", McpServerCommand::command()))
         .subcommand(named("orchestrator", OrchestratorCommand::command()))
+        .subcommand(named("worktree", WorktreeCommand::command()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum WorktreeAction {
+    /// Inspect a durable local worktree receipt without starting a model.
+    Show { receipt: uuid::Uuid },
+    /// Remove only a clean worktree whose commits are integrated; retain its branch.
+    Cleanup { receipt: uuid::Uuid },
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego worktree",
+    about = "Inspect or clean up a retained local worktree."
+)]
+struct WorktreeCommand {
+    #[command(subcommand)]
+    action: WorktreeAction,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -604,6 +627,7 @@ pub struct SessionShape {
     pub system: Option<String>,
     pub bare: bool,
     pub append_system: Option<String>,
+    pub output_style: Option<String>,
     pub instructions: Option<PathBuf>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
@@ -620,6 +644,7 @@ impl From<Shape> for SessionShape {
             system: shape.system,
             bare: shape.bare,
             append_system: shape.append_system,
+            output_style: shape.output_style,
             instructions: shape.instructions,
             allow: shape.allow,
             deny: shape.deny,
@@ -800,6 +825,7 @@ pub enum RulesAction {
 /// The parsed command line of `ego run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
+    pub worktree: Option<String>,
     /// Launch-owned read grant; never accepted from a configuration layer.
     pub read_only_dir: Option<PathBuf>,
     pub prompt: Option<String>,
@@ -816,6 +842,7 @@ pub struct Args {
     pub system: Option<String>,
     pub session_prompt: Option<ego_core::config::SessionSystemPrompt>,
     pub append_system: Option<String>,
+    pub output_style: Option<String>,
     pub instructions: Option<PathBuf>,
     pub bare: bool,
     pub trust_workspace: bool,
@@ -870,6 +897,8 @@ pub struct Args {
     pub quiet: bool,
     pub no_color: bool,
     pub plain: bool,
+    /// Select Vim composer editing for this interactive process.
+    pub vim: bool,
 }
 
 /// One validated `resume --answer QUESTION_ID=JSON` value.
@@ -994,7 +1023,12 @@ fn into_mcp_args(
                     Some(_) => unreachable!("clap restricts MCP HTTP auth values"),
                 };
                 McpHttpConfig::new(url, auth, add.allow_insecure_loopback)
-                    .map(McpServerConfig::Http)
+                    .map(|mut config| {
+                        if add.profile.as_deref() == Some("legacy-sse") {
+                            config.profile = ego_core::config::McpHttpProfile::LegacySse;
+                        }
+                        McpServerConfig::Http(config)
+                    })
                     .map_err(|error| UsageError(error.to_string()))?
             };
             McpAction::Add { name, server }
@@ -1216,6 +1250,7 @@ fn overview(program: &str) -> String {
             "doctor" => "Print a read-only redacted health snapshot",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "orchestrator" => "Inspect native orchestration without model generation",
+            "worktree" => "Inspect or safely remove a retained local worktree",
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
             "roots" => "Manage perimeter roots",
@@ -1338,6 +1373,10 @@ fn parse_subcommand(
     resume_metadata: bool,
 ) -> Result<Invocation, UsageError> {
     match subcommand {
+        Some("worktree") => match clap_or_answer::<WorktreeCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Worktree(parsed.action)),
+        },
         Some("orchestrator") => match clap_or_answer::<OrchestratorCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => match parsed.action {
@@ -1659,6 +1698,15 @@ fn into_export_invocation(parsed: ExportCommand) -> Result<Invocation, UsageErro
     })))
 }
 
+fn validate_keyboard_value(value: &ManagedConfigValue) -> Result<(), UsageError> {
+    if let ManagedConfigValue::Keybindings(bindings) = value {
+        crate::repl::actions::ActionRegistry::final_surface()
+            .with_keybindings(bindings)
+            .map_err(UsageError)?;
+    }
+    Ok(())
+}
+
 fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
     let action = match command.action {
         ConfigSubcommand::Capabilities => ConfigAction::Capabilities,
@@ -1688,6 +1736,7 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
                 let value = ManagedConfigValue::parse(key.clone(), raw).map_err(|_| {
                     UsageError(format!("invalid TOML value or type for config key `{key}`"))
                 })?;
+                validate_keyboard_value(&value)?;
                 changes.push(ego_core::config::UserConfigMutation::ManagedSet {
                     target: target.clone(),
                     key,
@@ -1728,6 +1777,7 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
             let value = ManagedConfigValue::parse(key.clone(), raw_value).map_err(|_| {
                 UsageError(format!("invalid TOML value or type for config key `{key}`"))
             })?;
+            validate_keyboard_value(&value)?;
             ConfigAction::Set { target, key, value }
         }
         ConfigSubcommand::Unset { profile, key } => {
@@ -1887,6 +1937,11 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     } = command;
 
     reject_ephemeral(flags.ephemeral)?;
+    if flags.worktree.is_some() {
+        return Err(UsageError(
+            "--worktree creates a new session; it cannot resume one".into(),
+        ));
+    }
 
     for (given, flag) in [
         (flags.session.is_some(), "--session"),
@@ -1956,6 +2011,11 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
     let RunCommand { prompt, flags } = command;
 
     reject_ephemeral(flags.ephemeral)?;
+    if flags.vim && retry_default == 0 {
+        return Err(UsageError(
+            "--vim applies only to an interactive session".to_owned(),
+        ));
+    }
 
     if flags.file.is_some() && prompt.is_some() {
         return Err(UsageError(
@@ -2013,6 +2073,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
     let shape = SessionShape::from(flags.shape);
 
     Ok(Args {
+        worktree: flags.worktree,
         read_only_dir: shape.read_only_dir,
         prompt,
         agent_file,
@@ -2025,6 +2086,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         system: shape.system,
         session_prompt: None,
         append_system: shape.append_system,
+        output_style: shape.output_style,
         instructions: shape.instructions,
         bare: shape.bare,
         trust_workspace: flags.trust_workspace,
@@ -2062,6 +2124,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         quiet: flags.quiet,
         no_color: flags.no_color,
         plain: flags.plain,
+        vim: flags.vim,
     })
 }
 
