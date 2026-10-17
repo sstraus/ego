@@ -306,6 +306,15 @@ pub(super) fn surface_line(
     drafts: &mut DraftStash,
 ) -> (Line, bool) {
     loop {
+        if phase.get() == EditPhase::Idle {
+            question::tell_host(status, |osc, _| {
+                [
+                    osc.state(crate::render::osc::State::Idle),
+                    osc.progress(crate::render::osc::Progress::Cleared),
+                ]
+                .concat()
+            });
+        }
         if phase.get() == EditPhase::Busy {
             let notice = status.lock().expect("surface status lock").notice.take();
             if let Some(notice) = notice {

@@ -1,5 +1,3 @@
-#[path = "live_surface_pty/slash_completion.rs"]
-mod slash_completion;
 #[path = "live_surface_pty/background_notice.rs"]
 mod background_notice;
 #[path = "live_surface_pty/busy_notice.rs"]
@@ -22,12 +20,16 @@ mod permission_receipts;
 mod plan_denial;
 #[path = "live_surface_pty/prompt_echo.rs"]
 mod prompt_echo;
+#[path = "live_surface_pty/prompt_readiness.rs"]
+mod prompt_readiness;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/slash_completion.rs"]
+mod slash_completion;
 #[path = "live_surface_pty/slash_inspections.rs"]
 mod slash_inspections;
 #[path = "live_surface_pty/startup_provenance.rs"]
