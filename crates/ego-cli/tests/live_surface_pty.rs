@@ -1169,7 +1169,7 @@ fn successor_accepts_next_turn(action: &str) {
         "--sandbox",
         "off",
     ]);
-    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, Some((24, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
