@@ -118,15 +118,15 @@ fn readable(raw: &str) -> String {
         let mut line = undouble(line);
         let mut repainted_modal = false;
         if line.starts_with("Trust project files")
-            && let Some((_, redrawn_banner)) = line.split_once(" ego ")
+            && let Some((_, redrawn_banner)) = line.split_once(" Project files offered for trust:")
         {
-            line = format!("ego {redrawn_banner}");
+            line = format!("Project files offered for trust:{redrawn_banner}");
             repainted_modal = true;
         }
-        if line.starts_with("ego ")
+        if line.starts_with("Project files offered for trust:")
             && let Some(start) = lines
                 .iter()
-                .position(|previous| previous.starts_with("ego "))
+                .position(|previous| previous.starts_with("Project files offered for trust:"))
             && (repainted_modal
                 || lines[start..]
                     .iter()
@@ -287,10 +287,10 @@ fn readable_keeps_answer_text_that_looks_like_a_prompt_echo() {
 
 #[test]
 fn readable_keeps_the_last_complete_trust_modal_frame() {
-    let raw = "ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n";
+    let raw = "εgo: ego 0.1.0\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] Project files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n";
     assert_eq!(
         readable(raw),
-        "ego <version> · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n"
+        "εgo: ego <version>\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n"
     );
 }
 
