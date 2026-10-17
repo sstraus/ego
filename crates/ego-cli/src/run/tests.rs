@@ -3195,3 +3195,52 @@ fn native_search_registry_does_not_require_or_select_exa() {
         );
     }
 }
+
+#[test]
+fn output_style_precedes_explicit_appends_and_session_replace_suppresses_it() {
+    // Catches: style overriding explicit appends or leaking into a session replacement.
+    #[derive(Default)]
+    struct Notes(Mutex<Vec<String>>);
+    impl crate::output::Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+    let root = tempdir().unwrap();
+    let effective = ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap();
+    let mut args = protocol_args(
+        None,
+        crate::cli::SessionShape {
+            system: Some("base".into()),
+            output_style: Some("concise".into()),
+            append_system: Some("explicit tail".into()),
+            bare: true,
+            ..Default::default()
+        },
+    );
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Append,
+        text: "session tail".into(),
+    });
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        assembled.text,
+        "base\n\nUse concise, direct answers. Omit unnecessary detail, but retain material risks, failures and uncertainty.\n\nexplicit tail\n\nsession tail"
+    );
+    assert_eq!(*notes.0.lock().unwrap(), ["output style concise: builtin"]);
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Replace,
+        text: "replacement".into(),
+    });
+    // Even a missing launch style must not be loaded after a session replacement.
+    args.output_style = Some("missing".into());
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(assembled.text, "replacement");
+    assert!(notes.0.lock().unwrap().is_empty());
+}

@@ -63,7 +63,7 @@ ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               canonical intent + matching rule, dry)
 ego usage  [--period P] [--all-roles] [--json] cost and token report
 ego acp [--tools LIST | --no-tools] [--allow RULE] [--deny RULE]
-        [--profile NAME] [--append-system TEXT|@file]
+        [--profile NAME] [--append-system TEXT|@file] [--output-style NAME]
         [--instructions FILE]
         [--listen ENDPOINT [--allow-public-bind]
          [--max-connections N] [--connection-lifetime DURATION]
@@ -363,6 +363,7 @@ the final grammar.
     --thinking L        off|minimal|low|medium|high|xhigh|max   (pi's scale)
     --system TEXT|@file          replace system prompt
     --append-system TEXT|@file   append to it
+    --output-style NAME         select a trusted prompt-only response style
 ```
 
 **Permissions and confinement** (one axis pair, Codex-style)
@@ -570,6 +571,7 @@ and what it is told about where it is working.
     --allow RULE / --deny RULE   what it is allowed to do
     --profile NAME               which stored configuration layer applies
     --append-system TEXT|@file   what it is told, appended to the prompt
+    --output-style NAME         trusted prompt-only response style
     --instructions FILE          which instruction file, named not discovered
 ```
 
@@ -2420,6 +2422,34 @@ HTTP 401 triggers refresh without replaying the operation; retry the operation
 when requested. Missing or revoked credentials require a new explicit login.
 Servers that advertise only confidential-client authentication are not supported.
 
+### Named output styles
+
+`--output-style NAME` selects a response-style overlay for a CLI session or a
+served session launch (`ego acp`). With no selection, the prompt
+is unchanged. The built-in catalogue contains `concise` and `explanatory`.
+These names are reserved and cannot be overridden by user files.
+
+For a custom style, create `$EGO_HOME/output-styles/NAME.md` (or
+`~/.ego/output-styles/NAME.md` when `EGO_HOME` is unset). The file is plain
+UTF-8 prompt text, not a configuration or agent envelope. Names contain 1–80
+ASCII letters, digits, underscores or hyphens. Files must be nonempty, contain
+no NUL bytes, and be at most 64 KiB. Operator-owned catalogue and file symlinks
+are followed; the opened target must be a regular file. Missing or invalid styles
+refuse the run; there is no fallback to a workspace file. Install only styles you
+trust.
+
+The selected name and source (`builtin` or the user file path) appear in a
+diagnostic, not protocol stdout. Styles are explicit launch selections; they
+are not discovered from workspace files or stored as a session preference.
+To resume with a style, pass the flag again.
+
+Composition order is base instructions or `--system`, then the selected style,
+then `--append-system`, then a session prompt in append mode. A session prompt
+in replace mode suppresses the launch style and launch append. An explicit
+style is available with `--bare`, which disables ambient discovery, not launch
+options. Styles do not select tools, change permission policy, execute commands
+or expand `@file` text inside the style. The overlay affects model instructions,
+not the terminal renderer or the machine-readable output format.
 
 ### Notebook cell edits
 
