@@ -1,5 +1,7 @@
 #[path = "live_surface_pty/background_notice.rs"]
 mod background_notice;
+#[path = "live_surface_pty/blank_prompt.rs"]
+mod blank_prompt;
 #[path = "live_surface_pty/busy_notice.rs"]
 mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
@@ -10,6 +12,8 @@ mod finish_queue;
 mod foreign_judge_reason;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
+#[path = "live_surface_pty/metadata_refusal.rs"]
+mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/mode_picker.rs"]
