@@ -77,7 +77,13 @@ fn git(root: &Path, args: &[&str], input: &[u8]) -> io::Result<Vec<u8>> {
     }
     let mut child = command
         .arg("--no-replace-objects")
-        .args(["-c", "core.fsync=all", "-C"])
+        .args([
+            "-c",
+            "core.fsync=all",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+        ])
         .arg(root)
         .args(args)
         .env("GIT_NO_LAZY_FETCH", "1")

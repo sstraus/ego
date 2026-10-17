@@ -252,3 +252,42 @@ fn identical_bytes_from_external_atomic_replacement_are_a_conflict() {
     assert!(CheckpointFs::restore(repo.path(), session, &id).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"after");
 }
+
+#[cfg(unix)]
+#[test]
+fn checkpoint_capture_restore_and_close_never_execute_repository_hooks() {
+    // Catches: private update-ref operations executing repository reference-transaction hooks.
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repository();
+    let root = repo.path();
+    let hooks = root.join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("reference-transaction");
+    fs::write(&hook, "#!/bin/sh\ncat >/dev/null\ntouch hook-ran\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    git(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let marker = root.join("hook-ran");
+    let session = SessionId::new();
+    let path = root.join("target");
+    fs::write(&path, b"before").unwrap();
+    write(&CheckpointFs::new(session), &path, b"after");
+    assert!(
+        !marker.exists(),
+        "checkpoint capture executed a repository hook"
+    );
+    let id = CheckpointFs::preview(root, session)
+        .unwrap()
+        .remove(0)
+        .checkpoint;
+    CheckpointFs::restore(root, session, &id).unwrap();
+    assert!(
+        !marker.exists(),
+        "checkpoint restore executed a repository hook"
+    );
+    CheckpointFs::close(root, session).unwrap();
+    assert!(
+        !marker.exists(),
+        "checkpoint close executed a repository hook"
+    );
+    assert_eq!(fs::read(path).unwrap(), b"before");
+}
