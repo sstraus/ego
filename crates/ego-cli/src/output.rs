@@ -309,8 +309,14 @@ pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
         return text.to_owned();
     };
     text.split('\n')
-        .flat_map(|line| crate::render::Line::plain(line).wrap(width))
-        .map(|line| line.text())
+        .flat_map(|line| {
+            let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+            let prefix = " ".repeat(indent.min(width.saturating_sub(1)));
+            crate::render::Line::plain(&line[indent..])
+                .wrap(width.saturating_sub(prefix.len()).max(1))
+                .into_iter()
+                .map(move |row| format!("{prefix}{}", row.text()))
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -974,6 +980,15 @@ mod tests {
         assert_eq!(
             wrap_notice("\n  hint\nεgo: 日本語 café text continues\n", Some(20)),
             "\n  hint\nεgo: 日本語 café\ntext continues\n"
+        );
+    }
+
+    // Catches: wrapping long key hints strips their header-alignment indentation.
+    #[test]
+    fn wrapped_notices_keep_leading_indent_on_every_row() {
+        assert_eq!(
+            wrap_notice("     Ctrl+B backgrounds · Esc interrupts", Some(25)),
+            "     Ctrl+B backgrounds ·\n     Esc interrupts"
         );
     }
 
