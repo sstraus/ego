@@ -332,6 +332,18 @@ Report a read-only redacted health snapshot of this installation.
 - `-h, --help` — Print help
 - `--json` — Emit the exact versioned health snapshot
 
+## `ego checkpoint`
+
+Preview or selectively restore session-owned Git file checkpoints.
+
+- `checkpoint preview` — List checkpoint IDs, paths, effects, and external-change conflicts as JSON
+- `checkpoint restore` — Restore one selected checkpoint; external changes are never forced
+- `checkpoint close` — Close checkpoint ownership and delete the session's private Git ref
+
+- `-C, --directory <DIRECTORY>` — (undocumented)
+- `-h, --help` — Print help
+- `<SESSION>` — (undocumented)
+
 ## `ego setup`
 
 Inspect expected work without running effects.

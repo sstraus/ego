@@ -32,6 +32,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand models 'List the shared model catalogue.'
             cand hooks 'Inspect the admitted system and user hook catalogue.'
             cand doctor 'Report a read-only redacted health snapshot of this installation.'
+            cand checkpoint 'Preview or selectively restore session-owned Git file checkpoints.'
             cand setup 'Inspect expected work without running effects.'
             cand acp 'Serve the Agent Client Protocol on stdio or an endpoint.'
             cand a2a 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
@@ -290,6 +291,27 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;doctor'= {
             cand --json 'Emit the exact versioned health snapshot'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;checkpoint'= {
+            cand -C 'C'
+            cand --directory 'directory'
+            cand -h 'Print help'
+            cand --help 'Print help'
+            cand preview 'List checkpoint IDs, paths, effects, and external-change conflicts as JSON'
+            cand restore 'Restore one selected checkpoint; external changes are never forced'
+            cand close 'Close checkpoint ownership and delete the session''s private Git ref'
+        }
+        &'ego;checkpoint;preview'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;checkpoint;restore'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;checkpoint;close'= {
             cand -h 'Print help'
             cand --help 'Print help'
         }

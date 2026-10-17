@@ -25,6 +25,9 @@ _ego() {
             ego,auth)
                 cmd="ego__subcmd__auth"
                 ;;
+            ego,checkpoint)
+                cmd="ego__subcmd__checkpoint"
+                ;;
             ego,compact)
                 cmd="ego__subcmd__compact"
                 ;;
@@ -93,6 +96,15 @@ _ego() {
                 ;;
             ego__subcmd__auth,status)
                 cmd="ego__subcmd__auth__subcmd__status"
+                ;;
+            ego__subcmd__checkpoint,close)
+                cmd="ego__subcmd__checkpoint__subcmd__close"
+                ;;
+            ego__subcmd__checkpoint,preview)
+                cmd="ego__subcmd__checkpoint__subcmd__preview"
+                ;;
+            ego__subcmd__checkpoint,restore)
+                cmd="ego__subcmd__checkpoint__subcmd__restore"
                 ;;
             ego__subcmd__config,batch)
                 cmd="ego__subcmd__config__subcmd__batch"
@@ -179,7 +191,7 @@ _ego() {
 
     case "${cmd}" in
         ego)
-            opts="-h --help run resume continue fork rm compact export ls usage models hooks doctor setup acp a2a auth mcp config roots rules mcp-server orchestrator worktree"
+            opts="-h --help run resume continue fork rm compact export ls usage models hooks doctor checkpoint setup acp a2a auth mcp config roots rules mcp-server orchestrator worktree"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -339,6 +351,70 @@ _ego() {
             return 0
             ;;
         ego__subcmd__auth__subcmd__status)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__checkpoint)
+            opts="-C -h --directory --help preview restore close"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --directory)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -C)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__checkpoint__subcmd__close)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__checkpoint__subcmd__preview)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__checkpoint__subcmd__restore)
             opts="-h --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
