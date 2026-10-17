@@ -444,6 +444,10 @@ impl CliPrepared {
         let admitted_tools = bindings.admitted_tools();
         let mcp_runtime = bindings.mcp_runtime();
         let inherited_effect_tools = bindings.effect_tools();
+        if !bindings.delegation_allowed() {
+            self.registry
+                .retain(|tool| !matches!(tool, RegisteredTool::Task | RegisteredTool::Skill(_)));
+        }
         let sink = bindings.sink_factory.create(&model_capabilities);
         sink.publish(
             &PublicEvent::SessionStarted {

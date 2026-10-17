@@ -51,14 +51,17 @@ pub(crate) struct TaskRequest {
     prompt: String,
     agent: Option<String>,
     plan_step: Option<String>,
+    #[serde(default)]
+    background: bool,
 }
 
 pub(super) fn descriptor() -> ToolDescriptor {
     ToolDescriptor {
         name: "task".into(),
-        description: "Run an isolated child agent with your tools, permissions, sandbox, offline posture and shared budget. Children cannot delegate. Returns only its bounded final answer.".into(),
+        description: "Run an isolated child agent with your tools, permissions, sandbox, offline posture and shared budget. Children cannot delegate. Returns only its bounded final answer. Set background=true for durable standalone work that must outlive this parent turn; returns an ID immediately. ".into(),
         parameters: json!({"type":"object", "additionalProperties":false,
             "required":["name","prompt"], "properties": {
+                "background":{"type":"boolean", "default":false, "description":"Launch a durable child and return its ID without waiting. Parent interruption does not cancel it."},
                 "plan_step":{"type":"string", "description":"Existing durable plan step ID. Child execution marks it in_progress, then completed or blocked."},
                 "name":{"type":"string", "minLength":1,"maxLength":80},
                 "prompt":{"type":"string", "minLength":1,"maxLength":65536},
@@ -80,6 +83,35 @@ pub(super) fn parse(params: Value) -> Result<TaskRequest, String> {
         return Err("task requires a printable name of 1–80 characters and a nonempty prompt of at most 64 KiB".into());
     }
     Ok(request)
+}
+
+/// A durable task crosses the same product-owned child boundary as forked skills.
+#[derive(Clone, Debug)]
+pub struct BackgroundTaskLaunch {
+    pub invocation: crate::event::id::SubagentInvocationId,
+    pub turn: TurnId,
+    pub item: ItemId,
+    pub started: EventId,
+    pub prompt: String,
+    pub model: Option<ModelRef>,
+    pub mode: Mode,
+    pub policy: GenerationPolicyDigest,
+    pub tools: BTreeSet<String>,
+}
+
+pub trait BackgroundTaskPort: Send + Sync {
+    fn launch_task(&self, task: BackgroundTaskLaunch) -> BoxFuture<'_, Result<(), String>>;
+    /// Collect only settled children; never wait for a live child at a boundary.
+    fn refresh_tasks(&self, state: SessionState) -> BoxFuture<'_, Result<(), String>>;
+}
+
+/// Host-selected policy text is shared by the prompt and tool catalogue.
+pub fn delegation_guidance(tuic: bool) -> &'static str {
+    if tuic {
+        "Inside TUIC, prefer orchestrator_active for long delegated work. End your turn after launching managed peers; RESULT/BLOCKED resumes it. Use task only for short in-turn work."
+    } else {
+        "For standalone delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Use /tasks to inspect or cancel it."
+    }
 }
 
 /// Only accounting crosses into the parent's durable log. Conversation and
@@ -469,6 +501,60 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     completed.insert(call.item);
                     continue;
                 }
+            }
+            if request.background {
+                // Do not silently drop named-agent policy or plan ownership on a durable run.
+                let launched = if request.agent.is_some() || request.plan_step.is_some() {
+                    Err("background task does not accept agent or plan_step; use an explicit prompt".to_owned())
+                } else if let Some(port) = &self.background_task_port {
+                    let mut tools: BTreeSet<_> = self.tools.effect_names().into_iter().collect();
+                    tools.remove("orchestrator_active");
+                    if let Some(ceiling) = self.inherited_effect_tools.as_ref() {
+                        tools.retain(|name| ceiling.contains(name));
+                    }
+                    if let Some(scope) = self.active_skill_scope.as_ref() {
+                        let allowed = scope.effect_tools();
+                        tools.retain(|name| allowed.contains(&name.as_str()));
+                    }
+                    let invocation = crate::event::id::SubagentInvocationId::from_uuid(
+                        call.item.to_string().parse().expect("item UUID"),
+                    )
+                    .expect("item UUIDv7");
+                    port.launch_task(BackgroundTaskLaunch {
+                        invocation,
+                        turn,
+                        item: call.item,
+                        started: call.started,
+                        prompt: request.prompt,
+                        model: self.main_model_identity.clone(),
+                        mode: snapshot.mode(),
+                        policy: snapshot
+                            .analysis_cache_digest(self.tools.mcp_output_root())
+                            .map_err(|error| {
+                                StoreError::Io(std::io::Error::other(error.to_string()))
+                            })?,
+                        tools,
+                    })
+                    .await
+                    .map(|()| format!("background agent {invocation}"))
+                } else {
+                    Err("durable background tasks are unavailable in this host".to_owned())
+                };
+                let (ok, text) = match launched {
+                    Ok(text) => (true, text),
+                    Err(error) => (false, error),
+                };
+                self.journal.append(
+                    turn,
+                    Some(call.item),
+                    Some(call.started),
+                    EventKind::ToolCallCompleted {
+                        ok,
+                        result: self.tools.masked_result(ToolResult::builtin(text)),
+                    },
+                )?;
+                completed.insert(call.item);
+                continue;
             }
             let mut request = request;
             if let Some(definition) = &definition {

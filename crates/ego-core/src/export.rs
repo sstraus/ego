@@ -382,6 +382,8 @@ pub enum ExportEvent {
     SubagentRequested,
     SubagentSpawned,
     SubagentSettled,
+    SubagentCompletionDelivered,
+    BackgroundTaskRequested,
     SkillCatalogueAdmitted,
     SkillInstructionAdmitted,
     SkillResourceAdmitted,
@@ -1221,6 +1223,17 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             invocation: _,
             child: _,
         } => ExportEvent::SubagentSpawned,
+        EventKind::BackgroundTaskRequested {
+            invocation: _,
+            authority: _,
+        } => ExportEvent::BackgroundTaskRequested,
+        EventKind::SubagentCompletionDelivered {
+            invocation: _,
+            text: _,
+        } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::SubagentCompletionDelivered
+        }
         EventKind::SubagentSettled {
             invocation: _,
             child: _,

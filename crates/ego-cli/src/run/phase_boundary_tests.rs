@@ -42,6 +42,7 @@ fn child_case(test: &str, case: &str, plan: Plan) -> Stub {
         // Match the existing real-driver child harness: its nested turn future
         // exceeds libtest's default stack when coverage is enabled.
         .env("RUST_MIN_STACK", "16777216")
+        .env("TMPDIR", std::env::temp_dir())
         .env("HOME", home.path())
         .env("EGO_HOME", home.path())
         .env("ANTHROPIC_API_KEY", "test-key")
@@ -481,5 +482,54 @@ fn headless_completion_collects_background_skill_result_before_returning() {
             ),
             "{terminals:?}"
         );
+    });
+}
+
+// Catches: production wiring refusing every background task or accidentally retaining child delegation.
+#[test]
+fn headless_background_task_launch_uses_the_durable_child_owner() {
+    if std::env::var_os(CHILD).is_none() {
+        let stub = child_case(
+            "headless_background_task_launch_uses_the_durable_child_owner",
+            "background-task",
+            Plan {
+                completions: vec![
+                    Reply::Sse(tool_call(
+                        "task-call",
+                        "task",
+                        r#"{"name":"check","prompt":"Return a short result","background":true}"#,
+                    )),
+                    Reply::Sse(text("background result")),
+                    Reply::Sse(text("background result")),
+                ],
+                ..Plan::default()
+            },
+        );
+        let generations = stub.generations();
+        assert_eq!(
+            generations.len(),
+            3,
+            "parent and durable child must execute"
+        );
+        assert!(
+            generations.iter().any(|request| !request["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "task"))),
+            "the child cannot delegate"
+        );
+        return;
+    }
+    runtime().block_on(async {
+        let mut args = args("anthropic/claude-sonnet-5-5");
+        args.thinking = Some(ThinkingLevel::Low);
+        args.prompt = Some("start the background check".to_owned());
+        let ended = run_with_registry(args, |_| &NullSink, CancelToken::new(), Arc::new(EvidenceAdmissionService::new()), None).await;
+        assert_eq!(ended.termination.exit_code(), 0, "{:?}", ended.termination);
+        let store = session::jsonl(session::store_root(None).unwrap(), std::env::current_dir().unwrap());
+        let entries: Vec<_> = SessionStore::read(&store, &ended.session).unwrap().collect().await;
+        let events: Vec<_> = entries.into_iter().filter_map(|entry| match entry.unwrap() { SessionEntry::Event(event) => Some(event), _ => None }).collect();
+        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::SubagentSpawned { .. })).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::SubagentCompletionDelivered { .. })).count(), 1);
+        assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ToolCallCompleted { ok: true, result } if result.model_text().contains("background agent"))));
     });
 }

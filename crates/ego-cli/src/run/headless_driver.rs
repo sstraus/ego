@@ -210,12 +210,22 @@ pub(super) async fn drive_headless_turn(
         bindings: child_bindings,
         blobs: active.evidence().clone(),
     });
-    let skill_owner = Arc::new(CliSkillInvocationOwner::new(
-        child_service,
-        hooks.runtime.clone(),
-        cancel.clone(),
-        hook_trust,
-    ));
+    let skill_owner = Arc::new(
+        CliSkillInvocationOwner::new(
+            child_service,
+            hooks.runtime.clone(),
+            cancel.clone(),
+            hook_trust,
+        )
+        .with_task_blobs(active.evidence().clone())
+        .with_task_policy(
+            policy_source
+                .capture()
+                .map_err(|message| RunTermination::Failed { message })?
+                .snapshot()
+                .digest(),
+        ),
+    );
     // Headless CLI and ACP prompts are explicit command input adapters. Ordinary
     // interactive/queued prompt data never passes through this selection.
     let actions = repl::actions::ActionRegistry::final_surface();
@@ -302,6 +312,8 @@ pub(super) async fn drive_headless_turn(
     .with_goal_policy(goal_ceilings, goal_check_command)
     .with_provider_recovery(provider_recovery.then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON))
     .with_skill_invocation_port(skill_owner.clone())
+    .with_background_task_port(skill_owner.clone())
+    .with_delegation_host(std::env::var_os("TUIC_SESSION").is_some())
     .with_pause_token(pause.clone());
     let loop_ = match recovered_policy.as_ref() {
         Some(policy) => loop_
@@ -387,6 +399,12 @@ pub(super) async fn drive_headless_turn(
         }
     };
     drop(loop_);
+    skill_owner
+        .drain_tasks()
+        .await
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
     skill_owner
         .drain()
         .await

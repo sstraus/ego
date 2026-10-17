@@ -562,12 +562,22 @@ pub(super) async fn drive_execution<S: EventSink>(
                         bindings: child_bindings,
                         blobs: active.evidence().clone(),
                     });
-                    let skill_owner = Arc::new(CliSkillInvocationOwner::new(
-                        child_service,
-                        session_hooks.runtime.clone(),
-                        cancel.clone(),
-                        skill_trust,
-                    ));
+                    let skill_owner = Arc::new(
+                        CliSkillInvocationOwner::new(
+                            child_service,
+                            session_hooks.runtime.clone(),
+                            cancel.clone(),
+                            skill_trust,
+                        )
+                        .with_task_blobs(active.evidence().clone())
+                        .with_task_policy(
+                            policy_source
+                                .capture()
+                                .map_err(|message| RunTermination::Failed { message })?
+                                .snapshot()
+                                .digest(),
+                        ),
+                    );
                     let model_switch_owner;
                     install_model_switch_owner!(session_hooks, model_switch_owner, status);
                     dispatch_post_compact_hook(&epoch_start, &session_hooks, diagnostics).await;
@@ -683,6 +693,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         policy_application: &policy_application,
                                         text_output,
                                         session_hook_ports: &session_hook_ports,
+                                        task_owner: &skill_owner,
                                         skill_profile_layers: &skill_profile_layers,
                                         perimeter: &perimeter,
                                         mcp_registry,
@@ -1744,7 +1755,7 @@ struct InteractiveTurnBuild<'a, 'session> {
     active: &'session ActiveSession<'session>,
     hooks: &'a SessionHookComposition<'session>,
     journal: &'a SharedJournal<'session>,
-    skill_owner: Arc<dyn SkillInvocationPort + 'session>,
+    skill_owner: Arc<CliSkillInvocationOwner<'session>>,
 }
 
 fn build_interactive_turn<'session: 'turn, 'turn>(
@@ -1853,7 +1864,9 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
             args.provider_recovery
                 .then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
         )
-        .with_skill_invocation_port(skill_owner);
+        .with_skill_invocation_port(skill_owner.clone())
+        .with_background_task_port(skill_owner)
+        .with_delegation_host(std::env::var_os("TUIC_SESSION").is_some());
     let loop_ = match active.replayed() {
         Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
@@ -2297,6 +2310,7 @@ struct InteractiveCommand<'a, 'session, 'store> {
     policy_application: &'a Option<Arc<PolicyApplicationOwner>>,
     text_output: Option<&'a dyn TextOutput>,
     session_hook_ports: &'a Arc<RunEffectPorts>,
+    task_owner: &'a CliSkillInvocationOwner<'session>,
     skill_profile_layers: &'a Option<Vec<Sourced<ConfigLayer>>>,
     perimeter: &'a crate::perimeter::Perimeter,
     mcp_registry: &'a Arc<McpRegistryController>,
@@ -2355,6 +2369,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         policy_application,
         text_output,
         session_hook_ports,
+        task_owner,
         skill_profile_layers,
         perimeter,
         mcp_registry,
@@ -2533,11 +2548,23 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Tasks(arguments)) => {
-            diagnostics.note(&background_tasks(
-                &arguments,
-                state,
-                session_hook_ports.process(),
-            ));
+            ego_core::turn::BackgroundTaskPort::refresh_tasks(
+                task_owner,
+                session_hooks.state.state(),
+            )
+            .await
+            .map_err(|message| RunTermination::Failed { message })?;
+            let current = session_hooks.state.state();
+            diagnostics.note(
+                &task_listing(
+                    &arguments,
+                    &current,
+                    session_hook_ports.process(),
+                    task_owner,
+                )
+                .await,
+            );
+            *state = current;
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Help)) => {
@@ -2733,6 +2760,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                     policy_application,
                     text_output,
                     session_hook_ports,
+                    task_owner,
                     skill_profile_layers,
                     perimeter,
                     mcp_registry,
@@ -3035,7 +3063,8 @@ async fn end_session_epoch(
     policy_source: &dyn GenerationPolicySource,
     session_id: SessionId,
 ) -> Result<(), RunTermination> {
-    match skill_owner.drain().await {
+    let drained = skill_owner.drain_tasks().await;
+    match drained.and(skill_owner.drain().await) {
         Ok(()) => {
             let runtime = match recovered_epoch_policy {
                 Some(policy) => session_hooks.bind_policy(policy),
@@ -3407,7 +3436,7 @@ struct InteractiveTurnPhase<'a, 'session, 'store> {
     skill_trust: Trust,
     session_hooks: &'a SessionHookComposition<'session>,
     session_journal: &'a SharedJournal<'session>,
-    skill_owner: Arc<dyn SkillInvocationPort + 'session>,
+    skill_owner: Arc<CliSkillInvocationOwner<'session>>,
     refresh_prompt: &'a mut bool,
     control: &'a mut InteractiveControl,
     turns: &'a Turns<'a>,
@@ -3540,7 +3569,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
             active,
             hooks: session_hooks,
             journal: session_journal,
-            skill_owner,
+            skill_owner: skill_owner.clone(),
         },
         (&ports, &turn_cancel, observation, probe_evidence),
     )?;
@@ -3586,11 +3615,15 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
                     let current = session_hooks.state.state();
                     match command {
                         repl::HostCommand::Tasks(arguments) => {
-                            diagnostics.note(&background_tasks(
-                                &arguments,
-                                &current,
-                                session_hook_ports.process(),
-                            ));
+                            diagnostics.note(
+                                &task_listing(
+                                    &arguments,
+                                    &current,
+                                    session_hook_ports.process(),
+                                    skill_owner.as_ref(),
+                                )
+                                .await,
+                            );
                         }
                         repl::HostCommand::Action(repl::actions::ActionId::Config) => {
                             diagnostics.note(&crate::config::repl_text(

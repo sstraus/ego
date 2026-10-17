@@ -2852,6 +2852,18 @@ impl<'a> DrainFixture<'a> {
                 hooks,
                 CancelToken::new(),
                 Trust::Untrusted,
+            )
+            .with_task_blobs(SessionEvidenceStore::open(root, session, 1024 * 1024).unwrap())
+            .with_task_policy(
+                ego_core::turn::GenerationPolicyCapture::new(
+                    CanonPath::new(root),
+                    Mode::Default,
+                    Ruleset::default(),
+                    None,
+                )
+                .unwrap()
+                .snapshot()
+                .digest(),
             ),
             store,
             session,
@@ -3243,4 +3255,310 @@ fn output_style_precedes_explicit_appends_and_session_replace_suppresses_it() {
         .unwrap();
     assert_eq!(assembled.text, "replacement");
     assert!(notes.0.lock().unwrap().is_empty());
+}
+
+// These tests drive the CLI owner over the real durable child service and JSONL store.
+impl DrainFixture<'_> {
+    fn background_task_request(&self) -> ego_core::turn::BackgroundTaskLaunch {
+        let item = ItemId::new();
+        let id = SubagentInvocationId::from_uuid(item.to_string().parse().unwrap()).unwrap();
+        let turn = TurnId::new();
+        let started = self.owner.hooks.hook_state().journal().append(turn, Some(item), None,
+            EventKind::ToolCallStarted { name: "task".to_owned(), args: serde_json::json!({"name":"check", "prompt":"background launch task", "background":true}).to_string(), call_id: Some(format!("call-{id}")) }).unwrap();
+        ego_core::turn::BackgroundTaskLaunch {
+            invocation: id,
+            turn,
+            item,
+            started,
+            prompt: "background launch task".to_owned(),
+            model: None,
+            mode: Mode::Default,
+            policy: self.owner.task_policy.clone().unwrap(),
+            tools: BTreeSet::from(["read".to_owned()]),
+        }
+    }
+
+    async fn background_task(&self) -> SubagentInvocationId {
+        use ego_core::turn::BackgroundTaskPort;
+        let request = self.background_task_request();
+        let (id, turn, item, started) = (
+            request.invocation,
+            request.turn,
+            request.item,
+            request.started,
+        );
+        tokio::time::timeout(Duration::from_secs(5), self.owner.launch_task(request))
+            .await
+            .expect("launch must not wait for child completion")
+            .unwrap();
+        self.owner
+            .hooks
+            .hook_state()
+            .journal()
+            .append(
+                turn,
+                Some(item),
+                Some(started),
+                EventKind::ToolCallCompleted {
+                    ok: true,
+                    result: ego_core::permit::ToolResult::builtin(format!("background agent {id}")),
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    async fn execution_finished(&self, id: SubagentInvocationId) {
+        let task = self
+            .owner
+            .tasks
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .execution
+            .take();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            CliSkillInvocationOwner::await_execution(task),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    fn deliveries(&self) -> usize {
+        self.owner
+            .hooks
+            .hook_state()
+            .state()
+            .items
+            .values()
+            .filter(|item| item.text.contains("completed child answer"))
+            .count()
+    }
+}
+
+#[tokio::test]
+async fn background_task_completion_during_another_parent_turn_waits_for_boundary() {
+    // Catches: a child injecting its completion into a parent generation already in flight.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(release.clone()),
+        interrupt_failure: false,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.background_task().await;
+    crossed.await.unwrap();
+    let parent_turn = TurnId::new();
+    fixture
+        .owner
+        .hooks
+        .hook_state()
+        .journal()
+        .append(
+            parent_turn,
+            Some(ItemId::new()),
+            None,
+            EventKind::UserPrompt {
+                text: "another parent turn".to_owned(),
+                images: vec![],
+                queued_prompt: None,
+            },
+        )
+        .unwrap();
+    release.notify_one();
+    fixture.execution_finished(id).await;
+    assert_eq!(
+        fixture.deliveries(),
+        0,
+        "execution must not write parent context"
+    );
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    let state = fixture.owner.hooks.hook_state().state();
+    let (conversation, _) = ego_core::generator::history::conversation_from(&state).unwrap();
+    assert!(
+        serde_json::to_string(&conversation)
+            .unwrap()
+            .contains("completed child answer")
+    );
+}
+
+#[tokio::test]
+async fn background_task_parent_interruption_does_not_cancel_child() {
+    // Catches: Ctrl+Enter's parent token leaking into an admitted background child.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(release.clone()),
+        interrupt_failure: false,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.background_task().await;
+    crossed.await.unwrap();
+    fixture.owner.parent_cancel.cancel(CancelCause::User);
+    assert!(
+        !fixture
+            .owner
+            .tasks
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .service
+            .is_settled(id)
+            .unwrap()
+    );
+    release.notify_one();
+    fixture.execution_finished(id).await;
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    assert_eq!(fixture.settled().await, [id]);
+}
+
+#[tokio::test]
+async fn background_task_duplicate_crash_recovery_does_not_redeliver_completion() {
+    // Catches: reopening after child settlement launching it again or delivering its answer twice.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let id = fixture.background_task().await;
+    fixture.execution_finished(id).await;
+    let service = fixture
+        .owner
+        .tasks
+        .lock()
+        .unwrap()
+        .get(&id)
+        .unwrap()
+        .service
+        .clone();
+    service
+        .collect_background(id, &fixture.owner.hooks)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.deliveries(),
+        0,
+        "simulate crash between settlement and delivery"
+    );
+    fixture.owner.tasks.lock().unwrap().clear();
+    let stale = fixture.owner.hooks.hook_state().state();
+    fixture.owner.refresh_tasks(stale.clone()).await.unwrap();
+    fixture.owner.refresh_tasks(stale).await.unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    assert_eq!(fixture.settled().await, [id]);
+    assert_eq!(
+        fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::SubagentCompletionDelivered { .. }))
+            .count(),
+        1
+    );
+    let mut replay = SessionState::default();
+    for event in fixture.events().await {
+        replay.apply(&event);
+    }
+    fixture.owner.refresh_tasks(replay.clone()).await.unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    assert!(replay.delivered_subagents.contains_key(&id));
+    assert!(replay.refusals.is_empty(), "{:?}", replay.refusals);
+}
+
+#[tokio::test]
+async fn background_task_inspect_and_cancel_targets_only_the_selected_agent() {
+    // Catches: /tasks cancellation accidentally cancelling the parent or an unrelated entry.
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(Arc::new(tokio::sync::Notify::new())),
+        interrupt_failure: false,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.background_task().await;
+    crossed.await.unwrap();
+    let state = fixture.owner.hooks.hook_state().state();
+    assert!(
+        fixture
+            .owner
+            .inspect_tasks("", &state)
+            .await
+            .unwrap()
+            .contains(&format!("agent {id}"))
+    );
+    assert!(
+        fixture
+            .owner
+            .inspect_tasks(&format!("cancel {id}"), &state)
+            .await
+            .unwrap()
+            .contains("cancellation requested")
+    );
+    assert!(!fixture.owner.parent_cancel.is_cancelled());
+    fixture.execution_finished(id).await;
+}
+
+#[tokio::test]
+async fn background_task_changed_parent_policy_is_not_replaced_with_stale_authority() {
+    // Catches: a live parent restriction being dropped by a child composed from epoch defaults.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let mut request = fixture.background_task_request();
+    request.mode = Mode::Plan;
+    request.policy = ego_core::turn::GenerationPolicyCapture::new(
+        CanonPath::new(root.path()),
+        Mode::Plan,
+        Ruleset::default(),
+        None,
+    )
+    .unwrap()
+    .snapshot()
+    .digest();
+    let error = fixture.owner.launch_task(request).await.unwrap_err();
+    assert!(error.contains("policy differs"), "{error}");
+    assert!(fixture.owner.tasks.lock().unwrap().is_empty());
+    assert!(fixture.events().await.iter().all(|event| !matches!(
+        event.kind,
+        EventKind::SubagentRequested { .. } | EventKind::SubagentSpawned { .. }
+    )));
 }

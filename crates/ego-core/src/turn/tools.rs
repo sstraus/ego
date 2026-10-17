@@ -276,6 +276,7 @@ pub struct Tools<'a> {
     resume: Option<std::sync::Arc<ResumeSealer>>,
     task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
     pub(super) named_agents: Vec<super::NamedAgent>,
+    delegation_host: bool,
     task_tool_ceiling: Option<std::collections::BTreeSet<String>>,
 }
 
@@ -304,6 +305,7 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
+            delegation_host: false,
         }
     }
 
@@ -325,6 +327,7 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
+            delegation_host: false,
         }
     }
 
@@ -347,6 +350,7 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
+            delegation_host: false,
         })
     }
 
@@ -356,8 +360,18 @@ impl<'a> Tools<'a> {
         self
     }
 
+    pub fn with_delegation_host(mut self, tuic: bool) -> Self {
+        self.delegation_host = tuic;
+        self
+    }
+
     fn describe(&self, tool: &RegisteredTool) -> GenToolDescriptor {
         let mut descriptor = tool.descriptor();
+        if matches!(tool, RegisteredTool::Task) {
+            descriptor
+                .description
+                .push_str(super::delegation_guidance(self.delegation_host));
+        }
         if matches!(tool, RegisteredTool::Task) && !self.named_agents.is_empty() {
             let names: Vec<_> = self
                 .named_agents
@@ -436,6 +450,7 @@ impl<'a> Tools<'a> {
             task_context: Some((name, serial)),
             named_agents: Vec::new(),
             task_tool_ceiling: ceiling,
+            delegation_host: self.delegation_host,
         })
     }
 

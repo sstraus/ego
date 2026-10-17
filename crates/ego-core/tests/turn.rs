@@ -12862,6 +12862,34 @@ mod turn {
             agents: Vec<ego_core::turn::NamedAgent>,
             roots: Vec<ego_core::permit::ProfileRoot>,
         ) -> (ExitReason, SessionState) {
+            run_task_host_case(
+                fx,
+                generator,
+                cancel,
+                ceiling,
+                agents,
+                roots,
+                TaskHost::default(),
+            )
+        }
+
+        #[derive(Default)]
+        struct TaskHost {
+            tuic: bool,
+            background: Option<Arc<dyn ego_core::turn::BackgroundTaskPort>>,
+            prior_snapshot: Option<ego_core::session::PromptSnapshot>,
+            refresh: bool,
+        }
+
+        fn run_task_host_case<G: Generator + 'static>(
+            fx: &Fixture,
+            generator: &Arc<G>,
+            cancel: CancelToken,
+            ceiling: Option<u64>,
+            agents: Vec<ego_core::turn::NamedAgent>,
+            roots: Vec<ego_core::permit::ProfileRoot>,
+            host: TaskHost,
+        ) -> (ExitReason, SessionState) {
             let mut registry: Vec<_> = fx
                 .registry
                 .iter()
@@ -12907,20 +12935,183 @@ mod turn {
                 offline: true,
                 host: None,
             });
+            let mut initial = SessionState::default();
+            initial.prompt_snapshot = host.prior_snapshot;
             let mut loop_ = CoreTurnLoop::new(
-                session(
-                    SessionState::default(),
-                    &fx.store,
-                    &fx.clock,
-                    &fx.sink,
-                    cancel,
-                ),
+                session(initial, &fx.store, &fx.clock, &fx.sink, cancel),
                 runtime,
                 tools,
             )
             .unwrap();
+            loop_ = loop_.with_delegation_host(host.tuic);
+            if host.refresh {
+                loop_ = loop_.with_prompt_refresh();
+            }
+            if let Some(port) = host.background {
+                loop_ = loop_.with_background_task_port(port);
+            }
             let outcome = block_on(loop_.run("parent")).unwrap();
             (outcome.exit_reason, loop_.into_state().unwrap())
+        }
+
+        #[derive(Default)]
+        struct RecordingBackgroundPort(Mutex<Vec<ego_core::turn::BackgroundTaskLaunch>>);
+        impl ego_core::turn::BackgroundTaskPort for RecordingBackgroundPort {
+            fn launch_task(
+                &self,
+                task: ego_core::turn::BackgroundTaskLaunch,
+            ) -> BoxFuture<'_, Result<(), String>> {
+                self.0.lock().unwrap().push(task);
+                Box::pin(std::future::ready(Ok(())))
+            }
+            fn refresh_tasks(&self, _: SessionState) -> BoxFuture<'_, Result<(), String>> {
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        #[test]
+        fn background_task_launch_returns_id_without_running_an_ephemeral_child() {
+            // Catches: background=true falling through to the foreground child wait path.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "bg",
+                        "task",
+                        json!({"name":"long check", "prompt":"Inspect", "background":true}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let port = Arc::new(RecordingBackgroundPort::default());
+            let (exit, state) = run_task_host_case(
+                &fx,
+                &generator,
+                CancelToken::new(),
+                None,
+                vec![],
+                vec![],
+                TaskHost {
+                    tuic: false,
+                    background: Some(port.clone()),
+                    ..TaskHost::default()
+                },
+            );
+            assert_eq!(exit, ExitReason::Completed);
+            assert_eq!(generator.calls().len(), 2, "no ephemeral child generation");
+            let launches = port.0.lock().unwrap();
+            assert_eq!(launches.len(), 1);
+            let task = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(true));
+            assert!(tool_result_text(task).contains(&launches[0].invocation.to_string()));
+        }
+
+        #[test]
+        fn background_task_without_owner_is_refused_instead_of_running_foreground() {
+            // Catches: an unsupported host silently blocking on a background task.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "bg",
+                        "task",
+                        json!({"name":"long check", "prompt":"Inspect", "background":true}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            assert_eq!(generator.calls().len(), 2);
+            let task = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(false));
+            assert!(tool_result_text(task).contains("unavailable"));
+        }
+
+        #[test]
+        fn task_guidance_under_tuic_does_not_send_long_work_to_in_turn_children() {
+            // Catches: TUIC agents receiving standalone task-first guidance in prompt or tool schema.
+            for tuic in [false, true] {
+                let fx = Fixture::new(vec![]);
+                let generator =
+                    Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+                run_task_host_case(
+                    &fx,
+                    &generator,
+                    CancelToken::new(),
+                    None,
+                    vec![],
+                    vec![],
+                    TaskHost {
+                        tuic,
+                        background: None,
+                        refresh: true,
+                        ..TaskHost::default()
+                    },
+                );
+                let calls = generator.calls();
+                let request = &calls[0];
+                let expected = if tuic {
+                    "prefer orchestrator_active for long delegated work"
+                } else {
+                    "For standalone delegation, use task"
+                };
+                let task = request
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == "task")
+                    .unwrap();
+                assert!(task.description.contains(expected), "{}", task.description);
+                assert!(request.messages.messages().iter().any(|message| message.role == Role::System && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(expected)))));
+            }
+        }
+
+        #[test]
+        fn task_guidance_host_change_replaces_stale_prompt_authority_once() {
+            // Catches: resuming standalone history inside TUIC retaining task-first system guidance.
+            let prior = ego_core::session::PromptSnapshot {
+                epoch: EventId::new(),
+                identity: Some(format!(
+                    "ego test\n\n{}",
+                    ego_core::turn::delegation_guidance(false)
+                )),
+                system: None,
+            };
+            let mut snapshot = prior.clone();
+            for changed in [true, false] {
+                let fx = Fixture::new(vec![]);
+                let generator =
+                    Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+                let (_, state) = run_task_host_case(
+                    &fx,
+                    &generator,
+                    CancelToken::new(),
+                    None,
+                    vec![],
+                    vec![],
+                    TaskHost {
+                        tuic: true,
+                        prior_snapshot: Some(snapshot.clone()),
+                        ..TaskHost::default()
+                    },
+                );
+                let next = state.prompt_snapshot.unwrap();
+                assert_eq!(next.epoch != snapshot.epoch, changed);
+                let text = next.identity.as_ref().unwrap();
+                assert!(text.contains("prefer orchestrator_active"));
+                assert!(!text.contains("For standalone delegation"));
+                assert_eq!(text.matches("Inside TUIC").count(), 1);
+                snapshot = next;
+            }
         }
 
         #[test]
