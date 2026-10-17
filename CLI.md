@@ -2330,10 +2330,15 @@ its bounded stderr preview. An exec allow rule does not grant filesystem access:
 the evaluator script and its inputs must be readable under the run confinement.
 
 
-Usage report v2 is the current closed contract: its role lines are `main`,
+Usage report v3 is the current closed contract: its role lines are `main`,
 `judge`, `goal_check`, `compaction`, `subagent`, `hook`, and `total`.
-`goal_check` is required in v2 reports, including zero usage; no legacy-report
+`goal_check` is required in v3 reports, including zero usage; no legacy-report
 decoder or compatibility default is provided.
+Cost `known` and `unknown` describe monetary spend only. Display-only standard
+API estimates are separate `subscription_equivalent` totals by currency, with
+missing or overflowing estimates in `subscription_unknown`. The text view labels
+them `subscription-equivalent (standard API)` and never presents subscription
+accounting zero as known monetary spend.
 
 ### Model-requested context changes
 
