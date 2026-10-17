@@ -467,5 +467,27 @@ fn unsupported_collapsed_envelope_has_terminal_compatibility_diagnostic() {
             report.contains("changing the search query cannot repair"),
             "{mode}: {report}"
         );
+        let messages = generations.last().unwrap()["messages"].as_array().unwrap();
+        let lookup_errors: Vec<_> = messages
+            .iter()
+            .filter(|message| {
+                message["role"] == "tool"
+                    && matches!(
+                        message["tool_call_id"].as_str(),
+                        Some("schema-call" | "schema-retry")
+                    )
+            })
+            .map(|message| message["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(lookup_errors.len(), 2, "{mode}: {lookup_errors:?}");
+        assert_eq!(
+            lookup_errors[0], lookup_errors[1],
+            "query changed the compatibility failure"
+        );
+        assert!(
+            lookup_errors
+                .iter()
+                .all(|error| error.contains("non-retryable compatibility error"))
+        );
     }
 }
