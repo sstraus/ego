@@ -94,6 +94,25 @@ impl GenerationPolicySnapshot {
         self.mode
     }
 
+    pub(crate) fn validate_task_roots(
+        &self,
+        roots: Option<&[CanonPath]>,
+    ) -> Result<(), &'static str> {
+        if let Some(roots) = roots {
+            if roots.len() != 1 || roots[0] != self.workspace {
+                return Err(
+                    "named agent roots must retain exactly the parent workspace; conflicting roots are not admitted",
+                );
+            }
+            if !self.roots.is_empty() {
+                return Err(
+                    "named agent roots cannot narrow inherited process confinement; extra parent roots require a new executor",
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Copy the canonical bytes into a fresh zeroizing owner for storage.
     pub fn encode_confidential(&self) -> SecretMaterial {
         SecretMaterial::new(self.canonical.expose_secret_bytes().to_vec())
@@ -308,6 +327,41 @@ impl GenerationPolicyCapture {
 
     pub fn policy(&self) -> Arc<PolicyEngine> {
         Arc::clone(&self.policy)
+    }
+
+    /// Narrow a task without changing parent roots, deny rules or human authority.
+    pub(crate) fn task_ceiling(
+        self,
+        mode: Option<Mode>,
+        deny: &[Rule],
+        roots: Option<&[CanonPath]>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        self.snapshot
+            .validate_task_roots(roots)
+            .map_err(|_| GenerationPolicyCaptureError::InvalidSnapshot)?;
+        let mode = mode
+            .filter(|mode| mode.within(self.snapshot.mode))
+            .unwrap_or(self.snapshot.mode);
+        let mut ruleset = self.snapshot.ruleset.clone();
+        for rule in deny {
+            if let Some(existing) = ruleset.deny.iter_mut().find(|entry| entry.rule() == rule) {
+                existing.also_carried_by(Source::AgentFile);
+            } else {
+                ruleset
+                    .deny
+                    .push(SourcedRule::new(rule.clone(), Source::AgentFile));
+            }
+        }
+        let roots = self.snapshot.roots.clone();
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            roots,
+            mode,
+            self.snapshot.coordinator,
+            ruleset,
+            self.snapshot.read_perimeter.clone(),
+        )?;
+        Self::restore(Arc::new(snapshot), self.human)
     }
 
     pub fn snapshot(&self) -> Arc<GenerationPolicySnapshot> {

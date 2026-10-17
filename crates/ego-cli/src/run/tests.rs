@@ -1056,6 +1056,13 @@ fn only_a_long_run_is_worth_interrupting_someone_over() {
         "{long:?}"
     );
 
+    // Catches: the completed-turn notification using a different format from the working row.
+    let hour = loud.postamble(&RunTermination::Done, Duration::from_secs(3900));
+    assert!(
+        hour.contains("\x1b]9;εgo: done after 1h 05m\x07"),
+        "{hour:?}"
+    );
+
     let quiet = Announce::new(&out, capabilities, true);
     assert!(
         !quiet
@@ -1105,6 +1112,16 @@ fn a_long_title_is_cut_where_a_grapheme_ends() {
 
 #[test]
 fn a_duration_is_written_for_a_person() {
+    use crate::render::duration;
+
+    // Catches: turn notifications retaining minutes after the hour boundary.
+    assert_eq!(duration(Duration::from_secs(3600)), "1h 00m");
+    assert_eq!(duration(Duration::from_secs(3900)), "1h 05m");
+    assert_eq!(duration(Duration::from_secs(3959)), "1h 05m");
+    assert_eq!(
+        duration(Duration::from_secs(u64::MAX)),
+        "5124095576030431h 00m"
+    );
     assert_eq!(duration(Duration::from_secs(9)), "9s");
     assert_eq!(duration(Duration::from_secs(60)), "1m 0s");
     assert_eq!(duration(Duration::from_secs(252)), "4m 12s");
@@ -3067,16 +3084,17 @@ async fn cli_drain_failed_child_does_not_abandon_later_children() {
     let first = fixture.add(false, false).await;
     let second = fixture.add(false, false).await;
     // BTreeMap order, not insertion order, determines the first child drained.
-    let mut pending = fixture.owner.background.lock().unwrap();
-    let earlier = *pending.keys().next().unwrap();
-    let task = pending.get_mut(&earlier).unwrap().execution.take().unwrap();
-    pending.get_mut(&earlier).unwrap().execution = Some(tokio::spawn(async move {
-        task.await.expect("child executor task")?;
-        Err(ChildServiceError::Result {
-            diagnostic: "drain execution failure".to_owned(),
-        })
-    }));
-    drop(pending);
+    {
+        let mut pending = fixture.owner.background.lock().unwrap();
+        let earlier = *pending.keys().next().unwrap();
+        let task = pending.get_mut(&earlier).unwrap().execution.take().unwrap();
+        pending.get_mut(&earlier).unwrap().execution = Some(tokio::spawn(async move {
+            task.await.expect("child executor task")?;
+            Err(ChildServiceError::Result {
+                diagnostic: "drain execution failure".to_owned(),
+            })
+        }));
+    }
     let error = fixture.drain().await.unwrap_err().to_string();
     assert!(error.contains("drain execution failure"), "{error}");
     let mut settled = fixture.settled().await;
@@ -3138,4 +3156,91 @@ async fn cli_drain_repeated_empty_drain_does_not_duplicate_settlement() {
         before,
         "an empty second drain must not rerun hooks or append another settlement"
     );
+}
+// Catches: native providers require EXA_API_KEY or expose Exa as a silent fallback.
+#[test]
+fn native_search_registry_does_not_require_or_select_exa() {
+    for model in ["openai/fixture", "anthropic/fixture"] {
+        let tools = composition::tools_with_mode(
+            Some(&vec!["web_search".into()]),
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            ego_core::orchestrator::Mode::Observe,
+            Some(model),
+        )
+        .unwrap();
+        assert_eq!(tools.len(), 1);
+        let descriptor = tools[0].descriptor();
+        assert_eq!(descriptor.name, "web_search");
+        assert!(descriptor.description.contains("provider hosted tool"));
+        assert!(!descriptor.description.contains("EXA_API_KEY"));
+        let defaults = composition::tools_with_mode(
+            None,
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            ego_core::orchestrator::Mode::Observe,
+            Some(model),
+        )
+        .unwrap();
+        assert!(
+            defaults.iter().all(|tool| !tool
+                .descriptor()
+                .description
+                .contains("provider hosted tool")),
+            "paid native search requires explicit selection"
+        );
+    }
+}
+
+#[test]
+fn output_style_precedes_explicit_appends_and_session_replace_suppresses_it() {
+    // Catches: style overriding explicit appends or leaking into a session replacement.
+    #[derive(Default)]
+    struct Notes(Mutex<Vec<String>>);
+    impl crate::output::Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+    let root = tempdir().unwrap();
+    let effective = ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap();
+    let mut args = protocol_args(
+        None,
+        crate::cli::SessionShape {
+            system: Some("base".into()),
+            output_style: Some("concise".into()),
+            append_system: Some("explicit tail".into()),
+            bare: true,
+            ..Default::default()
+        },
+    );
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Append,
+        text: "session tail".into(),
+    });
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        assembled.text,
+        "base\n\nUse concise, direct answers. Omit unnecessary detail, but retain material risks, failures and uncertainty.\n\nexplicit tail\n\nsession tail"
+    );
+    assert_eq!(*notes.0.lock().unwrap(), ["output style concise: builtin"]);
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Replace,
+        text: "replacement".into(),
+    });
+    // Even a missing launch style must not be loaded after a session replacement.
+    args.output_style = Some("missing".into());
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(assembled.text, "replacement");
+    assert!(notes.0.lock().unwrap().is_empty());
 }

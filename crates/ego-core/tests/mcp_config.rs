@@ -345,3 +345,32 @@ fn enabled_false_marks_the_entry_and_a_whole_entry_replacement_resets_it() {
         Some(ResolvedMcpEntry::Configured { enabled: true, server: McpServerConfig::Stdio(s), .. }) if s.command == "project"
     ));
 }
+
+#[test]
+fn legacy_sse_requires_an_explicit_http_profile_and_rejects_unknown_profiles() {
+    use ego_core::config::McpHttpProfile;
+    for (field, expected) in [
+        ("", McpHttpProfile::Current),
+        ("profile='legacy-sse'", McpHttpProfile::LegacySse),
+    ] {
+        let config = layer(
+            Source::User,
+            &format!(
+                "[mcp.servers.events]\ntransport='http'\nurl='https://example.test/sse'\n{field}"
+            ),
+        );
+        let entry = config
+            .value
+            .mcp
+            .servers
+            .get(&"events".parse().unwrap())
+            .unwrap();
+        let McpLayerEntry::Server(McpServerConfig::Http(http)) = entry else {
+            panic!("HTTP profile lost");
+        };
+        assert_eq!(http.profile, expected);
+    }
+    for field in ["profile='auto'", "profile='websocket'", "profile='legacy'"] {
+        assert!(ConfigLayer::parse(Source::User, &format!("[mcp.servers.events]\ntransport='http'\nurl='https://example.test/sse'\n{field}")).is_err());
+    }
+}

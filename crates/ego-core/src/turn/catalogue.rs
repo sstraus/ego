@@ -123,7 +123,7 @@ impl CapturedToolCatalogue {
         &self.generation
     }
 
-    pub(crate) fn tools(&self) -> &[RegisteredTool] {
+    pub fn tools(&self) -> &[RegisteredTool] {
         &self.tools
     }
 

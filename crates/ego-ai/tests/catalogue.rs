@@ -80,6 +80,7 @@ fn hosted_row() -> ProviderRow {
 /// a free-first table hides, so one test spends real (stubbed) money.
 fn hosted_quote() -> PricingQuote {
     PricingQuote {
+        web_search: None,
         revision: PricingRevision("supplied-by-the-caller".to_string()),
         currency: usd(),
         uncached_input: Some("0.000003".parse().unwrap()),
@@ -112,6 +113,7 @@ static SUPPLIED_OPENAI: Supplied = Supplied::new(&OpenAiCompletions);
 
 fn request() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "gemma4:e4b-mlx".to_string(),
         messages: Conversation::new(Vec::new()).expect("an empty history is valid"),
@@ -607,6 +609,7 @@ fn an_unmetered_local_model_needs_no_output_ceiling_to_bound_zero_spend() {
         block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http)).expect("resolved");
 
     let uncapped = GenRequest {
+        web_search: None,
         cache: None,
         max_output_tokens: None,
         ..request()

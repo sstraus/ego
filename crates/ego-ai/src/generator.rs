@@ -158,6 +158,19 @@ impl WireGenerator {
         &self,
         req: &GenRequest,
     ) -> Result<(crate::http::HttpRequest, ToolNames), wire::RequestRefused> {
+        if req.web_search.is_some() && !self.supports_web_search() {
+            return Err(wire::RequestRefused::new(
+                "this provider does not support native hosted search; no fallback is used",
+            ));
+        }
+        let dialect = match self.row.id() {
+            "openai" => "openai-responses",
+            "anthropic" => "anthropic-messages",
+            _ => "",
+        };
+        if req.messages.messages().iter().flat_map(|message| &message.content).any(|block| matches!(block, ego_core::generator::types::ContentBlock::ProviderContent { state } if state.dialect != dialect || dialect.is_empty())) {
+            return Err(wire::RequestRefused::new("provider-owned search content cannot be replayed to another provider"));
+        }
         let mut headers = self.credential.headers();
         for (name, value) in &self.row.extra_headers {
             headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
@@ -203,6 +216,18 @@ fn trace_request_tool_names(request: &crate::http::HttpRequest) {
 }
 
 impl Generator for WireGenerator {
+    fn release_idle_connection(&self, session: ego_core::event::id::SessionId) {
+        // An active stream owns the lock and its socket, not idle state. Only
+        // this session's completed connection may be released here.
+        if let Some(mut owner) = self.codex_session.try_lock() {
+            owner.release_idle_connection(session);
+        }
+    }
+
+    fn supports_web_search(&self) -> bool {
+        matches!(self.row.id(), "openai" | "anthropic")
+    }
+
     fn ensure_expressible(&self, req: &GenRequest) -> Result<(), RequestExpressibilityError> {
         self.build_request(req)
             .map(drop)

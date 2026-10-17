@@ -386,7 +386,7 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
                 // carrying one before this runs, because this schema has
                 // nowhere to put it. Dropped rather than refused a second
                 // time so that the refusal stays in one place.
-                ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. } => {}
                 ContentBlock::Image { image } => images.push(image_data_url(image)),
                 ContentBlock::Text { text: chunk } => {
                     if !text.is_empty() {
@@ -584,7 +584,12 @@ pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Inex
         .messages()
         .iter()
         .flat_map(|message| &message.content)
-        .any(|block| matches!(block, ContentBlock::Reasoning { .. }));
+        .any(|block| {
+            matches!(
+                block,
+                ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. }
+            )
+        });
     if carries_reasoning {
         return Err(Inexpressible::ReasoningStateNotCarriable);
     }
@@ -815,6 +820,7 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         // that evidence is archival. Ollama sends no
         // `completion_tokens_details` at all, and `None` says so rather than
         // claiming it reasoned for nothing.
+        web_search_requests: 0,
         reasoning_tokens: usage
             .completion_tokens_details
             .as_ref()

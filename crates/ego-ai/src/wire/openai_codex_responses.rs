@@ -145,6 +145,9 @@ fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
         }
         for block in &message.content {
             match block {
+                ContentBlock::ProviderContent { .. } => {
+                    return Err(Inexpressible::ReasoningStateNotCarriable);
+                }
                 ContentBlock::Reasoning { state } => {
                     if state.dialect != "openai-codex-responses" {
                         return Err(Inexpressible::ReasoningStateNotCarriable);
@@ -360,6 +363,7 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         cache_write_tokens,
         cache_write_extended_tokens: 0,
         output_tokens: usage.output_tokens,
+        web_search_requests: 0,
         reasoning_tokens: None,
     })
 }

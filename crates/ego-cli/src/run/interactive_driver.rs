@@ -517,11 +517,18 @@ pub(super) async fn interactive_process(
         flag_plain: args.plain,
         ..Terminal::from_process(args.no_color, &environment)
     });
-    let (seat, surface) = match repl::Seat::new(cancel.clone()) {
+    let keyboard = match config::keyboard_preferences(args.vim) {
+        Ok(preferences) => preferences,
+        Err(error) => return Ended::refused(RunTermination::UsageError { message: error.0 }),
+    };
+    let (seat, surface) = match repl::Seat::with_keyboard(cancel.clone(), &keyboard) {
         Ok(built) => built,
         Err(err) => {
-            return Ended::refused(RunTermination::Failed {
-                message: format!("could not start the terminal owner: {err}"),
+            let message = format!("could not start the terminal owner: {err}");
+            return Ended::refused(if err.kind() == std::io::ErrorKind::InvalidInput {
+                RunTermination::UsageError { message }
+            } else {
+                RunTermination::Failed { message }
             });
         }
     };
@@ -852,7 +859,11 @@ impl<'a> Announce<'a> {
         } else {
             self.osc.notify(
                 crate::DISPLAY_NAME,
-                &format!("{} after {}", termination.exit_reason(), duration(elapsed)),
+                &format!(
+                    "{} after {}",
+                    termination.exit_reason(),
+                    crate::render::duration(elapsed)
+                ),
             )
         };
         [
@@ -924,15 +935,6 @@ impl EventSink for Signalling<'_> {
         self.inner.publish(event, state);
         self.announce.emit(self.announce.signal(event, state));
     }
-}
-
-/// A duration a person reads, not one a machine parses.
-pub(super) fn duration(elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs();
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-    format!("{}m {}s", seconds / 60, seconds % 60)
 }
 
 /// Run `args` to completion, publishing through the sink `destination` builds.

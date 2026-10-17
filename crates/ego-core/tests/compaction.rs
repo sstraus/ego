@@ -136,6 +136,7 @@ fn context_checkpoint_frame(text: &str) -> String {
 #[test]
 fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
     let request = GenRequest {
+        web_search: None,
         cache: None,
         model: "main-model".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, checkpoint())])
@@ -318,7 +319,7 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 
 #[test]
 fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_authority_low() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 14);
+    assert_eq!(PUBLIC_EVENT_VERSION, 15);
     let source: SessionId =
         serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let seeded = seeded_event(EventKind::CompactionSeeded {
@@ -508,6 +509,7 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
         let frame = context_checkpoint_frame(parsed.text());
 
         let request = GenRequest {
+            web_search: None,
             cache: None,
             model: "main-model".to_string(),
             messages: Conversation::new(vec![Message::text(Role::User, frame)])

@@ -53,6 +53,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// once, so a field that silently stops being sent has nowhere to hide.
 fn golden_request() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "gpt-5.1".to_string(),
         messages: conversation(vec![
@@ -260,6 +261,7 @@ fn an_assistant_turn_of_pure_tool_calls_sends_no_content_key() {
 #[test]
 fn reasoning_state_is_refused_rather_than_dropped() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
@@ -356,6 +358,7 @@ fn a_golden_transcript_decodes_to_an_exact_event_sequence() {
                 cache_write_tokens: 100,
                 cache_write_extended_tokens: 0,
                 output_tokens: 250,
+                web_search_requests: 0,
                 reasoning_tokens: Some(180),
             }),
             AiEvent::Stop(StopReason::Stop),
@@ -408,6 +411,7 @@ fn a_usage_report_without_a_cache_breakdown_is_all_uncached() {
                 cache_write_tokens: 0,
                 cache_write_extended_tokens: 0,
                 output_tokens: 7,
+                web_search_requests: 0,
                 reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::Stop),
@@ -473,6 +477,7 @@ fn a_restated_usage_total_is_not_added_to_itself() {
                 cache_write_tokens: 0,
                 cache_write_extended_tokens: 0,
                 output_tokens: 40,
+                web_search_requests: 0,
                 reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::Stop),
@@ -505,6 +510,7 @@ fn tool_call_arguments_are_assembled_by_index_across_interleaved_fragments() {
                 cache_write_tokens: 0,
                 cache_write_extended_tokens: 0,
                 output_tokens: 64,
+                web_search_requests: 0,
                 reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::ToolUse),

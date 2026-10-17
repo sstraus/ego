@@ -22,6 +22,7 @@ use url::Url;
 
 fn request() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "grok-4.6".to_string(),
         messages: Conversation::new(vec![

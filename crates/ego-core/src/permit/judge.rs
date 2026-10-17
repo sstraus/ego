@@ -105,6 +105,7 @@ impl JudgeInput {
         ])
         .expect("two text messages are a valid conversation");
         GenRequest {
+            web_search: None,
             cache: None,
             model: config.request_model.clone(),
             messages,
@@ -274,7 +275,7 @@ impl JudgeDecoder {
                     }
                 }
             }
-            AiEvent::ToolCall { .. } => {
+            AiEvent::ToolCall { .. } | AiEvent::WebSearch { .. } => {
                 self.uncertain = Some("judge attempted a tool call");
             }
             AiEvent::Error { .. } => {
@@ -285,7 +286,9 @@ impl JudgeDecoder {
                     self.uncertain = Some("judge emitted more than one terminal event");
                 }
             }
-            AiEvent::ReasoningDelta { .. }
+            AiEvent::ProviderContent { .. }
+            | AiEvent::Citation { .. }
+            | AiEvent::ReasoningDelta { .. }
             | AiEvent::ReasoningState(_)
             | AiEvent::Usage(_)
             | AiEvent::ProviderCost { .. }
@@ -536,6 +539,10 @@ struct CanonicalArgument {
 #[derive(Serialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 enum CanonicalChange {
+    Notebook {
+        bytes: usize,
+        sha256: String,
+    },
     Whole {
         bytes: usize,
         sha256: String,
@@ -551,6 +558,13 @@ enum CanonicalChange {
 impl From<&Change> for CanonicalChange {
     fn from(change: &Change) -> Self {
         match change {
+            Change::Notebook(edit) => {
+                let bytes = serde_json::to_vec(edit).expect("closed cell edit codec");
+                Self::Notebook {
+                    bytes: bytes.len(),
+                    sha256: sha256_hex(&bytes),
+                }
+            }
             Change::Whole(bytes) => Self::Whole {
                 bytes: bytes.len(),
                 sha256: sha256_hex(bytes),
