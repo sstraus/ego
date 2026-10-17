@@ -2190,14 +2190,6 @@ fn own_terminal(
             inspection_waker.wake();
             continue;
         }
-        if phase.get() == EditPhase::Busy
-            && matches!(&line, Line::HostCommand(HostCommand::Config(_)))
-        {
-            commit_to_transcript(
-                &status,
-                "config write pending until the active turn finishes; saved defaults apply to future sessions",
-            );
-        }
         match line {
             Line::ExternalBreak(_) => match control.recv() {
                 Ok(Control::Shutdown) | Err(_) => break,
@@ -2280,10 +2272,12 @@ fn own_terminal(
                         HostCommand::History(_) => "/history".to_owned(),
                         _ => "local command".to_owned(),
                     };
-                    commit_to_transcript(
-                        &status,
-                        &format!("{label} pending until the current turn ends"),
-                    );
+                    let receipt = if matches!(command, HostCommand::Config(_)) {
+                        "config write pending until the active turn finishes; saved defaults apply to future sessions".to_owned()
+                    } else {
+                        format!("{label} pending until the current turn ends")
+                    };
+                    commit_to_transcript(&status, &receipt);
                 }
                 if input.send(line).is_err() || (ended && failed) {
                     break;
