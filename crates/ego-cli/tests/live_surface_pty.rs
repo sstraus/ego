@@ -1222,9 +1222,20 @@ fn successor_accepts_next_turn(action: &str) {
         );
         let start = output.len();
         until_prompt_from(&reader, &mut output, start);
-        // Redraws may occur between wrapped notice rows; inspect the actual
-        // terminal, not the interleaved live-frame bytes in the write stream.
-        let shown = screen_rows(&output, 24, 100).join("\n");
+        // The receipt may already be in scrollback when the idle prompt repaints.
+        // Read each retained terminal row once, not interleaved redraw bytes.
+        let mut terminal = vt100::Parser::new(24, 100, 10_000);
+        terminal.process(&output);
+        let live = terminal.screen().contents();
+        terminal.screen_mut().set_scrollback(usize::MAX);
+        let depth = terminal.screen().scrollback();
+        let mut shown = String::new();
+        for offset in (1..=depth).rev() {
+            terminal.screen_mut().set_scrollback(offset);
+            shown.push_str(&terminal.screen().rows(0, 100).next().unwrap());
+            shown.push('\n');
+        }
+        shown.push_str(&live);
         assert!(
             shown.contains("the session log could not be written")
                 && support::notice_prose(&shown).contains("Is a directory"),
