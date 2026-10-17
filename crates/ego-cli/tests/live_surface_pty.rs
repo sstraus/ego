@@ -4828,7 +4828,7 @@ fn cancelling_before_reply_clears_the_thinking_row() {
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
-    until_normalized(&reader, &mut output, cancel_start, "qwen3 · ");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(24, 80, 0);
     screen.process(&output);
