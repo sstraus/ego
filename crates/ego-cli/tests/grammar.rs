@@ -70,6 +70,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         }
         Invocation::Setup(_) => panic!("setup does not construct a run"),
         Invocation::Doctor(_) => panic!("`doctor` takes no Args: use the doctor tests for it"),
+        Invocation::Checkpoint(_) => panic!("checkpoint does not construct a run"),
     }
 }
 

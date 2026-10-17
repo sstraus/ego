@@ -111,6 +111,11 @@ pub trait PathResolver: Send + Sync {
 /// Tools never hold this directly (`ARCHITECTURE.md` §3.2); it is held by
 /// the loop and wrapped in [`GuardedEffects`] before a tool ever sees it.
 pub trait Fs: PathResolver {
+    /// User-visible receipt for the last successful builtin write.
+    fn write_notice(&self, _path: &CanonPath) -> Option<String> {
+        None
+    }
+
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError>;
 
     /// A bounded import read. OS adapters must bound the read before allocation.
@@ -157,6 +162,10 @@ pub trait Fs: PathResolver {
 /// is resolved a second time and is not re-checked. Closing that needs
 /// handle-relative, no-follow opens, which is `POTENTIALS.md` P23.
 pub trait GuardedIo<'s>: Send + Sync {
+    fn write_notice(&self, _path: &CanonPath) -> Option<String> {
+        None
+    }
+
     /// Atomically and durably replace one permit-checked whole file.
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied>;
 
@@ -812,6 +821,10 @@ fn credential_keys(path: &CanonPath, bytes: Vec<u8>) -> Result<Vec<u8>, IoDenied
 }
 
 impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedMcpResume<'resume>> {
+    fn write_notice(&self, path: &CanonPath) -> Option<String> {
+        self.fs.write_notice(path)
+    }
+
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
         // the trait doc comment. `write_target` and not `canonicalize`,

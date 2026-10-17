@@ -88,3 +88,5 @@ fn __ego_internal_network_probe_v1() {
     }
     assert!(ego_tools::exec::dispatch_network_probe(std::env::args_os()).expect("probe envelope"));
 }
+
+pub mod checkpoint;

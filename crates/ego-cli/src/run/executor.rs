@@ -599,7 +599,7 @@ impl CliCompactionCommand {
             effect_scope(&confinement, active.evidence(), &cancel, run_deadline, None)
                 .await
                 .map_err(compaction_termination)?;
-        let fs = OsFs;
+        let fs = &active.checkpoint_fs;
         let sink = NullSink;
         let session = Session {
             id: active.id(),
@@ -622,7 +622,7 @@ impl CliCompactionCommand {
             retry_pause: Arc::new(TokioRetryPause),
         };
         let effect_ports = ToolEffectPorts::new(
-            &fs,
+            fs,
             ports.process(),
             active.evidence(),
             ports.resolver_handle(),

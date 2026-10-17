@@ -37,6 +37,8 @@ ego ls                        list sessions (this workspace; --all for every one
 ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
                               --force acknowledges an uncertain run
 ego fork <ID> [--at ITEM_ID]   branch after a completed turn
+ego checkpoint [-C DIR] <ID> preview|restore COMMIT|close
+                              inspect or selectively undo builtin file edits
 ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
                               publish one idempotent checkpoint target
 ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
@@ -2533,3 +2535,31 @@ Reference contracts captured 2026-10-16:
   schema recorded from
   <https://raw.githubusercontent.com/jupyter/nbformat/main/nbformat/v4/nbformat.v4.schema.json>.
   The upstream BSD license is stored beside it as `nbformat.LICENSE`.
+
+
+### Session-owned file checkpoints
+
+Builtin `write` and `edit` save pre-edit bytes in private Git commit objects before
+changing files. This works in Git worktrees, including dirty and untracked files,
+without changing HEAD or the user's index. Outside Git, builtin results explicitly
+state that no checkpoint is available.
+
+```text
+ego checkpoint [-C DIR] SESSION_ID preview
+ego checkpoint [-C DIR] SESSION_ID restore CHECKPOINT_COMMIT
+ego checkpoint [-C DIR] SESSION_ID close
+```
+
+Preview emits JSON with each checkpoint's path, restore effect, and conflict state.
+Restore selects exactly one checkpoint and refuses external changes, missing edited
+files, external atomic replacements, symlinks, and permission changes. There is no force flag: preserve or resolve
+an external edit before retrying. Restore successive edits to a file newest first.
+A created file is deleted when its creation checkpoint is restored. Repeating a
+completed restore is safe. Binary preimages are preserved byte-for-byte.
+
+Refs live at `refs/ego/checkpoints/SESSION_ID`; normal exit keeps them for recovery.
+Explicit checkpoint close or `ego rm` removes the selected repository's session
+ref, without changing files. Git GC later removes unreachable objects. Child
+sessions own separate refs. With multiple repositories, close each with `-C`.
+Exec commands, MCP effects, arbitrary deletes, and external editors are not captured.
+Checkpoint objects contain original file bytes; do not push private checkpoint refs.
