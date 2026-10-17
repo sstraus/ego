@@ -73,4 +73,4 @@ pub use tool::{
 };
 
 mod terminal_text;
-pub use terminal_text::{TerminalSafe, shell_word, terminal_safe};
+pub use terminal_text::{TerminalSafe, shell_word, terminal_output_safe, terminal_safe};
