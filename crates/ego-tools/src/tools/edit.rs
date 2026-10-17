@@ -141,7 +141,8 @@ impl TypedTool for EditTool {
                 io.write_notice(&path)
                     .map(|notice| format!("\n{notice}"))
                     .unwrap_or_default()
-            )).with_line_change(change))
+            ))
+            .with_line_change(change))
         })
     }
 }
