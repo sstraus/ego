@@ -119,7 +119,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
     );
     logical.push("Aliases: /resume [ID], /continue [ID], /history QUERY".to_owned());
     logical.push(
-        "Unknown slash input is sent as prompt text; aliases require their exact spelling."
+        "Unknown slash input is refused locally; add a leading space to send literal text."
             .to_owned(),
     );
     logical.push("Keys".to_owned());
@@ -323,15 +323,6 @@ pub(super) fn surface_line(
     drafts: &mut DraftStash,
 ) -> (Line, bool) {
     loop {
-        if phase.get() == EditPhase::Idle {
-            question::tell_host(status, |osc, _| {
-                [
-                    osc.state(crate::render::osc::State::Idle),
-                    osc.progress(crate::render::osc::Progress::Cleared),
-                ]
-                .concat()
-            });
-        }
         if phase.get() == EditPhase::Busy {
             let notice = status.lock().expect("surface status lock").notice.take();
             if let Some(notice) = notice {
@@ -343,6 +334,14 @@ pub(super) fn surface_line(
                 }
                 commit_to_transcript(status, &format!("{}: {notice}", crate::DISPLAY_NAME));
             }
+        } else if phase.get() == EditPhase::Idle {
+            question::tell_host(status, |osc, _| {
+                [
+                    osc.state(crate::render::osc::State::Idle),
+                    osc.progress(crate::render::osc::Progress::Cleared),
+                ]
+                .concat()
+            });
         }
         let signal = editor.read_line(prompt);
         // Reject blank input before Reedline commits it to history or clears

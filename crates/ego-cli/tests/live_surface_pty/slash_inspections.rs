@@ -197,4 +197,9 @@ fn busy_config_write_reports_pending_before_the_turn_finishes() {
         held.contains("config write pending until the active turn finishes"),
         "the user needs an acceptance receipt before completion: {held}"
     );
+    assert_eq!(
+        held.matches("pending until").count(),
+        1,
+        "the generic host handoff must not duplicate the config receipt: {held}"
+    );
 }

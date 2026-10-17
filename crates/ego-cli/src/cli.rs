@@ -1,23 +1,10 @@
 //! The argument grammar: `CLI.md` §3 and the parse half of §4.5.
 //!
-//! Three things happen here, in this order, and the order is the contract:
-//!
-//! 1. **`--` is honoured first.** §4.5 reserves it for prompt
-//!    disambiguation — `ego -- run` prompts the word "run" — and the MCP
-//!    grammar reserves it for the exact stdio child argv. Nothing downstream
-//!    may reinterpret a token past it. `clap`'s own `--` handling is per-
-//!    subcommand and would have to decide `run` is a subcommand *before* it
-//!    could apply, which is the wrong way round.
-//! 2. **The applicability matrix.** A flag `CLI.md` documents whose subsystem
-//!    this build does not have is refused **by name**, naming what it waits
-//!    on, and a retired flag is refused by name with its replacement (§4.3:
-//!    "flags are never removed silently"). Both run before `clap` sees the
-//!    vector, so the answer is a sentence about *that flag* rather than
-//!    clap's "unexpected argument".
-//! 3. **`clap`, over what is left.** `ARCHITECTURE.md` names clap for
-//!    argv, and generating the reference and the completions from the same
-//!    definition (§4.5's last clause) is only possible while there is exactly
-//!    one definition.
+//! The literal `--` boundary is separated before command dispatch. Clap then
+//! owns option/value boundaries, including hidden diagnostic spellings. Only
+//! parsed flags can earn a retired/unavailable refusal; prompt values and MCP
+//! child argv are never searched for flags. Resume metadata is dispatched from
+//! typed fields after the same clap parser used by both aliases.
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
@@ -25,7 +12,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use clap::error::ErrorKind;
-use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
+use clap::{ArgAction, Args as ClapArgs, CommandFactory, Parser, Subcommand};
 use ego_core::config::{
     ManagedConfigKey, ManagedConfigValue, ManagedRuleEffect, McpEnvironmentName, McpHttpAuth,
     McpHttpConfig, McpHttpUrl, McpServerConfig, McpServerName, Mode, ModelRef, ProfileName,
@@ -68,7 +55,7 @@ pub enum Invocation {
     /// "which session" is identical, and a `ResumeArgs` would be the parallel
     /// implementation `AGENTS.md`'s reuse rule forbids.
     Resume(Box<Args>),
-    /// `ego resume ID --name ...|--goal ...` — durable metadata only.
+    /// `ego resume ID --name ...|--goal-operation ...` — durable metadata only.
     SessionMetadata(Box<SessionMetadataArgs>),
     /// `ego ls` — the catalogue, this workspace's by default.
     Ls(Box<LsArgs>),
@@ -252,14 +239,14 @@ pub fn root_command() -> clap::Command {
         .name("ego")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Run an agent, from one command line.")
-        // `ego help` is not one of the 17 commands `CLI.md` §2 documents, and
+        // `ego help` is not in the command inventory `CLI.md` §2 documents, and
         // building the tree would otherwise invent it — putting a subcommand in
         // the reference and the completions that the real parser answers by
         // treating "help" as a prompt.
         .disable_help_subcommand(true)
-        .subcommand(named("run", RunCommand::command()))
-        .subcommand(named("resume", ResumeCommand::command()))
-        .subcommand(named("continue", ResumeCommand::command()))
+        .subcommand(named("run", headless_run_command()))
+        .subcommand(named("resume", resume_command()))
+        .subcommand(named("continue", resume_command()))
         .subcommand(named("fork", ForkCommand::command()))
         .subcommand(named("rm", RmCommand::command()))
         .subcommand(named("compact", CompactCommand::command()))
@@ -321,17 +308,6 @@ enum OrchestratorAction {
     },
 }
 
-/// The flag name in `token`, if it is one. `--budget=2.5$` is `--budget`.
-fn flag_name(token: &str) -> Option<&str> {
-    if !token.starts_with('-') || token == "-" || token == "--" {
-        return None;
-    }
-    Some(match token.split_once('=') {
-        Some((name, _)) => name,
-        None => token,
-    })
-}
-
 /// The refusal a retired flag earns, if `name` names one in `table`.
 ///
 /// The table is an argument and not [`RETIRED`] read directly, because
@@ -359,12 +335,38 @@ pub fn unbuilt_refusal(program: &str, first: &str, table: &[(&str, &str)]) -> Op
         })
 }
 
-/// Refuse a documented-but-unavailable or retired flag, by name.
-fn check_matrix(tokens: &[String]) -> Result<(), UsageError> {
-    for token in tokens {
-        let Some(name) = flag_name(token) else {
-            continue;
+/// Let clap, not a token scan, decide whether a diagnostic flag was supplied.
+fn diagnostic_flags() -> impl Iterator<Item = &'static str> {
+    UNAVAILABLE
+        .iter()
+        .flat_map(|entry| entry.flags.iter().copied())
+        .chain(RETIRED.iter().map(|(name, _)| *name))
+}
+
+fn with_diagnostic_flags(mut command: clap::Command) -> clap::Command {
+    for spelling in diagnostic_flags() {
+        let argument = clap::Arg::new(spelling)
+            .action(ArgAction::SetTrue)
+            .hide(true)
+            .global(true);
+        let argument = if let Some(long) = spelling.strip_prefix("--") {
+            argument.long(long)
+        } else {
+            argument.short(
+                spelling
+                    .trim_start_matches('-')
+                    .chars()
+                    .next()
+                    .expect("short flag"),
+            )
         };
+        command = command.arg(argument);
+    }
+    command
+}
+
+fn check_matrix(matches: &clap::ArgMatches) -> Result<(), UsageError> {
+    for name in diagnostic_flags().filter(|name| matches.get_flag(name)) {
         if let Some(refusal) = retired_refusal(name, RETIRED) {
             return Err(refusal);
         }
@@ -377,6 +379,40 @@ fn check_matrix(tokens: &[String]) -> Result<(), UsageError> {
         }
     }
     Ok(())
+}
+
+/// Metadata may share store/output selection, but never run options or prompts.
+fn headless_run_command() -> clap::Command {
+    RunCommand::command().mut_arg("vim", |argument| argument.hide(true))
+}
+
+fn resume_command() -> clap::Command {
+    let mut command = ResumeCommand::command();
+    for id in ["session", "session_id", "worktree"] {
+        command = command.mut_arg(id, |argument| argument.hide(true));
+    }
+    let launch = command
+        .get_arguments()
+        .filter(|argument| {
+            ![
+                "id",
+                "prompt",
+                "answers",
+                "name",
+                "goal_operation",
+                "session_dir",
+                "directory",
+                "output",
+            ]
+            .contains(&argument.get_id().as_str())
+        })
+        .map(|argument| argument.get_id().clone())
+        .collect::<Vec<_>>();
+    command.group(
+        clap::ArgGroup::new("resume-run-options")
+            .args(launch)
+            .multiple(true),
+    )
 }
 
 /// Where the prompt comes from when it is not on the command line.
@@ -1172,8 +1208,21 @@ enum Parsed<T> {
 /// offending argument and the group it violated, and re-writing it here would
 /// be a second voice saying the same thing, worse.
 fn clap_or_answer<T: Parser>(tokens: &[String]) -> Result<Parsed<T>, UsageError> {
-    match T::try_parse_from(tokens) {
-        Ok(parsed) => Ok(Parsed::Command(parsed)),
+    clap_command_or_answer(tokens, T::command(), None)
+}
+
+fn clap_command_or_answer<T: Parser>(
+    tokens: &[String],
+    command: clap::Command,
+    redacted_usage: Option<&str>,
+) -> Result<Parsed<T>, UsageError> {
+    match with_diagnostic_flags(command).try_get_matches_from(tokens) {
+        Ok(matches) => {
+            check_matrix(&matches)?;
+            T::from_arg_matches(&matches)
+                .map(Parsed::Command)
+                .map_err(|error| UsageError(error.to_string().trim_end().to_owned()))
+        }
         Err(err)
             if matches!(
                 err.kind(),
@@ -1182,7 +1231,11 @@ fn clap_or_answer<T: Parser>(tokens: &[String]) -> Result<Parsed<T>, UsageError>
         {
             Ok(Parsed::Answered(err.to_string()))
         }
-        Err(err) => Err(UsageError(err.to_string().trim_end().to_string())),
+        Err(err) => Err(UsageError(
+            redacted_usage
+                .map(str::to_owned)
+                .unwrap_or_else(|| err.to_string().trim_end().to_owned()),
+        )),
     }
 }
 
@@ -1192,39 +1245,23 @@ fn clap_or_answer<T: Parser>(tokens: &[String]) -> Result<Parsed<T>, UsageError>
 /// will reject it. Structural failures therefore retain the frozen usage but
 /// not clap's echo of the supplied argv.
 fn config_clap_or_answer(tokens: &[String]) -> Result<Parsed<ConfigCommand>, UsageError> {
-    match ConfigCommand::try_parse_from(tokens) {
-        Ok(parsed) => Ok(Parsed::Command(parsed)),
-        Err(err)
-            if matches!(
-                err.kind(),
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            ) =>
-        {
-            Ok(Parsed::Answered(err.to_string()))
-        }
-        Err(_) => Err(UsageError(
-            "invalid ego config invocation\n\nUsage:\n  ego config get [--profile NAME] [--json] KEY\n  ego config set [--profile NAME] KEY=TOML_VALUE\n  ego config unset [--profile NAME] KEY\n  ego config ls [--profile NAME] [--json]\n  ego config edit"
-                .to_owned(),
-        )),
-    }
+    clap_command_or_answer(
+        tokens,
+        ConfigCommand::command(),
+        Some(
+            "invalid ego config invocation\n\nUsage:\n  ego config get [--profile NAME] [--json] KEY\n  ego config set [--profile NAME] KEY=TOML_VALUE\n  ego config unset [--profile NAME] KEY\n  ego config ls [--profile NAME] [--json]\n  ego config edit",
+        ),
+    )
 }
 
 fn rules_clap_or_answer(tokens: &[String]) -> Result<Parsed<RulesCommand>, UsageError> {
-    match RulesCommand::try_parse_from(tokens) {
-        Ok(parsed) => Ok(Parsed::Command(parsed)),
-        Err(err)
-            if matches!(
-                err.kind(),
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            ) =>
-        {
-            Ok(Parsed::Answered(err.to_string()))
-        }
-        Err(_) => Err(UsageError(
-            "invalid ego rules invocation\n\nUsage:\n  ego rules ls [--profile NAME] [--json]\n  ego rules allow [--profile NAME] RULE\n  ego rules deny [--profile NAME] RULE\n  ego rules revoke [--profile NAME] RULE_ID\n  ego rules remember [--profile NAME] [-C DIR] [--yes] allow|deny TOOL ARGS_JSON\n  ego rules explain [--profile NAME] [-C DIR] [--json] TOOL ARGS_JSON"
-                .to_owned(),
-        )),
-    }
+    clap_command_or_answer(
+        tokens,
+        RulesCommand::command(),
+        Some(
+            "invalid ego rules invocation\n\nUsage:\n  ego rules ls [--profile NAME] [--json]\n  ego rules allow [--profile NAME] RULE\n  ego rules deny [--profile NAME] RULE\n  ego rules revoke [--profile NAME] RULE_ID\n  ego rules remember [--profile NAME] [-C DIR] [--yes] allow|deny TOOL ARGS_JSON\n  ego rules explain [--profile NAME] [-C DIR] [--json] TOOL ARGS_JSON",
+        ),
+    )
 }
 
 /// `ego --help`: the command set, from the tables the refusals read.
@@ -1242,7 +1279,9 @@ fn overview(program: &str) -> String {
     for name in BUILT {
         let about = match *name {
             "run" => "Run an agent from a prompt, headless",
-            "resume" | "continue" => "Continue a session; no ID = latest in this workspace",
+            "resume" | "continue" => {
+                "Continue a session; terminal picker, otherwise latest in this workspace"
+            }
             "rm" => "Delete a stored session",
             "fork" => "Fork a session at its tip or after a completed turn",
             "ls" => "List sessions (this workspace; --all for every one)",
@@ -1277,11 +1316,12 @@ fn overview(program: &str) -> String {
             .to_string(),
     );
     text.push_str(&format!(
-        "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
-         documents the remaining commands; each is refused by name, with the subsystem it \
-         waits on. Start Ollama and run `ollama pull qwen3` before the local \
-         example above.\n"
+        "\n`{program} <COMMAND> --help` describes one of them.\n"
     ));
+    if !UNBUILT.is_empty() {
+        text.push_str("CLI.md §2 documents the remaining commands; each is refused by name, with the subsystem it waits on.\n");
+    }
+    text.push_str("Start Ollama and run `ollama pull qwen3` before the local example above.\n");
     text
 }
 
@@ -1294,10 +1334,6 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         argv.remove(0)
     };
     let (head, tail) = split_at_separator(argv);
-
-    // Before clap, and before the subcommand is decided: a refusal must be
-    // able to name a flag clap would have rejected as unknown.
-    check_matrix(&head)?;
 
     // A documented command answers for itself, before the fallback below can
     // answer for it. Only an exact first token counts: §2's first line is
@@ -1340,11 +1376,6 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         Some(name) if BUILT.contains(&name) => Some(name.to_string()),
         _ => None,
     };
-    let resume_metadata = subcommand.as_deref() == Some("resume")
-        && head
-            .iter()
-            .any(|token| matches!(flag_name(token), Some("--name") | Some("--goal")));
-
     let mut tokens: Vec<String> = head;
     // Both words, not just the program. clap takes the command it names in
     // `Usage:` from argv[0] and not from the `name` attribute on the struct, so
@@ -1371,14 +1402,13 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         tokens.extend(tail.iter().cloned());
     }
 
-    parse_subcommand(subcommand.as_deref(), tokens, tail, resume_metadata)
+    parse_subcommand(subcommand.as_deref(), tokens, tail)
 }
 
 fn parse_subcommand(
     subcommand: Option<&str>,
     tokens: Vec<String>,
     tail: Option<Vec<String>>,
-    resume_metadata: bool,
 ) -> Result<Invocation, UsageError> {
     match subcommand {
         Some("worktree") => match clap_or_answer::<WorktreeCommand>(&tokens)? {
@@ -1402,29 +1432,27 @@ fn parse_subcommand(
                 INTERACTIVE_PROVIDER_RETRIES,
             )?))),
         },
-        Some("resume" | "continue") if resume_metadata => {
-            match clap_or_answer::<SessionMetadataCommand>(&tokens)? {
+        Some("resume" | "continue") => {
+            match clap_command_or_answer::<ResumeCommand>(&tokens, resume_command(), None)? {
                 Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-                Parsed::Command(parsed) => Ok(Invocation::SessionMetadata(Box::new(
-                    into_session_metadata_args(parsed)?,
-                ))),
-            }
-        }
-        Some("resume" | "continue") => match clap_or_answer::<ResumeCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => {
-                let args = into_resume_args(parsed)?;
-                if args.prompt.is_none()
-                    && args.agent_file.is_none()
-                    && args.stdin == Stdin::Ambient
-                    && args.answers.is_empty()
-                {
-                    Ok(Invocation::Interactive(Box::new(args)))
-                } else {
-                    Ok(Invocation::Resume(Box::new(args)))
+                Parsed::Command(parsed) => {
+                    if parsed.name.is_some() || parsed.goal_operation.is_some() {
+                        return into_session_metadata_args(parsed)
+                            .map(|args| Invocation::SessionMetadata(Box::new(args)));
+                    }
+                    let args = into_resume_args(parsed)?;
+                    if args.prompt.is_none()
+                        && args.agent_file.is_none()
+                        && args.stdin == Stdin::Ambient
+                        && args.answers.is_empty()
+                    {
+                        Ok(Invocation::Interactive(Box::new(args)))
+                    } else {
+                        Ok(Invocation::Resume(Box::new(args)))
+                    }
                 }
             }
-        },
+        }
         Some("acp") => match clap_or_answer::<AcpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => into_acp_invocation(parsed),
@@ -1487,7 +1515,7 @@ fn parse_subcommand(
         Some(command @ ("auth" | "roots" | "config" | "rules" | "mcp")) => {
             parse_management_command(command, &tokens, tail)
         }
-        _ => match clap_or_answer::<RunCommand>(&tokens)? {
+        _ => match clap_command_or_answer::<RunCommand>(&tokens, headless_run_command(), None)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
         },
@@ -1958,6 +1986,8 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         prompt,
         answers,
         flags,
+        name: _,
+        goal_operation: _,
     } = command;
 
     reject_ephemeral(flags.ephemeral)?;
@@ -2004,16 +2034,18 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     Ok(args)
 }
 
-fn into_session_metadata_args(
-    command: SessionMetadataCommand,
-) -> Result<SessionMetadataArgs, UsageError> {
-    let session = SessionId::from_str(&command.id).map_err(|error| {
+fn into_session_metadata_args(command: ResumeCommand) -> Result<SessionMetadataArgs, UsageError> {
+    let id = command
+        .id
+        .as_deref()
+        .expect("clap requires a metadata session id");
+    let session = SessionId::from_str(id).map_err(|error| {
         UsageError(format!(
             "`{}` is not a session id: {error}. Metadata operations require an explicit id",
-            command.id
+            id
         ))
     })?;
-    let operation = match (command.name, command.goal) {
+    let operation = match (command.name, command.goal_operation) {
         (Some(operation), None) => SessionMetadataOperation::Name(operation),
         (None, Some(operation)) => SessionMetadataOperation::Goal(operation),
         _ => unreachable!("clap requires exactly one metadata operation"),
@@ -2021,9 +2053,9 @@ fn into_session_metadata_args(
     Ok(SessionMetadataArgs {
         session,
         operation,
-        session_dir: command.common.places.session_dir,
-        directory: command.common.places.directory,
-        output: command.common.output.unwrap_or(Output::Text),
+        session_dir: command.flags.common.places.session_dir,
+        directory: command.flags.common.places.directory,
+        output: command.flags.common.output.unwrap_or(Output::Text),
         profile: None,
     })
 }

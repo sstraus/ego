@@ -33,6 +33,10 @@ fn busy_tasks_contract(interrupt: bool) {
     input.write_all(b"hold turn\r").expect("turn");
     input.flush().expect("flush");
     until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    let help_start = output.len();
+    input.write_all(b"/help\r").expect("help during held turn");
+    input.flush().expect("help flush");
+    until_normalized_without_new_generation(&reader, &mut output, help_start, HELP_END, &stub, 1);
     let start = output.len();
     input.write_all(b"/tasks\r").expect("tasks");
     input.flush().expect("flush");
