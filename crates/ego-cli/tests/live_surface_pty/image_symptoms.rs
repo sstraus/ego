@@ -1,6 +1,6 @@
 //! Real driver/seat in an isolated PTY with an image-kind pasteboard port.
 //! The port never fetches bytes: these models must refuse before acquisition.
-use super::held_permission_receipt::support;
+use crate::run::test_support as support;
 
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};

@@ -600,6 +600,8 @@ pub fn project_replay_v1(
                             serde_json::json!({"salience": "card"}),
                         )])),
                 )]
+            } else if matches!(frame.event, PublicEvent::PlanUpdated { .. }) {
+                vec![project_plan_v1(&frame.state.plan)]
             } else {
                 project_updates_v1(&frame.event, root)
             };
@@ -793,7 +795,8 @@ fn project_v1_with_root(
         | PublicEvent::TurnCompleted { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
-        | PublicEvent::Error { .. } => None,
+        | PublicEvent::Error { .. }
+        | PublicEvent::PlanUpdated { .. } => None,
     }
 }
 
@@ -828,7 +831,9 @@ pub fn project_acp_updates_v1(
     caps: &ModelCapabilities,
     root: &std::path::Path,
 ) -> Vec<v1::SessionUpdate> {
-    let mut updates = if needs_state(event) {
+    let mut updates = if matches!(event, PublicEvent::PlanUpdated { .. }) {
+        vec![project_plan_v1(&state_after.plan)]
+    } else if needs_state(event) {
         project_acp_v1(event, state_after, caps)
             .into_iter()
             .collect()
@@ -838,36 +843,53 @@ pub fn project_acp_updates_v1(
     if matches!(
         event,
         PublicEvent::TurnStarted { .. } | PublicEvent::TurnCompleted { .. }
-    ) && let Some(plan) = project_goal_plan_v1(state_after.goal.as_ref())
+    ) && let Some(plan) = project_objective_v1(state_after.goal.as_ref())
     {
         updates.push(plan);
     }
     updates
 }
 
-/// Present the current goal as one plan entry, without inventing plan steps.
-pub fn project_goal_plan_v1(
+/// Goals are objectives, never fabricated plan steps.
+pub fn project_objective_v1(
     goal: Option<&ego_core::goal::GoalRecord>,
 ) -> Option<v1::SessionUpdate> {
-    use ego_core::goal::GoalState;
     let goal = goal?;
-    let status = match goal.state {
-        GoalState::Active => v1::PlanEntryStatus::InProgress,
-        GoalState::Achieved => v1::PlanEntryStatus::Completed,
-        GoalState::Blocked => v1::PlanEntryStatus::Pending,
-    };
-    Some(v1::SessionUpdate::Plan(v1::Plan::new(vec![
-        v1::PlanEntry::new(&goal.objective, v1::PlanEntryPriority::Medium, status).meta(
-            serde_json::Map::from_iter([(
-                "ego".to_owned(),
-                serde_json::json!({
-                    "goalId": goal.id, "goalState": goal.state,
-                    "goalStop": goal.check_stop, "goalContinuationTurns": goal.continuation_turns,
-                    "goalStatus": if goal.check_stop.is_some() { "stopped" } else { "running" },
-                }),
-            )]),
-        ),
-    ])))
+    Some(v1::SessionUpdate::SessionInfoUpdate(
+        v1::SessionInfoUpdate::new().meta(serde_json::Map::from_iter([(
+            "ego".to_owned(),
+            serde_json::json!({
+                "objective": goal.objective, "goalId": goal.id, "goalState": goal.state,
+                "goalStop": goal.check_stop, "goalContinuationTurns": goal.continuation_turns,
+                "goalStatus": if goal.check_stop.is_some() { "stopped" } else { "running" },
+            }),
+        )])),
+    ))
+}
+
+/// Full replacement projection of the authoritative ordered plan.
+pub fn project_plan_v1(plan: &ego_core::plan::Plan) -> v1::SessionUpdate {
+    use ego_core::plan::StepStatus;
+    v1::SessionUpdate::Plan(v1::Plan::new(
+        plan.steps
+            .iter()
+            .map(|step| {
+                let status = match step.status {
+                    StepStatus::Pending | StepStatus::Blocked => v1::PlanEntryStatus::Pending,
+                    StepStatus::InProgress => v1::PlanEntryStatus::InProgress,
+                    StepStatus::Completed => v1::PlanEntryStatus::Completed,
+                };
+                v1::PlanEntry::new(&step.text, v1::PlanEntryPriority::Medium, status).meta(
+                    serde_json::Map::from_iter([(
+                        "ego".to_owned(),
+                        serde_json::json!({
+                            "stepId": step.id, "status": step.status,
+                        }),
+                    )]),
+                )
+            })
+            .collect(),
+    ))
 }
 
 /// Project one `PublicEvent` onto ACP protocol v2's `SessionUpdate`.
@@ -975,7 +997,8 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         | PublicEvent::ProviderRetrying { .. }
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
-        | PublicEvent::Error { .. } => None,
+        | PublicEvent::Error { .. }
+        | PublicEvent::PlanUpdated { .. } => None,
     }
 }
 

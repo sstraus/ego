@@ -386,6 +386,190 @@ mod report_service {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
+    // Catches: subscription accounting zero leaking into known monetary spend.
+    #[test]
+    fn subscription_equivalents_are_not_known_zero_monetary_spend() {
+        use ego_core::cost::{MeteringRevision, SubscriptionEquivalent};
+        for metered in [None, Some("0"), Some("0.25")] {
+            let session = SessionId::new();
+            let mut seq = Seq::default();
+            let mut entries = Vec::new();
+            let subscription = CostDelta::Known {
+                amount: Money::new("0".parse().unwrap(), CurrencyCode::new("USD").unwrap()),
+                attribution: CostAttribution::MeteringPolicy {
+                    revision: MeteringRevision("ego/builtin/openai-codex-subscription/v1".into()),
+                    equivalent: Some(Box::new(SubscriptionEquivalent::V1 {
+                        model: "openai-codex/gpt-6-sol".into(),
+                        source: PricingRevision("fixture-standard-api".into()),
+                        service_tier: "standard".into(),
+                        amount: Money::new(
+                            "0.011458".parse().unwrap(),
+                            CurrencyCode::new("USD").unwrap(),
+                        ),
+                    })),
+                },
+                fx: None,
+            };
+            let mut costs = vec![subscription];
+            if let Some(amount) = metered {
+                costs.push(cost("USD", amount));
+            }
+            for delta in costs {
+                let attempt = AttemptRef::first(GenerationId::new());
+                entries.push(SessionEntry::Event(event(
+                    &mut seq,
+                    1_000,
+                    EventKind::GenerationStarted {
+                        attempt,
+                        role: GenerationRole::Main,
+                        snapshot: None,
+                    },
+                )));
+                entries.push(SessionEntry::Event(event(
+                    &mut seq,
+                    1_001,
+                    EventKind::UsageUpdated {
+                        usage: usage(10, 2),
+                        cost_delta: delta,
+                        attempt: Some(attempt),
+                    },
+                )));
+            }
+            let store = FixtureStore {
+                entries: BTreeMap::from([(session, entries)]),
+                metadata: vec![meta(session, None, 2_000)],
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let clock = CountingClock {
+                now: Timestamp::from_millis(2_000),
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let report = block_on(
+                UsageReportService::new(&store, &clock).report(&store.metadata, UsagePeriod::All),
+            )
+            .unwrap();
+            let json = serde_json::to_value(&report).unwrap();
+            let expected_known = metered.map_or_else(
+                || serde_json::json!([]),
+                |amount| serde_json::json!([{"amount":amount,"currency":"USD"}]),
+            );
+            for line in [
+                &json["totals"]["total"],
+                &json["sessions"][0]["lines"]["main"],
+            ] {
+                assert_eq!(
+                    line["cost"]["known"], expected_known,
+                    "subscription zero is not monetary spend"
+                );
+                assert_eq!(
+                    line["cost"]["subscription_equivalent"],
+                    serde_json::json!([{"amount":"0.011458","currency":"USD"}])
+                );
+                assert_eq!(
+                    line["usage"]["uncached_input_tokens"],
+                    if metered.is_some() { 20 } else { 10 }
+                );
+            }
+        }
+    }
+
+    // Catches: missing/overflowing estimates looking complete, or losing real metered zero.
+    #[test]
+    fn subscription_missing_and_overflow_do_not_poison_monetary_currency_totals() {
+        use ego_core::cost::{MeteringRevision, SubscriptionEquivalent};
+        let policy = |estimate: Option<Money>| CostDelta::Known {
+            amount: Money::new("0".parse().unwrap(), CurrencyCode::new("USD").unwrap()),
+            attribution: CostAttribution::MeteringPolicy {
+                revision: MeteringRevision("fixture-subscription".into()),
+                equivalent: estimate.map(|amount| {
+                    Box::new(SubscriptionEquivalent::V1 {
+                        model: "fixture-model".into(),
+                        source: PricingRevision("fixture-standard".into()),
+                        service_tier: "standard".into(),
+                        amount,
+                    })
+                }),
+            },
+            fx: None,
+        };
+        let money = |currency: &str, coefficient| {
+            Money::new(
+                Amount::new(coefficient, 0).unwrap(),
+                CurrencyCode::new(currency).unwrap(),
+            )
+        };
+        for (costs, equivalent, unknown) in [
+            (
+                vec![cost("USD", "0")],
+                serde_json::json!([]),
+                serde_json::json!([]),
+            ),
+            (
+                vec![cost("USD", "0"), policy(None)],
+                serde_json::json!([]),
+                serde_json::json!([{"reason":"no_pricing_quote"}]),
+            ),
+            (
+                vec![
+                    cost("USD", "0"),
+                    policy(Some(money("USD", u128::MAX))),
+                    policy(Some(money("USD", 1))),
+                    policy(Some(money("USD", 2))),
+                    policy(Some(money("EUR", 3))),
+                ],
+                serde_json::json!([{"amount":"3","currency":"EUR"}]),
+                serde_json::json!([{"reason":"overflow"}]),
+            ),
+        ] {
+            let session = SessionId::new();
+            let mut seq = Seq::default();
+            let mut entries = Vec::new();
+            for delta in costs {
+                let attempt = AttemptRef::first(GenerationId::new());
+                entries.push(SessionEntry::Event(event(
+                    &mut seq,
+                    1_000,
+                    EventKind::GenerationStarted {
+                        attempt,
+                        role: GenerationRole::Main,
+                        snapshot: None,
+                    },
+                )));
+                entries.push(SessionEntry::Event(event(
+                    &mut seq,
+                    1_001,
+                    EventKind::UsageUpdated {
+                        usage: usage(10, 2),
+                        cost_delta: delta,
+                        attempt: Some(attempt),
+                    },
+                )));
+            }
+            let store = FixtureStore {
+                entries: BTreeMap::from([(session, entries)]),
+                metadata: vec![meta(session, None, 2_000)],
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let clock = CountingClock {
+                now: Timestamp::from_millis(2_000),
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let report = block_on(
+                UsageReportService::new(&store, &clock).report(&store.metadata, UsagePeriod::All),
+            )
+            .unwrap();
+            let json = serde_json::to_value(&report).unwrap();
+            let actual = &json["totals"]["total"]["cost"];
+            assert_eq!(
+                actual["known"],
+                serde_json::json!([{"amount":"0","currency":"USD"}])
+            );
+            assert_eq!(actual["unknown"], serde_json::json!([]));
+            assert_eq!(actual["subscription_equivalent"], equivalent);
+            assert_eq!(actual["subscription_unknown"], unknown);
+        }
+    }
+
     #[test]
     fn report_period_is_tagged_and_rejects_zero_seconds_at_the_type_boundary() {
         let period = UsagePeriod::Last {
