@@ -62,3 +62,47 @@ fn selected_completion(accept: &[u8], tab_first: bool) {
         }
     }
 }
+
+// Catches: accepting a skill completion submits literal slash text or invokes it twice.
+#[test]
+fn selected_skill_completion_enter_delivers_one_admitted_instruction() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("SELECTED-SKILL-REPLY"))],
+        ..Plan::default()
+    });
+    let ego =
+        Ego::against(&stub)
+            .conversing()
+            .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    ego.file("AGENTS.md", "# Selected skill fixture\n");
+    ego.file(
+        ".ego/skills/zebra-completion/SKILL.md",
+        "---\nname: zebra-completion\ndescription: Selected skill consumer\nuser-invocable: true\ndisable-model-invocation: true\n---\nSELECTED-SKILL-INSTRUCTION-537\n",
+    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("flush");
+    until_prompt_from(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(b"/zebra-c").expect("skill prefix");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, start, "/zebra-completion");
+    input.write_all(b"\r").expect("accept skill");
+    input.flush().expect("flush");
+    until(&reader, &mut output, b"SELECTED-SKILL-REPLY");
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("flush");
+    assert!(session.quit(input).success());
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "one selected skill invocation");
+    let request = generations[0].to_string();
+    assert!(request.contains("Admitted skill instruction"), "{request}");
+    assert!(
+        request.contains("REGRESSION-MARKER"),
+        "{request}"
+    );
+}
