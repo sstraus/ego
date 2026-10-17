@@ -1622,21 +1622,79 @@ fn tool_schema_command(
     let McpSubject::Tool { name, .. } = envelope.subject() else {
         return Ok(None);
     };
-    if name != collapsed.bootstrap.lookup_name() {
+    if !collapsed.bootstrap.admits_schema_from(name) {
         return Ok(None);
     }
     let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
         return Ok(None);
     };
-    let structured_content = schema_lookup_content(result)?;
-    let parameters: Value = serde_json::from_slice(envelope.parameters())?;
-    let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
+    let (requested_name, structured_content) = if name == collapsed.bootstrap.lookup_name() {
+        let content = schema_lookup_content(result)?;
+        let parameters: Value = serde_json::from_slice(envelope.parameters())?;
+        (collapsed.bootstrap.requested_name(&parameters)?, content)
+    } else {
+        let Some(definition) = search_inline_definition(result)? else {
+            return Ok(None);
+        };
+        definition
+    };
     Ok(Some(McpToolSchemaCommand::new(
         server_admission,
         generation.to_string(),
         envelope.admission().clone(),
         requested_name,
         structured_content,
+    )))
+}
+
+/// One top hit can carry a complete definition without a second discovery round.
+/// This limits admitted inline data, not the server's existing summary results.
+const INLINE_SEARCH_SCHEMA_MAX_BYTES: usize = 16 * 1024;
+
+fn search_inline_definition(result: &CallToolResult) -> Result<Option<(String, Value)>, McpError> {
+    if result.is_error == Some(true)
+        || !result
+            .result_type
+            .as_ref()
+            .is_some_and(rmcp::model::ResultType::is_complete)
+    {
+        return Ok(None);
+    }
+    // Summary-only servers may return prose; only complete JSON definitions opt in.
+    let content = match schema_lookup_content(result) {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
+    let Some(top) = content
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|hits| hits.first())
+    else {
+        return Ok(None);
+    };
+    if top.get("inputSchema").is_none() {
+        return Ok(None);
+    }
+    if serde_json::to_vec(top)?.len() > INLINE_SEARCH_SCHEMA_MAX_BYTES {
+        return Err(protocol(
+            "collapsed search inline schema exceeds 16384-byte cap; use get_tool_schema",
+        ));
+    }
+    let name = top
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| protocol("collapsed search inline schema has no tool name"))?;
+    // Search metadata (summary, score) is not part of a complete tool definition.
+    let description = top
+        .get("description")
+        .and_then(Value::as_str)
+        .ok_or_else(|| protocol("collapsed search inline schema has no description"))?;
+    Ok(Some((
+        name.to_owned(),
+        serde_json::json!({
+            "name": name, "description": description, "inputSchema": top["inputSchema"]
+        }),
     )))
 }
 
@@ -2513,6 +2571,49 @@ mod stdio_fingerprint_tests {
                 .contains("transport fingerprint changed")
         );
         assert!(!probe.0.load(Ordering::SeqCst));
+    }
+
+    fn inline_search_result(content: Value) -> CallToolResult {
+        let mut result = CallToolResult::success(vec![]);
+        result.structured_content = Some(content);
+        result
+    }
+
+    /// Catches: an oversized inline definition bypasses the bounded schema surface.
+    #[test]
+    fn collapsed_search_inline_schema_rejects_excess_bytes() {
+        let top = serde_json::json!({"name":"weather","description":"x".repeat(INLINE_SEARCH_SCHEMA_MAX_BYTES),"inputSchema":{"type":"object"}});
+        let error =
+            search_inline_definition(&inline_search_result(serde_json::json!({"results":[top]})))
+                .unwrap_err();
+        assert!(error.to_string().contains("16384-byte cap"));
+    }
+
+    /// Catches: a summary or a non-top schema grants dispatcher authority.
+    #[test]
+    fn collapsed_search_summaries_and_non_top_schemas_do_not_admit() {
+        let result = inline_search_result(serde_json::json!({"results":[
+            {"name":"weather","summary":"Weather"},
+            {"name":"calendar","description":"Calendar","inputSchema":{"type":"object"}}
+        ]}));
+        assert!(search_inline_definition(&result).unwrap().is_none());
+        let prose =
+            CallToolResult::success(vec![ContentBlock::text("weather: current conditions")]);
+        assert!(search_inline_definition(&prose).unwrap().is_none());
+    }
+
+    /// Catches: the byte cap rejects a definition that fits exactly.
+    #[test]
+    fn collapsed_search_inline_schema_accepts_exact_cap() {
+        let mut top =
+            serde_json::json!({"name":"weather","description":"","inputSchema":{"type":"object"}});
+        let padding = INLINE_SEARCH_SCHEMA_MAX_BYTES - serde_json::to_vec(&top).unwrap().len();
+        top["description"] = Value::String("x".repeat(padding));
+        let result = inline_search_result(serde_json::json!({"results":[top]}));
+        assert_eq!(
+            search_inline_definition(&result).unwrap().unwrap().0,
+            "weather"
+        );
     }
 
     struct RejectSchemaPublication;

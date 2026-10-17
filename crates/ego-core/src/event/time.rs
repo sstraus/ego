@@ -138,6 +138,12 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// — and that is a different method for a different caller.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Timestamp;
+
+    /// Current local calendar time, including the UTC offset, for live turn context.
+    /// Clocks without a local zone report their UTC observation explicitly.
+    fn local_datetime(&self) -> String {
+        self.now().to_rfc3339()
+    }
 }
 
 #[cfg(test)]

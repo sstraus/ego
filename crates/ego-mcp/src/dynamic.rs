@@ -64,6 +64,10 @@ impl McpCollapsedBootstrap {
         [GET_TOOL_SCHEMA, SEARCH_TOOLS].into_iter()
     }
 
+    pub(crate) fn admits_schema_from(&self, name: &str) -> bool {
+        matches!(name, SEARCH_TOOLS | GET_TOOL_SCHEMA)
+    }
+
     pub(crate) fn lookup_name(&self) -> &'static str {
         GET_TOOL_SCHEMA
     }
