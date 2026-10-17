@@ -226,3 +226,65 @@ fn prompt_shaping_constraints_are_owned_by_clap_and_reference() {
         assert!(line.contains(rule), "{line}");
     }
 }
+
+// Catches: CLI.md omits writable keys or assigns them to the wrong user scope.
+#[test]
+fn managed_config_documentation_matches_the_closed_key_scopes() {
+    use ego_core::config::{ManagedConfigKey, ProfileName, UserConfigTarget};
+    use std::collections::{BTreeMap, BTreeSet};
+    let targets = [
+        UserConfigTarget::Base,
+        UserConfigTarget::Profile(ProfileName::parse("ordinary").unwrap()),
+        UserConfigTarget::Profile(ProfileName::parse("ci").unwrap()),
+    ];
+    let mut keys = BTreeSet::new();
+    for target in &targets {
+        keys.extend(ManagedConfigKey::for_target(target.clone()).iter().cloned());
+    }
+    keys.extend([
+        ManagedConfigKey::AuthHeaders("PROVIDER".into()),
+        ManagedConfigKey::AuthCredentialCommand("PROVIDER".into()),
+    ]);
+    let expected = keys
+        .into_iter()
+        .map(|key| {
+            (
+                key.as_str().into_owned(),
+                targets.each_ref().map(|target| key.available_in(target)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let document = include_str!("../../../CLI.md");
+    let table = document
+        .split("<!-- ego-managed-config-keys:start -->")
+        .nth(1)
+        .unwrap()
+        .split("<!-- ego-managed-config-keys:end -->")
+        .next()
+        .unwrap();
+    let mut actual = BTreeMap::new();
+    for line in table.lines().filter(|line| line.starts_with("| `")) {
+        let cells = line.split('|').map(str::trim).collect::<Vec<_>>();
+        let key = cells[1].trim_matches('`').to_owned();
+        let scopes = [cells[2], cells[3], cells[4]].map(|cell| match cell {
+            "yes" => true,
+            "no" => false,
+            other => panic!("invalid scope {other}"),
+        });
+        assert!(
+            actual.insert(key, scopes).is_none(),
+            "duplicate key: {line}"
+        );
+    }
+    assert_eq!(actual, expected);
+}
+
+// Catches: help claims missing commands when every command is already implemented.
+#[test]
+fn root_help_does_not_invent_unavailable_commands() {
+    if cli::UNBUILT.is_empty() {
+        let rendered = help(&["--help"]);
+        assert!(!rendered.contains("remaining commands"), "{rendered}");
+        assert!(!rendered.contains("waits on"), "{rendered}");
+    }
+}

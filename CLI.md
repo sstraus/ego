@@ -28,8 +28,8 @@ proposed.
 
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
-ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
-ego continue [ID] [PROMPT]    continue the latest saved session; shares resume options
+ego run [PROMPT]              headless one-shot; PROMPT from argv or stdin; -f FILE loads an agent file
+ego continue [ID] [PROMPT]    alias of resume; same session selection and options
 ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
                               --answer QUESTION_ID=JSON answers pending input;
                               --name and --goal-operation are metadata-only operations
@@ -56,7 +56,7 @@ ego mcp-server --max-concurrent-runs N --retained-requests N
 ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
 ego hooks  ls [--json]                     read-only admitted hook catalogue
-ego config get|set|unset|ls|edit
+ego config capabilities|snapshot|batch|get|set|unset|ls|edit
 ego roots  add|rm|ls                         user perimeter roots
 ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
@@ -162,15 +162,28 @@ turn. `ego run --output jsonl` remains one-shot event output, not this input
 protocol. The [integration guide](docs/integrations/acp.md#headless-multi-turn-stdio)
 shows both directions, attachment blocks, and flow control.
 
+`-f` / `--file` loads a strict version-1 agent file, including its invocation
+settings and declared template variables. It is not a plain-text prompt-file
+reader. For example, save this as `reviewer.md`:
+
+```markdown
+---
+version: 1
+---
+Review the current change for defects.
+```
+
+Then run `ego run --file reviewer.md`. Use `ego run -` to read a plain-text
+prompt from stdin. An argv prompt cannot be combined with an agent file.
+
 ### 2.1 Availability — what ships today
 
-The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-seventeen commands; this build implements **fourteen**. The remaining three are
-refused **by name**, each naming the subsystem it waits on, from the `UNBUILT`
-table in `crates/ego-cli/src/cli.rs`. A test binds that table to this section,
-so a command can be refused as documented only while this list still offers it.
-M5 must enable all seventeen from their final owners; this count is current
-availability, not permission to ship a fourteen-command product.
+The current command inventory comes from `BUILT` and `UNBUILT` in
+`crates/ego-cli/src/cli.rs`. All commands in the current `BUILT` table are
+implemented; `UNBUILT` is empty. Tests bind the command set below to those
+tables. If an unavailable command is added, its refusal must name the command
+and the subsystem it waits on. Availability does not remove a required
+capability from the final product.
 
 A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
@@ -218,6 +231,10 @@ milestones remain dependencies of the final product.
 The final root grammar is exact:
 
 ```text
+ego config capabilities
+ego config snapshot [--profile NAME]
+ego config batch [--profile NAME] [--set KEY=TOML_VALUE]...
+                 [--unset KEY]... [--if-revision REVISION]
 ego config get   [--profile NAME] [--json] KEY
 ego config set   [--profile NAME] KEY=TOML_VALUE
 ego config unset [--profile NAME] KEY
@@ -245,20 +262,47 @@ lists empty, `get` reports absence, `set` creates it, and `unset` is unchanged
 success. For `rules`, the selected user contribution is empty but effective
 list/explain still includes applicable system rules.
 
-`config set` accepts one assignment and parses its value as TOML. Its closed
-key set is `model`, `thinking`, `mode`, `sandbox`, `budget`, `bare`,
-`permissions.judge`, and `ui.statusline.segments` at base user scope; profiles
-accept `model`, `thinking`, `mode`, `sandbox`, `budget`, and
-`permissions.judge`, with `session_dir` and `artifact_dir` accepted only for
-explicit profile `ci`. Permission arrays, credentials, MCP, and hooks remain
-owned by their dedicated commands. `unset` is the only null operation and
-prunes empty managed tables. There are no table fragments, list indices,
-aliases, or arbitrary dotted keys.
+`config set` accepts one assignment and parses its value as TOML. The closed
+managed key set and writable scopes are listed below. `PROVIDER` stands for a
+provider-qualified authentication key, not a literal provider name. The table
+is checked against `ManagedConfigKey`; it is not a separate runtime allowlist.
+
+<!-- ego-managed-config-keys:start -->
+| Key | User base | User profile | ci profile |
+|---|---|---|---|
+| `model` | yes | yes | yes |
+| `thinking` | yes | yes | yes |
+| `mode` | yes | yes | yes |
+| `sandbox` | yes | yes | yes |
+| `roots` | yes | yes | yes |
+| `exec_paths` | yes | yes | yes |
+| `exec.env` | yes | yes | yes |
+| `exec.env_allowlist` | yes | yes | yes |
+| `network` | yes | yes | yes |
+| `budget` | yes | yes | yes |
+| `bare` | yes | no | no |
+| `permissions.judge` | yes | yes | yes |
+| `ui.statusline.segments` | yes | no | no |
+| `ui.keybindings` | yes | no | no |
+| `ui.vim` | yes | no | no |
+| `session_dir` | no | no | yes |
+| `artifact_dir` | no | no | yes |
+| `auth.PROVIDER.headers` | yes | no | no |
+| `auth.PROVIDER.credential_command` | yes | no | no |
+<!-- ego-managed-config-keys:end -->
+
+Permission arrays, interactive authentication login, MCP, and hooks retain their
+dedicated commands. `unset` is the only null operation and prunes empty managed
+tables. There are no table fragments, list indices, aliases, or arbitrary dotted
+keys. `config capabilities` reports transaction support; `snapshot` reads a
+managed document revision and `batch` applies its bounded edits atomically,
+optionally conditional on `--if-revision`. These commands do not change which
+authority owns a key.
 
 The standalone runner also accepts `exec_paths = ["/absolute/tools/root"]`
 in `~/.ego/config.toml` (or `$EGO_HOME/config.toml`), selected user/system
-profiles, and explicit `-c` overrides. Edit the TOML with `ego config edit`;
-`config set` does not manage this key. Higher layers replace the whole list;
+profiles, and explicit `-c` overrides. Use `ego config set exec_paths='["/absolute/tools/root"]'`
+for a managed user edit, or edit the TOML with `ego config edit`. Higher layers replace the whole list;
 an explicit empty list clears configured roots. Project and project-local
 configuration cannot add exec roots. Paths must be absolute and must exist;
 the runner canonicalizes symlinks before creating the confinement policy.
@@ -459,7 +503,7 @@ confined execs. The launcher was subsequently fixed.
     --artifact-dir DIR  override the sanitized artifact root; valid only for
                         the explicit `ci` profile
     --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
-    --name OP           resume only; show|set=TEXT|clear, metadata-only
+    --name OP           resume/continue only; show|set=TEXT|clear, metadata-only
     --goal-operation OP resume/continue only; show|set=TEXT|achieve|block=REASON,
                         metadata-only
 ```
@@ -518,7 +562,7 @@ accept `--worktree` or create a hidden second checkout.
                         transient failure that was unsent or showed no
                         output retries, with backoff (default 0; ACP 6)
     --fallback P/M      ordered model degradation chain (repeatable)
--f, --file FILE         prompt/agent file (§5)
+-f, --file FILE         strict version-1 agent file with invocation settings (§5)
     --var K=V           template variable for agent files (repeatable)
 -C DIR                  run as if started in DIR (git-style)
 -c, --set K=V           dotted-path config override, value parsed as TOML
@@ -1219,8 +1263,9 @@ from a generation that is no longer admitted. ACP announces the same commands
 and their JSON argument schemas when the admitted runtime opens a prompt.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
-/name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
+/sessions /history QUERY /resume [ID] /continue [ID] /fork [message-id]
+/compact /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
+/name /goal /tasks /tools /expand /skills /hooks /retry /version`. These commands and aliases form the
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1233,7 +1278,7 @@ To send literal text that starts with `/` (for example `/tmp/x`), add a leading
 space. Bracketed paste also remains literal prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
-25-command action registry: a typed complete slash is classified as an action,
+action registry: a typed complete slash is classified as an action,
 while bracketed paste and non-command text remain ordinary prompts. Completion,
 menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
@@ -1241,8 +1286,11 @@ reason rather than becoming model input or silently disappearing.
 
 Arguments that do not belong to a selected local action are usage errors, not
 model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
-configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
-points to that root syntax without consuming a provider turn.
+`/mcp add NAME --http URL` and `/mcp add NAME --stdio -- COMMAND ...` parse
+the same add grammar as `ego mcp add` and persist configuration through the same
+transaction and live-admission service. `/mcp toggle NAME` changes enablement
+only for this session and does not edit stored configuration. Both are local
+commands, not provider prompts; MCP mutations require an idle turn.
 
 Read-only `/tasks [ID]`, `/config`, `/config perimeter`, and `/usage` answer
 while a turn runs. They read the current session journal, admitted configuration,
@@ -1422,7 +1470,7 @@ bounded channels.
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
 | Ctrl+Z | **yes** (Unix) | stops ego as a shell job with the terminal back in cooked mode; `fg` restores raw mode and repaints the composer or the open modal, which stays unanswered. A running `exec` keeps running in its own process group, and its timeout does not count the time ego was stopped. Windows has no job control: the key reports that it is unsupported |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
-| Slash commands | **yes** | one shared 25-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
+| Slash commands | **yes** | one shared action registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |

@@ -237,7 +237,7 @@ pub fn root_command() -> clap::Command {
         .name("ego")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Run an agent, from one command line.")
-        // `ego help` is not one of the 17 commands `CLI.md` §2 documents, and
+        // `ego help` is not in the command inventory `CLI.md` §2 documents, and
         // building the tree would otherwise invent it — putting a subcommand in
         // the reference and the completions that the real parser answers by
         // treating "help" as a prompt.
@@ -1308,11 +1308,12 @@ fn overview(program: &str) -> String {
             .to_string(),
     );
     text.push_str(&format!(
-        "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
-         documents the remaining commands; each is refused by name, with the subsystem it \
-         waits on. Start Ollama and run `ollama pull qwen3` before the local \
-         example above.\n"
+        "\n`{program} <COMMAND> --help` describes one of them.\n"
     ));
+    if !UNBUILT.is_empty() {
+        text.push_str("CLI.md §2 documents the remaining commands; each is refused by name, with the subsystem it waits on.\n");
+    }
+    text.push_str("Start Ollama and run `ollama pull qwen3` before the local example above.\n");
     text
 }
 
