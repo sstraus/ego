@@ -50,6 +50,7 @@ fn unknown_metadata_subcommands_print_usage_without_changing_state() {
         let start = output.len();
         input.write_all(format!("{command}\r").as_bytes()).unwrap();
         input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, usage);
         drain_until_quiet(&reader, &mut output);
         // A local status command replaces prompt notices. A refusal must stay
         // readable in the transcript instead of vanishing on the next action.
