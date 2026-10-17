@@ -197,6 +197,7 @@ impl Completer for ActionCompleter {
         }
         if position == line.len()
             && (self.registry.resolve_slash(filter).is_some()
+                || self.registry.resolve_alias(filter).is_some()
                 || self
                     .registry
                     .mcp_menu(filter)
@@ -231,6 +232,26 @@ impl Completer for ActionCompleter {
                 ..Suggestion::default()
             })
             .collect::<Vec<_>>();
+        suggestions.extend(
+            self.registry
+                .aliases()
+                .into_iter()
+                .filter(|alias| alias.starts_with(filter))
+                .map(|alias| Suggestion {
+                    value: format!("/{alias}"),
+                    description: Some(
+                        if alias == "history" {
+                            "/history QUERY — search sessions"
+                        } else {
+                            "/resume [ID] or /continue [ID] — resume a session"
+                        }
+                        .to_owned(),
+                    ),
+                    span: Span::new(0, position),
+                    append_whitespace: false,
+                    ..Suggestion::default()
+                }),
+        );
         suggestions.extend(self.registry.skill_menu(filter).into_iter().map(
             |(name, description)| Suggestion {
                 value: format!("/{name}"),
@@ -1276,6 +1297,7 @@ impl Seat {
                     .registry
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
+                    Dispatch::Details(action) => Line::HostCommand(HostCommand::Details(action)),
                     Dispatch::History(query) => Line::HostCommand(HostCommand::History(query)),
                     Dispatch::Resume(id) => Line::HostCommand(HostCommand::Resume(id)),
                     Dispatch::SessionMetadata(operation) => {

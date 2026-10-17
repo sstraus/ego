@@ -9294,3 +9294,168 @@ fn record_slash_capture(output: &[u8], rows: u16, cols: u16) {
         .expect("geometry");
     }
 }
+
+/// Catches: a UUID-width usage table wraps cost onto detached continuation rows.
+#[test]
+fn interactive_usage_keeps_cost_with_its_session_row_at_80_columns() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+            ])
+            .env("TERM", "xterm-256color");
+        ego.file("AGENTS.md", "# usage layout fixture\n");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until(&reader, &mut output, b"Trust project files");
+        input.write_all(b"yes\r").expect("trust");
+        input.flush().expect("trust flush");
+        until_post_trust_prompt(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/usage\r").expect("usage");
+        input.flush().expect("usage flush");
+        until_normalized(&reader, &mut output, start, "workspace");
+        until_local_action_completed(&reader, &mut output, start, "usage", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).expect("capture directory");
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).expect("raw capture");
+            std::fs::write(format!("{root}/{columns}x{rows}.txt"), &visible)
+                .expect("screen capture");
+        }
+        input.write_all(b"/quit\r").expect("quit");
+        input.flush().expect("quit flush");
+        session.quit(input);
+        let header = visible
+            .lines()
+            .find(|line| line.contains("cache_hit") && line.contains("cost"))
+            .expect("accounting header");
+        assert!(
+            header.rsplit('\r').next().unwrap_or(header).chars().count() <= usize::from(columns),
+            "accounting labels must fit without terminal wrapping: {header:?}"
+        );
+        assert!(
+            visible
+                .lines()
+                .any(|line| line.contains("total") && line.contains("unknown")),
+            "cost must stay beside its role and tokens: {visible:?}"
+        );
+    }
+}
+
+/// Catches: typed clear silently leaves the transcript and export omits format/destination receipts.
+#[test]
+fn typed_clear_reports_its_scope() {
+    let mut captures = Vec::new();
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/clear\r").unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(&reader, &mut output, start, "clear", SLASH_ACTION_DEADLINE);
+        submit_local_action(
+            &reader,
+            &mut output,
+            &mut input,
+            &stub,
+            "help",
+            Some(HELP_END),
+        );
+        submit_local_action(&reader, &mut output, &mut input, &stub, "export", None);
+        drain_until_quiet(&reader, &mut output);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).unwrap();
+        }
+        captures.push(normalized(&output[start..]));
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        assert!(stub.generations().is_empty());
+    }
+    for capture in captures {
+        assert!(
+            capture.contains("Composer cleared; transcript, context and history unchanged"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("Exported sanitized evidence bundle as md to this transcript"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("# ego sanitized export"),
+            "export bytes unchanged: {capture}"
+        );
+    }
+}
+
+/// Catches: the default tools summary is followed by per-tool diagnostic notices.
+#[test]
+fn followup_tools_default_has_no_per_tool_notices() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let places = support::Places::new();
+        places.file("AGENTS.md", "# tools fixture\n");
+        let ego = places
+            .ego(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--yolo",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/tools\r").unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        let notices = visible
+            .lines()
+            .filter(|line| line.contains("εgo: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.len(),
+            1,
+            "only the summary notice is allowed: {visible}"
+        );
+        assert!(
+            notices[0].contains("/tools details for the full list"),
+            "{visible}"
+        );
+        assert!(stub.generations().is_empty());
+    }
+}

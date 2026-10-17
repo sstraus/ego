@@ -110,6 +110,11 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
             .into_iter()
             .map(|(name, description)| format!("  /{name}  {description}")),
     );
+    logical.push("Aliases: /resume [ID], /continue [ID], /history QUERY".to_owned());
+    logical.push(
+        "Unknown slash input is sent as prompt text; aliases require their exact spelling."
+            .to_owned(),
+    );
     logical.push("Keys".to_owned());
     logical.extend(
         registry
@@ -159,6 +164,7 @@ pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> Strin
 /// Both submission paths enforce the same busy-command boundary.
 fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
     match dispatch {
+        Dispatch::Details(_) => Some("details are unavailable while a turn is running"),
         Dispatch::History(_) | Dispatch::Resume(_) => {
             Some("history is unavailable while a turn is running")
         }
@@ -243,7 +249,8 @@ fn submit_busy_line(
             commit_to_transcript(status, reason);
             return None;
         }
-        Dispatch::History(_)
+        Dispatch::Details(_)
+        | Dispatch::History(_)
         | Dispatch::Resume(_)
         | Dispatch::Skill(_)
         | Dispatch::Skills(_)
@@ -408,6 +415,9 @@ pub(super) fn surface_line(
                         return (line, failed);
                     }
                     continue;
+                }
+                Dispatch::Details(action) => {
+                    return (Line::HostCommand(HostCommand::Details(action)), failed);
                 }
                 Dispatch::Resume(id) => {
                     return (Line::HostCommand(HostCommand::Resume(id)), failed);
@@ -888,7 +898,8 @@ pub(super) fn apply_surface_effect(
                 }
             }
             editor.run_edit_commands(&[EditCommand::Clear]);
-            status.lock().expect("surface status lock").notice = None;
+            status.lock().expect("surface status lock").notice =
+                Some("Composer cleared; transcript, context and history unchanged".to_owned());
         }
         SurfaceActionEffect::Statusline => {
             let segments = match choose_statusline_preset(editor, phase, status, busy) {
@@ -922,6 +933,9 @@ pub(super) fn apply_surface_effect(
         SurfaceActionEffect::Tasks => {
             return Some(Line::HostCommand(HostCommand::Tasks(String::new())));
         }
+        SurfaceActionEffect::Tools if !busy => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Tools)));
+        }
         SurfaceActionEffect::Tools => {
             let actions = status
                 .lock()
@@ -942,7 +956,10 @@ pub(super) fn apply_surface_effect(
                     if catalogue.is_empty() {
                         "tools: none".to_string()
                     } else {
-                        format!("tools: {}", catalogue.join(" "))
+                        format!(
+                            "tools: {} admitted; /tools details when idle",
+                            catalogue.len()
+                        )
                     }
                 }
                 Err(_) => "tools: the admitted tool catalogue is unavailable".to_string(),
