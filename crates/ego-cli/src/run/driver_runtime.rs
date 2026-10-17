@@ -3578,8 +3578,8 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     let Some((termination, result)) = driven else {
         return Ok((false, perimeter));
     };
-    between();
     report_interactive_turn_end(&termination, cancel, seat, turn_started, diagnostics);
+    between();
     *last = Ended {
         termination,
         session: active.id(),
