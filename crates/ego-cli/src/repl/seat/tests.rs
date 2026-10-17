@@ -1439,7 +1439,7 @@ fn collapsed_prompt_and_tool_output_share_expansion_history() {
     output.expand_last_tool();
     assert_eq!(
         rows.try_iter().collect::<String>(),
-        "> one\n… two\n… three\n… four\n"
+        "\n> one\n… two\n… three\n… four\n"
     );
     output.tool_row("new tool", "new detail".into());
     let _ = rows.try_iter().collect::<Vec<_>>();
