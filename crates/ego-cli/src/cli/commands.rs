@@ -915,7 +915,8 @@ impl clap::ValueEnum for RootAccessValue {
 )]
 pub(super) struct SetupCommand {
     /// Limit proposals to these report item IDs (comma-separated).
-    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    /// Select proposal item IDs as one comma-separated list; repeat to add IDs.
+    #[arg(long, value_name = "ID[,ID...]", value_delimiter = ',', num_args = 1, action = ArgAction::Append)]
     pub(super) items: Option<Vec<usize>>,
     /// Offer a validated judge for unresolved policy; never authorizes an action.
     #[arg(long)]

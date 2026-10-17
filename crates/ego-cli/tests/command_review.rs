@@ -119,3 +119,28 @@ fn resumed_launch_goal_is_not_metadata() {
         );
     }
 }
+
+// Catches: --items greedily parses the following expected-work prompt as an integer.
+#[test]
+fn setup_items_keeps_prompt() {
+    for words in [
+        vec!["setup", "--items", "1,2", "review this"],
+        vec!["setup", "review this", "--items", "1,2"],
+        vec!["setup", "--items", "1", "--items", "2", "review this"],
+        vec!["setup", "--items", "1,2", "--", "review this"],
+    ] {
+        let Invocation::Setup(args) = parse(&words).unwrap() else {
+            panic!("setup")
+        };
+        assert_eq!(args.items, Some(vec![1, 2]));
+        assert_eq!(args.prompt.as_deref(), Some("review this"));
+    }
+    assert!(parse(&["setup", "--items", "1,bad", "review this"]).is_err());
+    let Invocation::Answered(help) = parse(&["setup", "--help"]).unwrap() else {
+        panic!("help")
+    };
+    assert!(
+        help.contains("--items <ID[,ID...]>") && help.contains("comma-separated"),
+        "{help}"
+    );
+}
