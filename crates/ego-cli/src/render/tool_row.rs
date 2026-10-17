@@ -54,32 +54,60 @@ pub struct Finished<'a> {
     pub timing: Option<ego_core::event::domain::ToolTiming>,
 }
 
-pub fn record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
-    if let Some((child, name)) = call.name.split_once(" › ") {
-        let label = Line::plain(printable(child))
-            .truncate_to(capabilities.width.saturating_sub(30))
-            .text();
-        let prefix = format!("  ↳ {label} › ");
-        let mut nested_caps = capabilities;
-        nested_caps.width = capabilities
-            .width
-            .saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()))
-            .max(1);
-        let mut nested = record(&Finished { name, ..*call }, nested_caps);
-        nested.rows = nested
-            .rows
-            .lines()
-            .map(|line| format!("{prefix}{line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        nested.detail = cap(nested
-            .detail
-            .lines()
-            .map(|line| format!("{prefix}{line}"))
-            .collect::<Vec<_>>()
-            .join("\n"));
-        return nested;
+/// Presentation state for adjacent completed calls, shared by live output and replay.
+#[derive(Default)]
+pub struct ToolRows {
+    task: Option<String>,
+}
+
+impl ToolRows {
+    /// Prose, parent diagnostics or a new turn ends the current task group.
+    pub fn separate(&mut self) {
+        self.task = None;
     }
+
+    pub fn record(&mut self, call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
+        let Some((task, name)) = call.name.rsplit_once(" › ") else {
+            self.separate();
+            return plain_record(call, capabilities);
+        };
+        let header = Line::plain(format!("  ↳ task {}", printable(task)))
+            .truncate_to(capabilities.width)
+            .render(capabilities.depth);
+        let nested = plain_record(
+            &Finished { name, ..*call },
+            Capabilities {
+                width: capabilities.width.saturating_sub(4).max(1),
+                ..capabilities
+            },
+        );
+        let indent = |text: &str| {
+            text.lines()
+                .map(|line| format!("    {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let rows = indent(&nested.rows);
+        let rows = if self.task.as_deref() == Some(task) {
+            rows
+        } else {
+            format!("{header}\n{rows}")
+        };
+        self.task = Some(task.to_owned());
+        ToolRecord {
+            rows,
+            // Expand is an independent view: it always names its owning task.
+            detail: cap(format!("{header}\n{}", indent(&nested.detail))),
+        }
+    }
+}
+
+/// A standalone call retains its task context even without a preceding group.
+pub fn record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
+    ToolRows::default().record(call, capabilities)
+}
+
+fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let width = capabilities.width;
     let depth = capabilities.depth;
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
@@ -212,12 +240,9 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
         (true, _) => None,
     };
     let mut notes: Vec<String> = outcome.into_iter().collect();
-    notes.push(
-        call.timing
-            .and_then(|timing| timing.execution_ms)
-            .map(|millis| duration(Duration::from_millis(millis)))
-            .unwrap_or_else(|| "duration unavailable".to_owned()),
-    );
+    if let Some(millis) = call.timing.and_then(|timing| timing.execution_ms) {
+        notes.push(duration(Duration::from_millis(millis)));
+    }
     if let Some(timing) = call.timing
         && timing.approval_wait_ms > 0
     {
@@ -328,7 +353,11 @@ fn header(call: &Finished<'_>, args: &Value, width: usize) -> Line {
         .as_ref()
         .map(|stat| format!(" {stat}"))
         .unwrap_or_default();
-    let notes = format!(" · {}", parts.notes.join(" · "));
+    let notes = if parts.notes.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.notes.join(" · "))
+    };
     let fixed = Line::plain(format!("{lead}{stat}{notes}")).width();
     let room = width.saturating_sub(fixed);
     let target = if Line::plain(parts.target.as_str()).width() <= room {
@@ -473,8 +502,15 @@ mod tests {
                 ),
                 at(width),
             );
-            assert!(header_of(&result).starts_with("  ↳ a very lon"));
-            assert!(header_of(&result).contains("› ✓ read"));
+            assert!(header_of(&result).starts_with("  ↳ task a very lon"));
+            assert!(
+                result
+                    .rows
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .starts_with("    ✓ read")
+            );
             assert!(
                 result.rows.lines().all(|line| cells(line) <= width),
                 "{width}: {}",
@@ -530,6 +566,21 @@ mod tests {
                 assert!(rendered.detail.contains("rg: missing.txt") || ok);
                 println!("exec width={width} ok={ok} grid={grid:?}");
             }
+        }
+    }
+
+    // Catches: absent timing leaves a placeholder or an empty separator.
+    #[test]
+    fn missing_timing_omits_the_note_and_its_separator() {
+        for (name, expected) in [("task", "✓ task child"), ("read", "✓ read a.rs · 1 line")] {
+            let record = record(
+                &Finished {
+                    timing: None,
+                    ..call(name, r#"{"name":"child","path":"a.rs"}"#, true, "hello")
+                },
+                at(80),
+            );
+            assert_eq!(record.rows, expected);
         }
     }
 

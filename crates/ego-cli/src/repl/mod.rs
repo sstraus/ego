@@ -387,7 +387,7 @@ mod live_surface_red {
     }
 
     #[test]
-    fn edit_mode_submits_busy_input_to_the_host_and_delegates_idle_and_characters() {
+    fn edit_mode_submits_idle_and_busy_input_to_the_host_and_delegates_characters() {
         let phase = SurfacePhase::new(EditPhase::Busy);
         let mut mode = SurfaceEditMode::new(Emacs::default(), phase.clone());
         let escape =
@@ -412,7 +412,10 @@ mod live_surface_red {
             KeyModifiers::NONE,
         )))
         .unwrap();
-        assert!(matches!(mode.parse_event(enter), ReedlineEvent::Enter));
+        assert_eq!(
+            mode.parse_event(enter),
+            ReedlineEvent::ExecuteHostCommand(BUSY_SUBMIT_COMMAND.to_string())
+        );
         let character = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::NONE,
