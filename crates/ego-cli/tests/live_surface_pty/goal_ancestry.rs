@@ -22,7 +22,12 @@ fn goal_continuations_compact_without_cross_session_parent() {
         places.file("AGENTS.md", "# goal ancestry fixture\n");
         let checker = places.file(
             "checker.sh",
-            "cat >/dev/null\nprintf '%s\\n' '{\"verdict\":\"continue\",\"reason\":\"operator verification remains\"}'\n",
+            // A constant reason triggers the five-observation blocker before
+            // the 20-turn boundary. Derive progress from actual session input.
+            r#"input=$(cat)
+step=$(printf '%s' "$input" | grep -o 'REGRESSION-MARKER-ANSWER-[0-9]*' | tail -n 1)
+printf '{"verdict":"continue","reason":"Verification remains after %s"}\n' "$step"
+"#,
         );
         let command = serde_json::json!(["/bin/sh", checker]).to_string();
         let turns = continuations.to_string();
@@ -42,7 +47,7 @@ fn goal_continuations_compact_without_cross_session_parent() {
             "--allow",
             "exec(/bin/sh *)",
         ]);
-        let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+        let (session, mut input, reader) = PtySession::start(&ego, 24, 100, Some((24, 100)));
         let mut output = Vec::new();
         until(&reader, &mut output, b"Trust project files");
         let start = output.len();

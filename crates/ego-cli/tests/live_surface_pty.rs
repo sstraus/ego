@@ -3563,7 +3563,9 @@ fn busy_expand_hint_names_the_live_shortcut() {
 }
 
 fn busy_expand_shortcut_transcript(check_hint: bool) {
-    let (sampling, gate) = gated_paced_line("EXPAND-TURN-STILL-RUNNING");
+    // Screen markdown emits complete paragraphs, not a single trailing newline.
+    // Finish this paragraph before gating the response tail.
+    let (sampling, gate) = gated_paced_line("EXPAND-TURN-STILL-RUNNING\n");
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call(
@@ -3575,7 +3577,7 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
         ],
         ..Plan::default()
     });
-    // Release the fixture even when an assertion fails, before Stub joins its worker.
+    // Release the fixture worker even when an assertion fails.
     struct ReleaseOnDrop(Arc<ReleaseGate>);
     impl Drop for ReleaseOnDrop {
         fn drop(&mut self) {
@@ -3607,7 +3609,7 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
         .write_all(b"show five output lines\r")
         .expect("submit turn");
     input.flush().expect("submit turn flush");
-    until(&reader, &mut output, b"EXPAND-TURN-STILL-RUNNING");
+    until_normalized(&reader, &mut output, 0, "EXPAND-TURN-STILL-RUNNING");
     let collapsed = normalized(&output);
     assert!(collapsed.contains("2 more lines"), "{collapsed}");
     if check_hint {
