@@ -3711,6 +3711,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
                                 active.id(),
                                 clock,
                                 current.context,
+                                seat.width(),
                                 diagnostics,
                             )
                             .await;
