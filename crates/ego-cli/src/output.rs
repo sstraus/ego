@@ -361,11 +361,22 @@ pub struct TextSink<'a> {
     calls: Mutex<HashMap<ItemId, StartedCall>>,
     capabilities: Capabilities,
     retry_cause: Mutex<Option<String>>,
+    last_cache: Mutex<Option<(ego_core::generator::attempt::CachePrefix, bool)>>,
 }
 
 struct StartedCall {
     name: String,
     args: String,
+}
+
+fn compact_tokens(count: u64) -> String {
+    if count < 1_000 {
+        count.to_string()
+    } else if count < 100_000 {
+        format!("{:.1}K", count as f64 / 1_000.0)
+    } else {
+        format!("{}K", count / 1_000)
+    }
 }
 
 /// The state of the answer currently being written.
@@ -387,6 +398,7 @@ impl<'a> TextSink<'a> {
             calls: Mutex::new(HashMap::new()),
             capabilities,
             retry_cause: Mutex::new(None),
+            last_cache: Mutex::new(None),
         }
     }
 
@@ -490,6 +502,41 @@ impl<'a> TextSink<'a> {
 }
 
 impl EventSink for TextSink<'_> {
+    fn cache_observed(
+        &self,
+        prefix: &ego_core::generator::attempt::CachePrefix,
+        usage: Option<ego_core::state::Usage>,
+    ) {
+        if !self.capabilities.on_screen() || self.quiet {
+            return;
+        }
+        let mut last = self.last_cache.lock().expect("cache observation lock");
+        let Some(usage) = usage.filter(|usage| {
+            usage.cache_read_tokens > 0
+                || usage.uncached_input_tokens > 0
+                || usage.cache_write_tokens > 0
+                || usage.cache_write_extended_tokens > 0
+        }) else {
+            if last
+                .as_ref()
+                .is_some_and(|(previous, _)| previous != prefix)
+            {
+                *last = None;
+            }
+            return;
+        };
+        let hit = usage.cache_read_tokens > 0;
+        let probable_loss = last
+            .as_ref()
+            .is_some_and(|(previous, hit_before)| previous == prefix && *hit_before && !hit);
+        *last = Some((prefix.clone(), hit));
+        drop(last);
+        if probable_loss {
+            self.finish();
+            self.out.note("cache reuse was reported on an earlier request with the same marked input, but not this one; cached entries may have expired or changed at the provider");
+        }
+    }
+
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         if self.capabilities.on_screen()
             && self.out.live_retry()
@@ -507,6 +554,17 @@ impl EventSink for TextSink<'_> {
             }
         }
         match event {
+            PublicEvent::UsageUpdated { usage_delta, .. }
+                if self.capabilities.on_screen()
+                    && !self.quiet
+                    && usage_delta.cache_read_tokens > 0 =>
+            {
+                self.finish();
+                self.out.note(&format!(
+                    "cache hit: {} tokens",
+                    compact_tokens(usage_delta.cache_read_tokens)
+                ));
+            }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
@@ -895,6 +953,120 @@ mod tests {
             kind: ItemKind::Tool,
             name: Some(name.to_owned()),
             text: Some(args.to_owned()),
+        }
+    }
+
+    /// Catches: reporting a cache hit as a raw token count or dropping it from
+    /// the interactive transcript after a provider reports reused input.
+    #[test]
+    fn interactive_usage_reports_compact_cache_hits_only_when_read_tokens_exist() {
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        for cached in [0, 18_400] {
+            sink.publish(
+                &PublicEvent::UsageUpdated {
+                    turn,
+                    item: None,
+                    usage_delta: ego_core::state::Usage {
+                        cache_read_tokens: cached,
+                        ..ego_core::state::Usage::IDENTITY
+                    },
+                    cost_delta: ego_core::cost::CostDelta::Unknown(
+                        ego_core::cost::UnknownCost::NoPricingQuote,
+                    ),
+                },
+                &state,
+            );
+        }
+        assert_eq!(*out.notes.lock().unwrap(), ["cache hit: 18.4K tokens"]);
+    }
+
+    /// Catches: treating a first miss or a different cache prefix as a reset,
+    /// and repeating the warning for every miss after one prior hit.
+    #[test]
+    fn cache_warning_requires_a_prior_hit_on_the_same_marked_prefix() {
+        use ego_core::generator::attempt::CachePrefix;
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let original = CachePrefix {
+            session: SessionId::new(),
+            provider: "anthropic".into(),
+            model: "model-a".into(),
+            digest: "marked-a".into(),
+        };
+        let different = CachePrefix {
+            model: "model-b".into(),
+            ..original.clone()
+        };
+        let usage = |read, uncached| ego_core::state::Usage {
+            cache_read_tokens: read,
+            uncached_input_tokens: uncached,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(&different, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        assert!(out.notes.lock().unwrap().is_empty());
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(
+            &original,
+            Some(ego_core::state::Usage {
+                cache_write_tokens: 800,
+                ..ego_core::state::Usage::IDENTITY
+            }),
+        );
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("may have expired"), "{notes:?}");
+    }
+
+    /// Catches: a missing usage report being read as a zero-token miss, or a
+    /// cache warning entering a headless or quiet transcript.
+    #[test]
+    fn cache_warning_needs_reported_input_and_an_interactive_loud_surface() {
+        use ego_core::generator::attempt::CachePrefix;
+        let prefix = CachePrefix {
+            session: SessionId::new(),
+            provider: "anthropic".into(),
+            model: "model-a".into(),
+            digest: "same".into(),
+        };
+        let hit = ego_core::state::Usage {
+            cache_read_tokens: 500,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        let miss = ego_core::state::Usage {
+            uncached_input_tokens: 500,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        for (quiet, interactive) in [(false, true), (true, true), (false, false)] {
+            let out = Recorded::default();
+            let mut caps = Capabilities::plain();
+            if interactive {
+                caps.osc = crate::render::caps::OscProfile::Standard;
+            }
+            let sink = TextSink::new(&out, quiet, caps);
+            sink.cache_observed(&prefix, Some(hit));
+            sink.cache_observed(&prefix, None);
+            sink.cache_observed(&prefix, Some(ego_core::state::Usage::IDENTITY));
+            assert!(out.notes.lock().unwrap().is_empty());
+            sink.cache_observed(&prefix, Some(miss));
+            sink.cache_observed(&prefix, Some(hit));
+            sink.cache_observed(&prefix, Some(miss));
+            assert_eq!(
+                out.notes.lock().unwrap().len(),
+                2 * usize::from(!quiet && interactive)
+            );
         }
     }
 

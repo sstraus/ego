@@ -4600,6 +4600,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 })?;
             }
             let stream = profile.generator.generate(request, attempt);
+            let cache_prefix = stream.cache_prefix().cloned();
             let drained = self
                 .drain(
                     turn,
@@ -4632,6 +4633,19 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 &settlement,
                 drained.accounting_booked,
             )?;
+            if let Some(prefix) = cache_prefix.as_ref() {
+                let usage = match (settlement.outcome.stop(), settlement.outcome.usage()) {
+                    (
+                        StopReason::Stop
+                        | StopReason::Length
+                        | StopReason::ToolUse
+                        | StopReason::Continue,
+                        UsageReport::Reported(usage),
+                    ) => Some(usage),
+                    _ => None,
+                };
+                self.journal.cache_observed(prefix, usage)?;
+            }
             if drained.cancelled || self.cancel.is_cancelled() {
                 return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
                     cause: self.cancel.cause().unwrap_or(CancelCause::User),

@@ -918,6 +918,14 @@ pub(super) struct Signalling<'a> {
 }
 
 impl EventSink for Signalling<'_> {
+    fn cache_observed(
+        &self,
+        prefix: &ego_core::generator::attempt::CachePrefix,
+        usage: Option<ego_core::state::Usage>,
+    ) {
+        self.inner.cache_observed(prefix, usage);
+    }
+
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.inner.publish(event, state);
         self.announce.emit(self.announce.signal(event, state));
