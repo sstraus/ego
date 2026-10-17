@@ -690,6 +690,23 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 
 The model can also call `task` with a printable `name` and a `prompt` to run a depth-one, in-process child. The child inherits the parent mode, sandbox, offline posture and workspace ceilings, shares its budget and cancellation scope, and has no `task` tool. Task-only provider batches run concurrently. A batch that mixes `task` with other tool calls is refused with failed tool feedback for every call; no child or sibling tool runs. Child tool rows are nested under their names; permission prompts identify the child through the existing human seat. Only the final answer, bounded to the existing 64 KiB tool-result limit, enters the parent context. Child usage is booked once to the parent; child conversation state is held in memory and is not resumable.
 
+Set `task.background` to `true` to launch a durable standalone child without waiting.
+The tool returns `background agent ID`. The child has its own journal and run lineage,
+shares the parent budget and authority ceilings, cannot delegate, and emits no child
+tool rows in the parent. Parent-turn interruption (including Ctrl+Enter) does not
+cancel this child. `/tasks` lists typed exec and agent entries; `/tasks ID` inspects
+one entry and `/tasks cancel ID` cancels that entry independently.
+A completed child enters parent context once at the next generation boundary, not
+in the middle of another generation. Recovery uses the durable task ID, original
+parent run and captured tool ceiling. An uncertain interrupted child is not rerun.
+Closing a session waits for its admitted children to settle. A new background launch
+refuses if live permission policy differs from the admitted session epoch; start a
+new session to inherit that changed authority. Background tasks do
+not accept `agent` or `plan_step`; use an explicit prompt instead.
+Inside TUIC (`TUIC_SESSION` is set), use `orchestrator_active` for long delegated
+work and `task` for short in-turn work. Managed peer results resume the conversation.
+Live task conversion with Ctrl+B and child transcript navigation are not included.
+
 `task` also accepts `agent`, the filename stem of a named definition. Ego discovers
 `*.md` files in the trusted workspace's `.ego/agents`, then `$EGO_HOME/agents`
 (`~/.ego/agents` by default), then `/etc/ego/agents`. An untrusted workspace does

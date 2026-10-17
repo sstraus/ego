@@ -733,6 +733,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::HookLifecycleReached { .. }
         | EventKind::HookInvocationStarted { .. }
         | EventKind::HookInvocationSettled { .. }
+        | EventKind::BackgroundTaskRequested { .. }
+        | EventKind::SubagentCompletionDelivered { .. }
         | EventKind::SubagentRequested { .. }
         | EventKind::SkillCatalogueAdmitted { .. }
         | EventKind::SkillInstructionAdmitted { .. }

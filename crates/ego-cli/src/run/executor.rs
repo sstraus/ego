@@ -197,6 +197,7 @@ pub struct CliRunExecutor {
     pub(super) admission: Arc<EvidenceAdmissionService>,
     pub(super) child_authority: Option<Arc<ChildAuthorityCeiling>>,
     pub(super) child: bool,
+    pub(super) token_family: Option<SessionId>,
 }
 
 #[derive(Clone)]
@@ -822,6 +823,7 @@ impl CliRunExecutor {
             admission,
             child_authority: None,
             child: false,
+            token_family: None,
         }
     }
 
@@ -895,6 +897,7 @@ impl CliRunExecutor {
                 admission,
                 child_authority: None,
                 child: false,
+                token_family: None,
             },
             policy,
         ))

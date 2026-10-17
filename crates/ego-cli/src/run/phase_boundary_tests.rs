@@ -42,6 +42,7 @@ fn child_case(test: &str, case: &str, plan: Plan) -> Stub {
         // Match the existing real-driver child harness: its nested turn future
         // exceeds libtest's default stack when coverage is enabled.
         .env("RUST_MIN_STACK", "16777216")
+        .env("TMPDIR", std::env::temp_dir())
         .env("HOME", home.path())
         .env("EGO_HOME", home.path())
         .env("ANTHROPIC_API_KEY", "test-key")
@@ -481,5 +482,162 @@ fn headless_completion_collects_background_skill_result_before_returning() {
             ),
             "{terminals:?}"
         );
+    });
+}
+
+// Catches: production wiring refusing every background task or accidentally retaining child delegation.
+#[test]
+fn headless_background_task_launch_uses_the_durable_child_owner() {
+    if std::env::var_os(CHILD).is_none() {
+        let stub = child_case(
+            "headless_background_task_launch_uses_the_durable_child_owner",
+            "background-task",
+            Plan {
+                completions: vec![
+                    Reply::Sse(tool_call(
+                        "task-call",
+                        "task",
+                        r#"{"name":"check","prompt":"Return a short result","background":true}"#,
+                    )),
+                    Reply::Sse(text("background result")),
+                    Reply::Sse(text("background result")),
+                ],
+                ..Plan::default()
+            },
+        );
+        let generations = stub.generations();
+        assert_eq!(
+            generations.len(),
+            3,
+            "parent and durable child must execute"
+        );
+        assert!(
+            generations.iter().any(|request| !request["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "task"))),
+            "the child cannot delegate"
+        );
+        return;
+    }
+    runtime().block_on(async {
+        let mut args = args("anthropic/claude-sonnet-5-5");
+        args.thinking = Some(ThinkingLevel::Low);
+        args.prompt = Some("start the background check".to_owned());
+        let ended = run_with_registry(args, |_| &NullSink, CancelToken::new(), Arc::new(EvidenceAdmissionService::new()), None).await;
+        assert_eq!(ended.termination.exit_code(), 0, "{:?}", ended.termination);
+        let store = session::jsonl(session::store_root(None).unwrap(), std::env::current_dir().unwrap());
+        let entries: Vec<_> = SessionStore::read(&store, &ended.session).unwrap().collect().await;
+        let events: Vec<_> = entries.into_iter().filter_map(|entry| match entry.unwrap() { SessionEntry::Event(event) => Some(event), _ => None }).collect();
+        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::SubagentSpawned { .. })).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::SubagentCompletionDelivered { .. })).count(), 1);
+        assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ToolCallCompleted { ok: true, result } if result.model_text().contains("background agent"))));
+    });
+}
+
+#[test]
+fn background_task_cannot_reset_the_parent_token_allowance() {
+    // Catches: a durable child starting with a fresh token ledger after the family hit its ceiling.
+    if std::env::var_os(CHILD).is_none() {
+        let response = tool_call(
+            "task-call",
+            "task",
+            r#"{"name":"check","prompt":"Return a short result","background":true}"#,
+        )
+        .replace("\"prompt_tokens\":10", "\"prompt_tokens\":996")
+        .replace("\"total_tokens\":14", "\"total_tokens\":1000");
+        let stub = child_case(
+            "background_task_cannot_reset_the_parent_token_allowance",
+            "family-tokens",
+            Plan {
+                completions: vec![Reply::Sse(response), Reply::Sse(text("must not run"))],
+                ..Plan::default()
+            },
+        );
+        assert_eq!(
+            stub.generations().len(),
+            1,
+            "the exhausted family's child must not submit a provider request"
+        );
+        return;
+    }
+    runtime().block_on(async {
+        let mut args = args("anthropic/claude-sonnet-5-5");
+        args.thinking = Some(ThinkingLevel::Low);
+        args.budget = Some("1k".to_owned());
+        args.prompt = Some("start a background check".to_owned());
+        let ended = run_with_registry(
+            args,
+            |_| &NullSink,
+            CancelToken::new(),
+            Arc::new(EvidenceAdmissionService::new()),
+            None,
+        )
+        .await;
+        assert_eq!(ended.termination.exit_code(), 5, "{:?}", ended.termination);
+    });
+}
+
+#[test]
+fn background_task_budget_stop_is_delivered_as_failure_data() {
+    // Catches: RunSettlement::Completed erasing a child's budget exit and returning a normal answer.
+    if std::env::var_os(CHILD).is_none() {
+        child_case(
+            "background_task_budget_stop_is_delivered_as_failure_data",
+            "child-budget",
+            Plan {
+                completions: vec![
+                    Reply::Sse(tool_call(
+                        "task-call",
+                        "task",
+                        r#"{"name":"check","prompt":"Return a short result","background":true}"#,
+                    )),
+                    Reply::Sse(
+                        tool_call("read-child", "read", r#"{"path":"missing"}"#)
+                            .replace("\"prompt_tokens\":10", "\"prompt_tokens\":1000")
+                            .replace("\"total_tokens\":14", "\"total_tokens\":1004"),
+                    ),
+                    Reply::Sse(
+                        tool_call("read-child", "read", r#"{"path":"missing"}"#)
+                            .replace("\"prompt_tokens\":10", "\"prompt_tokens\":1000")
+                            .replace("\"total_tokens\":14", "\"total_tokens\":1004"),
+                    ),
+                ],
+                ..Plan::default()
+            },
+        );
+        return;
+    }
+    runtime().block_on(async {
+        let mut args = args("anthropic/claude-sonnet-5-5");
+        args.thinking = Some(ThinkingLevel::Low);
+        args.budget = Some("1k".to_owned());
+        args.prompt = Some("start a background check".to_owned());
+        let ended = run_with_registry(
+            args,
+            |_| &NullSink,
+            CancelToken::new(),
+            Arc::new(EvidenceAdmissionService::new()),
+            None,
+        )
+        .await;
+        let store = session::jsonl(
+            session::store_root(None).unwrap(),
+            std::env::current_dir().unwrap(),
+        );
+        let entries: Vec<_> = SessionStore::read(&store, &ended.session)
+            .unwrap()
+            .collect()
+            .await;
+        let delivered = entries
+            .into_iter()
+            .find_map(|entry| match entry.unwrap() {
+                SessionEntry::Event(DomainEvent {
+                    kind: EventKind::SubagentCompletionDelivered { text, .. },
+                    ..
+                }) => Some(text),
+                _ => None,
+            })
+            .expect("child completion delivered");
+        assert!(delivered.contains("Child ended: Budget"), "{delivered}");
     });
 }

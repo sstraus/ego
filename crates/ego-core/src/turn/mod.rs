@@ -22,7 +22,7 @@ mod mcp_registry;
 mod policy;
 mod residual;
 mod task;
-pub use task::NamedAgent;
+pub use task::{BackgroundTaskLaunch, BackgroundTaskPort, NamedAgent, delegation_guidance};
 mod tools;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1247,12 +1247,14 @@ pub struct TurnLoop<'session, 'turn> {
     control: Option<&'turn mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
     foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>>,
+    delegation_host: Option<bool>,
+    background_task_port: Option<Arc<dyn BackgroundTaskPort + 'turn>>,
     skill_invocation_port: Option<Arc<dyn crate::skill::SkillInvocationPort + 'turn>>,
     inherited_effect_tools: Option<Arc<BTreeSet<String>>>,
     hook_binding: Option<HookBindingState<'session>>,
     hook_runtime: Option<SessionHookRuntime<'session>>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
-    task_usage: Option<Arc<dyn Fn() -> Usage + Send + Sync + 'turn>>,
+    task_usage: Option<Arc<dyn Fn() -> Result<Usage, StoreError> + Send + Sync + 'turn>>,
     generation_role: GenerationRole,
     automatic_compaction: bool,
     context_clear: bool,
@@ -1426,6 +1428,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             elicitor: None,
             foreign_question_port: None,
             skill_invocation_port: None,
+            background_task_port: None,
+            delegation_host: None,
             inherited_effect_tools: None,
             hook_binding: None,
             hook_runtime: None,
@@ -1518,6 +1522,46 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         port: Arc<dyn crate::skill::SkillInvocationPort + 'turn>,
     ) -> Self {
         self.skill_invocation_port = Some(port);
+        self
+    }
+
+    /// Bind both provider-visible prompt and task guidance to the product host.
+    pub fn with_delegation_host(mut self, tuic: bool) -> Self {
+        self.delegation_host = Some(tuic);
+        self.tools = self.tools.with_delegation_host(tuic);
+        if let Some(identity) = self.prompt_snapshot.identity.as_mut() {
+            let previous_identity = identity.clone();
+            for previous in [delegation_guidance(false), delegation_guidance(true)] {
+                if let Some(prefix) = identity.strip_suffix(previous) {
+                    *identity = prefix.trim_end().to_owned();
+                }
+            }
+            identity.push_str("\n\n");
+            identity.push_str(delegation_guidance(tuic));
+            if *identity != previous_identity {
+                self.prompt_snapshot.epoch = EventId::new();
+            }
+        }
+        self
+    }
+
+    fn budget_usage(&self) -> Result<Usage, StoreError> {
+        // Without a token ceiling there is no reason to read the family journals.
+        if self.config.token_ceiling.is_some() {
+            if let Some(usage) = &self.task_usage {
+                return usage();
+            }
+            if let Some(port) = &self.background_task_port
+                && let Some(usage) = port.family_usage()?
+            {
+                return Ok(usage);
+            }
+        }
+        Ok(self.state().usage)
+    }
+
+    pub fn with_background_task_port(mut self, port: Arc<dyn BackgroundTaskPort + 'turn>) -> Self {
+        self.background_task_port = Some(port);
         self
     }
 
@@ -1623,6 +1667,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 .map(AgentIdentity::stable_text),
             system: self.config.system.clone(),
         };
+        if let Some(tuic) = self.delegation_host {
+            self = self.with_delegation_host(tuic);
+        }
         self
     }
 
@@ -1635,6 +1682,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             self.prompt_snapshot = snapshot.clone();
         }
         self.ancestor = Some(replayed.conversation().clone());
+        if let Some(tuic) = self.delegation_host {
+            self = self.with_delegation_host(tuic);
+        }
         self
     }
 
@@ -3421,7 +3471,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             id: goal.id,
             reason,
         };
-        if tokens_reached(self.config.token_ceiling, &self.state().usage) {
+        if tokens_reached(self.config.token_ceiling, &self.budget_usage()?) {
             self.journal.append(
                 turn,
                 None,
@@ -3777,14 +3827,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             // on an unmetered or subscription row no charge is raised at all.
             // `CLI.md:128` spells it the same way: "exit 5 when hit", not
             // "when it would be hit".
-            if tokens_reached(
-                self.config.token_ceiling,
-                &self
-                    .task_usage
-                    .as_ref()
-                    .map(|usage| usage())
-                    .unwrap_or_else(|| self.state().usage),
-            ) {
+            if tokens_reached(self.config.token_ceiling, &self.budget_usage()?) {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 
@@ -4345,6 +4388,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     async fn generate(&mut self, turn: TurnId) -> Result<Generated, StoreError> {
         self.provider_failure = None;
         self.refresh_detached_execs(turn)?;
+        if let Some(port) = &self.background_task_port {
+            port.refresh_tasks(self.state())
+                .await
+                .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
+        }
         // A log this build wrote cannot fail here: the guard in `drain` refuses
         // a reused call id before it is ever appended. A log written before
         // that guard existed can, and there is nothing to do about it from

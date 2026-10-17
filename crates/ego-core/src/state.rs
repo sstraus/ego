@@ -1203,6 +1203,10 @@ pub struct SessionState {
     settled_hooks: HashSet<HookInvocationId>,
     /// Subagent lifecycle events, in application order.
     pub subagents: Vec<SubagentEvent>,
+    #[serde(default)]
+    pub delivered_subagents: BTreeMap<SubagentInvocationId, ItemId>,
+    #[serde(default)]
+    pub background_tasks: BTreeMap<SubagentInvocationId, crate::subagent::BackgroundTaskAuthority>,
     /// The latest complete admitted skill catalogue.
     skill_catalogue_generation: Option<SkillCatalogueGeneration>,
     skill_catalogue: SkillCatalogueEvidence,
@@ -1283,6 +1287,8 @@ impl Default for SessionState {
             hook_settlements: Vec::default(),
             settled_hooks: HashSet::default(),
             subagents: Vec::default(),
+            delivered_subagents: BTreeMap::new(),
+            background_tasks: std::collections::BTreeMap::new(),
             skill_catalogue_generation: None,
             skill_catalogue: SkillCatalogueEvidence::default(),
             skill_events: Vec::default(),
@@ -2094,6 +2100,28 @@ impl SessionState {
             EventKind::ToolCallMeasured { timing } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
                     item.tool_timing = Some(*timing);
+                }
+            }
+            EventKind::BackgroundTaskRequested {
+                invocation,
+                authority,
+            } => {
+                self.background_tasks
+                    .entry(*invocation)
+                    .or_insert_with(|| authority.clone());
+            }
+            EventKind::SubagentCompletionDelivered { invocation, text } => {
+                if !self.background_tasks.contains_key(invocation)
+                    || !self.subagents.iter().any(|event| matches!(event, SubagentEvent::Settled { invocation: found, .. } if found == invocation))
+                {
+                    return self.refuse(ev, RefusalReason::SubagentInvocationUnknown);
+                }
+                if !self.delivered_subagents.contains_key(invocation)
+                    && let Some(id) = ev.env.item
+                    && let Some(item) = self.item_mut(ev, ItemKind::HostContext)
+                {
+                    item.text = text.clone();
+                    self.delivered_subagents.insert(*invocation, id);
                 }
             }
             EventKind::HostContextAppended { text } => {
