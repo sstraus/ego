@@ -18,14 +18,14 @@ mod image_refusal;
 mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
+#[path = "live_surface_pty/mode_picker.rs"]
+mod mode_picker;
 #[path = "live_surface_pty/notice_wrap.rs"]
 mod notice_wrap;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/picker_roles.rs"]
 mod picker_roles;
-#[path = "live_surface_pty/mode_picker.rs"]
-mod mode_picker;
 #[path = "live_surface_pty/plan_denial.rs"]
 mod plan_denial;
 #[path = "live_surface_pty/prompt_echo.rs"]
