@@ -240,28 +240,29 @@ fn branch_validation_and_creation_failure_preserve_existing_checkout() {
     );
 }
 
-// Catches: checkout smudge filters execute project commands or fetch remote content.
+// Catches: worktree creation bypasses configured checkout filters.
 #[test]
-fn creation_does_not_execute_checkout_filters() {
-    let (dir, root, repository) = fixture();
-    fs::write(root.join(".gitattributes"), "tracked filter=trap\n").unwrap();
+fn creation_preserves_configured_checkout_filters() {
+    let (_dir, root, repository) = fixture();
+    fs::write(root.join(".gitattributes"), "tracked filter=local\n").unwrap();
     git(&root, &["add", ".gitattributes"]);
     git(&root, &["commit", "-qm", "filter declaration"]);
-    let marker = dir.path().join("filter-was-executed");
     git(
         &root,
         &[
             "config",
-            "filter.trap.smudge",
-            &format!("touch '{}'", marker.display()),
+            "filter.local.smudge",
+            "sed 's/committed/smudged/'",
         ],
     );
-    git(&root, &["config", "filter.trap.required", "true"]);
-    let (checkout, _) = create(&repository, &root, "feat/no-filter").unwrap();
-    assert!(!marker.exists());
+    git(&root, &["config", "filter.local.required", "true"]);
+    assert_eq!(git(&root, &["show", "HEAD:tracked"]), "committed");
+    let (checkout, text) = create(&repository, &root, "feat/local-filter").unwrap();
+    let receipt: Receipt = serde_json::from_str(&text).unwrap();
+    assert_eq!(receipt.state, ReceiptState::Ready);
     assert_eq!(
         fs::read_to_string(checkout.join("tracked")).unwrap(),
-        "committed\n"
+        "smudged\n"
     );
 }
 

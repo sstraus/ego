@@ -364,31 +364,6 @@ fn git_command(source: &Path) -> Command {
 
 fn git(source: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = git_command(source);
-    {
-        // A checkout/status filter is arbitrary code, and can also fetch content.
-        // Disable configured smudge/process drivers rather than running an
-        // external system merely to create an isolated checkout.
-        let filters = git_command(source)
-            .args([
-                "config",
-                "--name-only",
-                "--get-regexp",
-                r"^filter\..*\.(clean|smudge|process|required)$",
-            ])
-            .output()
-            .map_err(error)?;
-        if !filters.status.success() && filters.status.code() != Some(1) {
-            return Err("cannot inspect checkout filter configuration".into());
-        }
-        for key in String::from_utf8(filters.stdout).map_err(error)?.lines() {
-            let value = if key.ends_with(".required") {
-                "false"
-            } else {
-                ""
-            };
-            command.arg("-c").arg(format!("{key}={value}"));
-        }
-    }
     let output = command.args(args).output().map_err(error)?;
     if !output.status.success() {
         return Err(format!(
