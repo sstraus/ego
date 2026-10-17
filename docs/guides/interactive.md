@@ -38,8 +38,8 @@ new prompt epoch when source work is idle.
 `/tools`, `/skills`, and `/doctor` show concise inventories; append `details`
 for complete entries and evidence. `/skills diagnose` shows admission diagnostics.
 `/resume [ID]` and `/continue [ID]` resume sessions; `/history QUERY` searches them.
-These aliases support completion. Unknown slash spellings remain ordinary prompt
-text and can start provider work; this release does not change that policy.
+These aliases support completion. Unknown slash spellings are refused locally.
+Add a leading space to send literal prompt text that starts with `/`.
 
 ## Input while work is running
 

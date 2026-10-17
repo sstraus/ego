@@ -9437,6 +9437,7 @@ fn followup_tools_default_has_no_per_tool_notices() {
         let start = output.len();
         input.write_all(b"/tools\r").unwrap();
         input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "/tools details for the full list");
         until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
         drain_until_quiet(&reader, &mut output);
         let visible = normalized(&output[start..]);

@@ -112,7 +112,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
     );
     logical.push("Aliases: /resume [ID], /continue [ID], /history QUERY".to_owned());
     logical.push(
-        "Unknown slash input is sent as prompt text; aliases require their exact spelling."
+        "Unknown slash input is refused locally; add a leading space to send literal text."
             .to_owned(),
     );
     logical.push("Keys".to_owned());
