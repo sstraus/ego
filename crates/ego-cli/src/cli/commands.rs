@@ -43,28 +43,16 @@ pub(super) struct ResumeCommand {
     )]
     pub(super) answers: Vec<ResumeAnswer>,
 
-    #[command(flatten)]
-    pub(super) flags: Flags,
-}
-
-/// The metadata-only `resume` grammar. No run flag is present by construction.
-#[derive(Debug, Parser)]
-#[command(
-    name = "ego resume",
-    about = "Read or change durable session metadata.",
-    disable_help_subcommand = true
-)]
-pub(super) struct SessionMetadataCommand {
-    pub(super) id: String,
-
-    #[arg(long, value_parser = parse_name_operation, conflicts_with = "goal", required_unless_present = "goal")]
+    /// Read or change the session title without starting a turn: show, set=TEXT, clear.
+    #[arg(long, value_parser = parse_name_operation, requires = "id", conflicts_with_all = ["goal_operation", "prompt", "answers", "resume-run-options"])]
     pub(super) name: Option<NameOperation>,
 
-    #[arg(long, value_parser = parse_goal_operation, conflicts_with = "name", required_unless_present = "name")]
-    pub(super) goal: Option<GoalOperation>,
+    /// Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON.
+    #[arg(long, value_parser = parse_goal_operation, requires = "id", conflicts_with_all = ["name", "prompt", "answers", "resume-run-options"])]
+    pub(super) goal_operation: Option<GoalOperation>,
 
     #[command(flatten)]
-    pub(super) common: Common,
+    pub(super) flags: Flags,
 }
 
 /// `ego ls` — the catalogue.
