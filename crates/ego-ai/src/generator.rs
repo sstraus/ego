@@ -266,6 +266,20 @@ impl Generator for WireGenerator {
             }
         };
 
+        let cache_prefix = request
+            .body
+            .as_deref()
+            .and_then(|body| self.wire.cache_prefix(body))
+            .and_then(|digest| {
+                req.cache
+                    .as_ref()
+                    .map(|cache| ego_core::generator::attempt::CachePrefix {
+                        session: cache.session_id,
+                        provider: self.row.id().to_owned(),
+                        model: req.model.clone(),
+                        digest,
+                    })
+            });
         tracing::debug!(target: "ego_ai::tool_names", provider = self.row.id(), model = %req.model,
             "provider generation request");
         let http = Arc::clone(&self.http);
@@ -296,6 +310,10 @@ impl Generator for WireGenerator {
         .flat_map(move |response| wire.decode(response, cost.clone()))
         .flat_map(move |event| stream::iter(names.restore(event)))
         .boxed();
-        AttemptStream::new(attempt, inner)
+        let stream = AttemptStream::new(attempt, inner);
+        match cache_prefix {
+            Some(prefix) => stream.with_cache_prefix(prefix),
+            None => stream,
+        }
     }
 }

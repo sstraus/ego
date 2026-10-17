@@ -136,6 +136,34 @@ fn anthropic_breakpoints_exclude_host_updates_and_current_user_intent() {
     assert_eq!(first["messages"][3]["content"][0]["text"], "current intent");
 }
 
+// Catches: a fingerprint of the entire request treating a volatile user
+// message as a changed cache prefix, or missing Anthropic's real breakpoints.
+#[test]
+fn anthropic_continuity_uses_the_actual_marked_request_prefix() {
+    use ego_ai::wire::{WireFormat, anthropic_messages::AnthropicMessages};
+    let root = SessionId::new();
+    let a = request("claude-opus-5-5", root, "host rev1");
+    let b = request("claude-opus-5-5", root, "host rev2");
+    let fingerprint = |req: &GenRequest| {
+        AnthropicMessages.cache_prefix(&anthropic_messages::request_body(req).unwrap())
+    };
+    assert!(fingerprint(&a).is_some());
+    assert_eq!(fingerprint(&a), fingerprint(&b));
+    let mut changed = b;
+    changed.messages = Conversation::new(vec![
+        Message::text(Role::System, "changed identity"),
+        Message::text(Role::System, "stable instructions"),
+        Message::text(Role::User, "earlier intent"),
+        Message::text(Role::Assistant, "earlier answer"),
+        Message::text(Role::User, "host rev2"),
+        Message::text(Role::User, "current intent"),
+    ])
+    .unwrap();
+    assert_ne!(fingerprint(&a), fingerprint(&changed));
+    changed.cache.as_mut().unwrap().retention = CacheRetention::None;
+    assert_eq!(fingerprint(&changed), None);
+}
+
 #[test]
 fn openrouter_claude_marks_only_the_normalized_system_and_stable_history() {
     // Catches: routed Claude missing explicit breakpoints, or unrelated endpoints receiving them.

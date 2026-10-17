@@ -1105,6 +1105,49 @@ mod edit {
         );
     }
 
+    // Catches: a guarded edit changing the file but dropping its measured
+    // line metadata before the turn's terminal receipt can read the result.
+    #[test]
+    fn guarded_edit_result_carries_the_lines_it_changed() {
+        let ws = editable();
+        let tool = ws.tool("edit");
+        let call = tool
+            .prepare(
+                json!({
+                    "path": "src/main.rs",
+                    "old_string": "    todo!()\n",
+                    "new_string": "    println!(\"done\");\n",
+                }),
+                &ws.ctx(),
+            )
+            .unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &ws.fs,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        let ToolExecution::Complete(result) = block_on(tool.execute(call, &guarded)).unwrap()
+        else {
+            panic!("edit must complete without input");
+        };
+        assert_eq!(
+            result.line_change(),
+            Some(ego_core::permit::LineChange {
+                added: 1,
+                removed: 1,
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    println!(\"done\");\n}\n"
+        );
+    }
+
     #[test]
     fn edit_refuses_text_that_is_not_in_the_file_and_changes_nothing() {
         // The whole reason `edit` is not `write`: it may only land where the

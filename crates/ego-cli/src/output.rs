@@ -9,10 +9,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use ego_core::cost::{CumulativeCost, RateSource};
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
-use ego_core::event::id::{ItemId, SessionId};
+use ego_core::event::id::{ItemId, SessionId, TurnId};
 use ego_core::permit::Authority;
 use ego_core::public::{CeilingEffect, ItemKind, MeteringKind, PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination};
@@ -378,11 +379,24 @@ pub struct TextSink<'a> {
     calls: Mutex<HashMap<ItemId, StartedCall>>,
     capabilities: Capabilities,
     retry_cause: Mutex<Option<String>>,
+    turn_started: Mutex<HashMap<TurnId, Instant>>,
+    edited_lines: Mutex<HashMap<TurnId, ego_core::permit::LineChange>>,
+    last_cache: Mutex<Option<(ego_core::generator::attempt::CachePrefix, bool)>>,
 }
 
 struct StartedCall {
     name: String,
     args: String,
+}
+
+fn compact_tokens(count: u64) -> String {
+    if count < 1_000 {
+        count.to_string()
+    } else if count < 100_000 {
+        format!("{:.1}K", count as f64 / 1_000.0)
+    } else {
+        format!("{}K", count / 1_000)
+    }
 }
 
 /// The state of the answer currently being written.
@@ -404,6 +418,9 @@ impl<'a> TextSink<'a> {
             calls: Mutex::new(HashMap::new()),
             capabilities,
             retry_cause: Mutex::new(None),
+            turn_started: Mutex::new(HashMap::new()),
+            edited_lines: Mutex::new(HashMap::new()),
+            last_cache: Mutex::new(None),
         }
     }
 
@@ -507,6 +524,41 @@ impl<'a> TextSink<'a> {
 }
 
 impl EventSink for TextSink<'_> {
+    fn cache_observed(
+        &self,
+        prefix: &ego_core::generator::attempt::CachePrefix,
+        usage: Option<ego_core::state::Usage>,
+    ) {
+        if !self.capabilities.on_screen() || self.quiet {
+            return;
+        }
+        let mut last = self.last_cache.lock().expect("cache observation lock");
+        let Some(usage) = usage.filter(|usage| {
+            usage.cache_read_tokens > 0
+                || usage.uncached_input_tokens > 0
+                || usage.cache_write_tokens > 0
+                || usage.cache_write_extended_tokens > 0
+        }) else {
+            if last
+                .as_ref()
+                .is_some_and(|(previous, _)| previous != prefix)
+            {
+                *last = None;
+            }
+            return;
+        };
+        let hit = usage.cache_read_tokens > 0;
+        let probable_loss = last
+            .as_ref()
+            .is_some_and(|(previous, hit_before)| previous == prefix && *hit_before && !hit);
+        *last = Some((prefix.clone(), hit));
+        drop(last);
+        if probable_loss {
+            self.finish();
+            self.out.note("cache reuse was reported on an earlier request with the same marked input, but not this one; cached entries may have expired or changed at the provider");
+        }
+    }
+
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         if self.capabilities.on_screen()
             && self.out.live_retry()
@@ -524,6 +576,56 @@ impl EventSink for TextSink<'_> {
             }
         }
         match event {
+            PublicEvent::TurnStarted { turn } if self.capabilities.on_screen() && !self.quiet => {
+                self.turn_started
+                    .lock()
+                    .expect("turn clock lock")
+                    .insert(*turn, Instant::now());
+            }
+            PublicEvent::UsageUpdated { usage_delta, .. }
+                if self.capabilities.on_screen()
+                    && !self.quiet
+                    && usage_delta.cache_read_tokens > 0 =>
+            {
+                self.finish();
+                self.out.note(&format!(
+                    "cache hit: {} tokens",
+                    compact_tokens(usage_delta.cache_read_tokens)
+                ));
+            }
+            PublicEvent::TurnCompleted { turn, ok, .. }
+                if self.capabilities.on_screen() && !self.quiet =>
+            {
+                let started = self
+                    .turn_started
+                    .lock()
+                    .expect("turn clock lock")
+                    .remove(turn);
+                let lines = self
+                    .edited_lines
+                    .lock()
+                    .expect("edit count lock")
+                    .remove(turn);
+                if let Some(started) = started {
+                    self.finish();
+                    let elapsed = tool_row::duration(started.elapsed());
+                    let clock = chrono::Local::now().format("%-I:%M %p");
+                    let outcome = if *ok { "done" } else { "stopped" };
+                    let mut receipt = format!("✻ Turn elapsed {elapsed} · {outcome} {clock}");
+                    if let Some(lines) = lines {
+                        let (green, red, reset) = if self.capabilities.coloured() {
+                            ("\x1b[32m", "\x1b[31m", "\x1b[0m")
+                        } else {
+                            ("", "", "")
+                        };
+                        receipt.push_str(&format!(
+                            " · tracked edits {green}+{}{reset} {red}-{}{reset}",
+                            lines.added, lines.removed
+                        ));
+                    }
+                    self.out.note(&receipt);
+                }
+            }
             PublicEvent::PlanUpdated { .. } if !self.quiet => {
                 self.finish();
                 for step in &state.plan.steps {
@@ -575,11 +677,27 @@ impl EventSink for TextSink<'_> {
             }
             PublicEvent::ItemCompleted {
                 kind: ItemKind::Tool,
+                turn,
                 item,
                 ok,
                 text,
-                ..
             } if !self.quiet => {
+                if *ok
+                    && self.capabilities.on_screen()
+                    && let Some(change) = state
+                        .items
+                        .get(item)
+                        .and_then(|item| item.tool_result.as_ref())
+                        .and_then(|result| result.line_change())
+                {
+                    let mut lines = self.edited_lines.lock().expect("edit count lock");
+                    let total = lines.entry(*turn).or_insert(ego_core::permit::LineChange {
+                        added: 0,
+                        removed: 0,
+                    });
+                    total.added = total.added.saturating_add(change.added);
+                    total.removed = total.removed.saturating_add(change.removed);
+                }
                 let started = self
                     .calls
                     .lock()
@@ -923,6 +1041,273 @@ mod tests {
             name: Some(name.to_owned()),
             text: Some(args.to_owned()),
         }
+    }
+
+    /// Catches: reporting a cache hit as a raw token count or dropping it from
+    /// the interactive transcript after a provider reports reused input.
+    #[test]
+    fn interactive_usage_reports_compact_cache_hits_only_when_read_tokens_exist() {
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        for cached in [0, 18_400] {
+            sink.publish(
+                &PublicEvent::UsageUpdated {
+                    turn,
+                    item: None,
+                    usage_delta: ego_core::state::Usage {
+                        cache_read_tokens: cached,
+                        ..ego_core::state::Usage::IDENTITY
+                    },
+                    cost_delta: ego_core::cost::CostDelta::Unknown(
+                        ego_core::cost::UnknownCost::NoPricingQuote,
+                    ),
+                },
+                &state,
+            );
+        }
+        assert_eq!(*out.notes.lock().unwrap(), ["cache hit: 18.4K tokens"]);
+    }
+
+    /// Catches: treating a first miss or a different cache prefix as a reset,
+    /// and repeating the warning for every miss after one prior hit.
+    #[test]
+    fn cache_warning_requires_a_prior_hit_on_the_same_marked_prefix() {
+        use ego_core::generator::attempt::CachePrefix;
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let original = CachePrefix {
+            session: SessionId::new(),
+            provider: "anthropic".into(),
+            model: "model-a".into(),
+            digest: "marked-a".into(),
+        };
+        let different = CachePrefix {
+            model: "model-b".into(),
+            ..original.clone()
+        };
+        let usage = |read, uncached| ego_core::state::Usage {
+            cache_read_tokens: read,
+            uncached_input_tokens: uncached,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(&different, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        assert!(out.notes.lock().unwrap().is_empty());
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(
+            &original,
+            Some(ego_core::state::Usage {
+                cache_write_tokens: 800,
+                ..ego_core::state::Usage::IDENTITY
+            }),
+        );
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("may have expired"), "{notes:?}");
+    }
+
+    /// Catches: a missing usage report being read as a zero-token miss, or a
+    /// cache warning entering a headless or quiet transcript.
+    #[test]
+    fn cache_warning_needs_reported_input_and_an_interactive_loud_surface() {
+        use ego_core::generator::attempt::CachePrefix;
+        let prefix = CachePrefix {
+            session: SessionId::new(),
+            provider: "anthropic".into(),
+            model: "model-a".into(),
+            digest: "same".into(),
+        };
+        let hit = ego_core::state::Usage {
+            cache_read_tokens: 500,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        let miss = ego_core::state::Usage {
+            uncached_input_tokens: 500,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        for (quiet, interactive) in [(false, true), (true, true), (false, false)] {
+            let out = Recorded::default();
+            let mut caps = Capabilities::plain();
+            if interactive {
+                caps.osc = crate::render::caps::OscProfile::Standard;
+            }
+            let sink = TextSink::new(&out, quiet, caps);
+            sink.cache_observed(&prefix, Some(hit));
+            sink.cache_observed(&prefix, None);
+            sink.cache_observed(&prefix, Some(ego_core::state::Usage::IDENTITY));
+            assert!(out.notes.lock().unwrap().is_empty());
+            sink.cache_observed(&prefix, Some(miss));
+            sink.cache_observed(&prefix, Some(hit));
+            sink.cache_observed(&prefix, Some(miss));
+            assert_eq!(
+                out.notes.lock().unwrap().len(),
+                2 * usize::from(!quiet && interactive)
+            );
+        }
+    }
+
+    /// Catches: a finished turn disappearing without a visible receipt, or
+    /// a headless answer receiving terminal-only status text.
+    #[test]
+    fn interactive_turn_completion_prints_elapsed_receipt_without_changing_headless_output() {
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let interactive = TextSink::new(&out, false, caps);
+        let headless = TextSink::new(&out, false, Capabilities::plain());
+        let state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        let start = PublicEvent::TurnStarted { turn };
+        let end = PublicEvent::TurnCompleted {
+            turn,
+            ok: true,
+            exit_reason: ego_core::event::domain::ExitReason::Completed,
+        };
+        interactive.publish(&start, &state);
+        interactive.publish(&end, &state);
+        headless.publish(&start, &state);
+        headless.publish(&end, &state);
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("✻ Turn elapsed "), "{notes:?}");
+        assert!(notes[0].contains(" · done "), "{notes:?}");
+    }
+
+    /// Catches: a terminal receipt loses the diff-like signs or leaks ANSI
+    /// sequences when colour was disabled.
+    #[test]
+    fn turn_receipt_colours_only_observed_edit_counts() {
+        for (colour, green, red) in [(false, "", ""), (true, "\x1b[32m", "\x1b[31m")] {
+            let out = Recorded::default();
+            let mut caps = Capabilities::plain();
+            caps.osc = crate::render::caps::OscProfile::Standard;
+            if colour {
+                caps.depth = crate::render::caps::Depth::Ansi16;
+            }
+            let sink = TextSink::new(&out, false, caps);
+            let state = SessionState::default();
+            let turn = TurnId::new();
+            sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+            sink.edited_lines.lock().unwrap().insert(
+                turn,
+                ego_core::permit::LineChange {
+                    added: 3,
+                    removed: 1,
+                },
+            );
+            sink.publish(
+                &PublicEvent::TurnCompleted {
+                    turn,
+                    ok: true,
+                    exit_reason: ego_core::event::domain::ExitReason::Completed,
+                },
+                &state,
+            );
+            let notes = out.notes.lock().unwrap();
+            let reset = if colour { "\x1b[0m" } else { "" };
+            assert!(
+                notes[0].contains(&format!("tracked edits {green}+3{reset} {red}-1{reset}")),
+                "{notes:?}"
+            );
+        }
+    }
+
+    /// Catches: counting metadata from a failed call, or showing a measured
+    /// zero for a successful write whose line changes were never observed.
+    #[test]
+    fn receipt_reads_only_successful_measured_tool_results_from_reduced_state() {
+        use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+        use ego_core::event::id::{EventId, Producer, Seq};
+        use ego_core::event::time::Timestamp;
+        use ego_core::permit::{LineChange, ToolResult};
+
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let turn = TurnId::new();
+        let mut state = SessionState::default();
+        sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+        let mut seq = Seq::ZERO;
+        for (ok, change) in [
+            (
+                true,
+                Some(LineChange {
+                    added: 3,
+                    removed: 1,
+                }),
+            ),
+            (
+                false,
+                Some(LineChange {
+                    added: 9,
+                    removed: 9,
+                }),
+            ),
+            (true, None),
+        ] {
+            let item = ItemId::new();
+            let result = match change {
+                Some(change) => ToolResult::builtin("done").with_line_change(change),
+                None => ToolResult::builtin("done"),
+            };
+            let event = DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn,
+                    item: Some(item),
+                    parent: None,
+                    ts: Timestamp::from_millis(0),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::ToolCallCompleted { ok, result },
+            };
+            state.apply(&event);
+            sink.publish(&ego_core::public::project_public(&event).unwrap(), &state);
+        }
+        sink.publish(
+            &PublicEvent::TurnCompleted {
+                turn,
+                ok: true,
+                exit_reason: ExitReason::Completed,
+            },
+            &state,
+        );
+        let notes = out.notes.lock().unwrap();
+        assert!(notes[0].contains("tracked edits +3 -1"), "{notes:?}");
+        assert!(!notes[0].contains("+12"), "{notes:?}");
+    }
+
+    #[test]
+    fn quiet_interactive_turn_does_not_print_progress_receipt() {
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, true, caps);
+        let state = SessionState::default();
+        let turn = TurnId::new();
+        sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+        sink.publish(
+            &PublicEvent::TurnCompleted {
+                turn,
+                ok: true,
+                exit_reason: ego_core::event::domain::ExitReason::Completed,
+            },
+            &state,
+        );
+        assert!(out.notes.lock().unwrap().is_empty());
     }
 
     fn completed(item: ItemId, ok: bool, result: &str) -> PublicEvent {
