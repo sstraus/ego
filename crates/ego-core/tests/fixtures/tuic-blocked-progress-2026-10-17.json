@@ -1,0 +1,32 @@
+{
+  "content": [
+    {
+      "text": "{\"id\":29619}",
+      "provenance": {
+        "source": "builtin"
+      }
+    }
+  ],
+  "provenance": {
+    "kind": "foreign",
+    "result": {
+      "server": "tuic",
+      "tool": "progress",
+      "invocation_digest": "sha256:af43d7865602861549b1a532aa9aebf2ad6a8c86199b36beeb2fc47bd07374f7",
+      "admission": {
+        "capture": "sha256:df1e280ddce74236d63c85b01cca6020363944d4ed5b03d8ea7ed15423ce7d6d",
+        "operation": "tuic/progress",
+        "schema": "sha256:cde34f931e808eaba424bc7e43042047a6b0d18f813c3c7a60cab591c4c22a92"
+      },
+      "result_type": "complete",
+      "ttl_ms": null,
+      "cache_scope": null,
+      "visible_text": "{\"id\":29619}",
+      "visible_truncated": false,
+      "unsupported": [],
+      "evidence": "95addf681920e65f1c529288ee4ecc4f13a8b618d37bdbb2cfab74fc12f50b16:93",
+      "delivery": "possibly_sent",
+      "cancellation": "completed"
+    }
+  }
+}
