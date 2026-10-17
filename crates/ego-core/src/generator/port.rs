@@ -200,5 +200,12 @@ pub trait Generator: Send + Sync {
     ///
     /// Implementors build the return value with [`AttemptStream::new`]; they
     /// do not need to touch the attempt otherwise.
+    /// Release connection-local continuation state before an unbounded human wait.
+    ///
+    /// Called only after the session's attempt has settled. Stateless generators
+    /// have nothing to release; retained transports must not tie the next request
+    /// to a connection that can expire while the person is answering.
+    fn release_idle_connection(&self, _session: crate::event::id::SessionId) {}
+
     fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream;
 }

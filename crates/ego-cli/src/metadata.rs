@@ -360,8 +360,9 @@ fn goal_text(goal: Option<&GoalRecord>) -> String {
     match goal.state {
         GoalState::Active => match (&goal.blocker_reason, goal.blocker_observations) {
             (Some(reason), observations) if observations != 0 => format!(
-                "goal active: {} (blocked {observations}/3: {reason})",
-                goal.objective
+                "goal active: {} (blocked {observations}/{}: {reason})",
+                goal.objective,
+                ego_core::goal::BLOCKER_OBSERVATION_LIMIT
             ),
             _ => format!("goal active: {}", goal.objective),
         },
@@ -396,6 +397,60 @@ mod regression_case_tests {
     impl Clock for FixedClock {
         fn now(&self) -> Timestamp {
             Timestamp::from_millis(1)
+        }
+    }
+
+    /// Catches: metadata reports /3 although the durable goal blocks on observation five.
+    #[test]
+    fn goal_blocker_receipts_follow_the_five_observation_lifecycle() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = Arc::new(JsonlStore::new(
+            root.path(),
+            workspace.path(),
+            Box::new(OsIo),
+        ));
+        let id = SessionId::new();
+        store
+            .publish_empty_session(id, workspace.path(), Timestamp::from_millis(1))
+            .unwrap();
+        let opened = crate::session::open(store.as_ref(), &id, &FixedClock).unwrap();
+        let metadata = SessionMetadata::new(Arc::clone(&store), Arc::new(FixedClock));
+        let journal = LeasedSharedJournal::new(
+            &opened.writer,
+            &FixedClock,
+            &NullSink,
+            Producer::Main,
+            opened.state.clone(),
+        );
+        let shared = journal.shared();
+        let ceilings = ego_core::ceiling::Ceilings::default();
+        let mut notices = Vec::new();
+        execute_interactive(
+            &metadata,
+            &journal,
+            &shared,
+            &SessionMetadataOperation::Goal(GoalOperation::Set("ship".into())),
+            &ceilings,
+            &mut |notice| notices.push(notice.to_owned()),
+        )
+        .unwrap();
+        for observation in 1..=5 {
+            execute_interactive(
+                &metadata,
+                &journal,
+                &shared,
+                &SessionMetadataOperation::Goal(GoalOperation::Block("network".into())),
+                &ceilings,
+                &mut |notice| notices.push(notice.to_owned()),
+            )
+            .unwrap();
+            let expected = if observation == 5 {
+                "goal blocked: ship (network)".to_owned()
+            } else {
+                format!("goal active: ship (blocked {observation}/5: network)")
+            };
+            assert_eq!(notices.last().unwrap(), &expected);
         }
     }
 

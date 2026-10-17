@@ -85,6 +85,9 @@ fn finish_with_typeahead(pending_answer: bool) {
     // /tasks is delivered to the driver even while generation is running,
     // unlike normal busy submissions which use the turn's durable ingress.
     // Three lines exceed the real mailbox capacity (one) without a test seam.
+    // TEST-CHANGE: read-only receipts now arrive during generation. Capture
+    // the whole burst, not only output after releasing the provider gate.
+    let receipts_start = output.len();
     input
         .write_all(b"/tasks\r/tasks invalid\r/tasks invalid extra\r")
         .unwrap();
@@ -97,10 +100,13 @@ fn finish_with_typeahead(pending_answer: bool) {
     until_normalized(
         &reader,
         &mut output,
-        finished,
+        receipts_start,
         "usage: /tasks [ID | cancel ID]",
     );
-    let receipts = normalized(&output[finished..]);
+    // TEST-CHANGE: keep a separate post-gate prompt barrier and recovery
+    // checks even when all three receipts were printed before gate release.
+    until_prompt_from(&reader, &mut output, finished);
+    let receipts = normalized(&output[receipts_start..]);
     let first = receipts
         .find("background tasks: none")
         .expect("first queued line");

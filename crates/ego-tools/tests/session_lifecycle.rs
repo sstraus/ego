@@ -784,7 +784,7 @@ fn lifecycle_title_requires_the_session_writer_lease() {
 }
 
 #[test]
-fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
+fn reopened_fork_seed_accepts_active_goal_and_plan_with_and_without_title() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
     let workspace = dir.path().join("workspace");
@@ -817,6 +817,25 @@ fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
             Ceilings::default(),
         )
         .unwrap();
+    let inherited_plan = ego_core::plan::PlanUpdate::Replace {
+        steps: vec![ego_core::plan::PlanStep {
+            id: "stable".into(),
+            text: "Finish work".into(),
+            status: ego_core::plan::StepStatus::Blocked,
+        }],
+    };
+    titled_writer
+        .writer
+        .append(
+            &titled,
+            &lifecycle_event(
+                3,
+                EventKind::PlanUpdated {
+                    update: inherited_plan.clone(),
+                },
+            ),
+        )
+        .unwrap();
     drop(titled_writer);
     let titled_child = futures::executor::block_on(service.fork(titled))
         .unwrap()
@@ -838,6 +857,18 @@ fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
             Ceilings::default(),
         )
         .unwrap();
+    untitled_writer
+        .writer
+        .append(
+            &untitled,
+            &lifecycle_event(
+                2,
+                EventKind::PlanUpdated {
+                    update: inherited_plan,
+                },
+            ),
+        )
+        .unwrap();
     drop(untitled_writer);
     let untitled_child = futures::executor::block_on(service.fork(untitled))
         .unwrap()
@@ -851,6 +882,10 @@ fn reopened_fork_seed_accepts_active_goal_with_and_without_title() {
     );
     for (child, source_goal) in [(titled_child, titled_goal), (untitled_child, untitled_goal)] {
         let inherited = reopened_meta.goal(child).unwrap().unwrap();
+        let plan = _reopened.plan(child).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].id, "stable");
+        assert_eq!(plan.steps[0].status, ego_core::plan::StepStatus::Blocked);
         assert_ne!(inherited.id, source_goal.value.id);
         assert_eq!(inherited.derived_from, Some(source_goal.value.id));
         assert_eq!(inherited.objective, source_goal.value.objective);

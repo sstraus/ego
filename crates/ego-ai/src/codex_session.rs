@@ -18,6 +18,13 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    pub(crate) fn release_idle_connection(&mut self, session: ego_core::event::id::SessionId) {
+        if self.session_id == Some(session) {
+            self.socket = None;
+            self.continuation = None;
+        }
+    }
+
     fn bind_session(&mut self, session_id: Option<ego_core::event::id::SessionId>) {
         if session_id.is_none() || self.session_id != session_id {
             self.socket = None;
@@ -106,6 +113,7 @@ pub(crate) async fn execute(
         b"responses_websockets=2026-02-06".to_vec(),
     ));
     // Taking the connection makes cancellation/drop fail closed: no partial response can be reused.
+    let socket_reused = owner.socket.is_some();
     let mut socket = match owner.socket.take() {
         Some(socket) => socket,
         None => {
@@ -133,6 +141,36 @@ pub(crate) async fn execute(
         .continuation
         .take()
         .map_or_else(|| body.clone(), |prior| prior.request(&body));
+    // Diagnostic evidence contains hashes only, never prompt text or transport headers.
+    if tracing::enabled!(target: "ego_ai::codex_session", tracing::Level::DEBUG) {
+        let mut prefix = Vec::new();
+        let prefix_digests: Vec<_> = body["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| {
+                prefix.extend(serde_json::to_vec(item).expect("Codex JSON serializes"));
+                ego_core::digest::sha256_hex(&prefix)
+            })
+            .collect();
+        let mut settings = body.clone();
+        settings
+            .as_object_mut()
+            .expect("Codex request object")
+            .remove("input");
+        tracing::debug!(
+            target: "ego_ai::codex_session",
+            socket_reused,
+            settings_digest = %ego_core::digest::sha256_hex(
+                &serde_json::to_vec(&settings).expect("Codex JSON serializes")
+            ),
+            input_prefix_digests = ?prefix_digests,
+            outgoing_digest = %ego_core::digest::sha256_hex(
+                &serde_json::to_vec(&outgoing).expect("Codex JSON serializes")
+            ),
+            "Codex request fingerprint evidence"
+        );
+    }
     tracing::debug!(
         target: "ego_ai::codex_session",
         incremental = outgoing.get("previous_response_id").is_some(),

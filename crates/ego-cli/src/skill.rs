@@ -627,7 +627,9 @@ fn load_skill(
         .map_err(|error| format!("skill root could not be resolved: {error}"))?;
     let path = fs::canonicalize(requested_path)
         .map_err(|error| format!("could not be resolved: {error}"))?;
-    if !path.starts_with(&canonical_root) {
+    // User-owned roots can link to skills maintained elsewhere. Project and
+    // system roots must not admit files outside their declared authority.
+    if source != SkillSourceAuthority::User && !path.starts_with(&canonical_root) {
         return Err("resolves outside its canonical skill root".to_owned());
     }
     let mut file = fs::File::open(&path).map_err(|error| format!("could not be read: {error}"))?;

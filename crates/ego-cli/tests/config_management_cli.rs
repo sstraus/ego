@@ -486,3 +486,68 @@ mod batch;
 
 #[path = "config_management_cli/conditional.rs"]
 mod conditional;
+
+// Catches: keyboard settings cannot round-trip through managed configuration or escape user scope.
+#[test]
+fn keyboard_preferences_round_trip_as_user_only_settings() {
+    let fixture = Fixture::new();
+    for assignment in ["ui.vim=true", "ui.keybindings={model=['Ctrl+P'],expand=[]}"] {
+        let saved = fixture.run(&["config", "set", assignment]);
+        assert_eq!(saved.status.code(), Some(0), "{}", error(&saved));
+        assert_usage_failure(
+            &fixture.run(&["config", "set", "--profile", "dev", assignment]),
+            "not available",
+        );
+    }
+    assert_eq!(text(&fixture.run(&["config", "get", "ui.vim"])), "true\n");
+    let binding = fixture.run(&["config", "get", "ui.keybindings", "--json"]);
+    assert_eq!(binding.status.code(), Some(0), "{}", error(&binding));
+    let value: serde_json::Value = serde_json::from_slice(&binding.stdout).unwrap();
+    assert_eq!(value["values"]["ui.keybindings"]["model"][0], "Ctrl+P");
+    assert_eq!(
+        value["values"]["ui.keybindings"]["expand"],
+        serde_json::json!([])
+    );
+    let disk = std::fs::read_to_string(fixture.config_path()).unwrap();
+    for (assignment, reason) in [
+        ("ui.keybindings={model=['Ctrl+S']}", "reserved"),
+        ("ui.keybindings={model=['Alt+O']}", "conflicts"),
+        ("ui.keybindings={typo=['F2']}", "unknown keybinding action"),
+    ] {
+        for args in [
+            vec!["config", "set", assignment],
+            vec!["config", "batch", "--set", assignment],
+        ] {
+            assert_usage_failure(&fixture.run(&args), reason);
+            assert_eq!(
+                std::fs::read_to_string(fixture.config_path()).unwrap(),
+                disk
+            );
+        }
+    }
+    for key in ["ui.vim", "ui.keybindings"] {
+        let unset = fixture.run(&["config", "unset", key]);
+        assert_eq!(unset.status.code(), Some(0), "{}", error(&unset));
+    }
+    assert!(text(&fixture.run(&["config", "ls"])).is_empty());
+}
+
+// Catches: a handwritten conflicting keymap starts the terminal or reaches model admission.
+#[test]
+fn invalid_keyboard_preferences_are_refused_before_terminal_activation() {
+    let fixture = Fixture::new();
+    fixture.write_config("[ui]\nvim=true\nkeybindings={model=['Alt+O']}\n");
+    std::fs::create_dir(fixture.workspace.path().join(".ego")).unwrap();
+    std::fs::write(
+        fixture.workspace.path().join(".ego/config.toml"),
+        "not valid TOML",
+    )
+    .unwrap();
+    let refused = fixture.run(&["--vim"]);
+    assert_usage_failure(&refused, "conflicts");
+    assert!(!error(&refused).contains("model admission"));
+    assert!(
+        !refused.stdout.contains(&0x1b),
+        "terminal activation emitted control sequences"
+    );
+}

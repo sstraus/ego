@@ -1202,3 +1202,32 @@ impl RecordingBackend {
         self.0.lock().expect("backend lock").calls.clear();
     }
 }
+
+#[test]
+fn published_legacy_sse_profile_is_not_lost_on_configuration_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture(&dir);
+    let io = FakeIo::new();
+    let store = OsUserConfigStore::new(&io, &path);
+    let mut http = ego_core::config::McpHttpConfig::new(
+        "https://example.test/sse".parse::<url::Url>().unwrap(),
+        ego_core::config::McpHttpAuth::None,
+        false,
+    )
+    .unwrap();
+    http.profile = ego_core::config::McpHttpProfile::LegacySse;
+    store
+        .mutate(UserConfigMutation::McpSet {
+            target: UserConfigTarget::Base,
+            name: "events".parse().unwrap(),
+            expected_user_entry: None,
+            server: McpServerConfig::Http(http.clone()),
+        })
+        .unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    let reloaded = ConfigLayer::parse(Source::User, &text).unwrap();
+    assert_eq!(
+        reloaded.value.mcp.servers.get(&"events".parse().unwrap()),
+        Some(&McpLayerEntry::Server(McpServerConfig::Http(http)))
+    );
+}

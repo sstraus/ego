@@ -216,6 +216,14 @@ fn trace_request_tool_names(request: &crate::http::HttpRequest) {
 }
 
 impl Generator for WireGenerator {
+    fn release_idle_connection(&self, session: ego_core::event::id::SessionId) {
+        // An active stream owns the lock and its socket, not idle state. Only
+        // this session's completed connection may be released here.
+        if let Some(mut owner) = self.codex_session.try_lock() {
+            owner.release_idle_connection(session);
+        }
+    }
+
     fn supports_web_search(&self) -> bool {
         matches!(self.row.id(), "openai" | "anthropic")
     }

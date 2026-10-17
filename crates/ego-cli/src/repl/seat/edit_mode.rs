@@ -1,14 +1,15 @@
 use super::*;
 
 pub struct SurfaceEditMode {
-    editor: Emacs,
+    editor: Box<dyn EditMode>,
+    modal_editor: Emacs,
     phase: SurfacePhase,
     status: SharedStatus,
     asked_for_image: Arc<AtomicBool>,
 }
 
 impl SurfaceEditMode {
-    pub fn new(editor: Emacs, phase: SurfacePhase) -> Self {
+    pub fn new(editor: impl EditMode + 'static, phase: SurfacePhase) -> Self {
         Self::with_status(
             editor,
             phase,
@@ -18,9 +19,22 @@ impl SurfaceEditMode {
         )
     }
 
-    pub(super) fn with_status(editor: Emacs, phase: SurfacePhase, status: SharedStatus) -> Self {
+    pub(super) fn with_status(
+        editor: impl EditMode + 'static,
+        phase: SurfacePhase,
+        status: SharedStatus,
+    ) -> Self {
+        Self::with_editor(Box::new(editor), phase, status)
+    }
+
+    pub(super) fn with_editor(
+        editor: Box<dyn EditMode>,
+        phase: SurfacePhase,
+        status: SharedStatus,
+    ) -> Self {
         Self {
             editor,
+            modal_editor: emacs_composer(),
             phase,
             status,
             asked_for_image: Arc::new(AtomicBool::new(false)),
@@ -251,7 +265,7 @@ impl EditMode for SurfaceEditMode {
             }
             if self.phase.get() == EditPhase::Modal {
                 return match ReedlineRawEvent::try_from(raw) {
-                    Ok(event) => self.editor.parse_event(event),
+                    Ok(event) => self.modal_editor.parse_event(event),
                     Err(()) => ReedlineEvent::None,
                 };
             }
@@ -324,7 +338,11 @@ impl EditMode for SurfaceEditMode {
     }
 
     fn edit_mode(&self) -> PromptEditMode {
-        self.editor.edit_mode()
+        if self.phase.get() == EditPhase::Modal {
+            self.modal_editor.edit_mode()
+        } else {
+            self.editor.edit_mode()
+        }
     }
 }
 

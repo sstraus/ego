@@ -121,6 +121,7 @@ impl From<SharedJournalError> for CompactionError {
 pub enum RegisteredTool {
     Context,
     Goal,
+    Plan,
     Effect(Arc<dyn crate::permit::Tool>),
     HumanInput(Arc<dyn crate::question::HumanInputTool>),
     Skill(Arc<crate::skill::SkillCatalogue>),
@@ -136,6 +137,7 @@ impl RegisteredTool {
     pub fn descriptor(&self) -> crate::generator::types::ToolDescriptor {
         match self {
             Self::Context => crate::context::descriptor(),
+            Self::Plan => crate::plan::descriptor(),
             Self::Goal => crate::generator::types::ToolDescriptor {
                 name: "goal".into(), description: "Set or update your model-authored session goal. An operator-owned active goal cannot be replaced.".into(),
                 parameters: serde_json::json!({"type":"object","required":["objective"],"additionalProperties":false,"properties":{"objective":{"type":"string","minLength":1}}}),
@@ -222,6 +224,7 @@ impl RegisteredTool {
             Self::Effect(tool) => Some(tool),
             Self::Context
             | Self::Goal
+            | Self::Plan
             | Self::HumanInput(_)
             | Self::Skill(_)
             | Self::Task
@@ -234,6 +237,7 @@ impl RegisteredTool {
             Self::HumanInput(tool) => Some(tool),
             Self::Context
             | Self::Goal
+            | Self::Plan
             | Self::Effect(_)
             | Self::Skill(_)
             | Self::Task
@@ -1228,6 +1232,7 @@ pub struct TurnLoop<'session, 'turn> {
     judge: Option<JudgeContext>,
     main_model_identity: Option<ModelRef>,
     last_request: Option<GenRequest>,
+    last_generator: Option<Arc<dyn crate::generator::port::Generator>>,
     compaction_source_tools: Option<Vec<ToolDescriptor>>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
@@ -1408,6 +1413,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             judge: None,
             main_model_identity: None,
             last_request: None,
+            last_generator: None,
             compaction_source_tools: None,
             analysis_cache: None,
             analysis_observation: None,
@@ -2018,6 +2024,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             baseline,
             title,
             goal,
+            plan: self.state().plan,
             context_interval: Some(if self.state().context_request.is_some() {
                 self.context_interval
             } else {
@@ -4599,6 +4606,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     attempt: additional_attempts,
                 })?;
             }
+            self.last_generator = Some(Arc::clone(&profile.generator));
             let stream = profile.generator.generate(request, attempt);
             let drained = self
                 .drain(
@@ -5356,9 +5364,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         &mut self,
         turn: TurnId,
         history: Conversation,
-        notes: Vec<String>,
+        mut notes: Vec<String>,
         identity: Option<&str>,
     ) -> Result<(Conversation, usize), StoreError> {
+        let plan = self.state().plan;
+        if !plan.steps.is_empty() {
+            notes.push(format!(
+                "Current durable plan: {}",
+                serde_json::to_string(&plan).expect("plan serializes")
+            ));
+        }
         let has_context =
             !notes.is_empty() || identity.is_some() || !self.active_skill_invocations.is_empty();
         let mut messages: Vec<Message> = history.into();
@@ -6223,6 +6238,23 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let (tool, prepared, presentation) = match prepared {
             PreparedToolCall::Context(request) => return self.run_context_request(turn, request),
             PreparedToolCall::Goal { objective } => return self.run_model_goal(turn, objective),
+            PreparedToolCall::Plan(update) => {
+                let result = self.state().plan.apply(&update);
+                if let Err(error) = result {
+                    return Ok(ToolOutcome::Answered {
+                        ok: false,
+                        result: ToolResult::builtin(error),
+                    });
+                }
+                self.journal
+                    .append(turn, None, None, EventKind::PlanUpdated { update })?;
+                return Ok(ToolOutcome::Answered {
+                    ok: true,
+                    result: ToolResult::builtin(
+                        serde_json::to_string(&self.state().plan).expect("plan is serializable"),
+                    ),
+                });
+            }
             PreparedToolCall::Task(_) => {
                 return Ok(answered(
                     false,
@@ -7046,12 +7078,19 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         })
     }
 
+    fn release_question_connection(&self) {
+        if let Some(generator) = &self.last_generator {
+            generator.release_idle_connection(self.session_id);
+        }
+    }
+
     async fn run_question(
         &mut self,
         turn: TurnId,
         call: &PendingCall,
         request: crate::question::QuestionRequest,
     ) -> Result<ToolOutcome, StoreError> {
+        self.release_question_connection();
         let question = ItemId::new();
         let request_event = self.journal.append(
             turn,
@@ -7155,6 +7194,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         required: crate::mcp::ForeignInputRequired,
         mut reopened: Option<(ItemId, EventId)>,
     ) -> Result<ToolOutcome, StoreError> {
+        self.release_question_connection();
         let mut parent = parent;
         let mut required = required;
         loop {
