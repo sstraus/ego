@@ -172,6 +172,36 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
     assert!(indicator.ends_with("\n> "));
 }
 
+// Catches: long turns shown as raw seconds, or losing the smaller unit at a boundary.
+#[test]
+fn working_indicator_formats_long_elapsed_time() {
+    for (seconds, expected) in [
+        (0, "0s"),
+        (42, "42s"),
+        (59, "59s"),
+        (60, "1m 0s"),
+        (1511, "25m 11s"),
+        (3599, "59m 59s"),
+        (3600, "1h 00m"),
+        (3900, "1h 05m"),
+        (86400, "24h 00m"),
+    ] {
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            activity: true,
+            activity_since: Some(Instant::now() - Duration::from_secs(seconds)),
+            ..SurfaceStatus::default()
+        }));
+        let waiting = Waiting::new(status);
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        assert!(
+            indicator.contains(&format!(
+                "Working {expected} \x1b[2m· Esc to interrupt\x1b[22m\n"
+            )),
+            "{seconds}s rendered as {indicator:?}"
+        );
+    }
+}
+
 #[test]
 fn failed_answer_output_does_not_claim_a_visible_reply() {
     use crate::output::{InteractiveOutput, TextOutput};
@@ -549,6 +579,7 @@ fn adding_a_registry_key_changes_the_banner_and_the_help_without_editing_either(
 #[test]
 fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let phase = SurfacePhase::new(EditPhase::Idle);
+    let (_inspection_sender, inspections) = crossbeam::channel::unbounded();
     let (input_sender, input) = bounded(CHANNEL_CAPACITY);
     input_sender
         .send(Line::Submitted("initial".to_string()))
@@ -559,6 +590,8 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let seat = Seat {
         kind: SeatKind::Live(Box::new(LiveSeat {
             input,
+            inspections,
+            inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
             control: seat_control,
             activated: AtomicBool::new(false),
             break_signal: Arc::new(AtomicBool::new(false)),
@@ -588,6 +621,58 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
         assert!(
             status.reply_started.load(Ordering::Acquire),
             "re-entering busy during one turn must retain visible answer state"
+        );
+    }
+}
+
+// Catches: an inspection queued in the finishing turn is answered against a new session.
+#[test]
+fn pending_inspections_are_answered_before_a_queued_session_switch() {
+    let (inspection_sender, inspections) = crossbeam::channel::unbounded();
+    let (input_sender, input) = crossbeam::channel::unbounded();
+    let (control, _control_receiver) = bounded(CHANNEL_CAPACITY);
+    let (_ingress, coordinator) = interactive_control();
+    let registry = Arc::new(ActionRegistry::final_surface());
+    let seat = Seat {
+        kind: SeatKind::Live(Box::new(LiveSeat {
+            input,
+            inspections,
+            inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
+            control,
+            activated: AtomicBool::new(false),
+            break_signal: Arc::new(AtomicBool::new(false)),
+            phase: SurfacePhase::new(EditPhase::Idle),
+            status: Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
+                &registry,
+            )))),
+            git_worker: Mutex::new(None),
+            activity_worker: Mutex::new(None),
+            output_owner: Mutex::new(None),
+            owner: Mutex::new(None),
+        })),
+        terminal: true,
+        registry,
+        coordinator: Mutex::new(Some(coordinator)),
+    };
+    // The active driver can finish with an inspection still waiting. A subsequent
+    // /new must not move that already-admitted request to the next session.
+    // Repeat because crossbeam randomizes selection when both inboxes are ready.
+    for _ in 0..32 {
+        let inspection = Line::HostCommand(HostCommand::Action(ActionId::Usage));
+        inspection_sender
+            .send(HostCommand::Action(ActionId::Usage))
+            .unwrap();
+        input_sender
+            .send(Line::HostCommand(HostCommand::Action(ActionId::New)))
+            .unwrap();
+        assert_eq!(
+            seat.read(),
+            inspection,
+            "pending /usage must be answered before /new changes the active session"
+        );
+        assert_eq!(
+            seat.read(),
+            Line::HostCommand(HostCommand::Action(ActionId::New))
         );
     }
 }
@@ -1020,4 +1105,249 @@ fn retry_row_is_bounded_and_expired_countdown_saturates() {
             .render_prompt_indicator(PromptEditMode::Emacs)
             .contains("retrying in 0.0s")
     );
+}
+
+fn vim_surface(phase: SurfacePhase, status: SharedStatus) -> SurfaceEditMode {
+    SurfaceEditMode::with_editor(composer_editor(true), phase, status)
+}
+
+fn keyboard_event(code: KeyCode, modifiers: KeyModifiers) -> ReedlineRawEvent {
+    ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
+}
+
+// Catches: the wrapper never enters Vim normal mode, or does not return to insertion.
+#[test]
+fn vim_composer_transitions_between_real_normal_and_insert_editing() {
+    use reedline::PromptViMode;
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(SurfacePhase::new(EditPhase::Idle), status);
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Insert));
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('h'), KeyModifiers::NONE)),
+        ReedlineEvent::Edit(vec![EditCommand::InsertChar('h')])
+    );
+    mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Normal));
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('h'), KeyModifiers::NONE)),
+        ReedlineEvent::Multiple(vec![ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::MenuLeft,
+            ReedlineEvent::Edit(vec![EditCommand::MoveLeft { select: false }]),
+        ])])
+    );
+    mode.parse_event(keyboard_event(KeyCode::Char('i'), KeyModifiers::NONE));
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Insert));
+    mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Normal));
+    let waiting = Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default())));
+    assert!(
+        waiting
+            .render_prompt_indicator(mode.edit_mode())
+            .contains("[NORMAL]")
+    );
+}
+
+// Catches: paste is interpreted as Vim commands or submits its first line; IME text is eaten.
+#[test]
+fn vim_composer_preserves_unicode_ime_paste_and_explicit_newlines() {
+    use reedline::PromptViMode;
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(SurfacePhase::new(EditPhase::Idle), Arc::clone(&status));
+    for (character, modifiers) in [
+        ('界', KeyModifiers::NONE),
+        ('é', KeyModifiers::CONTROL | KeyModifiers::ALT),
+    ] {
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Char(character), modifiers)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar(character)])
+        );
+    }
+    for normal in [false, true] {
+        if normal {
+            mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            mode.parse_event(
+                ReedlineRawEvent::try_from(Event::Paste("i界\r\n/help\rbye".into())).unwrap()
+            ),
+            ReedlineEvent::Edit(vec![EditCommand::InsertString("i界\n/help\nbye".into())])
+        );
+        assert_eq!(status.lock().unwrap().origin, InputOrigin::BracketedPaste);
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Enter, KeyModifiers::CONTROL)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            assert_eq!(
+                mode.parse_event(keyboard_event(KeyCode::Enter, modifiers)),
+                ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+            );
+        }
+        assert_eq!(
+            mode.edit_mode(),
+            PromptEditMode::Vi(if normal {
+                PromptViMode::Normal
+            } else {
+                PromptViMode::Insert
+            })
+        );
+    }
+}
+
+// Catches: Vim consumes queue/steer/interrupt/draft keys while a turn runs.
+#[test]
+fn vim_composer_keeps_busy_host_controls_in_both_modes() {
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(phase.clone(), Arc::clone(&status));
+    for normal in [false, true] {
+        phase.set(EditPhase::Idle);
+        if normal {
+            mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        phase.set(EditPhase::Busy);
+        let before = mode.edit_mode();
+        for (code, modifiers, command) in [
+            (KeyCode::Enter, KeyModifiers::NONE, BUSY_SUBMIT_COMMAND),
+            (KeyCode::Enter, KeyModifiers::CONTROL, BUSY_STEER_COMMAND),
+            (KeyCode::Esc, KeyModifiers::NONE, INTERRUPT_COMMAND),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL, DRAFT_COMMAND),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                BACKGROUND_COMMAND,
+            ),
+        ] {
+            assert_eq!(
+                mode.parse_event(keyboard_event(code, modifiers)),
+                ReedlineEvent::ExecuteHostCommand(command.into())
+            );
+            assert_eq!(mode.edit_mode(), before);
+        }
+        status.lock().unwrap().queue.queued = 1;
+        let event = mode.parse_event(keyboard_event(KeyCode::Up, KeyModifiers::NONE));
+        let ReedlineEvent::UntilFound(events) = event else {
+            panic!("missing queue recall")
+        };
+        assert_eq!(
+            events[0],
+            ReedlineEvent::ExecuteHostCommandIfEmpty(BUSY_RECALL_COMMAND.into())
+        );
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+    }
+}
+
+// Catches: normal-mode editing swallows approval keys or leaks into a modal text form.
+#[test]
+fn vim_composer_never_takes_permission_or_modal_text_ownership() {
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(phase.clone(), Arc::clone(&status));
+    mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+    let before = mode.edit_mode();
+    phase.set(EditPhase::Modal);
+    status.lock().unwrap().permission_modal = true;
+    assert_eq!(mode.edit_mode(), PromptEditMode::Emacs);
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('y'), KeyModifiers::NONE)),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}allow"))
+    );
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE)),
+        ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.into())
+    );
+    assert_eq!(
+        mode.parse_event(ReedlineRawEvent::try_from(Event::Paste("y".into())).unwrap()),
+        ReedlineEvent::None
+    );
+    status.lock().unwrap().permission_modal = false;
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('h'), KeyModifiers::NONE)),
+        ReedlineEvent::Edit(vec![EditCommand::InsertChar('h')])
+    );
+    phase.set(EditPhase::Idle);
+    assert_eq!(
+        mode.edit_mode(),
+        before,
+        "a modal must not change the composer mode"
+    );
+}
+
+// Catches: action help retains the old shortcut after runtime dispatch was changed.
+#[test]
+fn configured_shortcuts_reach_the_surface_and_both_help_projections() {
+    let registry = Arc::new(
+        ActionRegistry::final_surface()
+            .with_keybindings(&std::collections::BTreeMap::from([(
+                "model".into(),
+                vec!["Ctrl+P".into()],
+            )]))
+            .unwrap(),
+    );
+    let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
+        &registry,
+    ))));
+    let mut mode = vim_surface(SurfacePhase::new(EditPhase::Idle), status);
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        ReedlineEvent::ExecuteHostCommand(format!("{ACTION_COMMAND}model"))
+    );
+    for help in [
+        render_action_help(&registry, 120),
+        render_key_hints(&registry, 120),
+    ] {
+        assert!(help.contains("Ctrl+P"), "{help}");
+        assert!(!help.contains("Option+P"), "{help}");
+    }
+}
+
+// Catches: a submitted prompt longer than the preview limit floods the transcript.
+#[test]
+fn long_prompt_echo_is_collapsed() {
+    let waiting = Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default())));
+    let prompt = (1..=20)
+        .map(|n| format!("brief line {n}\n"))
+        .collect::<String>();
+    let receipt = waiting
+        .render_prompt_submission(&prompt, 120)
+        .expect("long submissions need a compact receipt");
+    assert_eq!(
+        receipt,
+        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · /expand shows all"
+    );
+}
+
+// Catches: collapsed input is not reachable through the tool expansion action.
+#[test]
+fn collapsed_prompt_and_tool_output_share_expansion_history() {
+    use crate::output::{Diagnostics, InteractiveOutput};
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let waiting = Waiting::new(Arc::clone(&status));
+    let (sender, rows) = crossbeam::channel::unbounded();
+    let mut surface = SurfaceOutput::new(sender, CancelToken::new());
+    surface.details = Arc::clone(&status.lock().unwrap().details);
+    let output = InteractiveOutput::new(surface);
+    output.tool_row("old tool", "old detail".into());
+    let _ = rows.try_iter().collect::<Vec<_>>();
+    let prompt = "one\ntwo\nthree\nfour";
+    assert!(waiting.render_prompt_submission(prompt, 80).is_some());
+    output.expand_last_tool();
+    assert!(
+        rows.try_iter()
+            .collect::<String>()
+            .contains("> one\n… two\n… three\n… four")
+    );
+    // A short submission, including /expand itself, must not replace the detail.
+    assert!(waiting.render_prompt_submission("/expand", 80).is_none());
+    output.tool_row("new tool", "new detail".into());
+    let _ = rows.try_iter().collect::<Vec<_>>();
+    output.expand_last_tool();
+    assert!(rows.try_iter().collect::<String>().contains("new detail"));
 }

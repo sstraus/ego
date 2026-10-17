@@ -6,6 +6,9 @@ use crate::ceiling::Ceilings;
 use crate::event::id::{GoalId, Seq, TurnId};
 use crate::store::evidence::EvidenceRef;
 
+/// Consecutive distinct-turn observations needed to block an active goal.
+pub const BLOCKER_OBSERVATION_LIMIT: u64 = 5;
+
 /// Authority responsible for a goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,7 +139,7 @@ impl GoalRecord {
 
         self.blocker_turns.push(turn);
         self.blocker_observations = self.blocker_turns.len() as u64;
-        if self.blocker_observations >= 5 {
+        if self.blocker_observations >= BLOCKER_OBSERVATION_LIMIT {
             self.state = GoalState::Blocked;
         }
     }

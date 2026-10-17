@@ -44,7 +44,7 @@ pub fn completion(shell: clap_complete::Shell) -> String {
     String::from_utf8(rendered).expect("clap_complete writes UTF-8")
 }
 
-/// The command reference, one section per subcommand.
+/// The command reference, one section per visible command path.
 ///
 /// Deliberately not a man page and not `--help` dumped to a file. It is the
 /// flat list of every command and every flag, which is what someone checks a
@@ -59,28 +59,25 @@ pub fn reference() -> String {
     out.push_str(
         "Generated from the clap definitions in `crates/ego-cli/src/cli.rs`.\n\
          Do not edit: `crates/ego-cli/tests/reference.rs` regenerates and compares it.\n\n\
-         `ego PROMPT` with no subcommand starts an interactive session and is not\n\
-         listed below, because it is the absence of a subcommand rather than one.\n\n",
+         `ego PROMPT` with no subcommand starts an interactive session.\n\n",
     );
-    for command in root.get_subcommands() {
-        section(&mut out, command);
-    }
+    section(&mut out, &root, "ego");
     out
 }
 
-fn section(out: &mut String, command: &Command) {
-    let _ = writeln!(out, "## `ego {}`\n", command.get_name());
+fn section(out: &mut String, command: &Command, path: &str) {
+    let _ = writeln!(out, "## `{path}`\n");
+    let usage = command.clone().render_usage();
+    let _ = writeln!(out, "```text\n{usage}\n```\n");
     if let Some(about) = command.get_about() {
         let _ = writeln!(out, "{about}\n");
     }
     for sub in command.get_subcommands() {
-        let _ = writeln!(
-            out,
-            "- `{} {}` — {}",
-            command.get_name(),
-            sub.get_name(),
-            sub.get_about().map_or(String::new(), |a| a.to_string())
-        );
+        let _ = write!(out, "- `{path} {}`", sub.get_name());
+        if let Some(about) = sub.get_about() {
+            let _ = write!(out, " — {about}");
+        }
+        out.push('\n');
     }
     if command.get_subcommands().next().is_some() {
         out.push('\n');
@@ -94,7 +91,7 @@ fn section(out: &mut String, command: &Command) {
                 // them, which is also the order the usage line puts them in.
                 arg.get_long().is_none() && arg.get_short().is_none(),
                 arg.get_id().as_str().to_owned(),
-                spelling(arg),
+                format!("{}{}", spelling(arg), metadata(command, arg)),
             )
         })
         .collect();
@@ -138,6 +135,9 @@ fn section(out: &mut String, command: &Command) {
              for the wire example and launch-default precedence.\n\n",
         );
     }
+    for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+        section(out, sub, &format!("{path} {}", sub.get_name()));
+    }
 }
 
 /// One argument as the reference spells it: how it is typed, then what it does.
@@ -153,6 +153,50 @@ fn spelling(arg: &clap::Arg) -> String {
         let _ = write!(spelling, " <{}>", value_name(arg));
     }
     format!("- `{spelling}` — {}", help(arg))
+}
+
+/// Preserve the constraints clap exposes without changing the parser grammar.
+fn metadata(command: &Command, arg: &clap::Arg) -> String {
+    let mut out = String::new();
+    if arg.is_required_set() {
+        out.push_str(" Required.");
+    }
+    let defaults: Vec<_> = arg
+        .get_default_values()
+        .iter()
+        .map(|value| format!("`{}`", value.to_string_lossy()))
+        .collect();
+    if !defaults.is_empty() {
+        let _ = write!(out, " Default: {}.", defaults.join(", "));
+    }
+    if matches!(
+        arg.get_action(),
+        clap::ArgAction::Append | clap::ArgAction::Count
+    ) {
+        out.push_str(" Repeatable.");
+    }
+    let values: Vec<_> = arg
+        .get_possible_values()
+        .into_iter()
+        .filter(|value| !value.is_hide_set())
+        .map(|value| format!("`{}`", value.get_name()))
+        .collect();
+    if !values.is_empty() {
+        let _ = write!(out, " Values: {}.", values.join(", "));
+    }
+    let conflicts: Vec<_> = command
+        .get_arg_conflicts_with(arg)
+        .into_iter()
+        .map(|other| match (other.get_long(), other.get_short()) {
+            (Some(long), _) => format!("`--{long}`"),
+            (_, Some(short)) => format!("`-{short}`"),
+            _ => format!("`<{}>`", value_name(other)),
+        })
+        .collect();
+    if !conflicts.is_empty() {
+        let _ = write!(out, " Conflicts: {}.", conflicts.join(", "));
+    }
+    out
 }
 
 fn positional(arg: &clap::Arg) -> String {

@@ -941,6 +941,11 @@ where
         self.metadata.goal(id)
     }
 
+    /// Read the same durable plan used by live consumers.
+    pub fn plan(&self, id: SessionId) -> Result<crate::plan::Plan, LifecycleError> {
+        Ok(self.metadata.state(id)?.plan)
+    }
+
     /// Derive tree metadata without retaining a second lineage authority.
     pub fn lineage_info(
         &self,

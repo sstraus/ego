@@ -14,9 +14,10 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use reedline::{
     ColumnarMenu, Completer, CompletionResult, EditCommand, EditMode, Emacs, ExternalPrinter,
-    KeyCode, KeyModifiers, Menu, MenuBuilder, MenuEvent, Painter, Prompt, PromptEditMode,
-    PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Span, Suggestion,
-    default_emacs_keybindings,
+    KeyCode, KeyModifiers, Keybindings, Menu, MenuBuilder, MenuEvent, Painter, Prompt,
+    PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
+    Span, Suggestion, Vi, default_emacs_keybindings, default_vi_insert_keybindings,
+    default_vi_normal_keybindings,
 };
 
 use super::actions::{
@@ -395,6 +396,7 @@ fn repaint_status(status: &SharedStatus) {
 }
 
 struct SurfaceStatus {
+    details: Arc<crate::output::ExpansionHistory>,
     setup_cancel: Option<tokio::sync::watch::Sender<bool>>,
     queue: QueueStatus,
     drafts: usize,
@@ -453,6 +455,7 @@ impl SurfaceStatus {
 impl Default for SurfaceStatus {
     fn default() -> Self {
         Self {
+            details: Arc::default(),
             setup_cancel: None,
             queue: QueueStatus::default(),
             drafts: 0,
@@ -520,6 +523,8 @@ struct TerminalOwner {
     cancel: CancelToken,
     startup_output: Receiver<String>,
     signals: Receiver<String>,
+    inspections: Sender<HostCommand>,
+    inspection_waker: Arc<futures::task::AtomicWaker>,
 }
 
 struct ComposerDraft {
@@ -701,6 +706,7 @@ enum SurfaceMessage {
 }
 
 pub struct SurfaceOutput {
+    pub(crate) details: Arc<crate::output::ExpansionHistory>,
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
@@ -716,6 +722,7 @@ pub struct SurfaceOutput {
 impl SurfaceOutput {
     pub fn new(sender: Sender<String>, cancel: CancelToken) -> Self {
         Self {
+            details: Arc::default(),
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
@@ -760,6 +767,7 @@ impl SurfaceOutput {
             .expect("output pump thread");
         (
             Self {
+                details: Arc::default(),
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
@@ -966,6 +974,8 @@ enum Control {
 
 struct LiveSeat {
     input: Receiver<Line>,
+    inspections: Receiver<HostCommand>,
+    inspection_waker: Arc<futures::task::AtomicWaker>,
     control: Sender<Control>,
     activated: AtomicBool,
     break_signal: Arc<AtomicBool>,
@@ -1009,6 +1019,61 @@ impl std::fmt::Debug for Seat {
     }
 }
 
+/// Keep the surface controls identical in Emacs, Vim insert and Vim normal.
+fn composer_keybindings(mut keybindings: Keybindings) -> Keybindings {
+    for (modifiers, code) in [
+        (KeyModifiers::CONTROL, KeyCode::Char('j')),
+        (KeyModifiers::CONTROL, KeyCode::Enter),
+        (KeyModifiers::SHIFT, KeyCode::Enter),
+        (KeyModifiers::ALT, KeyCode::Enter),
+    ] {
+        keybindings.add_binding(
+            modifiers,
+            code,
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+    }
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keybindings
+}
+
+fn emacs_composer() -> Emacs {
+    let mut keybindings = composer_keybindings(default_emacs_keybindings());
+    add_action_menu(&mut keybindings);
+    Emacs::new(keybindings)
+}
+
+fn add_action_menu(keybindings: &mut Keybindings) {
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Char('/'),
+        ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
+            ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+        ]),
+    );
+}
+
+fn composer_editor(vim: bool) -> Box<dyn EditMode> {
+    if vim {
+        let mut insert = composer_keybindings(default_vi_insert_keybindings());
+        add_action_menu(&mut insert);
+        Box::new(Vi::new(
+            insert,
+            composer_keybindings(default_vi_normal_keybindings()),
+        ))
+    } else {
+        Box::new(emacs_composer())
+    }
+}
+
 impl Seat {
     /// Build the applicable editor and, for a terminal, its only output port.
     ///
@@ -1016,10 +1081,25 @@ impl Seat {
     /// submits its first line as a whole prompt, which is the failure that
     /// makes pasting one impossible. `CLI.md` §6.1.
     pub fn new(cancel: CancelToken) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
+        Self::with_keyboard(cancel, &ego_core::config::UiLayer::default())
+    }
+
+    pub(crate) fn with_keyboard(
+        cancel: CancelToken,
+        preferences: &ego_core::config::UiLayer,
+    ) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
+        let registry = Arc::new(
+            ActionRegistry::final_surface()
+                .with_keybindings(
+                    preferences
+                        .keybindings
+                        .as_ref()
+                        .unwrap_or(&Default::default()),
+                )
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
+        );
         let (ingress, control) = interactive_control();
         let terminal = std::io::stdin().is_terminal();
-        let registry = Arc::new(ActionRegistry::final_surface());
-
         if !terminal {
             return Ok((
                 Self {
@@ -1038,33 +1118,8 @@ impl Seat {
         let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
             &registry,
         ))));
-        let mut keybindings = default_emacs_keybindings();
-        // Raw LF arrives as Ctrl+J; only an unmodified Enter submits.
-        for code in [KeyCode::Char('j'), KeyCode::Enter] {
-            keybindings.add_binding(
-                KeyModifiers::CONTROL,
-                code,
-                ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
-            );
-        }
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Tab,
-            ReedlineEvent::UntilFound(vec![
-                ReedlineEvent::Menu(ACTION_MENU.to_string()),
-                ReedlineEvent::MenuNext,
-            ]),
-        );
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Char('/'),
-            ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
-                ReedlineEvent::Menu(ACTION_MENU.to_string()),
-            ]),
-        );
-        let mode = SurfaceEditMode::with_status(
-            Emacs::new(keybindings),
+        let mode = SurfaceEditMode::with_editor(
+            composer_editor(preferences.vim.unwrap_or(false)),
             phase.clone(),
             Arc::clone(&status),
         );
@@ -1100,6 +1155,7 @@ impl Seat {
         // Host metadata never waits for the row printer or consumes a row.
         let (signal_sender, signals) = crossbeam::channel::unbounded();
         output.signals = Some(signal_sender);
+        output.details = Arc::clone(&status.lock().expect("surface status lock").details);
         output.status = Some(Arc::clone(&status));
         let active_signals = signals.clone();
         editor = editor.with_idle_callback(Box::new(move || {
@@ -1120,6 +1176,9 @@ impl Seat {
         // terminal owner must remain free to drain that pump's printer even
         // when several input lines arrive before the driver reads again.
         let (input_sender, input) = crossbeam::channel::unbounded();
+        let (inspection_sender, inspections) = crossbeam::channel::unbounded();
+        let inspection_waker = Arc::new(futures::task::AtomicWaker::new());
+        let owner_inspection_waker = Arc::clone(&inspection_waker);
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
         let owner_break = Arc::clone(&break_signal);
         let owner_phase = phase.clone();
@@ -1143,6 +1202,8 @@ impl Seat {
                         cancel,
                         startup_output,
                         signals,
+                        inspections: inspection_sender,
+                        inspection_waker: owner_inspection_waker,
                     },
                 );
             })?;
@@ -1172,6 +1233,8 @@ impl Seat {
             Self {
                 kind: SeatKind::Live(Box::new(LiveSeat {
                     input,
+                    inspections,
+                    inspection_waker,
                     control: seat_control,
                     activated: AtomicBool::new(false),
                     break_signal,
@@ -1197,7 +1260,12 @@ impl Seat {
     pub fn read(&self) -> Line {
         match &self.kind {
             SeatKind::Live(live) => {
-                let line = live.input.recv().unwrap_or(Line::Ended);
+                // Already admitted inspections belong to the current session, so
+                // answer them before ordinary input can switch or close it.
+                let line = crossbeam::channel::select_biased! {
+                    recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
+                    recv(live.input) -> line => line.unwrap_or(Line::Ended),
+                };
                 if matches!(line, Line::Submitted(_)) {
                     live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
@@ -1237,6 +1305,10 @@ impl Seat {
                     Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
+                    }
+                    Dispatch::UnknownSlash(message) => {
+                        eprintln!("{message}");
+                        Line::Blank
                     }
                     Dispatch::Refused { reason } => Line::Refused(reason),
                     Dispatch::Action(ActionId::Config) => {
@@ -1842,6 +1914,19 @@ impl crate::run::InteractiveSeat for Seat {
         *owner = Some(control);
     }
 
+    fn next_inspection(&self) -> BoxFuture<'_, HostCommand> {
+        let SeatKind::Live(live) = &self.kind else {
+            return Box::pin(futures::future::pending());
+        };
+        Box::pin(futures::future::poll_fn(move |cx| {
+            live.inspection_waker.register(cx.waker());
+            match live.inspections.try_recv() {
+                Ok(command) => std::task::Poll::Ready(command),
+                Err(_) => std::task::Poll::Pending,
+            }
+        }))
+    }
+
     fn refresh_queue(&self, queue: QueueStatus) {
         if let SeatKind::Live(live) = &self.kind {
             let mut status = live.status.lock().expect("surface status lock");
@@ -1976,6 +2061,8 @@ fn own_terminal(
         cancel,
         startup_output,
         signals,
+        inspections,
+        inspection_waker,
     } = owner;
     let mut pending_control = None;
     let mut active = false;
@@ -2060,6 +2147,24 @@ fn own_terminal(
         );
         if failed {
             cancel.cancel(CancelCause::Host);
+        }
+        if phase.get() == EditPhase::Busy
+            && let Line::HostCommand(command) = &line
+            && command.is_read_only_inspection()
+        {
+            if inspections.send(command.clone()).is_err() {
+                break;
+            }
+            inspection_waker.wake();
+            continue;
+        }
+        if phase.get() == EditPhase::Busy
+            && matches!(&line, Line::HostCommand(HostCommand::Config(_)))
+        {
+            commit_to_transcript(
+                &status,
+                "config write pending until the active turn finishes; saved defaults apply to future sessions",
+            );
         }
         match line {
             Line::ExternalBreak(_) => match control.recv() {

@@ -4,8 +4,13 @@ ACP lets a host own the conversation UI while εgo owns durable execution, polic
 and evidence. TUICommander is one host; an ACP connection itself is not proof of
 full compatibility with every host capability.
 
+For an installation-free custom-agent setup and editor context recipe, see
+[IDE setup over native ACP](ide.md).
+
 For wire shapes, fallback rules, source citations, and planned features, see
 [ego extensions to ACP](acp-extensions.md).
+For pinned standard TypeScript, Python, and Rust libraries and runnable clients,
+see [Drive ego with standard ACP client libraries](acp-clients.md).
 
 ## Launch and transport
 
@@ -25,6 +30,122 @@ ACP listener defaults are 32 simultaneous connections, 24-hour connection
 lifetime, and 128 MiB cumulative ingress per connection. `--max-connections`,
 `--connection-lifetime`, and `--max-ingress-bytes` tighten these explicit bounds.
 Source: [listener limits](../../crates/ego-listen/src/limits.rs).
+
+## Headless multi-turn stdio
+
+ACP is the only headless machine conversation protocol. Launch `ego acp` on
+macOS or Linux and keep its stdin and stdout open across turns. There is no
+separate `--input-format stream-json` mode. `ego run --output jsonl` emits events
+for a one-shot run; those events are not ACP input frames.
+
+Stdio uses UTF-8 JSON-RPC 2.0, one complete JSON object per newline, with no
+`Content-Length` header. Flush each outgoing frame. Read stdout continuously,
+even while a prompt response is pending: the agent streams `session/update`
+notifications and can issue requests that need a host answer before it can
+continue. Keep stderr separate from protocol stdout.
+
+The following is an illustrative ACP v1 exchange, not a recorded provider run.
+`SESSION`, `CALL`, and `PERMISSION_ID` stand for runtime IDs. Initialization and
+session creation results include other negotiated capabilities and controls
+omitted here; clients must read the actual responses.
+
+Host → agent: initialize, then wait for its response before creating a session.
+
+```jsonl
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+```
+
+Agent → host: the result selects `protocolVersion: 1` and advertises capabilities.
+Host → agent, after that response:
+
+```jsonl
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[]}}
+```
+
+Agent → host: use `result.sessionId` from response 2 for both prompts below.
+The first prompt includes an attachment with the host's text content, not a
+request for ego to fetch a URI.
+
+Host → agent:
+
+```jsonl
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Summarize these notes"},{"type":"resource","resource":{"uri":"untitled:notes","mimeType":"text/plain","text":"The build is offline."}}]}}
+```
+
+Agent → host, after any streamed updates:
+
+```jsonl
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
+```
+
+Host → agent: a second turn in the same session.
+
+```jsonl
+{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Check the notes against the workspace"}]}}
+```
+
+If policy requires approval, the agent → host request has this shape. The
+actual title, call ID, request ID, and offered options come from the live request;
+this example shows only the one-use choices.
+
+```jsonl
+{"jsonrpc":"2.0","id":"PERMISSION_ID","method":"session/request_permission","params":{"sessionId":"SESSION","toolCall":{"toolCallId":"CALL","title":"Read workspace notes"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject once","kind":"reject_once"}]}}
+```
+
+Host → agent: answer that exact agent-originated ID, preserving its JSON type.
+Only send this response when such a request is pending; select an option it
+actually offered. A declined host dialog can instead answer with
+`{"outcome":{"outcome":"cancelled"}}` as the result.
+
+```jsonl
+{"jsonrpc":"2.0","id":"PERMISSION_ID","result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+```
+
+Host → agent, while prompt 4 is still pending: cancel the current turn.
+
+```jsonl
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"SESSION"}}
+```
+
+Cancellation has no request ID and gets no separate response. The pending prompt
+settles after cancellation reaches the run; a turn that already completed can
+still have returned `end_turn`. For a cancelled run, agent → host:
+
+```jsonl
+{"jsonrpc":"2.0","id":4,"result":{"stopReason":"cancelled"}}
+```
+
+### Attachments, flow control, and shutdown
+
+- Text attachments use `resource` blocks as above. `resource_link` carries a
+  named URI reference, not the referenced bytes. Images use `image` blocks with
+  `mimeType` and base64 `data`; consult negotiated prompt capabilities and model
+  support. Unsupported content and malformed parameters are refused rather than
+  silently omitted. Existing attachment fixtures are in
+  [prompt tests](../../crates/ego-acp/tests/prompt.rs).
+- Keep one prompt in flight per session. Wait for its response before the next
+  ordinary prompt; do not treat write completion as turn completion. Dispatch
+  cancellation and permission responses independently while a prompt runs.
+- Bound the host's own outgoing queue and respect pipe write backpressure.
+  Drain stdout concurrently to avoid a full pipe preventing an approval request
+  or prompt response from reaching the host. Do not copy listener-only limits
+  onto stdio or assume an unbounded prompt queue is supported.
+- Invalid prompt parameters return a JSON-RPC error. Match responses by ID and
+  inspect `error` rather than assuming every response has `result`. Do not
+  replay a prompt blindly after a transport error: the work might have started.
+- EOF closes the ACP connection; it does not submit another prompt. For an
+  orderly shutdown, cancel pending work when needed, answer pending host
+  requests, drain the prompt settlement, then close stdin and reap the process.
+  Do not use EOF as a substitute for a correlated cancellation response.
+
+The offline [headless stdio tests](../../crates/ego-cli/tests/acp_headless_stream.rs)
+launch the real `ego acp` process against the existing local provider fixture:
+multiple turns, embedded text, malformed parameters, and EOF. The existing
+[settlement tests](../../crates/ego-cli/tests/acp_settlement.rs) cover permission
+answers, cancellation, and another prompt after a cancelled streaming turn.
+These fixtures use no paid calls and do not prove live host compatibility.
+The CLI's stdio composition uses the SDK `Stdio` transport in
+[acp.rs](../../crates/ego-cli/src/acp.rs).
 
 ## Sessions, permissions, and controls
 

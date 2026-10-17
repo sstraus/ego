@@ -636,7 +636,7 @@ mod regression_case {
     }
 
     #[test]
-    fn model_switch_lifecycle_roles_and_v2_usage_are_current_closed_spellings() {
+    fn model_switch_lifecycle_roles_and_v3_usage_are_current_closed_spellings() {
         for lifecycle in [
             HookLifecycle::PreModelSwitch,
             HookLifecycle::PostModelSwitch,
@@ -650,24 +650,24 @@ mod regression_case {
         ] {
             assert!(serde_json::to_value(role).unwrap().is_string());
         }
-        assert_eq!(USAGE_REPORT_VERSION, 2);
+        assert_eq!(USAGE_REPORT_VERSION, 3);
         let report: UsageReport = serde_json::from_value(json!({
-            "v": 2,
+            "v": 3,
             "as_of": 1000,
             "period": {"kind": "all"},
             "sessions": [],
             "totals": {
-                "main": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
-                "judge": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
-                "goal_check": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
-                "compaction": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
-                "subagent": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
-                "hook": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}},
-                "total": {"usage": zero_usage(), "cost": {"known": [], "unknown": []}}
+                "main": {"usage": zero_usage(), "cost": {"known": [], "unknown": [], "subscription_equivalent": [], "subscription_unknown": []}},
+                "judge": {"usage": zero_usage(), "cost": {"known": [], "unknown": [], "subscription_equivalent": [], "subscription_unknown": []}},
+                "goal_check": {"usage": zero_usage(), "cost": {"known": [], "unknown": [], "subscription_equivalent": [], "subscription_unknown": []}},
+                "compaction": {"usage": zero_usage(), "cost": {"known": [], "unknown": [], "subscription_equivalent": [], "subscription_unknown": []}},
+                "subagent": {"usage": zero_usage(), "cost": {"known": [], "unknown": [], "subscription_equivalent": [], "subscription_unknown": []}},
+                "hook": {"usage": zero_usage(), "cost": {"known": [], "unknown": [], "subscription_equivalent": [], "subscription_unknown": []}},
+                "total": {"usage": zero_usage(), "cost": {"known": [], "unknown": [], "subscription_equivalent": [], "subscription_unknown": []}}
             }
         }))
-        .expect("v2 usage report must decode");
-        assert_eq!(report.v, 2);
+        .expect("v3 usage report must decode");
+        assert_eq!(report.v, 3);
         let encoded = serde_json::to_value(&report).unwrap();
         let totals = encoded.get("totals").unwrap().as_object().unwrap();
         assert_eq!(totals.len(), 7);
@@ -683,7 +683,7 @@ mod regression_case {
             assert!(totals.contains_key(key), "missing usage line: {key}");
         }
         let serialized = serde_json::to_string(&report).unwrap();
-        assert!(serialized.starts_with("{\"v\":2,\"as_of\":1000,\"period\":"));
+        assert!(serialized.starts_with("{\"v\":3,\"as_of\":1000,\"period\":"));
         assert_json_key_order(&serialized, &["v", "as_of", "period", "sessions", "totals"]);
         assert_json_key_order(
             &serialized,
