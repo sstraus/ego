@@ -402,8 +402,13 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
     let Some(header_line) = lines.next() else {
         return Ok(None);
     };
-    let (created, workspace_root, profiles) = match decode_line(header_line) {
-        Ok(StoreLine::Header(header)) => (header.created, header.workspace_root, header.profiles),
+    let (session, created, workspace_root, profiles) = match decode_line(header_line) {
+        Ok(StoreLine::Header(header)) => (
+            header.session,
+            header.created,
+            header.workspace_root,
+            header.profiles,
+        ),
         _ => return Ok(None),
     };
     let mut last_ts = None;
@@ -426,8 +431,12 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                 ));
             }
         };
-        let entry = serde_json::from_str::<SessionEntry>(record.payload.get())
-            .map_err(|_| invalid_log("unknown payload in the valid session prefix"))?;
+        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
+            invalid_log(format!(
+                "session {session} has an unknown payload in the valid session prefix at record {} (unsupported schema or invalid payload)",
+                record.seq
+            ))
+        })?;
         match entry {
             SessionEntry::Event(event) => {
                 last_ts = Some(event.env.ts);
@@ -2008,6 +2017,37 @@ impl SessionStore for JsonlStore {
         })
     }
 
+    /// Inspect each authoritative log independently, without trusting or changing manifests.
+    /// Store-wide enumeration errors remain fatal; per-session errors are reported by ID.
+    fn list_readable(
+        &self,
+        unreadable: &mut dyn FnMut(SessionId, StoreError),
+    ) -> Result<Vec<SessionMeta>, StoreError> {
+        let mut metas = Vec::new();
+        for dir in self.io.list_dirs(&self.root)? {
+            let Some(id) = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<SessionId>().ok())
+            else {
+                continue;
+            };
+            let result = (|| {
+                if self.io.exists(&self.quarantine_path(&id))? {
+                    return Ok(None);
+                }
+                let facts = self.lifecycle_facts(id)?.ok_or(StoreError::NotFound)?;
+                Ok((!facts.deleted).then(|| meta_from_log_facts(id, &facts)))
+            })();
+            match result {
+                Ok(Some(meta)) => metas.push(meta),
+                Ok(None) => {}
+                Err(error) => unreadable(id, error),
+            }
+        }
+        Ok(metas)
+    }
+
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         let dirs = self.io.list_dirs(&self.root)?;
         let mut metas = Vec::new();
@@ -2162,6 +2202,27 @@ impl JsonlStore {
 }
 
 impl JsonlStore {
+    fn lifecycle_facts(&self, id: SessionId) -> Result<Option<LogManifestFacts>, StoreError> {
+        let Some(bytes) = self.io.read(&self.log_path(&id))? else {
+            return Ok(None);
+        };
+        let (header, start) = decoded_header(&bytes)?.ok_or(StoreError::MissingHeader)?;
+        if header.v != CODEC_VERSION {
+            return Err(StoreError::UnsupportedLog { found: header.v });
+        }
+        if header.session != id {
+            return Err(StoreError::WrongSession {
+                expected: header.session,
+                asked: id,
+            });
+        }
+        let (valid_len, _) = valid_prefix(&bytes, start);
+        if valid_len != bytes.len() {
+            return Err(invalid_log("session log has a corrupt or torn tail"));
+        }
+        self.catalogue_facts(&bytes)
+    }
+
     fn catalogue_facts(&self, log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
         let Some(mut facts) = log_manifest_facts(log)? else {
             return Ok(None);
@@ -2396,25 +2457,8 @@ impl SessionLifecycleStore for JsonlStore {
     }
 
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
-        let Some(bytes) = self.io.read(&self.log_path(&id))? else {
-            return Ok(None);
-        };
-        let (header, start) = decoded_header(&bytes)?.ok_or(StoreError::MissingHeader)?;
-        if header.v != CODEC_VERSION {
-            return Err(StoreError::UnsupportedLog { found: header.v });
-        }
-        if header.session != id {
-            return Err(StoreError::WrongSession {
-                expected: header.session,
-                asked: id,
-            });
-        }
-        let (valid_len, _) = valid_prefix(&bytes, start);
-        if valid_len != bytes.len() {
-            return Err(invalid_log("session log has a corrupt or torn tail"));
-        }
         Ok(self
-            .catalogue_facts(&bytes)?
+            .lifecycle_facts(id)?
             .map(|facts| meta_from_log_facts(id, &facts)))
     }
 

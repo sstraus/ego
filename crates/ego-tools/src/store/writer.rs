@@ -217,6 +217,13 @@ impl SessionStore for SessionWriter<'_> {
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         self.store.list()
     }
+
+    fn list_readable(
+        &self,
+        unreadable: &mut dyn FnMut(SessionId, StoreError),
+    ) -> Result<Vec<SessionMeta>, StoreError> {
+        self.store.list_readable(unreadable)
+    }
 }
 
 impl LeasedLifecycleAppend for SessionWriter<'_> {

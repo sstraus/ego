@@ -579,11 +579,16 @@ fn listed(args: &crate::cli::LsArgs, out: &Stdout) -> Result<(), RunTermination>
     // though listing creates none. One constructor, one meaning.
     let store = session::jsonl(store_root, root.clone());
 
-    let metas = crate::catalogue::listing(&store, &root, args.all).map_err(|err| {
-        RunTermination::Failed {
+    let metas =
+        crate::catalogue::saved_sessions(&store, out).map_err(|err| RunTermination::Failed {
             message: format!("the session store could not be listed: {err}"),
-        }
-    })?;
+        })?;
+
+    let metas = if args.all {
+        metas
+    } else {
+        crate::catalogue::in_workspace(metas, &root)
+    };
 
     match args.output {
         // §4.6's single object. Rendered even when there is nothing to list:
