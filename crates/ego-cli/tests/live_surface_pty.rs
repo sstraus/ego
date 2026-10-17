@@ -4696,6 +4696,9 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
     until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    // The receipt is queued before the driver returns to idle. Wait for the
+    // real idle status repaint, not a 100ms quiet period racing its 100ms poll.
+    until_normalized(&reader, &mut output, cancel_start, "qwen3 ·");
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
@@ -4904,6 +4907,9 @@ fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
     until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    // The receipt is queued before the driver returns to idle. Wait for the
+    // real idle status repaint, not a 100ms quiet period racing its 100ms poll.
+    until_normalized(&reader, &mut output, cancel_start, "qwen3 ·");
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
