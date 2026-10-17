@@ -481,6 +481,8 @@ impl<'a> TextSink<'a> {
             .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
+        text.answer
+            .resize(self.capabilities.with_current_width().width);
         let rest = text.answer.finish();
         if !rest.is_empty() {
             self.out.answer(&rest);
@@ -497,6 +499,8 @@ impl<'a> TextSink<'a> {
             .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
+        text.answer
+            .resize(self.capabilities.with_current_width().width);
         let ready = text.answer.push(delta);
         if ready.is_empty() {
             return;

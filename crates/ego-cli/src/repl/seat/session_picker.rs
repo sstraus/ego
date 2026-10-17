@@ -1,5 +1,7 @@
 //! Existing sessions selected by the same terminal owner as model pickers.
-use super::picker_surface::{truncate_cells, window_bounds};
+use super::picker_surface::{
+    PickerRole, picker_capabilities, picker_row, truncate_cells, window_bounds,
+};
 use super::*;
 use ego_core::store::session_store::SessionMeta;
 
@@ -23,16 +25,18 @@ pub(super) fn run_session_picker(
             .filter(|meta| matches_filter(meta, &filter))
             .collect();
         cursor = cursor.min(matches.len().saturating_sub(1));
-        let (cols, height) = crossterm::terminal::size().unwrap_or((80, 24));
-        let width = usize::from(cols).saturating_sub(1);
+        let (_cols, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        let caps = picker_capabilities(status);
+        let width = caps.width.saturating_sub(1);
         let visible = usize::from(height)
             .saturating_sub(6)
             .saturating_div(3)
             .max(1);
         let (start, end) = window_bounds(matches.len(), visible, Some(cursor));
-        let mut rows = vec![truncate_cells(
-            &format!("Select session · filter: {filter}"),
-            width,
+        let mut rows = vec![picker_row(
+            truncate_cells(&format!("Select session · filter: {filter}"), width),
+            PickerRole::Question,
+            caps.depth,
         )];
         if sessions.is_empty() {
             rows.push("No other saved sessions.".to_owned());
@@ -51,33 +55,54 @@ pub(super) fn run_session_picker(
                 })
                 .unwrap_or_else(|| "—".to_owned());
             let available = meta.workspace_root.is_dir();
-            rows.push(truncate_cells(
-                &format!(
-                    "{marker} {stamp}  {}  {}",
-                    meta.title.as_deref().unwrap_or("Untitled"),
-                    meta.model.as_deref().unwrap_or("—")
+            rows.push(picker_row(
+                truncate_cells(
+                    &format!(
+                        "{marker} {stamp}  {}  {}",
+                        meta.title.as_deref().unwrap_or("Untitled"),
+                        meta.model.as_deref().unwrap_or("—")
+                    ),
+                    width,
                 ),
-                width,
+                if marker == ">" {
+                    PickerRole::Selected
+                } else {
+                    PickerRole::Label
+                },
+                caps.depth,
             ));
-            rows.push(truncate_cells(
-                &format!(
-                    "  {}{}",
-                    if available { "" } else { "[unavailable] " },
-                    meta.workspace_root.display()
+            rows.push(picker_row(
+                truncate_cells(
+                    &format!(
+                        "  {}{}",
+                        if available { "" } else { "[unavailable] " },
+                        meta.workspace_root.display()
+                    ),
+                    width,
                 ),
-                width,
+                PickerRole::Description,
+                caps.depth,
             ));
-            rows.push(truncate_cells(
-                &format!("  {}", meta.summary.as_deref().unwrap_or("No summary")),
-                width,
+            rows.push(picker_row(
+                truncate_cells(
+                    &format!("  {}", meta.summary.as_deref().unwrap_or("No summary")),
+                    width,
+                ),
+                PickerRole::Description,
+                caps.depth,
             ));
         }
-        rows.push(truncate_cells(
-            "Type to filter; Up/Down selects; Enter resumes; Esc cancels.",
-            width,
+        rows.push(picker_row(
+            truncate_cells(
+                "Type to filter; Up/Down selects; Enter resumes; Esc cancels.",
+                width,
+            ),
+            PickerRole::Hint,
+            caps.depth,
         ));
         let prompt = Question::new(rows.join("\n"), Arc::clone(status));
         let line = answer(false, editor.read_line(&prompt));
+        let _ = editor.erase_last_prompt();
         if matches!(
             line,
             Line::Interrupted | Line::Ended | Line::ExternalBreak(_)
