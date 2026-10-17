@@ -1240,6 +1240,12 @@ model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
 configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
 points to that root syntax without consuming a provider turn.
 
+Read-only `/tasks [ID]`, `/config`, `/config perimeter`, and `/usage` answer
+while a turn runs. They read the current session journal, admitted configuration,
+and durable usage records without starting a generation. State-changing commands
+remain on their existing host-command path; an inspection does not cancel,
+restart, or complete the active turn.
+
 `/help` renders task-oriented Discover, Model, Control, Session, Integrations
 and Surface groups from that registry into transcript scrollback. `/doctor`
 wraps the shared health snapshot at the live terminal width. Both preserve

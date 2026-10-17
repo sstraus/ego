@@ -523,6 +523,8 @@ struct TerminalOwner {
     cancel: CancelToken,
     startup_output: Receiver<String>,
     signals: Receiver<String>,
+    inspections: Sender<HostCommand>,
+    inspection_waker: Arc<futures::task::AtomicWaker>,
 }
 
 struct ComposerDraft {
@@ -958,6 +960,8 @@ enum Control {
 
 struct LiveSeat {
     input: Receiver<Line>,
+    inspections: Receiver<HostCommand>,
+    inspection_waker: Arc<futures::task::AtomicWaker>,
     control: Sender<Control>,
     activated: AtomicBool,
     break_signal: Arc<AtomicBool>,
@@ -1158,6 +1162,9 @@ impl Seat {
         // terminal owner must remain free to drain that pump's printer even
         // when several input lines arrive before the driver reads again.
         let (input_sender, input) = crossbeam::channel::unbounded();
+        let (inspection_sender, inspections) = crossbeam::channel::unbounded();
+        let inspection_waker = Arc::new(futures::task::AtomicWaker::new());
+        let owner_inspection_waker = Arc::clone(&inspection_waker);
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
         let owner_break = Arc::clone(&break_signal);
         let owner_phase = phase.clone();
@@ -1181,6 +1188,8 @@ impl Seat {
                         cancel,
                         startup_output,
                         signals,
+                        inspections: inspection_sender,
+                        inspection_waker: owner_inspection_waker,
                     },
                 );
             })?;
@@ -1210,6 +1219,8 @@ impl Seat {
             Self {
                 kind: SeatKind::Live(Box::new(LiveSeat {
                     input,
+                    inspections,
+                    inspection_waker,
                     control: seat_control,
                     activated: AtomicBool::new(false),
                     break_signal,
@@ -1235,7 +1246,10 @@ impl Seat {
     pub fn read(&self) -> Line {
         match &self.kind {
             SeatKind::Live(live) => {
-                let line = live.input.recv().unwrap_or(Line::Ended);
+                let line = crossbeam::channel::select! {
+                    recv(live.input) -> line => line.unwrap_or(Line::Ended),
+                    recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
+                };
                 if matches!(line, Line::Submitted(_)) {
                     live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
@@ -1884,6 +1898,19 @@ impl crate::run::InteractiveSeat for Seat {
         *owner = Some(control);
     }
 
+    fn next_inspection(&self) -> BoxFuture<'_, HostCommand> {
+        let SeatKind::Live(live) = &self.kind else {
+            return Box::pin(futures::future::pending());
+        };
+        Box::pin(futures::future::poll_fn(move |cx| {
+            live.inspection_waker.register(cx.waker());
+            match live.inspections.try_recv() {
+                Ok(command) => std::task::Poll::Ready(command),
+                Err(_) => std::task::Poll::Pending,
+            }
+        }))
+    }
+
     fn refresh_queue(&self, queue: QueueStatus) {
         if let SeatKind::Live(live) = &self.kind {
             let mut status = live.status.lock().expect("surface status lock");
@@ -2018,6 +2045,8 @@ fn own_terminal(
         cancel,
         startup_output,
         signals,
+        inspections,
+        inspection_waker,
     } = owner;
     let mut pending_control = None;
     let mut active = false;
@@ -2102,6 +2131,16 @@ fn own_terminal(
         );
         if failed {
             cancel.cancel(CancelCause::Host);
+        }
+        if phase.get() == EditPhase::Busy
+            && let Line::HostCommand(command) = &line
+            && command.is_read_only_inspection()
+        {
+            if inspections.send(command.clone()).is_err() {
+                break;
+            }
+            inspection_waker.wake();
+            continue;
         }
         match line {
             Line::ExternalBreak(_) => match control.recv() {

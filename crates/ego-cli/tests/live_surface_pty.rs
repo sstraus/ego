@@ -20,6 +20,8 @@ mod raw_columns;
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/slash_inspections.rs"]
+mod slash_inspections;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;

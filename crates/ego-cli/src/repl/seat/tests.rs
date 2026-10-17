@@ -579,6 +579,7 @@ fn adding_a_registry_key_changes_the_banner_and_the_help_without_editing_either(
 #[test]
 fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let phase = SurfacePhase::new(EditPhase::Idle);
+    let (_inspection_sender, inspections) = crossbeam::channel::unbounded();
     let (input_sender, input) = bounded(CHANNEL_CAPACITY);
     input_sender
         .send(Line::Submitted("initial".to_string()))
@@ -589,6 +590,8 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let seat = Seat {
         kind: SeatKind::Live(Box::new(LiveSeat {
             input,
+            inspections,
+            inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
             control: seat_control,
             activated: AtomicBool::new(false),
             break_signal: Arc::new(AtomicBool::new(false)),

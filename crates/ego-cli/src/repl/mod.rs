@@ -86,6 +86,18 @@ pub enum HostCommand {
 }
 
 impl HostCommand {
+    pub(crate) fn is_read_only_inspection(&self) -> bool {
+        match self {
+            Self::Tasks(arguments) => {
+                let words = arguments.split_whitespace().collect::<Vec<_>>();
+                words.is_empty() || (words.len() == 1 && words[0] != "cancel")
+            }
+            Self::Action(ActionId::Config | ActionId::Usage) => true,
+            Self::Config(arguments) => arguments == "perimeter",
+            _ => false,
+        }
+    }
+
     fn from_editor(command: String) -> Option<Self> {
         if command == DRAFT_COMMAND {
             return Some(Self::Draft);
@@ -209,6 +221,28 @@ mod tests {
         SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillSourceAuthority,
         SkillSourceLocation,
     };
+
+    // Catches: a config write or task cancellation bypasses the pending mutation queue.
+    #[test]
+    fn read_only_inspection_inbox_excludes_state_changes() {
+        for command in [
+            HostCommand::Tasks(String::new()),
+            HostCommand::Tasks("some-id".into()),
+            HostCommand::Action(ActionId::Config),
+            HostCommand::Config("perimeter".into()),
+            HostCommand::Action(ActionId::Usage),
+        ] {
+            assert!(command.is_read_only_inspection(), "{command:?}");
+        }
+        for command in [
+            HostCommand::Tasks("cancel some-id".into()),
+            HostCommand::Config("set model \"other\"".into()),
+            HostCommand::Action(ActionId::New),
+            HostCommand::Action(ActionId::Compact),
+        ] {
+            assert!(!command.is_read_only_inspection(), "{command:?}");
+        }
+    }
 
     #[test]
     fn a_pasted_stack_trace_is_one_prompt_and_not_its_first_line() {

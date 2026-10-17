@@ -171,7 +171,9 @@ fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
         }
         Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
-        Dispatch::Config(_) => Some("config is unavailable while a turn is running"),
+        Dispatch::Config(arguments) if arguments != "perimeter" => {
+            Some("config is unavailable while a turn is running")
+        }
         Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
         _ => None,
     }
@@ -229,6 +231,11 @@ fn submit_busy_line(
             route_session_metadata(status, operation, true);
             return None;
         }
+        Dispatch::Config(arguments) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Config(arguments)), false));
+        }
         Dispatch::Tasks(arguments) => {
             editor.run_edit_commands(&[EditCommand::Clear]);
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
@@ -252,7 +259,6 @@ fn submit_busy_line(
         | Dispatch::McpContext(_)
         | Dispatch::Mcp(_)
         | Dispatch::Setup(_)
-        | Dispatch::Config(_)
         | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
         Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
     }
