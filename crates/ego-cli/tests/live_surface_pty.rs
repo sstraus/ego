@@ -3111,7 +3111,9 @@ fn count_notes_write_results(value: &serde_json::Value) -> usize {
     match value {
         serde_json::Value::String(value) => usize::from(
             value
-                .strip_prefix("wrote 10 bytes to ")
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("wrote 10 bytes to "))
                 .is_some_and(|path| {
                     Path::new(path)
                         .file_name()
