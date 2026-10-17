@@ -333,6 +333,7 @@ pub(super) fn surface_line(
             Ok(reedline::Signal::HostCommand(command))
                 if command == BUSY_SUBMIT_COMMAND || command == BUSY_STEER_COMMAND
         ) {
+            editor.accept_menu_selection();
             let buffer = editor.current_buffer_contents().to_string();
             if buffer.trim().is_empty() {
                 continue;

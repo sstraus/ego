@@ -970,6 +970,21 @@ impl Reedline {
         self.editor.get_buffer()
     }
 
+    /// Resolve a submit-on-accept menu before the host inspects a suspended buffer.
+    ///
+    /// This replaces the selected completion and closes its menu, but does not
+    /// submit or save history. Other completion menus are left unchanged.
+    pub fn accept_menu_selection(&mut self) {
+        if let Some(menu) = self
+            .menus
+            .iter_mut()
+            .find(|menu| menu.is_active() && menu.submit_on_accept())
+        {
+            menu.replace_in_buffer(&mut self.editor);
+            menu.menu_event(MenuEvent::Deactivate);
+        }
+    }
+
     /// Commit externally accepted input to the transcript and history.
     ///
     /// The host calls this after acknowledging a suspended buffer; it does
@@ -2774,8 +2789,7 @@ impl Reedline {
         self.hide_hints = true;
         // Receipt rendering belongs to the same transition as ordinary echo:
         // no host-side erase or second terminal writer can race the next read.
-        if let Some(receipt) =
-            prompt.render_prompt_submission(&buffer, self.painter.screen_width())
+        if let Some(receipt) = prompt.render_prompt_submission(&buffer, self.painter.screen_width())
         {
             self.editor.set_buffer(receipt, UndoBehavior::NoOp);
             let painted = self.repaint(&ReceiptPrompt);
