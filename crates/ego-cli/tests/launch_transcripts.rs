@@ -179,10 +179,30 @@ fn is_thinking_repaint(line: &str) -> bool {
     let Some((frame, elapsed)) = line.split_once(" Working ") else {
         return false;
     };
-    ["◐", "◓", "◑", "◒"].contains(&frame)
-        && elapsed
-            .strip_suffix("s · Esc to interrupt")
-            .is_some_and(|seconds| seconds.parse::<u64>().is_ok())
+    if !["◐", "◓", "◑", "◒"].contains(&frame) || elapsed.is_empty() {
+        return false;
+    }
+    // Replace numeric runs, not words: a real answer after a status-like prefix
+    // must still survive. A bounded row can end anywhere in this grammar.
+    let mut shape = String::new();
+    let mut was_digit = false;
+    for character in elapsed.chars() {
+        let digit = character.is_ascii_digit();
+        if !digit || !was_digit {
+            shape.push(if digit { '#' } else { character });
+        }
+        was_digit = digit;
+    }
+    ["#s", "#m #s", "#h #m"].iter().any(|duration| {
+        [
+            " · Esc to interrupt",
+            " · ↓ ~# tokens · Esc to interrupt",
+            " · thinking started #s ago · Esc to interrupt",
+            " · ↓ ~# tokens · thinking started #s ago · Esc to interrupt",
+        ]
+        .iter()
+        .any(|suffix| format!("{duration}{suffix}").starts_with(&shape))
+    })
 }
 
 /// Drop a repaint that landed on the same line as the draw it replaced.
@@ -265,6 +285,38 @@ fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
     // a timed thinking row, and a busy composer before the answer arrives.
     let raw = "hello> hello\r\n◐ Working 0s · Esc to interrupt\r\n>\r\n◓ Working 1s · Esc to interrupt\r\n>\r\na launch transcript\r\n";
     assert_eq!(readable(raw), "hello\na launch transcript\n");
+}
+
+// Catches: live progress leaking into goldens, or filtering real answer text.
+#[test]
+fn readable_discards_extended_working_repaints_but_keeps_real_answers() {
+    let rows = [
+        "◐ Working 0s · ↓ ~5 tokens · Esc to interrupt",
+        "◓ Working 1m 0s · thinking started 3s ago · Esc to interrupt",
+        "◑ Working 1h 05m · ↓ ~438 tokens · thinking started 12s ago · Esc to interrupt",
+        "◒ Working 42s · Esc to interrupt",
+    ];
+    for row in rows {
+        // Truncation cuts at a terminal cell without adding an ellipsis.
+        for width in [19, 39, 79, 120] {
+            let bounded: String = row.chars().take(width).collect();
+            assert_eq!(
+                readable(&format!("hello\r\n{bounded}\r\n>\r\nanswer\r\n")),
+                "hello\nanswer\n",
+                "{bounded:?}"
+            );
+        }
+    }
+    for answer in [
+        "Working 0s · ↓ ~5 tokens · Esc to interrupt",
+        "◐ Working on the answer",
+        "◐ Working 0s is the example",
+        "◐ Working 0s · ↓ ~5 tokens are estimated",
+        "◐ Working 0s · Esc to interrupt is a hint",
+        "A> A",
+    ] {
+        assert_eq!(readable(answer), format!("{answer}\n"));
+    }
 }
 
 #[test]

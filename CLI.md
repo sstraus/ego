@@ -1112,6 +1112,14 @@ exact prefix `ɛ । `. Every payload is stripped of control characters before i
 goes into a sequence: a tool name, an error message and an intent line all come
 from somewhere that is not ego.
 
+On-screen text output also reports prompt-cache hits from provider usage, with
+compact token counts. For Anthropic Messages requests with an explicit cache
+boundary, a hit followed by a miss on the same marked input produces a qualified
+warning: the provider may have expired or changed its cached entries. A changed
+session, provider, model, or marked prefix starts a new comparison. Missing input
+usage is unknown, not a miss. These observations do not change public JSON events
+or durable accounting and are suppressed by `-q`.
+
 ### 4.8 Diagnostics (`EGO_LOG`, `EGO_LOG_FILE`)
 
 The `tracing` events this build emits reach nobody by default. Two environment
