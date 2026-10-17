@@ -317,6 +317,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         system: shape.system,
         session_prompt: None,
         append_system: shape.append_system,
+        output_style: shape.output_style,
         instructions: shape.instructions,
         bare: shape.bare,
         trust_workspace: false,

@@ -210,6 +210,13 @@ pub(super) fn instructions(
 
         system_prompt(&set, root, &selection)
     };
+    if replacing.is_none()
+        && let Some(name) = args.output_style.as_deref()
+    {
+        let style = crate::output_style::load(name, crate::config::ego_home().as_deref())?;
+        diagnostics.note(&format!("output style {name}: {}", style.source));
+        assembled = Some(crate::output_style::overlay(assembled, &style.text));
+    }
     let launch_append = args.append_system.as_ref().filter(|_| replacing.is_none());
     let session_append = session
         .filter(|prompt| prompt.mode == ego_core::config::SystemPromptMode::Append)

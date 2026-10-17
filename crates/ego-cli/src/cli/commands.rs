@@ -293,6 +293,10 @@ pub(super) struct Shape {
     #[arg(long)]
     pub(super) append_system: Option<String>,
 
+    /// Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md.
+    #[arg(long, value_name = "NAME")]
+    pub(super) output_style: Option<String>,
+
     /// Use this instruction file instead of discovering one.
     #[arg(long)]
     pub(super) instructions: Option<PathBuf>,
