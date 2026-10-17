@@ -43,7 +43,7 @@ fn goal_visibility_transcript() -> String {
             &checker,
         ])
         .env("TERM", "xterm-256color");
-    let (session, mut input, reader) = PtySession::start(&ego, 32, 180, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 32, 180, Some((32, 180)));
     let mut output = Vec::new();
     until_prompt_from(&reader, &mut output, 0);
     let start = output.len();
@@ -55,12 +55,27 @@ fn goal_visibility_transcript() -> String {
         start,
         "goal continuation budget exhausted",
     );
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "goal 1/1");
+    drain_until_quiet(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
     assert_eq!(stub.generations().len(), 4);
-    normalized(&output[start..])
+    // Inspect durable terminal rows, not raw repaint bytes: the working line
+    // can be erased and redrawn between the rows of a wrapped receipt.
+    let mut parser = vt100::Parser::new(32, 180, 1_000);
+    parser.process(&output);
+    let live = parser.screen().contents();
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let depth = parser.screen().scrollback();
+    let mut history = String::new();
+    for offset in (1..=depth).rev() {
+        parser.screen_mut().set_scrollback(offset);
+        history.push_str(&parser.screen().rows(0, 180).next().unwrap());
+        history.push('\n');
+    }
+    history.push_str(&live);
+    history.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // Catches: model-authored goals start or change silently.
@@ -140,12 +155,15 @@ fn goal_visibility_needs_operator_blocks_without_spending_allowance() {
     let start = output.len();
     input.write_all(b"verify the account\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "Goal stopped:");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "active goal");
+    drain_until_quiet(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    let transcript = normalized(&output[start..]);
+    let transcript = normalized(&output[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let log = std::fs::read_to_string(
         places
             .home_path()
