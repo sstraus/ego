@@ -18,6 +18,13 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    pub(crate) fn release_idle_connection(&mut self, session: ego_core::event::id::SessionId) {
+        if self.session_id == Some(session) {
+            self.socket = None;
+            self.continuation = None;
+        }
+    }
+
     fn bind_session(&mut self, session_id: Option<ego_core::event::id::SessionId>) {
         if session_id.is_none() || self.session_id != session_id {
             self.socket = None;

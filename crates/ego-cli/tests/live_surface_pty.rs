@@ -1,5 +1,7 @@
 #[path = "live_surface_pty/background_notice.rs"]
 mod background_notice;
+#[path = "live_surface_pty/busy_notice.rs"]
+mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
 #[path = "live_surface_pty/finish_queue.rs"]
