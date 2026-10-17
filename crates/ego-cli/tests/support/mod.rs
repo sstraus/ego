@@ -1234,7 +1234,7 @@ impl Ego {
         let responder = Arc::clone(&writer);
         let reader = std::thread::spawn(move || {
             const DSR_QUERY: &[u8] = b"\x1b[6n";
-            const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
+            let mut terminal = vt100::Parser::new(24, 80, 0);
             let mut reader = reader;
             let mut output = Vec::new();
             let mut chunk = [0; 1024];
@@ -1243,6 +1243,7 @@ impl Ego {
                 match reader.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(length) => {
+                        terminal.process(&chunk[..length]);
                         output.extend_from_slice(&chunk[..length]);
                         let queries = output
                             .windows(DSR_QUERY.len())
@@ -1250,7 +1251,8 @@ impl Ego {
                             .count();
                         while responses < queries {
                             let mut writer = responder.lock().expect("pty writer lock");
-                            writer.write_all(DSR_RESPONSE).expect("DSR response");
+                            let (row, col) = terminal.screen().cursor_position();
+                            write!(writer, "\x1b[{};{}R", row + 1, col + 1).expect("DSR response");
                             writer.flush().expect("DSR response flush");
                             responses += 1;
                         }
@@ -1758,4 +1760,27 @@ pub fn permission_host(places: &Places, stub: &Stub) -> AcpHost {
             .args(["--profile", "acp"])
             .spawn_conversing(),
     )
+}
+
+/// Reconstruct notice prose after the terminal adds physical word-wrap rows.
+/// This does not remove words, punctuation, or duplicate receipts.
+pub fn notice_prose(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Read each retained PTY row once, excluding transient prompt repaint bytes.
+pub fn terminal_transcript(bytes: &[u8], rows: u16, cols: u16) -> String {
+    let mut terminal = vt100::Parser::new(rows, cols, 10_000);
+    terminal.process(bytes);
+    let live = terminal.screen().contents();
+    terminal.screen_mut().set_scrollback(usize::MAX);
+    let depth = terminal.screen().scrollback();
+    let mut transcript = String::new();
+    for offset in (1..=depth).rev() {
+        terminal.screen_mut().set_scrollback(offset);
+        transcript.push_str(&terminal.screen().rows(0, cols).next().unwrap());
+        transcript.push('\n');
+    }
+    transcript.push_str(&live);
+    transcript
 }

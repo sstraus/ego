@@ -313,7 +313,10 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
         );
         assert!(result.stdout.contains("/foo"), "{}", result.stdout);
         assert!(
-            result.stdout.contains(&skill.display().to_string()),
+            support::terminal_transcript(result.stdout.as_bytes(), 24, 80)
+                .split_whitespace()
+                .collect::<String>()
+                .contains(&skill.display().to_string()),
             "{}",
             result.stdout
         );
