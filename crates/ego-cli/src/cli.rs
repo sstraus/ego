@@ -242,7 +242,7 @@ pub fn root_command() -> clap::Command {
         // the reference and the completions that the real parser answers by
         // treating "help" as a prompt.
         .disable_help_subcommand(true)
-        .subcommand(named("run", RunCommand::command()))
+        .subcommand(named("run", headless_run_command()))
         .subcommand(named("resume", resume_command()))
         .subcommand(named("continue", resume_command()))
         .subcommand(named("fork", ForkCommand::command()))
@@ -379,8 +379,15 @@ fn check_matrix(matches: &clap::ArgMatches) -> Result<(), UsageError> {
 }
 
 /// Metadata may share store/output selection, but never run options or prompts.
+fn headless_run_command() -> clap::Command {
+    RunCommand::command().mut_arg("vim", |argument| argument.hide(true))
+}
+
 fn resume_command() -> clap::Command {
-    let command = ResumeCommand::command();
+    let mut command = ResumeCommand::command();
+    for id in ["session", "session_id", "worktree"] {
+        command = command.mut_arg(id, |argument| argument.hide(true));
+    }
     let launch = command
         .get_arguments()
         .filter(|argument| {
@@ -1265,7 +1272,9 @@ fn overview(program: &str) -> String {
     for name in BUILT {
         let about = match *name {
             "run" => "Run an agent from a prompt, headless",
-            "resume" | "continue" => "Continue a session; no ID = latest in this workspace",
+            "resume" | "continue" => {
+                "Continue a session; terminal picker, otherwise latest in this workspace"
+            }
             "rm" => "Delete a stored session",
             "fork" => "Fork a session at its tip or after a completed turn",
             "ls" => "List sessions (this workspace; --all for every one)",
@@ -1493,7 +1502,7 @@ fn parse_subcommand(
         Some(command @ ("auth" | "roots" | "config" | "rules" | "mcp")) => {
             parse_management_command(command, &tokens, tail)
         }
-        _ => match clap_or_answer::<RunCommand>(&tokens)? {
+        _ => match clap_command_or_answer::<RunCommand>(&tokens, headless_run_command(), None)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
         },

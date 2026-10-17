@@ -144,3 +144,85 @@ fn setup_items_keeps_prompt() {
         "{help}"
     );
 }
+
+fn help(words: &[&str]) -> String {
+    let Invocation::Answered(help) = parse(words).unwrap() else {
+        panic!("help must answer without effects")
+    };
+    help
+}
+
+// Catches: resume and continue advertise session-creation flags they always refuse.
+#[test]
+fn resume_help_omits_refused_flags() {
+    for alias in ["resume", "continue"] {
+        let rendered = help(&[alias, "--help"]);
+        for flag in ["--session", "--session-id", "--worktree", "--ephemeral"] {
+            assert!(
+                !rendered.split_whitespace().any(|word| word == flag),
+                "{rendered}"
+            );
+            assert!(parse(&[alias, SESSION, flag, "value"]).is_err());
+        }
+        for marker in ["picker", "latest", "non-UUID", "prompt-only", "--output"] {
+            assert!(rendered.contains(marker), "missing {marker}: {rendered}");
+        }
+    }
+}
+
+// Catches: sharing Flags causes headless run to advertise interactive-only Vim.
+#[test]
+fn run_help_omits_vim() {
+    assert!(!help(&["run", "--help"]).contains("--vim"));
+    assert!(help(&["--help"]).contains("--vim"));
+    let Invocation::Interactive(args) = parse(&["--vim"]).unwrap() else {
+        panic!("interactive Vim")
+    };
+    assert!(args.vim);
+    assert!(
+        parse(&["run", "--vim", "task"])
+            .unwrap_err()
+            .to_string()
+            .contains("interactive")
+    );
+}
+
+// Catches: prompt conflicts are enforced only after clap, invisible to generated discovery.
+#[test]
+fn prompt_shaping_constraints_are_owned_by_clap_and_reference() {
+    for words in [
+        vec!["run", "--bare", "--instructions", "missing.md"],
+        vec!["acp", "--bare", "--instructions", "missing.md"],
+        vec!["run", "--file", "missing.md", "task"],
+        vec!["run", "--var", "key=value", "task"],
+    ] {
+        let error = parse(&words).unwrap_err().to_string();
+        assert!(
+            error.contains("Usage:"),
+            "clap must own structural conflicts: {error}"
+        );
+        assert!(
+            !error.contains("could not") && !error.contains("No such file"),
+            "must refuse before loading: {error}"
+        );
+    }
+    let rendered = ego_cli::reference::reference();
+    let run = rendered
+        .split("## `ego run`\n")
+        .nth(1)
+        .unwrap()
+        .split("\n## ")
+        .next()
+        .unwrap();
+    for (argument, rule) in [
+        ("--bare", "--instructions"),
+        ("-f, --file", "<PROMPT>"),
+        ("--var", "Requires --file"),
+    ] {
+        let line = run
+            .lines()
+            .find(|line| line.starts_with(&format!("- `{argument}")))
+            .unwrap();
+        assert!(line.contains(rule), "{line}");
+    }
+}
