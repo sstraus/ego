@@ -151,16 +151,19 @@ fn readable(raw: &str) -> String {
             lines.pop();
         }
         for prefix in ["ego ", "εgo: ego "] {
-            if let Some(identity) = line.strip_prefix(prefix)
-                && let Some((version, model)) = identity.split_once(" · ")
-                && version
+            if let Some(identity) = line.strip_prefix(prefix) {
+                let version = identity
+                    .split_once(" · ")
+                    .map_or(identity, |(version, _)| version);
+                if version
                     .bytes()
                     .next()
                     .is_some_and(|byte| byte.is_ascii_digit())
-                && !version.contains(char::is_whitespace)
-            {
-                line = format!("{prefix}<version> · {model}");
-                break;
+                    && !version.contains(char::is_whitespace)
+                {
+                    line = format!("{prefix}<version>{}", &identity[version.len()..]);
+                    break;
+                }
             }
         }
         lines.push(line);
@@ -331,10 +334,18 @@ fn regenerate() {
 #[test]
 fn readable_redacts_version_bumps_only_in_banner_identity() {
     for version in ["0.1.0", "9.42.17", "10.0.0-rc.2"] {
-        let raw = format!("ego {version} · ollama/qwen3\nanswer cites {version}\n");
-        assert_eq!(
-            readable(&raw),
-            format!("ego <version> · ollama/qwen3\nanswer cites {version}\n")
-        );
+        for identity in [
+            format!("ego {version} · ollama/qwen3"),
+            format!("εgo: ego {version}"),
+        ] {
+            let raw = format!("{identity}\nanswer cites {version}\n");
+            assert_eq!(
+                readable(&raw),
+                format!(
+                    "{}\nanswer cites {version}\n",
+                    identity.replace(version, "<version>")
+                )
+            );
+        }
     }
 }
