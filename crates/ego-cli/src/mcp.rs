@@ -277,10 +277,7 @@ pub(crate) fn repl_add_args(arguments: &str) -> Result<McpArgs, UsageError> {
         crate::cli::Invocation::Mcp(args) if matches!(args.action, McpAction::Add { .. }) => {
             Ok(*args)
         }
-        _ => Err(UsageError(
-            "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]"
-                .into(),
-        )),
+        _ => Err(UsageError(crate::repl::actions::MCP_GRAMMAR.into())),
     }
 }
 

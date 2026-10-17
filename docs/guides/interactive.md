@@ -25,9 +25,20 @@ its reason. Exact registered slash commands execute with one Enter. Partial
 completion does not submit. Slash text in bracketed paste remains ordinary
 prompt text; it does not execute a pasted control command.
 
-`/clear` clears composer/menu state, not durable history. `/expand` pages the
-retained last-tool output. `/refresh` applies current instructions through a
+`/clear` clears composer/menu state and confirms that transcript, context, and
+durable history are unchanged. `/expand` pages the
+retained last-tool output. `/export` prints to this transcript, not a file, and
+reports its disclosure and format. The default remains a sanitized JSON evidence
+bundle in a markdown fence; export serialization is unchanged. `/refresh` applies current instructions through a
 new prompt epoch when source work is idle.
+
+`/name [show|set TEXT|clear]` reads or changes display metadata.
+`/goal [show|set TEXT|achieve|block REASON]` inspects or changes the persistent goal.
+`/tools`, `/skills`, and `/doctor` show concise inventories; append `details`
+for complete entries and evidence. `/skills diagnose` shows admission diagnostics.
+`/resume [ID]` and `/continue [ID]` resume sessions; `/history QUERY` searches them.
+These aliases support completion. Unknown slash spellings remain ordinary prompt
+text and can start provider work; this release does not change that policy.
 
 ## Input while work is running
 
@@ -43,6 +54,13 @@ Ctrl+D exits from the idle driver. Pending permission/question selectors own
 Enter/Escape until answered and preserve the underlying draft/queue.
 Use the shortcuts shown by this binary's `/help`; terminal Meta/function key
 support differs across platforms.
+
+## Setup model authority
+
+`/setup PROMPT` uses a separately resolved model from persistent user/profile
+configuration, not the live session model selected by flags or `/model`.
+If that interpreter model is absent or unavailable, setup explains the reason
+and uses its deterministic inventory. Esc cancels without configuration writes.
 
 ## MCP servers
 

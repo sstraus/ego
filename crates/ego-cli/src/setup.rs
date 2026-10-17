@@ -51,8 +51,14 @@ pub(crate) async fn observed_selection_host(
         match interpret(prompt, &effective, &workspace).await {
             Ok(probes) => (
                 Some(probes),
-                "Configured provider inference selected closed probes; network/spend exception.\n"
-                    .to_owned(),
+                format!(
+                    "Setup interpreter model: {} (persistent user/profile configuration). Provider inference selected closed probes; network/spend exception.\n",
+                    effective
+                        .model
+                        .as_ref()
+                        .expect("successful interpretation has a model")
+                        .0
+                ),
             ),
             Err(error) => (
                 None,
@@ -324,7 +330,10 @@ async fn interpret(
     ) {
         return Err("setup token ceiling reached".into());
     }
-    let model = effective.model.as_ref().ok_or("no configured model")?;
+    let model = effective
+        .model
+        .as_ref()
+        .ok_or("no persistent setup interpreter model; the session model is independent")?;
     let provider = model.0.split_once('/').ok_or("invalid model")?.0;
     if effective
         .auth

@@ -88,7 +88,16 @@ pub(crate) fn render_text(
     all_roles: bool,
     context: Option<ContextWindow>,
 ) -> String {
-    render_text_in(report, all_roles, context, &Local)
+    render_text_in(report, all_roles, context, &Local, None)
+}
+
+/// Render interactive usage within the current terminal width.
+pub(crate) fn render_interactive(
+    report: &UsageReport,
+    context: ContextWindow,
+    width: usize,
+) -> String {
+    render_text_in(report, false, Some(context), &Local, Some(width.max(1)))
 }
 
 /// [`render_text`] with the time zone `as_of` is written in made explicit.
@@ -97,6 +106,7 @@ fn render_text_in<Tz: TimeZone>(
     all_roles: bool,
     context: Option<ContextWindow>,
     zone: &Tz,
+    width: Option<usize>,
 ) -> String
 where
     Tz::Offset: std::fmt::Display,
@@ -126,7 +136,16 @@ where
         local_stamp(zone, report.as_of.as_millis())
     )];
     rows.extend(context.map(context_line));
-    rows.extend(aligned(&cells));
+    let table = aligned(&cells);
+    if width.is_some_and(|width| table.iter().any(|row| row.chars().count() > width)) {
+        // Keep the full identity, but do not let it push accounting cells off-screen.
+        for row in cells.iter().skip(1) {
+            rows.push(format!("session {} · model {}", row[0], row[1]));
+            rows.extend(aligned(&[cells[0][2..].to_vec(), row[2..].to_vec()]));
+        }
+    } else {
+        rows.extend(table);
+    }
     rows.push(String::new());
     rows.join("\n")
 }
@@ -365,7 +384,7 @@ mod text_red {
         // 2026-09-29 06:13:31 UTC.
         let as_of = 1_790_662_411_741;
         let zone = FixedOffset::east_opt(2 * 3600).expect("offset");
-        let text = render_text_in(&report(as_of, none()), false, None, &zone);
+        let text = render_text_in(&report(as_of, none()), false, None, &zone, None);
         let header = text.lines().next().expect("header");
         assert_eq!(header, "usage as of 2026-09-29 08:13 period=all");
         assert!(!text.contains(&as_of.to_string()), "{text}");
@@ -466,7 +485,7 @@ mod text_red {
             ..ContextWindow::default()
         };
         let zone = FixedOffset::east_opt(0).expect("offset");
-        let text = render_text_in(&report(0, none()), false, Some(context), &zone);
+        let text = render_text_in(&report(0, none()), false, Some(context), &zone, None);
         assert!(
             text.lines()
                 .any(|row| row == "context 50000 of 200000 tokens (25.0%)"),

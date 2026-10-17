@@ -993,12 +993,69 @@ async fn stage_image_path(
     seat.set_image_chips(paste_chips(staged_images));
 }
 
+fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String {
+    let label = match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_string(),
+        Some(relative) => format!("~/{}", relative.display()),
+        None => path.display().to_string(),
+    };
+    let label = ego_core::permit::terminal_safe(&label);
+    if crate::render::line::Line::plain(&label).width() <= width {
+        return label;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    // Keep complete words/path segments, even when a single segment is wider
+    // than the row. The full path remains in the setup report.
+    let boundary = label
+        .char_indices()
+        .filter(|(_, ch)| ch.is_whitespace() || *ch == '/' || *ch == '\\')
+        .map(|(index, ch)| index + ch.len_utf8())
+        .take_while(|end| crate::render::line::Line::plain(&label[..*end]).width() < width)
+        .last()
+        .unwrap_or(0);
+    format!("{}…", label[..boundary].trim_end())
+}
+
+#[cfg(test)]
+mod setup_picker_label_tests {
+    use super::*;
+
+    /// Catches: shortening a home path hides a sibling prefix or breaks a segment.
+    #[test]
+    fn home_labels_preserve_path_boundaries_and_terminal_cells() {
+        let home = Some(Path::new("/home/operator"));
+        for (path, width, expected) in [
+            ("/home/operator/.cargo/registry", 70, "~/.cargo/registry"),
+            ("/home/operator", 70, "~"),
+            ("/home/operator-other/file", 70, "/home/operator-other/file"),
+            ("/home/operator/.cargo/registry", 12, "~/.cargo/…"),
+            ("/home/operator/indivisiblesegment", 8, "~/…"),
+            ("/workspace/日本語/segment", 19, "/workspace/日本語/…"),
+            ("indivisiblesegment", 8, "…"),
+        ] {
+            let label = setup_picker_label(Path::new(path), home, width);
+            assert_eq!(label, expected);
+            assert!(crate::render::line::Line::plain(label).width() <= width);
+        }
+    }
+}
+
 async fn run_interactive_setup(
     prompt: String,
+    selection: &model::GenerationSelection,
     root: &Path,
     status: Option<&InteractiveStatus>,
     diagnostics: &dyn Diagnostics,
 ) {
+    match selection.snapshot() {
+        Ok(selected) => diagnostics.note(&format!(
+            "Session model: {}. Setup interpreter uses persistent user/profile configuration, not this session selection.",
+            selected.identity.0
+        )),
+        Err(error) => diagnostics.note(&format!("Session model unavailable: {error}. Setup interpreter uses persistent user/profile configuration.")),
+    }
     let setup_args = crate::cli::SetupArgs {
         items: None,
         judge: None,
@@ -1022,17 +1079,16 @@ async fn run_interactive_setup(
             QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
         };
         let status = status.as_ref().filter(|status| status.human)?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        // The selector owns the ordinal. Reserve its widest prefix and one
+        // terminal cell so the terminal never wraps an item itself.
+        let label_width = status.seat.width().saturating_sub(10);
         let options = findings
             .iter()
             .map(|finding| {
                 QuestionOption::new(
                     finding.id.to_string(),
-                    ego_core::permit::terminal_safe(&format!(
-                        "{}: {} — {}",
-                        finding.id,
-                        finding.requested.display(),
-                        finding.evidence
-                    )),
+                    setup_picker_label(&finding.requested, home.as_deref(), label_width),
                 )
             })
             .collect::<Vec<_>>();
@@ -1040,7 +1096,7 @@ async fn run_interactive_setup(
             return Some(Vec::new());
         }
         let request = QuestionRequest::new(
-            "Select setup proposal items; only selected items enter the preview. Final confirmation still required.",
+            "Select setup proposal items; only selected items enter the preview.\nFinal confirmation still required; Esc cancels without changes.",
             QuestionMode::Multiple,
             options,
             false,
@@ -1604,6 +1660,7 @@ fn handle_interactive_policy(
 fn render_skill_catalogue(
     catalogue: Option<&crate::skill::SkillCatalogue>,
     diagnose: bool,
+    details: bool,
     diagnostics: &dyn Diagnostics,
 ) {
     let Some(catalogue) = catalogue else {
@@ -1613,8 +1670,10 @@ fn render_skill_catalogue(
     match catalogue.capture() {
         Ok(capture) => diagnostics.note(&if diagnose {
             capture.render_diagnostics()
-        } else {
+        } else if details {
             capture.render_list()
+        } else {
+            capture.render_summary()
         }),
         Err(error) => diagnostics.note(&format!(
             "the skill catalogue could not be captured: {error}"
@@ -1695,6 +1754,7 @@ async fn report_session_usage(
     session_id: SessionId,
     clock: &SystemClock,
     context: ego_core::state::ContextWindow,
+    width: usize,
     diagnostics: &dyn Diagnostics,
 ) {
     let metadata = match crate::catalogue::listing(store, root, false) {
@@ -1715,7 +1775,7 @@ async fn report_session_usage(
         Ok(report) => {
             // `/usage` has no flags, so it
             // gets the compact default.
-            let rendered = crate::usage::render_text(&report, false, Some(context));
+            let rendered = crate::usage::render_interactive(&report, context, width);
             diagnostics.note(rendered.trim_end());
         }
         Err(error) => diagnostics.note(&format!("the usage report could not be built: {error}")),
@@ -2475,13 +2535,19 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::List,
         )) => {
-            render_skill_catalogue(skills.as_deref(), false, diagnostics);
+            render_skill_catalogue(skills.as_deref(), false, false, diagnostics);
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Skills(
+            repl::actions::SkillSurfaceAction::Details,
+        )) => {
+            render_skill_catalogue(skills.as_deref(), false, true, diagnostics);
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::Diagnose,
         )) => {
-            render_skill_catalogue(skills.as_deref(), true, diagnostics);
+            render_skill_catalogue(skills.as_deref(), true, false, diagnostics);
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
@@ -2581,18 +2647,42 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-            run_interactive_setup(prompt, root, status.as_ref(), diagnostics).await;
+            run_interactive_setup(prompt, selection, root, status.as_ref(), diagnostics).await;
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Tools)
+            | repl::HostCommand::Details(repl::actions::ActionId::Tools)),
+        ) => {
+            let details = matches!(command, repl::HostCommand::Details(_));
+            let tools = registry
+                .iter()
+                .map(|tool| tool.descriptor().name.to_string())
+                .collect::<Vec<_>>();
+            diagnostics.note(&format!(
+                "tools: {} admitted; /tools details for the full list",
+                tools.len()
+            ));
+            if details {
+                for name in &tools {
+                    diagnostics.note(name);
+                }
+            }
             Ok(CommandOutcome::Continue)
         }
         // The same snapshot `ego doctor` prints,
         // built by the same probes. Two renderings
         // of one value is the whole contract; two
         // implementations would be two diagnoses.
-        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Doctor)) => {
-            diagnostics.note(&crate::doctor::observed_session(
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Doctor)
+            | repl::HostCommand::Details(repl::actions::ActionId::Doctor)),
+        ) => {
+            diagnostics.note(&crate::doctor::observed_session_view(
                 root.to_path_buf(),
                 seat.width(),
                 perimeter,
+                matches!(command, repl::HostCommand::Details(_)),
             ));
             Ok(CommandOutcome::Continue)
         }
@@ -2617,7 +2707,18 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 directory: args.directory.clone(),
             };
             match exported(&args) {
-                Ok(rendered) => diagnostics.note(&rendered),
+                Ok(rendered) => {
+                    diagnostics.note(&rendered);
+                    diagnostics.note(&format!(
+                        "Exported {} as {} to this transcript; no file written.",
+                        if selection.sanitize {
+                            "sanitized evidence bundle"
+                        } else {
+                            "local session"
+                        },
+                        selection.format
+                    ));
+                }
                 Err(termination) => diagnostics.note(&format!(
                     "the session could not be exported: {}",
                     termination.exit_reason()
@@ -2652,6 +2753,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 active.id(),
                 clock,
                 state.context,
+                seat.width(),
                 diagnostics,
             )
             .await;
