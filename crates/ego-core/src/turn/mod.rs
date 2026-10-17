@@ -1254,7 +1254,7 @@ pub struct TurnLoop<'session, 'turn> {
     hook_binding: Option<HookBindingState<'session>>,
     hook_runtime: Option<SessionHookRuntime<'session>>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
-    task_usage: Option<Arc<dyn Fn() -> Usage + Send + Sync + 'turn>>,
+    task_usage: Option<Arc<dyn Fn() -> Result<Usage, StoreError> + Send + Sync + 'turn>>,
     generation_role: GenerationRole,
     automatic_compaction: bool,
     context_clear: bool,
@@ -1543,6 +1543,21 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
         }
         self
+    }
+
+    fn budget_usage(&self) -> Result<Usage, StoreError> {
+        // Without a token ceiling there is no reason to read the family journals.
+        if self.config.token_ceiling.is_some() {
+            if let Some(usage) = &self.task_usage {
+                return usage();
+            }
+            if let Some(port) = &self.background_task_port
+                && let Some(usage) = port.family_usage()?
+            {
+                return Ok(usage);
+            }
+        }
+        Ok(self.state().usage)
     }
 
     pub fn with_background_task_port(mut self, port: Arc<dyn BackgroundTaskPort + 'turn>) -> Self {
@@ -3456,7 +3471,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             id: goal.id,
             reason,
         };
-        if tokens_reached(self.config.token_ceiling, &self.state().usage) {
+        if tokens_reached(self.config.token_ceiling, &self.budget_usage()?) {
             self.journal.append(
                 turn,
                 None,
@@ -3812,14 +3827,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             // on an unmetered or subscription row no charge is raised at all.
             // `CLI.md:128` spells it the same way: "exit 5 when hit", not
             // "when it would be hit".
-            if tokens_reached(
-                self.config.token_ceiling,
-                &self
-                    .task_usage
-                    .as_ref()
-                    .map(|usage| usage())
-                    .unwrap_or_else(|| self.state().usage),
-            ) {
+            if tokens_reached(self.config.token_ceiling, &self.budget_usage()?) {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 

@@ -552,12 +552,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                             Arc::clone(&mcp_runtime) as Arc<dyn McpRuntimeBinding>,
                         );
                     }
+                    let mut family_executor = (*child_executor).clone();
+                    family_executor.token_family = Some(active.id());
                     let child_service = compose_child_service(ChildComposition {
                         parent_run: RunId::new(active.id(), invocation.uuid()),
                         parent_session: active.id(),
                         root: child_root.clone(),
                         store: Arc::clone(jsonl_store),
-                        executor: Arc::clone(&child_executor),
+                        executor: Arc::new(family_executor),
                         gate: gate.clone(),
                         bindings: child_bindings,
                         blobs: active.evidence().clone(),
@@ -569,6 +571,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                             cancel.clone(),
                             skill_trust,
                         )
+                        .with_token_family(Arc::clone(jsonl_store), active.id())
                         .with_task_blobs(active.evidence().clone())
                         .with_task_policy(
                             policy_source

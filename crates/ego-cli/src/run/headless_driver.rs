@@ -192,6 +192,11 @@ pub(super) async fn drive_headless_turn(
         instructions_loaded,
     })
     .await?;
+    let token_family = child_executor.token_family.unwrap_or(active.id());
+    let mut family_executor = (*child_executor).clone();
+    family_executor.token_family = Some(token_family);
+    let child_executor = Arc::new(family_executor);
+    let family_store = Arc::clone(&child_store);
     let mut child_bindings = RunExecutionBindings::new(
         Arc::new(CliChildSinkFactory),
         elicitor.as_ref().map(Arc::clone),
@@ -217,6 +222,7 @@ pub(super) async fn drive_headless_turn(
             cancel.clone(),
             hook_trust,
         )
+        .with_token_family(family_store, token_family)
         .with_task_blobs(active.evidence().clone())
         .with_task_policy(
             policy_source

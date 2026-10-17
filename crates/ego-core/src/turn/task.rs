@@ -100,6 +100,12 @@ pub struct BackgroundTaskLaunch {
 }
 
 pub trait BackgroundTaskPort: Send + Sync {
+    /// Aggregate corrected usage across the durable family, including the parent.
+    /// Hosts without a separate durable child ledger retain local accounting.
+    fn family_usage(&self) -> Result<Option<Usage>, StoreError> {
+        Ok(None)
+    }
+
     fn launch_task(&self, task: BackgroundTaskLaunch) -> BoxFuture<'_, Result<(), String>>;
     /// Collect only settled children; never wait for a live child at a boundary.
     fn refresh_tasks(&self, state: SessionState) -> BoxFuture<'_, Result<(), String>>;
@@ -290,6 +296,7 @@ impl GenerationPolicySource for TaskPolicySource {
 struct TaskExecution<'s, 't> {
     session: SessionId,
     parent: SharedJournal<'s>,
+    background: Option<Arc<dyn BackgroundTaskPort + 't>>,
     turn: TurnId,
     evidence: &'s dyn EvidenceStore,
     clock: &'s dyn Clock,
@@ -340,7 +347,12 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
             .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             let parent = self.parent.clone();
             child.task_usage = Some(Arc::new(move || {
-                parent.inspect(|state| state.usage).expect("parent usage")
+                if let Some(port) = &self.background
+                    && let Some(usage) = port.family_usage()?
+                {
+                    return Ok(usage);
+                }
+                parent.inspect(|state| state.usage).map_err(Into::into)
             }));
             child.generation_role = GenerationRole::Subagent;
             child.judge = self.judge;
@@ -573,6 +585,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
             let task = TaskExecution {
                 session: self.session_id,
                 parent: self.journal.clone(),
+                background: self.background_task_port.clone(),
                 turn,
                 evidence: self.evidence,
                 clock: self.journal.clock(),

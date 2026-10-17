@@ -724,6 +724,7 @@ pub(super) struct CliSkillInvocationOwner<'a> {
     pub(super) background: Arc<Mutex<BTreeMap<SubagentInvocationId, BackgroundSkill>>>,
     task_blobs: Option<SessionEvidenceStore>,
     pub(super) task_policy: Option<ego_core::turn::GenerationPolicyDigest>,
+    token_family: Option<(Arc<JsonlStore>, SessionId)>,
     task_refresh: futures::lock::Mutex<()>,
     pub(super) tasks: Mutex<BTreeMap<SubagentInvocationId, BackgroundTask>>,
 }
@@ -744,8 +745,14 @@ impl<'a> CliSkillInvocationOwner<'a> {
             tasks: Mutex::new(BTreeMap::new()),
             task_blobs: None,
             task_policy: None,
+            token_family: None,
             task_refresh: futures::lock::Mutex::new(()),
         }
+    }
+
+    pub(super) fn with_token_family(mut self, store: Arc<JsonlStore>, session: SessionId) -> Self {
+        self.token_family = Some((store, session));
+        self
     }
 
     pub(super) fn with_task_blobs(mut self, blobs: SessionEvidenceStore) -> Self {
@@ -995,6 +1002,43 @@ impl SkillInvocationPort for CliSkillInvocationOwner<'_> {
 }
 
 impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
+    fn family_usage(
+        &self,
+    ) -> Result<Option<ego_core::state::Usage>, ego_core::store::session_store::StoreError> {
+        let Some((store, root)) = &self.token_family else {
+            return Ok(None);
+        };
+        // Read the durable accounting owner, not a launch-time snapshot. Reduction
+        // handles UsageCorrected and AttemptSettled exactly as it does for a parent.
+        // A set prevents recovered/settled references from counting a child twice.
+        let mut pending = vec![*root];
+        let mut seen = BTreeSet::new();
+        let mut usage = ego_core::state::Usage::IDENTITY;
+        while let Some(session) = pending.pop() {
+            if !seen.insert(session) {
+                continue;
+            }
+            let mut state = SessionState::default();
+            let mut entries = SessionStore::read(store.as_ref(), &session)?;
+            while let Some(entry) = entries.next().now_or_never().ok_or_else(|| {
+                ego_core::store::session_store::StoreError::Io(std::io::Error::other(
+                    "JSONL usage reader became asynchronous",
+                ))
+            })? {
+                if let SessionEntry::Event(event) = entry? {
+                    state.apply(&event);
+                }
+            }
+            usage.add(&state.usage);
+            for event in state.subagents {
+                if let ego_core::state::SubagentEvent::Spawned { child, .. } = event {
+                    pending.push(child.session_id());
+                }
+            }
+        }
+        Ok(Some(usage))
+    }
+
     fn launch_task(
         &self,
         task: ego_core::turn::BackgroundTaskLaunch,
@@ -1157,6 +1201,7 @@ impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
                     .collect_background(id, &self.hooks)
                     .await
                     .map_err(|error| error.to_string())?;
+                let failed = matches!(&result, ego_core::subagent::ChildWaitResult::Failed { .. });
                 let text = match result {
                     ego_core::subagent::ChildWaitResult::Returned { final_message } => {
                         let bytes = self
@@ -1196,9 +1241,17 @@ impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
                     .expect("background tasks")
                     .remove(&id)
                     .and_then(|task| task.execution);
-                Self::await_execution(task)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                if let Some(task) = task {
+                    let executed = task
+                        .await
+                        .map_err(|error| format!("child execution task failed: {error}"))?;
+                    // The controller already persisted executor errors as Uncertain.
+                    // Once collected as a terminal failure, that error belongs to
+                    // the child's completion data, not to the unrelated parent turn.
+                    if !failed {
+                        executed.map_err(|error| error.to_string())?;
+                    }
+                }
             }
             Ok(())
         })

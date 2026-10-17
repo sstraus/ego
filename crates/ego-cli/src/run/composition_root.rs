@@ -53,6 +53,7 @@ pub struct CliPrepared {
     pub(super) run_context: RunContextEvidence,
     pub(super) admission: Arc<EvidenceAdmissionService>,
     pub(super) child_executor: Arc<CliRunExecutor>,
+    child: bool,
 }
 
 pub(super) struct PreparedExecutionRuntime {
@@ -318,6 +319,7 @@ impl CliPrepared {
             ModelRef(slug.clone()),
             Self {
                 _permit: permit,
+                child,
                 store,
                 artifacts,
                 run_id: request.run_id,
@@ -574,11 +576,31 @@ impl CliPrepared {
         .await
         {
             Ok(outcome) => outcome,
-            Err(termination) => return settlement(termination),
+            Err(termination) => return run_settlement(termination, self.child),
         };
         active.replace_state(state);
-        settle_run_artifact(termination, artifacts, run_id, result)
+        settle_run_artifact(termination, artifacts, run_id, result, self.child)
     }
+}
+
+fn run_settlement(
+    termination: RunTermination,
+    child: bool,
+) -> Result<RunSettlement, RunExecutorError> {
+    if child {
+        let stopped = match &termination {
+            RunTermination::BudgetExceeded => Some("Budget"),
+            RunTermination::MaxTurns => Some("MaxTurns"),
+            RunTermination::TaskFailed => Some("TaskFailed"),
+            _ => None,
+        };
+        if let Some(reason) = stopped {
+            return Ok(RunSettlement::Interrupted {
+                diagnostic: Some(format!("Child ended: {reason}")),
+            });
+        }
+    }
+    settlement(termination)
 }
 
 fn settle_run_artifact(
@@ -586,8 +608,9 @@ fn settle_run_artifact(
     artifacts: Option<Arc<dyn RunArtifactStore>>,
     run_id: RunId,
     result: Value,
+    child: bool,
 ) -> Result<RunSettlement, RunExecutorError> {
-    let settlement = settlement(termination)?;
+    let settlement = run_settlement(termination, child)?;
     if matches!(&settlement, RunSettlement::Completed)
         && let Some(artifacts) = artifacts
     {

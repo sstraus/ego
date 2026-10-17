@@ -271,6 +271,7 @@ struct LaunchBarrierExecutor {
     crossed: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     release: Option<Arc<tokio::sync::Notify>>,
     interrupt_failure: bool,
+    submit_error: bool,
 }
 
 impl LaunchBarrierExecutor {
@@ -339,7 +340,11 @@ impl RunExecutor for LaunchBarrierExecutor {
             if let Some(release) = &self.release {
                 release.notified().await;
             }
-            Ok(RunSettlement::Completed)
+            if self.submit_error {
+                Err(RunExecutorError::new("provider ended after partial output"))
+            } else {
+                Ok(RunSettlement::Completed)
+            }
         })
     }
 
@@ -454,6 +459,7 @@ async fn cli_background_launch_crosses_execution_barrier_without_collection_futu
         crossed: Mutex::new(None),
         release: None,
         interrupt_failure: false,
+        submit_error: false,
     });
     let crossed = executor.arm();
     let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
@@ -3015,6 +3021,7 @@ fn drain_executor() -> Arc<LaunchBarrierExecutor> {
         crossed: Mutex::new(None),
         release: None,
         interrupt_failure: false,
+        submit_error: false,
     })
 }
 
@@ -3029,6 +3036,7 @@ async fn cli_drain_cancellation_error_wins_without_losing_child_settlement() {
         crossed: Mutex::new(None),
         release: Some(Arc::new(tokio::sync::Notify::new())),
         interrupt_failure: true,
+        submit_error: false,
     });
     let crossed = executor.arm();
     let fixture = DrainFixture::new(root.path(), &store, executor);
@@ -3353,6 +3361,7 @@ async fn background_task_completion_during_another_parent_turn_waits_for_boundar
         crossed: Mutex::new(None),
         release: Some(release.clone()),
         interrupt_failure: false,
+        submit_error: false,
     });
     let crossed = executor.arm();
     let fixture = DrainFixture::new(root.path(), &store, executor);
@@ -3411,6 +3420,7 @@ async fn background_task_parent_interruption_does_not_cancel_child() {
         crossed: Mutex::new(None),
         release: Some(release.clone()),
         interrupt_failure: false,
+        submit_error: false,
     });
     let crossed = executor.arm();
     let fixture = DrainFixture::new(root.path(), &store, executor);
@@ -3507,6 +3517,7 @@ async fn background_task_inspect_and_cancel_targets_only_the_selected_agent() {
         crossed: Mutex::new(None),
         release: Some(Arc::new(tokio::sync::Notify::new())),
         interrupt_failure: false,
+        submit_error: false,
     });
     let crossed = executor.arm();
     let fixture = DrainFixture::new(root.path(), &store, executor);
@@ -3561,4 +3572,53 @@ async fn background_task_changed_parent_policy_is_not_replaced_with_stale_author
         event.kind,
         EventKind::SubagentRequested { .. } | EventKind::SubagentSpawned { .. }
     )));
+}
+
+#[tokio::test]
+async fn background_task_uncertain_execution_is_failure_data_not_parent_error() {
+    // Catches: an already delivered Uncertain settlement aborting the unrelated parent turn.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(
+        root.path(),
+        &store,
+        Arc::new(LaunchBarrierExecutor {
+            crossed: Mutex::new(None),
+            release: None,
+            interrupt_failure: false,
+            submit_error: true,
+        }),
+    );
+    let id = fixture.background_task().await;
+    let service = fixture
+        .owner
+        .tasks
+        .lock()
+        .unwrap()
+        .get(&id)
+        .unwrap()
+        .service
+        .clone();
+    let result = service
+        .collect_background(id, &fixture.owner.hooks)
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        ego_core::subagent::ChildWaitResult::Failed {
+            settlement: RunSettlement::Uncertain { .. }
+        }
+    ));
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .expect("settled child failures are data, not parent errors");
+    let state = fixture.owner.hooks.hook_state().state();
+    assert!(state.delivered_subagents.contains_key(&id));
+    fixture.owner.refresh_tasks(state).await.unwrap();
 }

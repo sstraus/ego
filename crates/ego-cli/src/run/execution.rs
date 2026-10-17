@@ -485,6 +485,7 @@ fn materialize_run_phase<'store>(
             &confinement,
         ))),
         child: true,
+        token_family: None,
     });
     let instruction_descriptors = system
         .as_ref()
