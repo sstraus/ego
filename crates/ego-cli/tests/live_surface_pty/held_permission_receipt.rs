@@ -140,7 +140,8 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
     };
     wait("Trust project files", &mut output, &mut screen);
     press(b"yes\r");
-    wait("ctx", &mut output, &mut screen);
+    // The compact status uses a context bar, not the retired ctx label.
+    wait("▱▱▱", &mut output, &mut screen);
     press(b"use the tool\r");
     wait("[y] yes", &mut output, &mut screen);
     press(b"y");

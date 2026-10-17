@@ -450,6 +450,7 @@ fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
         vec![
             Segment::Model,
             Segment::Effort,
+            Segment::Fast,
             Segment::Mode,
             Segment::Context,
             Segment::Cost,

@@ -322,7 +322,8 @@ pub fn note(message: &str) {
 /// Plain human notices share the answer renderer's word and cell layout.
 /// A missing terminal width keeps redirected diagnostics byte-for-byte intact.
 pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
-    let Some(width) = width else {
+    // Zero is an unmeasured surface width, not a one-cell terminal.
+    let Some(width) = width.filter(|width| *width > 0) else {
         return text.to_owned();
     };
     text.split('\n')

@@ -13,15 +13,15 @@ fn busy_tasks_survives_escape_once() {
 }
 
 fn busy_tasks_contract(interrupt: bool) {
-    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING");
+    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING\n");
     let stub = Stub::start(Plan {
         completions: vec![reply],
         ..Plan::default()
     });
-    let ego =
-        Ego::against(&stub)
-            .conversing()
-            .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# Busy command fixture\n");
     let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
@@ -36,6 +36,14 @@ fn busy_tasks_contract(interrupt: bool) {
     let start = output.len();
     input.write_all(b"/tasks\r").expect("tasks");
     input.flush().expect("flush");
+    until_normalized_without_new_generation(
+        &reader,
+        &mut output,
+        start,
+        "background tasks: none",
+        &stub,
+        1,
+    );
     drain_until_quiet(&reader, &mut output);
     record_slash_capture(&output, 24, 80);
     let during_turn = normalized(&output[start..]);

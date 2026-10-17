@@ -56,9 +56,15 @@ model, supply its API key or complete subscription login first; see
 | `ego acp` | ACP over stdio for a host such as TUICommander |
 
 The command set is `ego run`, `ego resume`, `ego continue`, `ego fork`, `ego compact`,
-`ego export`, `ego ls`, `ego rm`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`, `ego setup`,
+`ego export`, `ego checkpoint`, `ego ls`, `ego rm`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`, `ego setup`,
 `ego acp`, `ego a2a`, `ego auth`, `ego mcp`, `ego config`, `ego roots`,
 `ego rules`, `ego orchestrator`, and `ego mcp-server`.
+
+`ego checkpoint SESSION_ID preview` lists session-owned file checkpoints.
+Use `ego checkpoint SESSION_ID restore CHECKPOINT_COMMIT` to restore one
+checkpoint, or `ego checkpoint SESSION_ID close` to release its recovery ref
+without changing files. Builtin `write` and `edit` capture checkpoints in Git
+worktrees; external changes cause restore to refuse rather than overwrite them.
 
 A pipeline uses an explicit model and never prompts for permission or trust:
 
