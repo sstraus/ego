@@ -1432,7 +1432,15 @@ fn collapsed_prompt_and_tool_output_share_expansion_history() {
             .contains("> one\n… two\n… three\n… four")
     );
     // A short submission, including /expand itself, must not replace the detail.
-    assert!(waiting.render_prompt_submission("/expand", 80).is_none());
+    assert_eq!(
+        waiting.render_prompt_submission("/expand", 80).as_deref(),
+        Some("> /expand")
+    );
+    output.expand_last_tool();
+    assert_eq!(
+        rows.try_iter().collect::<String>(),
+        "> one\n… two\n… three\n… four\n"
+    );
     output.tool_row("new tool", "new detail".into());
     let _ = rows.try_iter().collect::<Vec<_>>();
     output.expand_last_tool();

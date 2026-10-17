@@ -315,7 +315,11 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
         assert!(
             result
                 .stdout
-                .split_whitespace()
+                .lines()
+                // This fixed-cursor PTY fixture interleaves a composer prefix
+                // between notice rows, including oversized path fragments.
+                .map(|line| line.trim_start().strip_prefix("> ").unwrap_or(line))
+                .flat_map(str::split_whitespace)
                 .collect::<String>()
                 .contains(&skill.display().to_string()),
             "{}",
