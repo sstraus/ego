@@ -151,7 +151,10 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
             r#"{"tool_name":"repo"}"#
         },
     ))];
-    if matches!(mode, "text" | "both" | "search" | "search-invalid" | "captured") {
+    if matches!(
+        mode,
+        "text" | "both" | "search" | "search-invalid" | "captured"
+    ) {
         completions.push(Reply::Sse(tool_call(
             "repo-call",
             "call_tool",
@@ -166,10 +169,14 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         completions.push(Reply::Sse(text("REPO-LIST-COMPLETE")));
     } else {
         completions.push(Reply::Sse(tool_call(
-            "changed-query", "search_tools", r#"{"query":"a different repository query"}"#,
+            "changed-query",
+            "search_tools",
+            r#"{"query":"a different repository query"}"#,
         )));
         completions.push(Reply::Sse(tool_call(
-            "schema-retry", "get_tool_schema", r#"{"tool_name":"repo"}"#,
+            "schema-retry",
+            "get_tool_schema",
+            r#"{"tool_name":"repo"}"#,
         )));
         completions.push(Reply::Sse(text("LOOKUP-REFUSED-COMPLETE")));
     }
@@ -419,8 +426,25 @@ fn captured_tuic_metadata_and_text_envelope_admit_valid_dispatch() {
     let (finished, generations) = run_lookup("captured");
     assert_eq!(finished.code, Some(0), "{finished:?}");
     assert!(!offers_tool(&generations[0], "call_tool"));
-    assert!(generations.iter().skip(1).any(|next| offers_tool(next, "call_tool")));
-    assert!(generations.iter().any(|request| request["messages"].as_array().is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool" && message["content"].as_str().is_some_and(|content| content.contains("fixture-progress-recorded"))))), "{generations:?}; {finished:?}");
+    assert!(
+        generations
+            .iter()
+            .skip(1)
+            .any(|next| offers_tool(next, "call_tool"))
+    );
+    assert!(
+        generations.iter().any(
+            |request| request["messages"]
+                .as_array()
+                .is_some_and(
+                    |messages| messages.iter().any(|message| message["role"] == "tool"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.contains("fixture-progress-recorded")))
+                )
+        ),
+        "{generations:?}; {finished:?}"
+    );
 }
 
 /// Catches deterministic envelope incompatibility being mistaken for a retryable query failure.
@@ -428,9 +452,20 @@ fn captured_tuic_metadata_and_text_envelope_admit_valid_dispatch() {
 fn unsupported_collapsed_envelope_has_terminal_compatibility_diagnostic() {
     for mode in ["malformed", "multiple", "empty", "nontext"] {
         let (finished, generations) = run_lookup(mode);
-        assert!(generations.iter().all(|request| !offers_tool(request, "call_tool")), "{mode}: {finished:?}");
+        assert!(
+            generations
+                .iter()
+                .all(|request| !offers_tool(request, "call_tool")),
+            "{mode}: {finished:?}"
+        );
         let report = format!("{generations:?}");
-        assert!(report.contains("non-retryable compatibility error"), "{mode}: {report}");
-        assert!(report.contains("changing the search query cannot repair"), "{mode}: {report}");
+        assert!(
+            report.contains("non-retryable compatibility error"),
+            "{mode}: {report}"
+        );
+        assert!(
+            report.contains("changing the search query cannot repair"),
+            "{mode}: {report}"
+        );
     }
 }
