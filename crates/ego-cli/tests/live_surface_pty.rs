@@ -188,43 +188,16 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     input.write_all(b"start the detached command\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
-    let start = output.len();
-    until_prompt_from(&reader, &mut output, start);
-    drain_until_quiet(&reader, &mut output);
+    until_mcp_composer_is_idle(&reader, &mut output);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    // Catches the completion-file race: the shell writes the file before its
-    // exit and output evidence settle. Observe delivery at a turn boundary
-    // instead of treating that file as a process-settlement barrier.
-    loop {
-        let start = output.len();
-        input.write_all(b"inspect the completed command\r").unwrap();
-        input.flush().unwrap();
-        while !normalized(&output[start..]).contains("DETACHED-NEXT-TURN") {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            output.extend(
-                reader
-                    .recv_timeout(remaining)
-                    .expect("settlement reply deadline"),
-            );
-        }
-        let start = output.len();
-        until_prompt_from_with_context(
-            &reader,
-            &mut output,
-            start,
-            deadline.saturating_duration_since(Instant::now()),
-            "detached settlement composer",
-        );
-        let generations = stub.generations();
-        let history = generations.last().expect("next generation")["messages"].to_string();
-        if (history.contains("exited code 0") && history.contains("DETACHED-DONE"))
-            || Instant::now() >= deadline
-        {
-            break;
-        }
-    }
+    let id = background_exec_id(&output);
+    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
+    let start = output.len();
+    input.write_all(b"inspect the completed command\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
+    until_mcp_composer_is_idle(&reader, &mut output);
     let completion = std::fs::read_to_string(&completed).ok();
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
@@ -241,6 +214,51 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
         history.contains("exited code 0") && history.contains("DETACHED-DONE"),
         "next turn lost detached settlement: {history}"
     );
+}
+
+/// Parse the admitted process identity, not a later status or another task.
+fn background_exec_id(output: &[u8]) -> String {
+    let transcript = normalized(output);
+    let prefix = "background exec id: ";
+    let offset = transcript.rfind(prefix).expect("background handle") + prefix.len();
+    let id = &transcript[offset..offset + 36];
+    assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
+    id.to_owned()
+}
+
+/// A shell completion file precedes pipe draining and waitpid. Inspect the
+/// executor's terminal snapshot before starting the generation that consumes it.
+/// Every inspection must finish its editor cycle before the next input is sent.
+fn until_background_exec_settled(
+    reader: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    input: &mut impl Write,
+    id: &str,
+    outcome: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let expected = format!("background exec {id}: {outcome}");
+    loop {
+        let start = output.len();
+        input
+            .write_all(format!("/tasks {id}\r").as_bytes())
+            .unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(
+            reader,
+            output,
+            start,
+            "tasks",
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        if normalized(&output[start..]).contains(&expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "process did not settle: {expected}"
+        );
+    }
 }
 
 // Catches: Ctrl+B kills/restarts the child, loses its handle, or duplicates its settlement.
@@ -289,9 +307,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "background exec id:");
     until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
-    let start = output.len();
-    until_prompt_from(&reader, &mut output, start);
-    drain_until_quiet(&reader, &mut output);
+    until_mcp_composer_is_idle(&reader, &mut output);
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
     input.flush().unwrap();
@@ -300,50 +316,28 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
         !places.workspace_path().join("completed").exists(),
         "Ctrl+B restarted or waited for the command"
     );
+    until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    // Catches the completion-file race: the shell writes the file before its
-    // exit and output evidence settle. Observe delivery at a turn boundary
-    // instead of treating that file as a process-settlement barrier.
-    loop {
-        let start = output.len();
-        input.write_all(b"inspect the completed command\r").unwrap();
-        input.flush().unwrap();
-        while !normalized(&output[start..]).contains("DETACHED-NEXT-TURN") {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            output.extend(
-                reader
-                    .recv_timeout(remaining)
-                    .expect("settlement reply deadline"),
-            );
-        }
-        let start = output.len();
-        until_prompt_from_with_context(
-            &reader,
-            &mut output,
-            start,
-            deadline.saturating_duration_since(Instant::now()),
-            "detached settlement composer",
-        );
-        let generations = stub.generations();
-        let history = generations.last().expect("next generation")["messages"].to_string();
-        if (history.contains("exited code 0") && history.contains("DETACHED-DONE"))
-            || Instant::now() >= deadline
-        {
-            break;
-        }
-    }
+    let id = background_exec_id(&output);
+    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
+    let start = output.len();
+    input.write_all(b"inspect the completed command\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
+    until_mcp_composer_is_idle(&reader, &mut output);
     let completion = std::fs::read_to_string(&completed).ok();
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, mark, "exited code 0");
+    until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
     let mark = output.len();
     input.write_all(b"/help\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, mark, "/tasks");
     until_normalized(&reader, &mut output, mark, "Ctrl+B");
+    until_local_action_completed(&reader, &mut output, mark, "help", PROGRESS_DEADLINE);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = session.quit(input);
@@ -9000,24 +8994,34 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     }
     session.press(b"\x02");
     session.wait(TOOL_TURN_DONE);
-    let transcript = normalized(&session.output);
-    let prefix = "background exec id: ";
-    let offset = transcript.rfind(prefix).expect("background handle") + prefix.len();
-    let id = &transcript[offset..offset + 36];
-    assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
+    until_mcp_composer_is_idle(&session.reader, &mut session.output);
+    let id = background_exec_id(&session.output);
     session.press(b"/tasks\r");
     session.wait("running");
     session.wait("REGRESSION-MARKER-OUTPUT");
+    until_local_action_completed(
+        &session.reader,
+        &mut session.output,
+        session.mark,
+        "tasks",
+        PROGRESS_DEADLINE,
+    );
     session.press(format!("/tasks cancel {id}\r").as_bytes());
     session.wait("background exec ");
-    loop {
-        session.press(format!("/tasks {id}\r").as_bytes());
-        drain_until_quiet(&session.reader, &mut session.output);
-        if normalized(&session.output[session.mark..]).contains("cancelled") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "cancel did not settle");
-    }
+    until_local_action_completed(
+        &session.reader,
+        &mut session.output,
+        session.mark,
+        "tasks",
+        PROGRESS_DEADLINE,
+    );
+    until_background_exec_settled(
+        &session.reader,
+        &mut session.output,
+        &mut session.input,
+        &id,
+        "cancelled",
+    );
     assert!(!session.ego.workspace_path().join("survived").exists());
     session.finish();
 }
