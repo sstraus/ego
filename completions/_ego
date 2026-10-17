@@ -40,6 +40,7 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
@@ -101,6 +102,7 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
@@ -163,6 +165,7 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
@@ -338,6 +341,7 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \

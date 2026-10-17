@@ -58,6 +58,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l thinking -d 'off|minimal
 complete -c ego -n "__fish_ego_using_subcommand run" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
@@ -111,6 +112,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l thinking -d 'off|mini
 complete -c ego -n "__fish_ego_using_subcommand resume" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
@@ -164,6 +166,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l thinking -d 'off|mi
 complete -c ego -n "__fish_ego_using_subcommand continue" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
@@ -269,6 +272,7 @@ complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest 
 complete -c ego -n "__fish_ego_using_subcommand acp" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r

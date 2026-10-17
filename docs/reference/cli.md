@@ -38,6 +38,7 @@ Run an agent from a prompt, headless.
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
+- `--output-style <NAME>` — Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md
 - `--plain` — Append plain output without terminal styling or live retry updates
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
@@ -95,6 +96,7 @@ Continue a session; no ID = latest in this workspace.
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
+- `--output-style <NAME>` — Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md
 - `--plain` — Append plain output without terminal styling or live retry updates
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
@@ -183,6 +185,7 @@ Continue a session; no ID = latest in this workspace.
 - `--no-tools` — Offer no tools at all
 - `--offline` — No non-loopback egress from ego's own HTTP transport
 - `--output <OUTPUT>` — text|json|jsonl
+- `--output-style <NAME>` — Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md
 - `--plain` — Append plain output without terminal styling or live retry updates
 - `--plan` — Shorthand for --mode plan
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
@@ -358,6 +361,7 @@ Serve the Agent Client Protocol on stdio or an endpoint.
 - `--max-connections <MAX_CONNECTIONS>` — Maximum simultaneous listener connections
 - `--max-ingress-bytes <MAX_INGRESS_BYTES>` — Maximum cumulative bytes read from one listener connection
 - `--no-tools` — Offer no tools at all
+- `--output-style <NAME>` — Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--sandbox <SANDBOX>` — The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included
