@@ -170,7 +170,12 @@ impl Line {
     /// Trailing whitespace at a break is dropped; whitespace inside a line is
     /// kept. Styles survive the break because each grapheme carries its own.
     pub fn wrap(&self, width: usize) -> Vec<Line> {
-        self.wrap_with(width, true)
+        self.wrap_with(width, true, 0)
+    }
+
+    /// Word wrap with a hanging indent included in each continuation row.
+    pub fn wrap_hanging(&self, width: usize, indent: usize) -> Vec<Line> {
+        self.wrap_with(width, true, indent)
     }
 
     /// Word wrap that never breaks a word, even one wider than the line.
@@ -184,7 +189,7 @@ impl Line {
     /// Not the default, because a table cell that overflows breaks the grid
     /// for every row below it.
     pub fn wrap_soft(&self, width: usize) -> Vec<Line> {
-        self.wrap_with(width, false)
+        self.wrap_with(width, false, 0)
     }
 
     /// The whole of wrapping, in one place.
@@ -196,8 +201,10 @@ impl Line {
     /// and then splits `https://example.com/…` down the middle the first time
     /// it does not. The decision has to be taken once per word, before any of
     /// the word is placed.
-    fn wrap_with(&self, width: usize, break_words: bool) -> Vec<Line> {
-        let width = width.max(1);
+    fn wrap_with(&self, width: usize, break_words: bool, indent: usize) -> Vec<Line> {
+        let indent = indent.min(width.saturating_sub(1));
+        let continuation_width = width.saturating_sub(indent).max(1);
+        let mut width = width.max(1);
         if self.width() <= width {
             return vec![self.clone()];
         }
@@ -234,6 +241,7 @@ impl Line {
 
             if used > 0 && used + gap_width + word_width > width {
                 lines.push(collect(&current));
+                width = continuation_width;
                 current.clear();
                 used = 0;
             } else if used > 0 {
@@ -252,6 +260,7 @@ impl Line {
                 let w = cells(atom.grapheme);
                 if used + w > width && used > 0 {
                     lines.push(collect(&current));
+                    width = continuation_width;
                     current.clear();
                     used = 0;
                 }
@@ -264,6 +273,15 @@ impl Line {
         }
         if lines.is_empty() {
             lines.push(Line::empty());
+        }
+        if indent > 0 {
+            for line in lines.iter_mut().skip(1) {
+                let mut indented = Line::plain(" ".repeat(indent));
+                for span in std::mem::take(&mut line.spans) {
+                    indented.push(span);
+                }
+                *line = indented;
+            }
         }
         lines
     }
@@ -451,6 +469,38 @@ mod tests {
                 assert!(rendered.ends_with("\x1b[0m"), "and closes it: {rendered:?}");
             }
         }
+    }
+
+    // Catches: continuation indentation is added after wrapping and overflows,
+    // or a style/link boundary incorrectly makes a word breakable.
+    #[test]
+    fn hanging_wrap_reserves_cells_and_preserves_styled_words() {
+        let line = Line::of(vec![
+            Span::plain("one two "),
+            Span::linked("three", Style::PLAIN.bold(), "https://example.test"),
+            Span::plain("four five six"),
+        ]);
+        let rows = line.wrap_hanging(12, 3);
+        assert_eq!(
+            rows.iter().map(Line::text).collect::<Vec<_>>(),
+            ["one two", "   threefour", "   five six"]
+        );
+        assert!(rows.iter().all(|row| row.width() <= 12));
+        assert_eq!(
+            rows[1].spans[1].link.as_deref(),
+            Some("https://example.test")
+        );
+    }
+
+    // Catches: an oversized word loops or overflows the reduced continuation width.
+    #[test]
+    fn hanging_wrap_breaks_only_words_larger_than_the_available_row() {
+        let rows = Line::plain("💬 abcdefghijklmnop").wrap_hanging(10, 3);
+        assert_eq!(
+            rows.iter().map(Line::text).collect::<Vec<_>>(),
+            ["💬", "   abcdefg", "   hijklmn", "   op"]
+        );
+        assert!(rows.iter().all(|row| row.width() <= 10));
     }
 
     /// A path or a URL belongs together more than it belongs to the column.
