@@ -7655,14 +7655,17 @@ fn blocked_progress(args: &str, result: &ToolResult) -> bool {
     let crate::permit::ToolResultProvenance::Foreign { result } = result.provenance() else {
         return false;
     };
-    if result.server() != "tuic" || result.tool() != "progress" {
+    if result.server() != "tuic" {
         return false;
     }
     let Ok(args) = serde_json::from_str::<serde_json::Value>(args) else {
         return false;
     };
-    args["type"] == "blocked"
-        || (args["tool_name"] == "progress" && args["arguments"]["type"] == "blocked")
+    match result.tool() {
+        "progress" => args["type"] == "blocked",
+        "call_tool" => args["tool_name"] == "progress" && args["arguments"]["type"] == "blocked",
+        _ => false,
+    }
 }
 
 enum DriveOutcome {
