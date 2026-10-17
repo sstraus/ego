@@ -2417,3 +2417,41 @@ this locator after restart. Expired access tokens refresh before MCP dispatch.
 HTTP 401 triggers refresh without replaying the operation; retry the operation
 when requested. Missing or revoked credentials require a new explicit login.
 Servers that advertise only confidential-client authentication are not supported.
+
+
+### Notebook cell edits
+
+`notebook_edit` is a builtin available through the same tool registry to CLI,
+ACP, and runtime consumers. Use `--tools notebook_edit` to select it explicitly.
+It accepts `path`, an explicit `edit_mode`, and mode-specific fields:
+
+- `replace`: `cell_id` and `new_source`. Change only the source of that cell.
+- `insert`: `cell_type` (`code` or `markdown`), `new_source`, and optional
+  `cell_id`. Insert after that ID, or at the start when the ID is omitted/null.
+- `delete`: `cell_id`. Remove that cell only.
+
+The file must be a valid UTF-8 nbformat 4.5 notebook with unique stable IDs,
+no larger than 16 MiB before or after the edit. Invalid files and missing IDs
+are refused without a write. Inserted cells receive a new random ID. Existing
+IDs, metadata, outputs, execution counts, and attachments remain unchanged
+unless their cell is deleted. The tool does not execute a kernel or clear old
+outputs. JSON formatting can change; preservation is semantic, not byte-for-byte.
+
+Each call declares read and write effects on the same resolved file. A matching
+`write(pattern)` allow covers the supporting read, as for `edit`. Explicit read
+and write denies, workspace confinement, and plan mode still apply. Concurrent
+`notebook_edit` calls in one ego process are serialized. Do not edit the notebook
+from another process during a call: external writers do not share that lock,
+and a pre-publication reread is not an operating-system compare-and-swap.
+
+Reference contracts captured 2026-10-16:
+
+- <https://code.claude.com/docs/en/tools-reference.md>, NotebookEdit section:
+  cell-ID targeting, replace/insert/delete, and UTF-8 refusal. ego uses its own
+  lowercase tool name and requires an explicit edit mode.
+- <https://nbformat.readthedocs.io/en/latest/format_description.html>:
+  source representation, metadata, outputs, and stable ID rules.
+- `crates/ego-tools/src/tools/nbformat.v4.schema.json` is the Jupyter v4.5
+  schema recorded from
+  <https://raw.githubusercontent.com/jupyter/nbformat/main/nbformat/v4/nbformat.v4.schema.json>.
+  The upstream BSD license is stored beside it as `nbformat.LICENSE`.
