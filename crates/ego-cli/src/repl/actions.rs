@@ -564,7 +564,7 @@ impl ActionRegistry {
             enabled(
                 Expand,
                 "expand",
-                "Show the full output of the last tool call",
+                "Show the last tool output or collapsed prompt",
             )
             .shortcut('o'),
             enabled(Skills, "skills", "List or invoke admitted skills")

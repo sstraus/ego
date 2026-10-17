@@ -12,6 +12,8 @@ mod image_refusal;
 mod missing_program;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
+#[path = "live_surface_pty/prompt_echo.rs"]
+mod prompt_echo;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
 #[path = "live_surface_pty/retry_line.rs"]

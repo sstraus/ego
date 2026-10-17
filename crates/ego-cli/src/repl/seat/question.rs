@@ -1619,7 +1619,17 @@ fn status_row(status: &SurfaceStatus) -> String {
 
 impl Prompt for Waiting {
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
-        background_notice::row(buffer, usize::from(width).saturating_sub(1))
+        let width = usize::from(width).saturating_sub(1);
+        if let Some(receipt) = background_notice::row(buffer, width) {
+            return Some(receipt);
+        }
+        let (receipt, detail) = crate::render::prompt_echo::collapsed(buffer, width)?;
+        self.status
+            .lock()
+            .expect("surface status lock")
+            .details
+            .remember(detail);
+        Some(receipt)
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {

@@ -23,7 +23,7 @@ use similar::{ChangeTag, TextDiff};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Output lines an exec row shows under its header.
-const TAIL_LINES: usize = 3;
+pub(crate) const PREVIEW_LINES: usize = 3;
 
 /// Most bytes of one call's detail kept for the expand key. A result larger
 /// than this is cut with a visible mark: the store is a bounded log of recent
@@ -377,19 +377,22 @@ fn dim(text: String) -> Line {
     Line::styled(text, Style::fg(Palette::NOTE))
 }
 
+/// The shared hidden-line count for compact tool and prompt output.
+pub(crate) fn hidden_lines(hidden: usize, width: usize) -> Line {
+    dim(format!(
+        "  … {hidden} more {} · /expand shows all",
+        if hidden == 1 { "line" } else { "lines" }
+    ))
+    .truncate_to(width)
+}
+
 /// The last lines of an exec's output, and a count of the ones left out.
 fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
     let lines = output_lines(call);
-    let hidden = lines.len().saturating_sub(TAIL_LINES);
+    let hidden = lines.len().saturating_sub(PREVIEW_LINES);
     let mut rows = Vec::new();
     if hidden > 0 {
-        rows.push(
-            dim(format!(
-                "  … {hidden} more {} · /expand shows all",
-                if hidden == 1 { "line" } else { "lines" }
-            ))
-            .truncate_to(width),
-        );
+        rows.push(hidden_lines(hidden, width));
     }
     rows.extend(
         lines[hidden..]

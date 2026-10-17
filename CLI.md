@@ -1341,10 +1341,16 @@ it is drawn (a resize applies to later rows): the target gives way first, the
 mark, verb, outcome and duration last. Text from a tool result is shown with
 control characters replaced, never passed to the terminal.
 
+A submitted prompt that exceeds three terminal rows shows its first three rows
+and a count of hidden rows. Short prompts keep their normal echo. This changes
+only the displayed receipt, not the prompt sent to the model or saved in history.
+`/expand` shows the full prompt if it is the most recent expandable entry; a
+later tool call replaces it as the expansion target.
+
 `/expand`, also `Alt-O`, prints the full result of the most recent tool call
 under its row: for `edit`, the line diff; for every other tool, the whole
-result text the model received, up to 256 KiB. Only the 16 most recent calls of
-the session are kept, and only the latest can be shown. It runs between turns,
+result text the model received, up to 256 KiB. Only the 16 most recent tool calls
+and collapsed prompts of the session are kept, and only the latest can be shown. It runs between turns,
 like `/help`. Headless runs write each row to stderr, prefixed `εgo:`, and have
 no expand key.
 
