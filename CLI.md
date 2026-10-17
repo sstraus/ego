@@ -1227,7 +1227,10 @@ opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
 checks are projections of one action registry rather than parallel command
 implementations. An exact registered action executes with one `Enter`; a
 partial completion remains inert until explicitly submitted, and pasted slash
-text remains ordinary prompt input.
+text remains ordinary prompt input. A submitted unknown slash command is refused
+locally with the nearest command names and never starts a model generation.
+To send literal text that starts with `/` (for example `/tmp/x`), add a leading
+space. Bracketed paste also remains literal prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
 25-command action registry: a typed complete slash is classified as an action,
@@ -1240,6 +1243,12 @@ Arguments that do not belong to a selected local action are usage errors, not
 model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
 configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
 points to that root syntax without consuming a provider turn.
+
+Read-only `/tasks [ID]`, `/config`, `/config perimeter`, and `/usage` answer
+while a turn runs. They read the current session journal, admitted configuration,
+and durable usage records without starting a generation. State-changing commands
+remain on their existing host-command path; an inspection does not cancel,
+restart, or complete the active turn.
 
 `/help` renders task-oriented Discover, Model, Control, Session, Integrations
 and Surface groups from that registry into transcript scrollback. `/doctor`
