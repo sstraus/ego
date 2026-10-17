@@ -28,6 +28,8 @@ mod retry_line;
 mod setup;
 #[path = "live_surface_pty/slash_inspections.rs"]
 mod slash_inspections;
+#[path = "live_surface_pty/startup_order.rs"]
+mod startup_order;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
@@ -5725,7 +5727,7 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
     drain_until_quiet(&reader, &mut output);
     let after_pickers = normalized(&output[reasoning_start..]);
     let banner = after_pickers
-        .find("εgo: ego")
+        .find("εgo: model")
         .unwrap_or_else(|| panic!("no banner after the pickers: {after_pickers:?}"));
     assert!(
         after_pickers[..banner].ends_with('\n') || banner == 0,

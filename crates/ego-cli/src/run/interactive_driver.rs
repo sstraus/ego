@@ -511,6 +511,11 @@ pub(super) async fn interactive_process(
         });
     }
 
+    // Identity precedes keyboard/configuration admission, trust, and provider/MCP
+    // setup. These paths keep their own diagnostics; none need buffering.
+    if !args.quiet {
+        out.note(&format!("ego {}", env!("CARGO_PKG_VERSION")));
+    }
     let quiet = args.quiet;
     let environment = Environment::read();
     let capabilities = Capabilities::of(&Terminal {

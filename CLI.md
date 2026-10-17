@@ -1202,6 +1202,11 @@ History, completion, multiline editing, bracketed paste, and concurrent output
 use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
+Interactive startup prints the application name and version before configuration,
+trust, provider, or MCP notices. It reports the selected model, effective posture,
+and key hints after admission. Startup notices remain visible; `--quiet` keeps
+its existing announcement policy. The name does not require a resolved model.
+
 The live seat enters raw mode before startup discovery, so lines typed before
 the composer appears retain their Enter boundaries without cooked terminal
 echo. The first starts a turn; further submitted lines enter the busy FIFO.
