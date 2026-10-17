@@ -283,11 +283,7 @@ fn startup_banner_names_ego_version_model_and_help_unless_quiet() {
     assert!(normal_text.contains("qwen3"));
     assert!(normal_text.contains("/help"));
     let banner = normal_text
-        .find(concat!(
-            "ego ",
-            env!("CARGO_PKG_VERSION"),
-            " · ollama/qwen3"
-        ))
+        .find(concat!("ego ", env!("CARGO_PKG_VERSION")))
         .expect("banner identity");
     let trust = normal_text
         .find("trust project files")
