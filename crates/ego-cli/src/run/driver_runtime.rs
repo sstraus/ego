@@ -2572,8 +2572,11 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             match selection.set_fast(enabled) {
                 Ok(receipt) => {
                     diagnostics.note(&receipt);
-                    if let Ok(selected) = selection.snapshot() {
-                        seat.refresh_status(state, selected);
+                    if let Some(status) = status.as_ref()
+                        && status.human
+                        && let Ok(selected) = selection.snapshot()
+                    {
+                        status.seat.refresh_status(state, selected);
                     }
                 }
                 Err(error) => diagnostics.note(&error.to_string()),
