@@ -3287,6 +3287,28 @@ fn report_interactive_turn_end(
         ));
     }
 
+    if let RunTermination::PermissionRequired {
+        action,
+        by: DeniedBy::Decided(ego_core::permit::Authority::Mode { mode: Mode::Plan }),
+    } = termination
+    {
+        use unicode_width::UnicodeWidthStr;
+
+        let action = ego_core::permit::terminal_safe(action);
+        let message = format!(
+            "stopped: permission refused — {action}\n\
+             Use /mode to choose a mode that permits this action, then resubmit."
+        );
+        let prefix_width = format!("{}: ", crate::DISPLAY_NAME).width();
+        let room = seat.width().saturating_sub(prefix_width + 1).max(1);
+        let rows = message
+            .lines()
+            .flat_map(|line| crate::render::Line::plain(line).wrap(room))
+            .map(|line| line.text())
+            .collect::<Vec<_>>();
+        diagnostics.note(&rows.join("\n"));
+    }
+
     if let RunTermination::Failed { message } = termination {
         diagnostics.note(&format!("{message}; fix the error and retry, or use /quit"));
     }
@@ -3614,8 +3636,8 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     let Some((termination, result)) = driven else {
         return Ok((false, perimeter));
     };
-    between();
     report_interactive_turn_end(&termination, cancel, seat, turn_started, diagnostics);
+    between();
     *last = Ended {
         termination,
         session: active.id(),
