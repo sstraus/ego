@@ -2562,9 +2562,17 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 let result =
                     crate::mcp::session_command(&arguments, controller, session_mcp, disabled_mcp)
                         .await;
+                if let Some(status) = status.as_ref() {
+                    status.seat.set_mcp_session_servers(
+                        session_mcp
+                            .iter()
+                            .map(|(name, _, _)| (name.clone(), disabled_mcp.contains(name)))
+                            .collect(),
+                    );
+                }
                 match result {
                     Ok(receipt) => diagnostics.note(&receipt),
-                    Err(error) => diagnostics.note(&format!("MCP control failed: {error:?}")),
+                    Err(error) => diagnostics.note(&crate::mcp::session_error(&error)),
                 }
             }
             Ok(CommandOutcome::Continue)

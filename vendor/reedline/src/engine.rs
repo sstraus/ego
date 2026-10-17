@@ -1670,10 +1670,15 @@ impl Reedline {
             {
                 for menu in self.menus.iter_mut() {
                     if menu.is_active() {
+                        let submit = menu.submit_on_accept();
                         menu.replace_in_buffer(&mut self.editor);
                         menu.menu_event(MenuEvent::Deactivate);
 
-                        return Ok(EventStatus::Handled);
+                        return if submit {
+                            self.handle_editor_event(prompt, event)
+                        } else {
+                            Ok(EventStatus::Handled)
+                        };
                     }
                 }
                 unreachable!()

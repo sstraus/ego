@@ -4,6 +4,8 @@ mod background_notice;
 mod blank_prompt;
 #[path = "live_surface_pty/busy_notice.rs"]
 mod busy_notice;
+#[path = "live_surface_pty/busy_commands.rs"]
+mod busy_commands;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
 #[path = "live_surface_pty/finish_queue.rs"]
@@ -14,6 +16,8 @@ mod foreign_judge_reason;
 mod image_refusal;
 #[path = "live_surface_pty/metadata_refusal.rs"]
 mod metadata_refusal;
+#[path = "live_surface_pty/mcp_inventory.rs"]
+mod mcp_inventory;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/mode_picker.rs"]
@@ -24,6 +28,8 @@ mod permission_receipts;
 mod plan_denial;
 #[path = "live_surface_pty/prompt_echo.rs"]
 mod prompt_echo;
+#[path = "live_surface_pty/prompt_readiness.rs"]
+mod prompt_readiness;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
 #[path = "live_surface_pty/retry_line.rs"]
@@ -32,6 +38,8 @@ mod retry_line;
 mod setup;
 #[path = "live_surface_pty/slash_inspections.rs"]
 mod slash_inspections;
+#[path = "live_surface_pty/slash_completion.rs"]
+mod slash_completion;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
@@ -9271,5 +9279,18 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
             "{successor}"
         );
         assert!(successor.contains("Finish both sub-tasks"), "{successor}");
+    }
+}
+
+fn record_slash_capture(output: &[u8], rows: u16, cols: u16) {
+    if let Some(directory) = std::env::var_os("EGO_SLASH_RECORD_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("record directory");
+        std::fs::write(directory.join(format!("{cols}x{rows}.ansi")), output).expect("raw capture");
+        std::fs::write(
+            directory.join(format!("{cols}x{rows}.json")),
+            format!("{{\"cols\":{cols},\"rows\":{rows}}}\n"),
+        )
+        .expect("geometry");
     }
 }

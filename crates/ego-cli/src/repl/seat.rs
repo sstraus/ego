@@ -128,6 +128,7 @@ enum SurfaceActionEffect {
 struct McpSurfaceActions {
     registry: Arc<McpRegistryController>,
     native_tools: Arc<[RegisteredTool]>,
+    servers: Vec<(ego_core::config::McpServerName, bool)>,
 }
 
 struct SurfaceActionSink {
@@ -268,6 +269,10 @@ impl ActionMenu {
 }
 
 impl Menu for ActionMenu {
+    fn submit_on_accept(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -1460,6 +1465,12 @@ impl Seat {
             status.model_selection = Some(selection);
             status.config_store = Some(config_store);
             status.mcp_actions = Some(McpSurfaceActions {
+                servers: mcp_registry
+                    .status()
+                    .servers()
+                    .iter()
+                    .map(|server| (server.name().clone(), false))
+                    .collect(),
                 registry: mcp_registry,
                 native_tools: native_tools.into(),
             });
@@ -1480,6 +1491,19 @@ impl Seat {
             .set_availability(ActionId::Compact, availability);
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
+        }
+    }
+
+    /// Keep the busy inventory bound to the same session-local enablement as idle commands.
+    pub(crate) fn set_mcp_session_servers(
+        &self,
+        servers: Vec<(ego_core::config::McpServerName, bool)>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            if let Some(actions) = status.mcp_actions.as_mut() {
+                actions.servers = servers;
+            }
         }
     }
 
@@ -2210,6 +2234,35 @@ fn own_terminal(
                     line
                 };
                 let ended = matches!(line, Line::Ended);
+                if phase.get() == EditPhase::Busy
+                    && let Line::HostCommand(command) = &line
+                {
+                    let label = match command {
+                        HostCommand::Action(action) => {
+                            let current = status.lock().expect("surface status lock");
+                            format!(
+                                "/{}",
+                                current
+                                    .actions
+                                    .as_ref()
+                                    .expect("installed actions")
+                                    .registry
+                                    .help(*action)
+                                    .name()
+                            )
+                        }
+                        HostCommand::Tasks(_) => "/tasks".to_owned(),
+                        HostCommand::Config(_) => "/config".to_owned(),
+                        HostCommand::Fork(_) => "/fork".to_owned(),
+                        HostCommand::Resume(_) => "/resume".to_owned(),
+                        HostCommand::History(_) => "/history".to_owned(),
+                        _ => "local command".to_owned(),
+                    };
+                    commit_to_transcript(
+                        &status,
+                        &format!("{label} pending until the current turn ends"),
+                    );
+                }
                 if input.send(line).is_err() || (ended && failed) {
                     break;
                 }
