@@ -45,7 +45,7 @@ mod tests {
             assert!(collapsed(text, 80).is_none(), "{text:?}");
         }
         let (preview, _) = collapsed("one\ntwo\nthree\nfour", 80).unwrap();
-        assert!(preview.ends_with("1 more line · /expand shows all"));
+        assert!(preview.ends_with("1 more line · Option+O or /expand"));
     }
 
     // Catches: a single wide line evades collapse or a preview splits Unicode.
@@ -53,7 +53,7 @@ mod tests {
     fn wrapped_prompt_echo_counts_terminal_rows() {
         let (preview, detail) = collapsed(&"界".repeat(80), 41).unwrap();
         assert_eq!(preview.lines().count(), 4);
-        assert!(preview.ends_with("2 more lines · /expand shows all"));
+        assert!(preview.ends_with("2 more lines · Option+O or /expand"));
         assert!(preview.lines().all(|line| Line::plain(line).width() <= 41));
         assert_eq!(detail, format!("> {}", "界".repeat(80)));
     }

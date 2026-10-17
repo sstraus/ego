@@ -39,7 +39,7 @@ fn long_prompt_echo_is_collapsed_in_the_live_terminal() {
     let collapsed = screen_rows(&output, 40, 120).join("\n");
     assert!(collapsed.contains("> brief line 01"), "{collapsed}");
     assert!(
-        collapsed.contains("17 more lines · /expand shows all"),
+        collapsed.contains("17 more lines · Option+O or /expand"),
         "{collapsed}"
     );
     assert!(!collapsed.contains("brief line 20"), "{collapsed}");
