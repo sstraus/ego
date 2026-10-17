@@ -73,13 +73,11 @@ fn section(out: &mut String, command: &Command, path: &str) {
         let _ = writeln!(out, "{about}\n");
     }
     for sub in command.get_subcommands() {
-        let _ = writeln!(
-            out,
-            "- `{} {}` — {}",
-            path,
-            sub.get_name(),
-            sub.get_about().map_or(String::new(), |a| a.to_string())
-        );
+        let _ = write!(out, "- `{path} {}`", sub.get_name());
+        if let Some(about) = sub.get_about() {
+            let _ = write!(out, " — {about}");
+        }
+        out.push('\n');
     }
     if command.get_subcommands().next().is_some() {
         out.push('\n');

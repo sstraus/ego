@@ -161,14 +161,19 @@ pub(super) struct CompactCommand {
     disable_help_subcommand = true
 )]
 pub(super) struct ExportCommand {
+    /// Stored session ID to export.
     pub(super) source: String,
 
+    /// Remove private content structurally; exports are unsanitized by default.
     #[arg(long)]
     pub(super) sanitize: bool,
 
+    /// Transcript format; JSONL is stdout-only and cannot be combined with --file.
     #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
     pub(super) format: ExportFormat,
 
+    /// Write to PATH instead of stdout; its parent must exist. Refuse symlinks,
+    /// non-regular targets and existing files with different bytes; identical bytes are accepted.
     #[arg(long, value_name = "PATH")]
     pub(super) file: Option<PathBuf>,
 
@@ -954,9 +959,13 @@ fn parse_goal_check_command(value: &str) -> Result<GoalCheckCommand, String> {
     disable_help_subcommand = true
 )]
 pub(super) struct RmCommand {
+    /// Stored session ID to delete; history needed by descendants is retained.
     pub(super) source: String,
+    /// Supply deletion confirmation without prompting; required without terminal stdin.
     #[arg(long)]
     pub(super) yes: bool,
+    /// Acknowledge an uncertain prior run; does not replace deletion confirmation
+    /// and is not a general override.
     #[arg(long)]
     pub(super) force: bool,
     #[command(flatten)]

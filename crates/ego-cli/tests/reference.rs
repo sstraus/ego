@@ -144,6 +144,7 @@ fn docs_review_root_completion_does_not_omit_interactive_options() {
 #[test]
 fn docs_review_reference_does_not_drop_nested_leaf_arguments() {
     let rendered = reference();
+    assert!(rendered.lines().all(|line| line.trim_end() == line));
     for (path, argument) in [
         ("config batch", "--if-revision"),
         ("roots add", "--access"),
@@ -182,5 +183,41 @@ fn docs_review_reference_does_not_erase_argument_constraints() {
         "default: 134217728 bytes",
     ] {
         assert!(rendered.contains(metadata), "missing metadata: {metadata}");
+    }
+}
+
+#[test]
+fn docs_review_local_help_does_not_hide_removal_and_export_controls() {
+    let mut root = root_command();
+    let rm = root
+        .find_subcommand_mut("rm")
+        .unwrap()
+        .render_long_help()
+        .to_string();
+    for explanation in [
+        "confirmation",
+        "uncertain prior run",
+        "does not replace",
+        "descendants",
+        "session ID",
+    ] {
+        assert!(rm.contains(explanation), "rm missing: {explanation}");
+    }
+    let export = root
+        .find_subcommand_mut("export")
+        .unwrap()
+        .render_long_help()
+        .to_string();
+    for explanation in [
+        "unsanitized",
+        "stdout",
+        "different bytes",
+        "JSONL",
+        "session ID",
+    ] {
+        assert!(
+            export.contains(explanation),
+            "export missing: {explanation}"
+        );
     }
 }
