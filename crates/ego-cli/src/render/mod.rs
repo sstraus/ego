@@ -44,6 +44,18 @@ pub use line::{Line, Span};
 pub use stream::Answer;
 pub use style::{Palette, Rgb, Style};
 
+/// A turn duration a person reads, with whole seconds below one hour.
+pub(crate) fn duration(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60)
+    }
+}
+
 /// Render a block of lines to bytes, one `\n` per line.
 ///
 /// The one place trailing whitespace is removed. It matters more than it

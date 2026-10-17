@@ -1597,11 +1597,12 @@ fn status_row(status: &SurfaceStatus) -> String {
     if status.activity {
         let elapsed = status
             .activity_since
-            .map(|started| started.elapsed().as_secs())
-            .unwrap_or(0);
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
         return format!(
-            "{} Working {elapsed}s \x1b[2m· Esc to interrupt\x1b[22m\n",
-            ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
+            "{} Working {} \x1b[2m· Esc to interrupt\x1b[22m\n",
+            ACTIVITY_FRAMES[(elapsed.as_secs() as usize) % ACTIVITY_FRAMES.len()],
+            crate::render::duration(elapsed)
         );
     }
     let text = status

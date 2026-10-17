@@ -172,6 +172,36 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
     assert!(indicator.ends_with("\n> "));
 }
 
+// Catches: long turns shown as raw seconds, or losing the smaller unit at a boundary.
+#[test]
+fn working_indicator_formats_long_elapsed_time() {
+    for (seconds, expected) in [
+        (0, "0s"),
+        (42, "42s"),
+        (59, "59s"),
+        (60, "1m 0s"),
+        (1511, "25m 11s"),
+        (3599, "59m 59s"),
+        (3600, "1h 00m"),
+        (3900, "1h 05m"),
+        (86400, "24h 00m"),
+    ] {
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            activity: true,
+            activity_since: Some(Instant::now() - Duration::from_secs(seconds)),
+            ..SurfaceStatus::default()
+        }));
+        let waiting = Waiting::new(status);
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        assert!(
+            indicator.contains(&format!(
+                "Working {expected} \x1b[2m· Esc to interrupt\x1b[22m\n"
+            )),
+            "{seconds}s rendered as {indicator:?}"
+        );
+    }
+}
+
 #[test]
 fn failed_answer_output_does_not_claim_a_visible_reply() {
     use crate::output::{InteractiveOutput, TextOutput};

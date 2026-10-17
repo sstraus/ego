@@ -1056,6 +1056,13 @@ fn only_a_long_run_is_worth_interrupting_someone_over() {
         "{long:?}"
     );
 
+    // Catches: the completed-turn notification using a different format from the working row.
+    let hour = loud.postamble(&RunTermination::Done, Duration::from_secs(3900));
+    assert!(
+        hour.contains("\x1b]9;εgo: done after 1h 05m\x07"),
+        "{hour:?}"
+    );
+
     let quiet = Announce::new(&out, capabilities, true);
     assert!(
         !quiet
@@ -1105,6 +1112,16 @@ fn a_long_title_is_cut_where_a_grapheme_ends() {
 
 #[test]
 fn a_duration_is_written_for_a_person() {
+    use crate::render::duration;
+
+    // Catches: turn notifications retaining minutes after the hour boundary.
+    assert_eq!(duration(Duration::from_secs(3600)), "1h 00m");
+    assert_eq!(duration(Duration::from_secs(3900)), "1h 05m");
+    assert_eq!(duration(Duration::from_secs(3959)), "1h 05m");
+    assert_eq!(
+        duration(Duration::from_secs(u64::MAX)),
+        "5124095576030431h 00m"
+    );
     assert_eq!(duration(Duration::from_secs(9)), "9s");
     assert_eq!(duration(Duration::from_secs(60)), "1m 0s");
     assert_eq!(duration(Duration::from_secs(252)), "4m 12s");
