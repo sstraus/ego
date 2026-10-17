@@ -175,3 +175,26 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     let config: toml::Value = toml::from_str(&config).expect("saved config");
     assert_eq!(config["model"].as_str(), Some("ollama/deferred-model"));
 }
+
+// Catches: a saved-default mutation disappears from the busy composer without
+// telling the user that it is accepted but still waiting for the active turn.
+#[test]
+fn busy_config_write_reports_pending_before_the_turn_finishes() {
+    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-HELD\n");
+    let mut session = modal_session_with(vec![reply]);
+    session.press(b"hold this turn\r");
+    session.wait("REGRESSION-MARKER-HELD");
+    let start = session.output.len();
+    session.press(b"/config set model \"ollama/pending-model\"\r");
+    // An immediate inspection proves that the preceding write was consumed.
+    session.press(b"/tasks\r");
+    session.wait("background tasks: none");
+    let held = normalized(&session.output[start..]);
+    gate.release();
+    session.wait("Saved model =");
+    session.finish();
+    assert!(
+        held.contains("config write pending until the active turn finishes"),
+        "the user needs an acceptance receipt before completion: {held}"
+    );
+}
