@@ -1,8 +1,11 @@
 //! The operator-visible projection of admitted run authority.
 
+mod network;
+
 use crate::config::{Effective, Source};
 use crate::permit::{ExecCaps, ExecObservation, ProfileRoot, RootAccess, RunConfinement};
 use crate::store::evidence::EvidenceRef;
+use network::DestinationPolicy;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -22,6 +25,7 @@ pub struct Perimeter {
     #[serde(skip_serializing_if = "Option::is_none")]
     probe_evidence: Option<EvidenceRef>,
     network: &'static str,
+    destination_policy: DestinationPolicy,
     warnings: Vec<String>,
 }
 
@@ -55,6 +59,7 @@ impl Perimeter {
             );
         }
         Self {
+            destination_policy: DestinationPolicy::capture(effective),
             warnings,
             workspace: confinement.workspace().as_path().to_path_buf(),
             roots: roots
@@ -193,6 +198,7 @@ impl Perimeter {
             ),
             format!("  network\t{}\tinvocation", self.network),
         ]);
+        lines.extend(self.destination_policy.text());
         if let Some(reason) = self.sandbox_reason {
             lines.push(format!("  sandbox_reason\t{reason}"));
         }

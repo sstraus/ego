@@ -72,6 +72,8 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::Network, "network"),
         (ManagedConfigKey::Roots, "roots"),
         (ManagedConfigKey::ExecPaths, "exec_paths"),
+        (ManagedConfigKey::Keybindings, "ui.keybindings"),
+        (ManagedConfigKey::Vim, "ui.vim"),
     ];
     let profile = [
         (ManagedConfigKey::Model, "model"),
@@ -223,5 +225,34 @@ fn managed_values_parse_to_existing_strong_types_and_canonical_toml() {
     }
     for raw in ["model[0]", "mode.alias", "unknown"] {
         assert!(ManagedConfigKey::parse(raw).is_err(), "{raw}");
+    }
+}
+
+// Catches: a keyboard preference acquires profile scope or loses its stored type during publication.
+#[test]
+fn keyboard_preference_types_round_trip_without_profile_inheritance() {
+    for (key, raw) in [
+        (ManagedConfigKey::Vim, "true"),
+        (
+            ManagedConfigKey::Keybindings,
+            "{model=['Ctrl+P'],expand=[]}",
+        ),
+    ] {
+        assert!(key.available_in(&UserConfigTarget::Base));
+        assert!(!key.available_in(&UserConfigTarget::Profile(
+            ProfileName::parse("ci").unwrap()
+        )));
+        let value = ManagedConfigValue::parse(key.clone(), raw).unwrap();
+        assert_eq!(
+            ManagedConfigValue::parse(key.clone(), &value.to_toml()).unwrap(),
+            value
+        );
+    }
+    for (key, raw) in [
+        (ManagedConfigKey::Vim, "'true'"),
+        (ManagedConfigKey::Keybindings, "{model='Ctrl+P'}"),
+        (ManagedConfigKey::Keybindings, "[]"),
+    ] {
+        assert!(ManagedConfigValue::parse(key, raw).is_err());
     }
 }

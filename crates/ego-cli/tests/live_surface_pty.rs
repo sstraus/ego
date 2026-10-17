@@ -1,5 +1,7 @@
 #[path = "live_surface_pty/background_notice.rs"]
 mod background_notice;
+#[path = "live_surface_pty/busy_notice.rs"]
+mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
 #[path = "live_surface_pty/finish_queue.rs"]
@@ -10,14 +12,22 @@ mod foreign_judge_reason;
 mod image_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
+#[path = "live_surface_pty/mode_picker.rs"]
+mod mode_picker;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
+#[path = "live_surface_pty/plan_denial.rs"]
+mod plan_denial;
+#[path = "live_surface_pty/prompt_echo.rs"]
+mod prompt_echo;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/slash_inspections.rs"]
+mod slash_inspections;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 #[path = "live_surface_pty/status_history.rs"]
@@ -4796,10 +4806,17 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     );
     drain_until_quiet(&reader, &mut output);
     let usage = normalized(&output[usage_start..]);
-    assert!(usage.contains("0.0000 USD"), "known usage cost: {usage:?}");
+    assert!(
+        usage.contains("unpriced subscription-equivalent (standard API)"),
+        "nonmonetary usage cost: {usage:?}"
+    );
+    assert!(
+        !usage.contains("0.0000 USD"),
+        "policy zero is not monetary spend: {usage:?}"
+    );
     assert!(
         !usage.contains("unknown"),
-        "cancelled local turn is still free: {usage:?}"
+        "cancelled local turn keeps its nonmonetary cost status: {usage:?}"
     );
     assert!(
         usage.lines().any(|line| {

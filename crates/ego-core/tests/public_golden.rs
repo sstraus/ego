@@ -117,6 +117,7 @@ mod public_golden {
             cache_write_tokens: cache_write,
             cache_write_extended_tokens: 0,
             output_tokens: output,
+            web_search_requests: 0,
             reasoning_tokens: None,
         }
     }

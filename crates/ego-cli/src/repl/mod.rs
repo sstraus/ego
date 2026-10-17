@@ -5,6 +5,7 @@
 //! and transcript output stay live without creating a second terminal writer.
 
 mod clipboard;
+mod keyboard;
 mod keys;
 mod seat;
 
@@ -67,6 +68,7 @@ pub enum HostCommand {
     Setup(String),
     Tasks(String),
     Mcp(String),
+    McpContext(actions::McpContextCommand),
     Background,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
@@ -84,6 +86,18 @@ pub enum HostCommand {
 }
 
 impl HostCommand {
+    pub(crate) fn is_read_only_inspection(&self) -> bool {
+        match self {
+            Self::Tasks(arguments) => {
+                let words = arguments.split_whitespace().collect::<Vec<_>>();
+                words.is_empty() || (words.len() == 1 && words[0] != "cancel")
+            }
+            Self::Action(ActionId::Config | ActionId::Usage) => true,
+            Self::Config(arguments) => arguments == "perimeter",
+            _ => false,
+        }
+    }
+
     fn from_editor(command: String) -> Option<Self> {
         if command == DRAFT_COMMAND {
             return Some(Self::Draft);

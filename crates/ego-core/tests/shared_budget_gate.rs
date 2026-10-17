@@ -58,6 +58,7 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
         revision: MeteringRevision("regression_case".to_owned()),
     };
     let request = GenRequest {
+        web_search: None,
         cache: None,
         model: "provider/model".to_owned(),
         messages: Conversation::new(vec![Message::text(Role::User, "pending".to_owned())])
@@ -144,6 +145,7 @@ fn admitted_stream(root: &SharedBudgetGate, model: &str) -> (AttemptStream, Gate
         revision: MeteringRevision("regression_case".to_owned()),
     };
     let request = GenRequest {
+        web_search: None,
         cache: None,
         model: model.to_owned(),
         messages: Conversation::new(vec![Message::text(Role::User, "pending".to_owned())])

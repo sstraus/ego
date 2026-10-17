@@ -68,6 +68,7 @@ fn usd(decimal: &str) -> Money {
 
 fn quote() -> PricingQuote {
     PricingQuote {
+        web_search: None,
         revision: PricingRevision("test-2026-08".to_string()),
         currency: CurrencyCode::new("USD").expect("USD is valid"),
         uncached_input: Some("0.000003".parse().unwrap()),
@@ -105,6 +106,7 @@ fn caps() -> ModelCapabilities {
 
 fn request() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "gpt-5.1".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "list the files")])
@@ -120,6 +122,7 @@ fn request() -> GenRequest {
 /// format has nowhere to put, and refuses rather than drops.
 fn request_carrying_reasoning() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         messages: Conversation::new(vec![
             Message::text(Role::User, "list the files"),

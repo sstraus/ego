@@ -471,6 +471,7 @@ impl TableEntry {
     /// whatever read the bytes, not to the parser.
     pub fn into_quote(self, revision: PricingRevision) -> PricingQuote {
         PricingQuote {
+            web_search: None,
             revision,
             currency: currency(),
             uncached_input: self.uncached_input,

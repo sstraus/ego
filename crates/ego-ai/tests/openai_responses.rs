@@ -39,6 +39,7 @@ fn png() -> Image {
 
 fn ask(thinking: ThinkingLevel) -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "gpt-5.6-sol".to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, "Reply with: ok")])

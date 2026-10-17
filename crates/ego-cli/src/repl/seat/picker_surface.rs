@@ -568,6 +568,7 @@ mod tests {
     #[test]
     fn coordinator_idle_preserves_the_terminal_owners_modal_phase() {
         let phase = SurfacePhase::new(EditPhase::Modal);
+        let (_inspection_sender, inspections) = crossbeam::channel::unbounded();
         let (_input_sender, input) = bounded(CHANNEL_CAPACITY);
         let (control, _control_receiver) = bounded(CHANNEL_CAPACITY);
         let (_ingress, coordinator) = interactive_control();
@@ -575,6 +576,8 @@ mod tests {
         let seat = Seat {
             kind: SeatKind::Live(Box::new(LiveSeat {
                 input,
+                inspections,
+                inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
                 control,
                 activated: AtomicBool::new(false),
                 break_signal: Arc::new(AtomicBool::new(false)),

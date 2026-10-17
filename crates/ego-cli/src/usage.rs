@@ -185,6 +185,8 @@ fn spent(line: &UsageLine) -> bool {
         || usage.reasoning_tokens.is_some_and(|tokens| tokens > 0)
         || !line.cost.known.is_empty()
         || !line.cost.unknown.is_empty()
+        || !line.cost.subscription_equivalent.is_empty()
+        || !line.cost.subscription_unknown.is_empty()
 }
 
 fn row(session: &str, model: &str, role: &str, line: &UsageLine) -> Vec<String> {
@@ -248,11 +250,30 @@ fn cost_text(cost: &CostBreakdown) -> String {
         .map(money_text)
         .collect::<Vec<_>>()
         .join(", ");
-    match (known.is_empty(), cost.unknown.is_empty()) {
-        (true, true) => "-".to_string(),
-        (true, false) => "unknown".to_string(),
-        (false, true) => known,
-        (false, false) => format!("{known} +unknown"),
+    let mut parts = match (known.is_empty(), cost.unknown.is_empty()) {
+        (true, true) => Vec::new(),
+        (true, false) => vec!["unknown".to_owned()],
+        (false, true) => vec![known],
+        (false, false) => vec![format!("{known} +unknown")],
+    };
+    parts.extend(cost.subscription_equivalent.iter().map(|amount| {
+        let text = format!(
+            "{} subscription-equivalent (standard API)",
+            money_text(amount)
+        );
+        if cost.subscription_unknown.is_empty() {
+            text
+        } else {
+            format!("{text} (partial; unpriced)")
+        }
+    }));
+    if !cost.subscription_unknown.is_empty() {
+        parts.push("unpriced subscription-equivalent (standard API)".to_owned());
+    }
+    if parts.is_empty() {
+        "-".to_owned()
+    } else {
+        parts.join(" + ")
     }
 }
 
@@ -300,7 +321,7 @@ mod text_red {
     fn report(as_of: u64, total: CostBreakdown) -> UsageReport {
         let empty = || line(none());
         UsageReport {
-            v: 2,
+            v: ego_core::usage::USAGE_REPORT_VERSION,
             as_of: Timestamp::from_millis(as_of),
             period: UsagePeriod::All,
             sessions: Vec::new(),
@@ -320,6 +341,8 @@ mod text_red {
         CostBreakdown {
             known: Vec::new(),
             unknown: Vec::new(),
+            subscription_equivalent: Vec::new(),
+            subscription_unknown: Vec::new(),
         }
     }
 
@@ -330,6 +353,8 @@ mod text_red {
                 CurrencyCode::new("USD").expect("currency"),
             )],
             unknown: Vec::new(),
+            subscription_equivalent: Vec::new(),
+            subscription_unknown: Vec::new(),
         }
     }
 
@@ -370,8 +395,65 @@ mod text_red {
         let unpriced = CostBreakdown {
             known: Vec::new(),
             unknown: vec![UnknownCost::NoPricingQuote],
+            subscription_equivalent: Vec::new(),
+            subscription_unknown: Vec::new(),
         };
         assert_eq!(cost_text(&unpriced), "unknown");
+    }
+
+    /// Catches: equivalent estimates rendered as spend or missing estimates hidden.
+    #[test]
+    fn subscription_cost_cells_label_equivalents_and_preserve_metered_zero() {
+        let assert_cost_cells = |cost: CostBreakdown, expected: &str| {
+            let mut report = report(0, cost.clone());
+            let mut lines = report.totals.clone();
+            lines.main = line(cost);
+            report.sessions.push(ego_core::usage::SessionUsage {
+                session: "00000000-0000-0000-0000-000000000001"
+                    .parse()
+                    .expect("session id"),
+                model: Some("fixture".to_owned()),
+                lineage: None,
+                context: None,
+                lines,
+            });
+            let text = render_text(&report, false, None);
+            let rows: Vec<_> = text
+                .lines()
+                .skip(2)
+                .map(|row| row.split_whitespace().collect::<Vec<_>>())
+                .collect();
+            assert_eq!(rows.len(), 3, "main, session total and workspace: {text}");
+            assert_eq!(rows[0][2], "main", "cost-only role stays visible: {text}");
+            for row in rows {
+                assert_eq!(row[7..].join(" "), expected, "{text}");
+            }
+            text
+        };
+        let mut subscription = none();
+        subscription.subscription_equivalent = usd(11_458, 6).known;
+        let label = "0.0115 USD subscription-equivalent (standard API)";
+        let text = assert_cost_cells(subscription.clone(), label);
+        assert!(!text.contains("0.0000 USD"), "{text}");
+        subscription.known = usd(0, 0).known;
+        assert_cost_cells(subscription.clone(), &format!("0.0000 USD + {label}"));
+        subscription
+            .subscription_unknown
+            .push(UnknownCost::NoPricingQuote);
+        assert_cost_cells(
+            subscription.clone(),
+            &format!(
+                "0.0000 USD + {label} (partial; unpriced) + unpriced subscription-equivalent (standard API)"
+            ),
+        );
+        subscription.subscription_equivalent.clear();
+        subscription.known.clear();
+        let text = assert_cost_cells(
+            subscription,
+            "unpriced subscription-equivalent (standard API)",
+        );
+        assert!(!text.contains("0.0000 USD"), "{text}");
+        assert_cost_cells(usd(0, 0), "0.0000 USD");
     }
 
     /// Catches: `/usage` omitting the window, or computing the percent against
@@ -401,7 +483,7 @@ mod text_red {
             serde_json::to_string(&report(1_790_662_411_741, usd(156_247, 8))).expect("serialise");
         assert_eq!(
             json,
-            r#"{"v":2,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[]}}}}"#
+            r#"{"v":3,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}}}}"#
         );
     }
 }

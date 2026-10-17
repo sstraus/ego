@@ -625,6 +625,17 @@ impl CliGenerationModelSource {
                 GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
             })?;
         }
+        if matches!(provider_id, "openai" | "anthropic")
+            && let Some(rates) = &mut resolved.rates
+        {
+            // The published tariff is USD. Never relabel it as a foreign-currency price.
+            rates.quote.web_search = (rates.quote.currency.as_str() == "USD")
+                .then(|| "0.01".parse().expect("published USD search tariff"));
+            rates.quote.revision.0.push_str("+web-search-2026-10-16");
+            if let ego_core::cost::RateSource::Table { revision } = &mut rates.source {
+                *revision = rates.quote.revision.clone();
+            }
+        }
         let thinking = if matches!(role, GenerationRole::Judge | GenerationRole::GoalCheck) {
             judge_thinking(&resolved.capabilities)
         } else {
@@ -1029,6 +1040,7 @@ mod tests {
             }
             previous_generator = Some(profile.generator.clone());
             let req = GenRequest {
+                web_search: None,
                 cache: Some(PromptCache {
                     session_id: id,
                     lineage_root: id,
@@ -1134,6 +1146,7 @@ mod tests {
         let headers = credential.headers();
         let target = RequestTarget::new(resolved.row.base(), &headers);
         let request = GenRequest {
+            web_search: None,
             cache: None,
             model: resolved.model.clone(),
             messages: Conversation::new(vec![Message::text(Role::User, "hello")])
@@ -1257,6 +1270,7 @@ mod tests {
             .build_request(
                 &target,
                 &GenRequest {
+                    web_search: None,
                     cache: None,
                     model: resolved.model.clone(),
                     messages: Conversation::new(vec![Message::text(Role::User, "hello")])
@@ -1364,6 +1378,7 @@ mod tests {
             .build_request(
                 &target,
                 &GenRequest {
+                    web_search: None,
                     cache: None,
                     model: resolved.model.clone(),
                     messages: Conversation::new(vec![Message::text(Role::User, "hello")])

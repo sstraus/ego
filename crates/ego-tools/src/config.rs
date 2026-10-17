@@ -970,6 +970,16 @@ fn managed_value(
             ManagedConfigKey::Network => parsed.network.map(ManagedConfigValue::Network),
             ManagedConfigKey::Budget => parsed.budget.clone().map(ManagedConfigValue::Budget),
             ManagedConfigKey::Bare => parsed.bare.map(ManagedConfigValue::Bare),
+            ManagedConfigKey::Keybindings => parsed
+                .ui
+                .as_ref()
+                .and_then(|ui| ui.keybindings.clone())
+                .map(ManagedConfigValue::Keybindings),
+            ManagedConfigKey::Vim => parsed
+                .ui
+                .as_ref()
+                .and_then(|ui| ui.vim)
+                .map(ManagedConfigValue::Vim),
             ManagedConfigKey::PermissionsJudge => parsed
                 .permissions
                 .as_ref()
@@ -1021,7 +1031,10 @@ fn managed_value(
                 ManagedConfigKey::ArtifactDir => {
                     profile.artifact_dir.clone().map(ManagedConfigValue::Path)
                 }
-                ManagedConfigKey::Bare | ManagedConfigKey::StatuslineSegments => None,
+                ManagedConfigKey::Bare
+                | ManagedConfigKey::StatuslineSegments
+                | ManagedConfigKey::Keybindings
+                | ManagedConfigKey::Vim => None,
             }
         }
     }
@@ -1128,6 +1141,8 @@ fn managed_path(key: &ManagedConfigKey) -> Vec<&str> {
         ManagedConfigKey::Bare => vec!["bare"],
         ManagedConfigKey::PermissionsJudge => vec!["permissions", "judge"],
         ManagedConfigKey::StatuslineSegments => vec!["ui", "statusline", "segments"],
+        ManagedConfigKey::Keybindings => vec!["ui", "keybindings"],
+        ManagedConfigKey::Vim => vec!["ui", "vim"],
         ManagedConfigKey::SessionDir => vec!["session_dir"],
         ManagedConfigKey::ArtifactDir => vec!["artifact_dir"],
     }
@@ -1298,6 +1313,7 @@ fn server_table(server: &McpServerConfig) -> Result<Table, UserConfigError> {
         }
         McpServerConfig::Http(http) => {
             table.insert("transport", value("http"));
+            table.insert("profile", value(http.profile.as_str()));
             table.insert("url", value(http.url.to_string()));
             if http.auth == McpHttpAuth::Oauth {
                 table.insert("auth", value("oauth"));
