@@ -222,28 +222,6 @@ mod tests {
         SkillSourceLocation,
     };
 
-    // Catches: a config write or task cancellation bypasses the pending mutation queue.
-    #[test]
-    fn read_only_inspection_inbox_excludes_state_changes() {
-        for command in [
-            HostCommand::Tasks(String::new()),
-            HostCommand::Tasks("some-id".into()),
-            HostCommand::Action(ActionId::Config),
-            HostCommand::Config("perimeter".into()),
-            HostCommand::Action(ActionId::Usage),
-        ] {
-            assert!(command.is_read_only_inspection(), "{command:?}");
-        }
-        for command in [
-            HostCommand::Tasks("cancel some-id".into()),
-            HostCommand::Config("set model \"other\"".into()),
-            HostCommand::Action(ActionId::New),
-            HostCommand::Action(ActionId::Compact),
-        ] {
-            assert!(!command.is_read_only_inspection(), "{command:?}");
-        }
-    }
-
     #[test]
     fn a_pasted_stack_trace_is_one_prompt_and_not_its_first_line() {
         let pasted = "thread 'main' panicked at src/main.rs:4:5:\nindex out of bounds\nnote: run with RUST_BACKTRACE=1";

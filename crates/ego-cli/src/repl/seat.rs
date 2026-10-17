@@ -1246,9 +1246,11 @@ impl Seat {
     pub fn read(&self) -> Line {
         match &self.kind {
             SeatKind::Live(live) => {
-                let line = crossbeam::channel::select! {
-                    recv(live.input) -> line => line.unwrap_or(Line::Ended),
+                // Already admitted inspections belong to the current session, so
+                // answer them before ordinary input can switch or close it.
+                let line = crossbeam::channel::select_biased! {
                     recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
+                    recv(live.input) -> line => line.unwrap_or(Line::Ended),
                 };
                 if matches!(line, Line::Submitted(_)) {
                     live.phase.set(EditPhase::Busy);

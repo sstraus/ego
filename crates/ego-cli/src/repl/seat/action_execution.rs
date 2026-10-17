@@ -171,9 +171,6 @@ fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
         }
         Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
-        Dispatch::Config(arguments) if arguments != "perimeter" => {
-            Some("config is unavailable while a turn is running")
-        }
         Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
         _ => None,
     }

@@ -97,3 +97,81 @@ fn unknown_slash_is_local_and_leading_space_sends_a_literal_path() {
     assert_eq!(requests.len(), 1);
     assert_eq!(count_exact_strings(&requests[0]["messages"], " /tmp/x"), 1);
 }
+
+// TEST-CHANGE: replace private inbox-predicate assertions with real task and
+// config effects, observed while the provider gate holds the foreground turn.
+// Catches: a task cancellation or config write executes during a held turn,
+// or a queued mutation is lost or executed more than once after completion.
+#[test]
+fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "printf ready > ready; printf REGRESSION-MARKER-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
+        "timeout_ms": 60000
+    });
+    let (reply, gate) = gated_paced_line("regression_case-HELD\n");
+    let mut session = modal_session_with(vec![
+        Reply::Sse(tool_call("regression_case", "exec", &arguments.to_string())),
+        Reply::Sse(text(TOOL_TURN_DONE)),
+        reply,
+    ]);
+    session.press(b"start a long exec\r");
+    session.wait("[d] details");
+    session.press(b"y");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !session.ego.workspace_path().join("ready").exists() {
+        assert!(Instant::now() < deadline, "foreground child did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.press(b"\x02");
+    session.wait(TOOL_TURN_DONE);
+    let transcript = normalized(&session.output);
+    let prefix = "background exec id: ";
+    let offset = transcript.rfind(prefix).expect("background handle") + prefix.len();
+    let id = transcript[offset..offset + 36].to_owned();
+    assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
+    let config_path = session.ego.home_path().join("config.toml");
+    let original = std::fs::read(&config_path).unwrap_or_default();
+
+    session.press(b"hold the next turn\r");
+    session.wait("regression_case-HELD");
+    session.press(format!("/tasks cancel {id}\r").as_bytes());
+    let mutation_start = session.mark;
+    session.press(b"/config set model \"ollama/deferred-model\"\r");
+    // This inspection is a processing barrier: the terminal has consumed both
+    // preceding mutations, but the provider still cannot complete the turn.
+    session.press(format!("/tasks {id}\r").as_bytes());
+    session.wait("running");
+    session.wait("REGRESSION-MARKER-OUTPUT");
+    assert_eq!(std::fs::read(&config_path).unwrap_or_default(), original);
+    let held = normalized(&session.output[mutation_start..]);
+    assert!(!held.contains("Saved model ="), "{held}");
+    assert!(!held.contains("cancellation requested"), "{held}");
+    assert!(!held.contains("cancelled"), "{held}");
+
+    gate.release();
+    session.mark = mutation_start;
+    session.wait("Saved model =");
+    drain_until_quiet(&session.reader, &mut session.output);
+    let receipts = normalized(&session.output[mutation_start..]);
+    assert_eq!(receipts.matches("Saved model =").count(), 1, "{receipts}");
+    assert!(!receipts.contains("Unchanged: model"), "{receipts}");
+    assert_eq!(
+        receipts.matches("cancellation requested").count() + receipts.matches("cancelled").count(),
+        1,
+        "{receipts}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        session.press(format!("/tasks {id}\r").as_bytes());
+        drain_until_quiet(&session.reader, &mut session.output);
+        if normalized(&session.output[session.mark..]).contains("cancelled") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "cancel did not settle");
+    }
+    assert!(!session.ego.workspace_path().join("survived").exists());
+    let (generations, config) = session.finish();
+    assert_eq!(generations.len(), 3, "mutations must not start generations");
+    let config: toml::Value = toml::from_str(&config).expect("saved config");
+    assert_eq!(config["model"].as_str(), Some("ollama/deferred-model"));
+}
