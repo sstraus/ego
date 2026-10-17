@@ -120,6 +120,11 @@ fn printable(text: &str) -> String {
     ego_core::permit::terminal_safe(&text.replace('\r', "").replace('\t', " "))
 }
 
+/// Process output may contain decoration, unlike call arguments or file text.
+fn printable_output(text: &str) -> String {
+    ego_core::permit::terminal_output_safe(&text.replace('\r', "").replace('\t', " "))
+}
+
 /// [`printable`] for text that spans lines: the line breaks stay, the rest of
 /// each line is made safe.
 fn printable_block(text: &str) -> String {
@@ -278,7 +283,7 @@ fn failure(result: &str, width: usize) -> String {
                 .unwrap_or("?");
             format!("exit {code}")
         }
-        None => keep_end(&printable(last), (width / 3).max(12)),
+        None => keep_end(&printable_output(last), (width / 3).max(12)),
     }
 }
 
@@ -356,7 +361,7 @@ fn output_lines(call: &Finished<'_>) -> Vec<String> {
             _ if line.trim().is_empty() => {}
             _ if !call.ok && line.starts_with(EXIT_PREFIX) => {}
             _ => {
-                let text = printable(line);
+                let text = printable_output(line);
                 lines.push(if stderr {
                     format!("stderr: {text}")
                 } else {
@@ -414,7 +419,7 @@ fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
     let room = width.saturating_sub(2).max(1);
     call.result
         .lines()
-        .flat_map(|line| Line::plain(printable(line)).wrap(room))
+        .flat_map(|line| Line::plain(printable_output(line)).wrap(room))
         .map(|line| {
             let mut indented = Line::plain("  ");
             line.spans.into_iter().for_each(|span| indented.push(span));
@@ -606,6 +611,37 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // Catches: SGR decoration is printed as escaped text in tool output.
+    #[test]
+    fn tool_output_strips_sgr_without_hiding_other_controls() {
+        for (source, expected) in [
+            ("\x1b[32m✓ Added worklog\x1b[0m", "✓ Added worklog"),
+            ("\x1b[38;2;1;2;3mcolour\x1b[m", "colour"),
+            ("\x1b[38:2::1:2:3mcolour\x1b[0m", "colour"),
+            ("\x1b[2Jscreen\u{202e}", "\\u{1b}[2Jscreen\\u{202e}"),
+            ("\x1b]0;title\x07", "\\u{1b}]0;title\\u{7}"),
+            ("\x1b[32incomplete", "\\u{1b}[32incomplete"),
+        ] {
+            let result = format!("[stdout]\n{source}\n[stderr]\n{source}\n");
+            let rendered = record(&call("exec", r#"{"argv":["x"]}"#, true, &result), at(120));
+            let rows: Vec<_> = rendered.rows.lines().skip(1).collect();
+            assert_eq!(
+                rows,
+                [format!("  {expected}"), format!("  stderr: {expected}")]
+            );
+            let detail: Vec<_> = rendered.detail.lines().skip(1).collect();
+            assert_eq!(
+                detail,
+                [
+                    "  [stdout]".to_owned(),
+                    format!("  {expected}"),
+                    "  [stderr]".to_owned(),
+                    format!("  {expected}")
+                ]
+            );
         }
     }
 
