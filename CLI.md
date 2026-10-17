@@ -103,6 +103,8 @@ Notes:
   (Codex split them and had to add `--include-non-interactive` to re-merge).
 - For an installation-free IDE custom-agent setup over native ACP, see
   [IDE setup](docs/integrations/ide.md); no `--ide` auto-connect flag is required.
+- For standard ACP client libraries and runnable isolated examples, see
+  [ACP client libraries](docs/integrations/acp-clients.md).
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
   Headless multi-turn streaming uses this same ACP stdio connection, not an
