@@ -283,6 +283,12 @@ pub struct McpMappedInput {
 }
 
 impl McpMappedInput {
+    pub(crate) fn bind_deadline(&mut self, expiry: u64) {
+        if let QuestionMode::Round(round) = &mut self.question_request.mode {
+            round.expires_at_ms = Some(expiry);
+        }
+    }
+
     pub fn correlation_key(&self) -> &str {
         &self.correlation_key
     }
@@ -340,47 +346,69 @@ impl McpInputMapping {
     }
 
     pub fn from_rmcp(required: InputRequiredResult) -> Result<McpMappedInput, McpError> {
+        use ego_core::question::{ElicitationKind, ElicitationMember, ElicitationRound};
         let request_state = required
             .request_state
             .filter(|state| !state.is_empty())
             .ok_or_else(|| protocol("input-required round has no requestState"))?;
-        let requests = required
-            .input_requests
-            .ok_or_else(|| protocol("requestState-only MRTR rounds are unsupported"))?;
-        if requests.len() != 1 {
-            return Err(protocol(
-                "MRTR round must contain exactly one input request",
-            ));
+        let requests = required.input_requests.unwrap_or_default();
+        if requests.len() > ego_core::question::MAX_ELICITATION_REQUESTS {
+            return Err(protocol("input-required round exceeds the request limit"));
         }
-        let (correlation_key, request) = requests
-            .into_iter()
-            .next()
-            .expect("one request was checked");
-        let InputRequest::Elicitation(request) = request else {
-            return Err(protocol("sampling and roots MRTR requests are unsupported"));
+        let mut members = std::collections::BTreeMap::new();
+        for (key, request) in requests {
+            let InputRequest::Elicitation(request) = request else {
+                return Err(protocol("sampling and roots MRTR requests are unsupported"));
+            };
+            let (prompt, kind) = match request.params {
+                ElicitRequestParams::FormElicitationParams {
+                    message,
+                    requested_schema,
+                    ..
+                } => {
+                    let schema = serde_json::to_value(requested_schema)?;
+                    compile_schema(&schema)?;
+                    (message, ElicitationKind::Form { schema })
+                }
+                ElicitRequestParams::UrlElicitationParams {
+                    message,
+                    url,
+                    elicitation_id,
+                    ..
+                } => (
+                    message,
+                    ElicitationKind::Url {
+                        url,
+                        elicitation_id,
+                    },
+                ),
+                _ => return Err(protocol("unsupported elicitation mode")),
+            };
+            members.insert(key, ElicitationMember { prompt, kind });
+        }
+        let round = ElicitationRound {
+            expires_at_ms: None,
+            requests: members,
+            completed: Default::default(),
         };
-        let ElicitRequestParams::FormElicitationParams {
-            message,
-            requested_schema,
-            ..
-        } = request.params
-        else {
-            return Err(protocol("URL elicitation is unsupported"));
-        };
-        let schema = serde_json::to_value(requested_schema)?;
-        let mut mapped = Self::map(McpInputRequired {
-            kind: InputKind::Elicitation,
-            schema: Some(schema.clone()),
-            correlation_key: Some(correlation_key),
-            request_state: Some(request_state.into_bytes()),
-        })?;
-        mapped.question_request =
-            QuestionRequest::new(message, QuestionMode::Form { schema }, Vec::new(), false);
-        mapped
-            .question_request
+        round
             .validate()
-            .map_err(|error| protocol(error.to_string()))?;
-        Ok(mapped)
+            .map_err(|_| protocol("invalid elicitation round"))?;
+        // Kept separately from the round for the legacy single-form adapter.
+        let schema = serde_json::json!({"type":"object"});
+        let validator = compile_schema(&schema)?;
+        Ok(McpMappedInput {
+            schema,
+            validator,
+            correlation_key: "round".to_owned(),
+            request_state: request_state.into_bytes(),
+            question_request: QuestionRequest::new(
+                "The MCP server requires input before retrying the original operation",
+                QuestionMode::Round(round),
+                Vec::new(),
+                false,
+            ),
+        })
     }
 }
 
@@ -511,6 +539,9 @@ impl McpInputState {
         original: impl AsRef<[u8]>,
         mapped: McpMappedInput,
     ) -> Result<Self, McpError> {
+        if matches!(mapped.question_request.mode, QuestionMode::Round(_)) {
+            return Err(protocol("durable rounds require the continuation owner"));
+        }
         let original = original.as_ref().to_vec();
         validate_original(method, &mapped.correlation_key, &original)?;
         let id = derive_local_id(

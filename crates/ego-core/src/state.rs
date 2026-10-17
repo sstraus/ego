@@ -51,6 +51,9 @@ use crate::store::blob::BlobRef;
 /// (`SessionState::usage`): the same shape, folded by `add`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Provider-billed searches, separate from all token categories.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub web_search_requests: u64,
     /// Input tokens billed at the full rate — not served from cache.
     ///
     /// **The partition direction is this type's, not a wire's**, and the
@@ -126,6 +129,10 @@ pub struct Usage {
     pub reasoning_tokens: Option<u64>,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl Usage {
     /// A usage of nothing: every category counted, all of them zero.
     ///
@@ -161,6 +168,7 @@ impl Usage {
         cache_write_tokens: 0,
         cache_write_extended_tokens: 0,
         output_tokens: 0,
+        web_search_requests: 0,
         reasoning_tokens: Some(0),
     };
 
@@ -192,6 +200,9 @@ impl Usage {
     /// hostile log (this is data read back from disk, not just a
     /// theoretical edge).
     pub fn add(&mut self, delta: &Usage) {
+        self.web_search_requests = self
+            .web_search_requests
+            .saturating_add(delta.web_search_requests);
         self.uncached_input_tokens = self
             .uncached_input_tokens
             .saturating_add(delta.uncached_input_tokens);
@@ -401,6 +412,8 @@ pub struct ItemState {
     /// thing to rely on.
     pub seq: Seq,
     pub kind: ItemKind,
+    #[serde(default)]
+    pub context_command: bool,
     /// The exact event that admitted this item as a tool call.
     ///
     /// Kept separately from [`Self::seq`] because continuation causality
@@ -438,6 +451,8 @@ pub struct ItemState {
     /// is why a reasoning item with text alone is not replayed.
     #[serde(default)]
     pub reasoning_state: Option<ReasoningState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_content: Option<ReasoningState>,
     pub completed: bool,
     pub ok: Option<bool>,
     /// The generation this item came out of, when the log says which.
@@ -465,6 +480,7 @@ impl ItemState {
             turn,
             seq,
             kind,
+            context_command: false,
             tool_call_started: None,
             call_id: None,
             tool_name: None,
@@ -474,6 +490,7 @@ impl ItemState {
             tool_result: None,
             tool_timing: None,
             reasoning_state: None,
+            provider_content: None,
             completed: false,
             ok: None,
             generation: None,
@@ -1107,6 +1124,8 @@ pub struct SessionState {
     /// The session's current goal, if one has been set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalRecord>,
+    #[serde(default)]
+    pub plan: crate::plan::Plan,
     /// Per-turn state, keyed by turn id.
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
@@ -1243,6 +1262,7 @@ impl Default for SessionState {
             pause: PauseState::Running,
             holds: HoldReceipts::default(),
             goal: None,
+            plan: crate::plan::Plan::default(),
             turns: HashMap::default(),
             items: HashMap::default(),
             detached_execs: BTreeMap::default(),
@@ -1332,7 +1352,29 @@ impl SessionState {
     }
 
     pub fn pending_question(&self) -> Option<&PendingQuestion> {
-        self.pending_question.as_ref()
+        self.pending_question.as_ref().or_else(|| {
+            // A durable answer can precede continuation acceptance/claim. Recovery
+            // requires a fresh explicit resume; it never repeats an effect itself.
+            self.settled_questions
+                .values()
+                .filter(|settled| {
+                    matches!(settled.outcome, QuestionOutcome::Answered(_))
+                        && matches!(
+                            settled.pending.request.mode,
+                            crate::question::QuestionMode::Round(_)
+                        )
+                        && matches!(
+                            settled.pending.target,
+                            QuestionTarget::ForeignContinuation { .. }
+                        )
+                        && self
+                            .items
+                            .get(&settled.pending.target.tool_call())
+                            .is_some_and(|item| !item.completed)
+                })
+                .max_by_key(|settled| self.items.get(&settled.pending.item).map(|item| item.seq))
+                .map(|settled| &settled.pending)
+        })
     }
 
     pub fn settled_question(&self, question: ItemId) -> Option<&SettledQuestion> {
@@ -1370,7 +1412,13 @@ impl SessionState {
         json: &str,
     ) -> Result<QuestionAnswer, QuestionError> {
         let pending = self.pending_for(question)?;
-        QuestionAnswer::from_json(&pending.request, json)
+        let answer = QuestionAnswer::from_json(&pending.request, json)?;
+        if let Some(settled) = self.settled_questions.get(&question)
+            && settled.outcome != QuestionOutcome::Answered(answer.clone())
+        {
+            return Err(QuestionError::AlreadySettled);
+        }
+        Ok(answer)
     }
 
     /// Validate an already parsed answer and prepare the pure tool result for
@@ -1396,7 +1444,7 @@ impl SessionState {
     }
 
     fn pending_for(&self, question: ItemId) -> Result<&PendingQuestion, QuestionError> {
-        match &self.pending_question {
+        match self.pending_question() {
             Some(pending) if pending.item == question => Ok(pending),
             Some(_) => Err(QuestionError::WrongQuestion),
             None if self.settled_questions.contains_key(&question) => {
@@ -1433,7 +1481,9 @@ impl SessionState {
             QuestionOutcome::Answered(answer) => (true, answer.model_text()),
             QuestionOutcome::Declined => (false, "question declined".to_string()),
             QuestionOutcome::Cancelled => (false, "question cancelled".to_string()),
-            QuestionOutcome::Unavailable => return Err(QuestionError::NoPendingQuestion),
+            QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => {
+                return Err(QuestionError::NoPendingQuestion);
+            }
         };
         Ok(QuestionContinuation {
             question,
@@ -1478,7 +1528,7 @@ impl SessionState {
     }
 
     pub fn refuse_new_prompt(&self, _turn: TurnId) -> Result<(), QuestionError> {
-        if self.pending_question.is_some() {
+        if self.pending_question().is_some() {
             Err(QuestionError::PendingQuestion)
         } else {
             Ok(())
@@ -1934,6 +1984,9 @@ impl SessionState {
             | EventKind::GoalCheckStopped { .. }
             | EventKind::GoalUpdated { .. }
             | EventKind::GoalTransitioned { .. } => self.apply_goal(ev),
+            EventKind::PlanUpdated { update } => {
+                let _ = self.plan.apply(update);
+            }
             EventKind::ContextRequested { request } => {
                 self.context_request = Some(request.clone());
             }
@@ -1989,9 +2042,28 @@ impl SessionState {
             // block that somehow reported twice reported a correction, not a
             // continuation. Concatenating two opaque blobs would produce a
             // third that no provider minted.
+            EventKind::ProviderContent { state, visible } => {
+                let kind = if *visible {
+                    ItemKind::Assistant
+                } else {
+                    ItemKind::Reasoning
+                };
+                if let Some(item) = self.item_mut(ev, kind) {
+                    item.provider_content = Some(state.clone());
+                    item.completed = true;
+                }
+            }
             EventKind::ReasoningState { state } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::Reasoning) {
                     item.reasoning_state = Some(state.clone());
+                }
+            }
+            EventKind::ContextCommandStarted { name, args } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
+                    item.tool_call_started.get_or_insert(ev.env.id);
+                    item.context_command = true;
+                    item.tool_name = Some(name.clone());
+                    item.args = args.clone();
                 }
             }
             EventKind::ToolCallStarted {
@@ -2044,6 +2116,17 @@ impl SessionState {
             }
             EventKind::QuestionRequested { request, target } => {
                 self.request_question(ev, request, target)
+            }
+            EventKind::QuestionMemberSettled { key, answer } => {
+                if let Some(pending) = self.pending_question.as_mut()
+                    && ev.env.item == Some(pending.item)
+                    && ev.env.turn == pending.turn
+                    && ev.env.parent == Some(pending.request_event)
+                    && matches!(pending.target, QuestionTarget::ForeignContinuation { .. })
+                    && let crate::question::QuestionMode::Round(round) = &mut pending.request.mode
+                {
+                    let _ = round.complete_member(key, answer.clone());
+                }
             }
             EventKind::QuestionSettled { outcome } => self.settle_question(ev, outcome),
             EventKind::PermissionRequested { escalation, .. } => {
@@ -2254,6 +2337,8 @@ impl SessionState {
             return;
         };
         if request.validate().is_err()
+            || (matches!(request.mode, crate::question::QuestionMode::Round(_))
+                && matches!(target, QuestionTarget::ModelTool { .. }))
             || target.validate().is_err()
             || self.pending_question.is_some()
             || self.settled_questions.contains_key(&item)
@@ -2286,7 +2371,7 @@ impl SessionState {
                 QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
                 // `Unavailable` is a host result, never a settlement:
                 // it is exactly the state in which the request stays pending.
-                QuestionOutcome::Unavailable => false,
+                QuestionOutcome::Unavailable | QuestionOutcome::MemberCompleted { .. } => false,
             };
         if valid && let Some(pending) = self.pending_question.take() {
             if let Some(question) = self.items.get_mut(&item) {

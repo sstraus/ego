@@ -234,11 +234,11 @@ pub struct ToolTiming {
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
 /// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
-/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
+/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
-/// ReasoningDelta | ReasoningState | ToolCallStarted | ToolCallDelta |
+/// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
-/// DetachedExecSettled | QuestionRequested | QuestionSettled |
+/// DetachedExecSettled | QuestionRequested | QuestionSettled | QuestionMemberSettled |
 /// PermissionRequested | PermissionAmended | PermissionDecided |
 /// GenerationStarted | FallbackDecision | ExecutionObserved |
 /// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
@@ -269,6 +269,8 @@ pub struct ToolTiming {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
+    /// An authoritative plan replacement or step progress transition.
+    PlanUpdated { update: crate::plan::PlanUpdate },
     /// Operator-facing metadata. The session identity and lineage do not change.
     SessionTitleChanged { title: Option<String> },
     /// Durable soft deletion. Storage remains available to lineage replay.
@@ -391,6 +393,13 @@ pub enum EventKind {
     /// resumed session that reconstructed the order by guesswork would be
     /// reconstructing the one thing the provider checks.
     ReasoningState { state: ReasoningState },
+    /// Private provider output required for exact continuation.
+    ProviderContent {
+        state: ReasoningState,
+        visible: bool,
+    },
+    /// An explicit user MCP context selection, not a provider-issued tool call.
+    ContextCommandStarted { name: String, args: String },
     /// A tool call began, with its name and raw (unvalidated) arguments.
     ToolCallStarted {
         name: String,
@@ -438,6 +447,11 @@ pub enum EventKind {
     /// The terminal human-input outcome, correlated by the same envelope item
     /// as [`QuestionRequested`](Self::QuestionRequested).
     QuestionSettled { outcome: QuestionOutcome },
+    /// A correlated round member was completed; this does not authorize a retry.
+    QuestionMemberSettled {
+        key: String,
+        answer: serde_json::Value,
+    },
     /// A sensitive action needs a permission decision.
     ///
     /// Structured rather than a rendered `description`, because the question
@@ -809,6 +823,7 @@ impl EventKind {
             EventKind::GoalAllowanceInherited { .. } => "goal_allowance_inherited",
             EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
             EventKind::GoalUpdated { .. } => "goal_updated",
+            EventKind::PlanUpdated { .. } => "plan_updated",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
@@ -818,6 +833,8 @@ impl EventKind {
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::ReasoningDelta { .. } => "reasoning_delta",
             EventKind::ReasoningState { .. } => "reasoning_state",
+            EventKind::ContextCommandStarted { .. } => "context_command_started",
+            EventKind::ProviderContent { .. } => "provider_content",
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
@@ -827,6 +844,7 @@ impl EventKind {
             EventKind::DetachedExecSettled { .. } => "detached_exec_settled",
             EventKind::QuestionRequested { .. } => "question_requested",
             EventKind::QuestionSettled { .. } => "question_settled",
+            EventKind::QuestionMemberSettled { .. } => "question_member_settled",
             EventKind::PermissionRequested { .. } => "permission_requested",
             EventKind::PermissionAmended { .. } => "permission_amended",
             EventKind::PermissionDecided { .. } => "permission_decided",

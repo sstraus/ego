@@ -507,6 +507,16 @@ impl EventSink for TextSink<'_> {
             }
         }
         match event {
+            PublicEvent::PlanUpdated { .. } if !self.quiet => {
+                self.finish();
+                for step in &state.plan.steps {
+                    self.out
+                        .note(&format!("[{:?}] {}: {}", step.status, step.id, step.text));
+                }
+                if state.plan.steps.is_empty() {
+                    self.out.note("Plan cleared");
+                }
+            }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
@@ -906,6 +916,38 @@ mod tests {
             ok,
             text: Some(result.to_owned()),
         }
+    }
+
+    #[test]
+    fn terminal_plan_rows_use_reduced_state_and_respect_quiet_progress() {
+        // Catches: terminal renders stale operation payloads instead of the authoritative plan.
+        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+        let mut state = SessionState::default();
+        state.plan.steps = vec![PlanStep {
+            id: "stable".into(),
+            text: "Verify output".into(),
+            status: StepStatus::Blocked,
+        }];
+        let event = PublicEvent::PlanUpdated {
+            turn: ego_core::event::id::TurnId::new(),
+            update: PlanUpdate::Step {
+                id: "stable".into(),
+                status: StepStatus::Blocked,
+            },
+        };
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain());
+        sink.publish(&event, &state);
+        assert_eq!(
+            *out.notes.lock().unwrap(),
+            ["[Blocked] stable: Verify output"]
+        );
+        state.plan.steps.clear();
+        sink.publish(&event, &state);
+        assert_eq!(out.notes.lock().unwrap().last().unwrap(), "Plan cleared");
+        let quiet_out = Recorded::default();
+        TextSink::new(&quiet_out, true, Capabilities::plain()).publish(&event, &state);
+        assert!(quiet_out.notes.lock().unwrap().is_empty());
     }
 
     #[test]

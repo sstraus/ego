@@ -23,6 +23,15 @@ use crate::state::Usage;
 /// not a design choice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AiEvent {
+    /// Provider-owned block; visible blocks replace the matching assistant history item.
+    ProviderContent {
+        state: ReasoningState,
+        visible: bool,
+    },
+    /// An observed provider-executed search, never a local tool request.
+    WebSearch { call_id: String, query: String },
+    /// A provider citation displayed with the assistant answer.
+    Citation { url: String, title: String },
     /// A streamed increment of the assistant's visible text.
     TextDelta { text: String },
     /// A streamed increment of the model's reasoning/thinking.
@@ -158,6 +167,11 @@ impl std::error::Error for RequestExpressibilityError {}
 /// `Http`, credentials and the provider table. The dependency arrow is
 /// `ego-ai -> ego-core`, never the reverse.
 pub trait Generator: Send + Sync {
+    /// Whether this resolved provider owns a native hosted search contract.
+    fn supports_web_search(&self) -> bool {
+        false
+    }
+
     /// Prove locally that the adapter can encode this exact request.
     ///
     /// This performs no I/O. It is required, with no default, so a new adapter

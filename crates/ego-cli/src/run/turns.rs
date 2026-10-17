@@ -224,11 +224,13 @@ enum TurnStart {
         images: Vec<ImageRef>,
     },
     Resumed(ego_core::event::id::TurnId),
+    Presented(ItemId),
     Answered {
         question: ItemId,
         answer: QuestionAnswer,
     },
     Skill(AdmittedSkillOperation),
+    McpContext(repl::actions::McpContextCommand),
 }
 
 impl Turns<'_> {
@@ -265,6 +267,17 @@ impl Turns<'_> {
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
         self.drive_from(loop_, TurnStart::Skill(operation), cancel, diagnostics)
+            .await
+    }
+
+    pub(super) async fn drive_mcp_context<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        command: repl::actions::McpContextCommand,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(loop_, TurnStart::McpContext(command), cancel, diagnostics)
             .await
     }
 
@@ -306,6 +319,17 @@ impl Turns<'_> {
         .await
     }
 
+    pub(super) async fn drive_presented<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        question: ItemId,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(loop_, TurnStart::Presented(question), cancel, diagnostics)
+            .await
+    }
+
     async fn drive_from<'session: 'turn, 'turn>(
         &self,
         loop_: &mut TurnLoop<'session, 'turn>,
@@ -324,14 +348,30 @@ impl Turns<'_> {
             loop_.set_turn_allowance(self.max_turns.map(|max| max.saturating_sub(taken)));
             let outcome = match next {
                 TurnStart::Checkpoint => {
-                    self.one_running(loop_.continue_checkpoint(), cancel).await
+                    self.one_running(Box::pin(loop_.continue_checkpoint()), cancel)
+                        .await
                 }
                 TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
                 TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
+                TurnStart::Presented(question) => {
+                    self.one_running(Box::pin(loop_.present_foreign_question(question)), cancel)
+                        .await
+                }
                 TurnStart::Answered { question, answer } => {
                     self.one_answered(loop_, question, answer, cancel).await
                 }
                 TurnStart::Skill(operation) => self.one_skill(loop_, operation, cancel).await,
+                TurnStart::McpContext(command) => {
+                    self.one_running(
+                        Box::pin(loop_.run_admitted_context(
+                            command.catalogue,
+                            command.name,
+                            command.parameters,
+                        )),
+                        cancel,
+                    )
+                    .await
+                }
             };
             let outcome = match outcome {
                 Ok(outcome) => outcome,
@@ -430,7 +470,7 @@ impl Turns<'_> {
         images: Vec<ImageRef>,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(loop_.run_with_images(prompt, images), cancel)
+        self.one_running(Box::pin(loop_.run_with_images(prompt, images)), cancel)
             .await
     }
 
@@ -440,7 +480,8 @@ impl Turns<'_> {
         turn: ego_core::event::id::TurnId,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(loop_.resume_turn(turn), cancel).await
+        self.one_running(Box::pin(loop_.resume_turn(turn)), cancel)
+            .await
     }
 
     async fn one_answered<'session: 'turn, 'turn>(
@@ -450,7 +491,7 @@ impl Turns<'_> {
         answer: QuestionAnswer,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(loop_.resume_question(question, answer), cancel)
+        self.one_running(Box::pin(loop_.resume_question(question, answer)), cancel)
             .await
     }
 

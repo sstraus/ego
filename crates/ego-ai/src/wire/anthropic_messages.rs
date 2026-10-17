@@ -339,13 +339,22 @@ struct ImageSource {
 }
 
 #[derive(Debug, Serialize)]
-struct WireTool<'a> {
-    name: &'a str,
-    description: &'a str,
-    /// `input_schema`, where chat-completions says `function.parameters`. The
-    /// same JSON Schema under a different name, which is why the difference is
-    /// a mapping and not a translation.
-    input_schema: &'a serde_json::Value,
+#[serde(untagged)]
+enum WireTool<'a> {
+    WebSearch {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: &'static str,
+        max_uses: u32,
+    },
+    Function {
+        name: &'a str,
+        description: &'a str,
+        /// `input_schema`, where chat-completions says `function.parameters`. The
+        /// same JSON Schema under a different name, which is why the difference is
+        /// a mapping and not a translation.
+        input_schema: &'a serde_json::Value,
+    },
 }
 
 /// `ThinkingLevel` to `output_config.effort`.
@@ -423,7 +432,7 @@ fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
                 data: base64::engine::general_purpose::STANDARD.encode(image.bytes()),
             },
         },
-        ContentBlock::Reasoning { state } => {
+        ContentBlock::Reasoning { state } | ContentBlock::ProviderContent { state } => {
             if state.dialect != DIALECT {
                 return Err(Inexpressible::ReasoningStateFromAnotherDialect {
                     dialect: state.dialect.clone(),
@@ -472,15 +481,23 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         .ok_or(Inexpressible::CeilingRequired)?;
     let effort = effort(req.thinking)?;
     let (system, messages) = project(req.messages.messages())?;
-    let tools: Vec<WireTool<'_>> = req
+    let mut tools: Vec<WireTool<'_>> = req
         .tools
         .iter()
-        .map(|tool| WireTool {
+        .filter(|tool| req.web_search.is_none() || tool.name != "web_search")
+        .map(|tool| WireTool::Function {
             name: &tool.name,
             description: &tool.description,
             input_schema: &tool.parameters,
         })
         .collect();
+    if let Some(search) = req.web_search {
+        tools.push(WireTool::WebSearch {
+            kind: "web_search_20250305",
+            name: "web_search",
+            max_uses: search.max_requests.get(),
+        });
+    }
     let tool_choice = (!tools.is_empty() && !req.parallel_tool_calls).then_some(ToolChoice {
         kind: "auto",
         disable_parallel_tool_use: true,
@@ -610,6 +627,8 @@ struct StartMessage {
 
 #[derive(Debug, Deserialize)]
 struct StartUsage {
+    #[serde(default)]
+    server_tool_use: Option<ServerToolUsage>,
     /// **Already the uncached figure.** The SDK states the identity verbatim:
     /// "Total input tokens in a request is the summation of `input_tokens`,
     /// `cache_creation_input_tokens`, and `cache_read_input_tokens`." So this
@@ -632,6 +651,12 @@ struct StartUsage {
 }
 
 #[derive(Debug, Deserialize)]
+struct ServerToolUsage {
+    #[serde(default)]
+    web_search_requests: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct CacheCreation {
     #[serde(default)]
     ephemeral_5m_input_tokens: u64,
@@ -641,6 +666,8 @@ struct CacheCreation {
 
 #[derive(Debug, Deserialize)]
 struct DeltaUsage {
+    #[serde(default)]
+    server_tool_use: Option<ServerToolUsage>,
     #[serde(default)]
     output_tokens: u64,
 }
@@ -778,6 +805,10 @@ pub struct StreamDecoder {
     /// of one figure — the double-count [`AiEvent::Usage`]'s own doc warns
     /// three of the six wires can cause.
     output_tokens: u64,
+    web_search_requests: u64,
+    hosted: bool,
+    provider_blocks: BTreeMap<u32, serde_json::Value>,
+    provider_inputs: BTreeMap<u32, String>,
     ending: Option<Ending>,
     provider_error: Option<(String, ErrorKind)>,
 }
@@ -919,6 +950,7 @@ impl StreamDecoder {
             // Anthropic bills thinking inside `output_tokens` and publishes no
             // separate count, so this is unknown rather than zero. `None` says
             // so instead of claiming the model reasoned for nothing.
+            web_search_requests: self.web_search_requests,
             reasoning_tokens: None,
         })
     }
@@ -966,6 +998,7 @@ impl StreamDecoder {
                 return;
             }
         };
+        self.capture_provider_frame(frame, out);
         match decoded {
             Frame::MessageStart { message } => self.consume_start(message),
             Frame::ContentBlockStart {
@@ -979,6 +1012,9 @@ impl StreamDecoder {
             Frame::MessageDelta { delta, usage } => {
                 if let Some(usage) = usage {
                     self.output_tokens = usage.output_tokens;
+                    if let Some(server) = usage.server_tool_use {
+                        self.web_search_requests = server.web_search_requests;
+                    }
                 }
                 if let Some(spelled) = delta.stop_reason {
                     self.ending = Some(ending(&spelled));
@@ -995,9 +1031,120 @@ impl StreamDecoder {
         }
     }
 
+    fn capture_provider_frame(&mut self, frame: &str, out: &mut Vec<AiEvent>) {
+        use serde_json::{Value, json};
+        let Ok(raw) = serde_json::from_str::<Value>(frame) else {
+            return;
+        };
+        let Some(index) = raw["index"].as_u64().and_then(|n| u32::try_from(n).ok()) else {
+            return;
+        };
+        match raw["type"].as_str() {
+            Some("content_block_start") => {
+                let block = &raw["content_block"];
+                let kind = block["type"].as_str().unwrap_or_default();
+                if kind == "text" {
+                    if block["citations"]
+                        .as_array()
+                        .is_some_and(|citations| !citations.is_empty())
+                    {
+                        self.hosted = true;
+                    }
+                    if let Some(text) = block["text"].as_str().filter(|text| !text.is_empty()) {
+                        out.push(AiEvent::TextDelta { text: text.into() });
+                    }
+                }
+                if kind == "web_search_tool_result"
+                    || (kind == "server_tool_use" && block["name"] == "web_search")
+                {
+                    self.hosted = true;
+                }
+                if kind == "text"
+                    || kind == "web_search_tool_result"
+                    || (kind == "server_tool_use" && block["name"] == "web_search")
+                {
+                    self.provider_blocks.insert(index, block.clone());
+                }
+            }
+            Some("content_block_delta") => {
+                let Some(block) = self.provider_blocks.get_mut(&index) else {
+                    return;
+                };
+                let delta = &raw["delta"];
+                match delta["type"].as_str() {
+                    Some("text_delta") => {
+                        let mut text = block["text"].as_str().unwrap_or_default().to_owned();
+                        text.push_str(delta["text"].as_str().unwrap_or_default());
+                        block["text"] = json!(text);
+                    }
+                    Some("input_json_delta") => self
+                        .provider_inputs
+                        .entry(index)
+                        .or_default()
+                        .push_str(delta["partial_json"].as_str().unwrap_or_default()),
+                    Some("citations_delta") => {
+                        self.hosted = true;
+                        if !block["citations"].is_array() {
+                            block["citations"] = json!([]);
+                        }
+                        block["citations"]
+                            .as_array_mut()
+                            .expect("array")
+                            .push(delta["citation"].clone());
+                    }
+                    _ => {}
+                }
+            }
+            Some("content_block_stop") => {
+                let Some(mut block) = self.provider_blocks.remove(&index) else {
+                    return;
+                };
+                if let Some(input) = self.provider_inputs.remove(&index) {
+                    let Ok(input) = serde_json::from_str::<Value>(&input) else {
+                        return;
+                    };
+                    block["input"] = input;
+                }
+                if !self.hosted {
+                    return;
+                }
+                let visible = block["type"] == "text";
+                if block["type"] == "server_tool_use" {
+                    out.push(AiEvent::WebSearch {
+                        call_id: block["id"].as_str().unwrap_or_default().into(),
+                        query: block["input"]["query"]
+                            .as_str()
+                            .unwrap_or("web search")
+                            .into(),
+                    });
+                }
+                for citation in block["citations"].as_array().into_iter().flatten() {
+                    if let Some(url) = citation["url"].as_str() {
+                        out.push(AiEvent::Citation {
+                            url: url.into(),
+                            title: citation["title"].as_str().unwrap_or(url).into(),
+                        });
+                    }
+                }
+                out.push(AiEvent::ProviderContent {
+                    state: ReasoningState {
+                        blob: serde_json::to_string(&block).expect("JSON value"),
+                        dialect: DIALECT.into(),
+                    },
+                    visible,
+                });
+            }
+            _ => {}
+        }
+    }
+
     fn consume_start(&mut self, message: StartMessage) {
         let Some(usage) = message.usage else { return };
         self.output_tokens = usage.output_tokens;
+        self.web_search_requests = usage
+            .server_tool_use
+            .as_ref()
+            .map_or(0, |server| server.web_search_requests);
         self.input = Some(usage);
     }
 
@@ -1088,6 +1235,7 @@ fn open(block: StartBlock) -> Block {
 /// complete one.
 fn ending(spelled: &str) -> Ending {
     match spelled {
+        "pause_turn" => Ending::Mapped(StopReason::Continue),
         "end_turn" | "stop_sequence" => Ending::Mapped(StopReason::Stop),
         "max_tokens" => Ending::Mapped(StopReason::Length),
         "model_context_window_exceeded" => Ending::ContextOverflow,

@@ -64,6 +64,7 @@ pub struct AcpSink {
     /// Whether a provider retry status is showing and must be cleared.
     retrying: Mutex<bool>,
     commands_generation: Mutex<Option<ego_core::event::skill::SkillCatalogueGeneration>>,
+    context_commands: Mutex<Vec<ego_core::permit::ToolDescriptor>>,
 }
 
 impl AcpSink {
@@ -81,11 +82,69 @@ impl AcpSink {
             reported: Mutex::new(false),
             retrying: Mutex::new(false),
             commands_generation: Mutex::new(None),
+            context_commands: Mutex::new(Vec::new()),
         }
     }
 }
 
+impl AcpSink {
+    fn available_commands(&self, state: &SessionState) -> Vec<v1::AvailableCommand> {
+        let mut commands: Vec<_> = state
+            .skill_catalogue()
+            .descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.user_invocable)
+            .map(|descriptor| {
+                let command = v1::AvailableCommand::new(
+                    descriptor.name.clone(),
+                    descriptor.description.clone(),
+                );
+                match &descriptor.argument_hint {
+                    Some(hint) => command.input(v1::AvailableCommandInput::Unstructured(
+                        v1::UnstructuredCommandInput::new(hint.clone()),
+                    )),
+                    None => command,
+                }
+            })
+            .collect();
+        commands.extend(
+            self.context_commands
+                .lock()
+                .expect("context command lock")
+                .iter()
+                .map(|descriptor| {
+                    let schema = serde_json::to_value(&descriptor.schema).unwrap_or_default();
+                    v1::AvailableCommand::new(
+                        descriptor.name.clone(),
+                        descriptor.description.clone(),
+                    )
+                    .input(v1::AvailableCommandInput::Unstructured(
+                        v1::UnstructuredCommandInput::new(format!("JSON arguments: {schema}")),
+                    ))
+                }),
+        );
+        commands
+    }
+}
+
 impl EventSink for AcpSink {
+    fn context_commands(
+        &self,
+        commands: Vec<ego_core::permit::ToolDescriptor>,
+        state: &SessionState,
+    ) {
+        *self.context_commands.lock().expect("context command lock") = commands;
+        let update = v1::SessionUpdate::AvailableCommandsUpdate(v1::AvailableCommandsUpdate::new(
+            self.available_commands(state),
+        ));
+        if let Err(error) = self
+            .connection
+            .send_notification(v1::SessionNotification::new(self.session.clone(), update))
+        {
+            tracing::warn!(%error, "ACP context command announcement failed");
+        }
+    }
+
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         // The complete entry point includes reduced usage and tool progress.
         // That is why `publish` carries the reduction. See
@@ -100,24 +159,7 @@ impl EventSink for AcpSink {
                 && *generation != state.skill_catalogue_generation()
             {
                 *generation = state.skill_catalogue_generation();
-                let commands = state
-                    .skill_catalogue()
-                    .descriptors()
-                    .iter()
-                    .filter(|descriptor| descriptor.user_invocable)
-                    .map(|descriptor| {
-                        let command = v1::AvailableCommand::new(
-                            descriptor.name.clone(),
-                            descriptor.description.clone(),
-                        );
-                        match &descriptor.argument_hint {
-                            Some(hint) => command.input(v1::AvailableCommandInput::Unstructured(
-                                v1::UnstructuredCommandInput::new(hint.clone()),
-                            )),
-                            None => command,
-                        }
-                    })
-                    .collect();
+                let commands = self.available_commands(state);
                 updates.push(v1::SessionUpdate::AvailableCommandsUpdate(
                     v1::AvailableCommandsUpdate::new(commands),
                 ));

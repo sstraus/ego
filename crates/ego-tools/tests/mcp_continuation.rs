@@ -157,7 +157,7 @@ fn accepted_answer_is_durable_before_atomic_single_use_claim() {
         )
         .expect("accepted");
     let wire = persisted_wire(root.path());
-    assert_eq!(wire["version"], json!(2));
+    assert_eq!(wire["version"], json!(3));
     assert_eq!(
         wire["record"]["generation_policy_digest"],
         json!(GENERATION_POLICY_DIGEST)
@@ -182,7 +182,7 @@ fn accepted_answer_is_durable_before_atomic_single_use_claim() {
         vec![Some("accepted"), Some("claimed"), Some("completed")]
     );
     for snapshot in committed {
-        assert_eq!(snapshot["version"], json!(2));
+        assert_eq!(snapshot["version"], json!(3));
         assert_eq!(
             snapshot["record"]["generation_policy_digest"],
             json!(GENERATION_POLICY_DIGEST)
@@ -237,7 +237,7 @@ fn pending_failure_is_durable_after_reopen_and_not_acceptable() {
         vec![Some("pending"), Some("failed")]
     );
     for snapshot in committed {
-        assert_eq!(snapshot["version"], json!(2));
+        assert_eq!(snapshot["version"], json!(3));
         assert_eq!(
             snapshot["record"]["generation_policy_digest"],
             json!(GENERATION_POLICY_DIGEST)

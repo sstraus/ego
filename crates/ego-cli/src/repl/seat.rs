@@ -14,9 +14,10 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use reedline::{
     ColumnarMenu, Completer, CompletionResult, EditCommand, EditMode, Emacs, ExternalPrinter,
-    KeyCode, KeyModifiers, Menu, MenuBuilder, MenuEvent, Painter, Prompt, PromptEditMode,
-    PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Span, Suggestion,
-    default_emacs_keybindings,
+    KeyCode, KeyModifiers, Keybindings, Menu, MenuBuilder, MenuEvent, Painter, Prompt,
+    PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
+    Span, Suggestion, Vi, default_emacs_keybindings, default_vi_insert_keybindings,
+    default_vi_normal_keybindings,
 };
 
 use super::actions::{
@@ -197,6 +198,11 @@ impl Completer for ActionCompleter {
             && (self.registry.resolve_slash(filter).is_some()
                 || self
                     .registry
+                    .mcp_menu(filter)
+                    .iter()
+                    .any(|(name, _)| name == filter)
+                || self
+                    .registry
                     .skill_menu(filter)
                     .iter()
                     .any(|(name, _)| name == filter))
@@ -229,6 +235,15 @@ impl Completer for ActionCompleter {
                 value: format!("/{name}"),
                 display_override: Some(format!("/{name}")),
                 description: Some(format!("{description} — skill")),
+                span: Span::new(0, position),
+                append_whitespace: true,
+                ..Suggestion::default()
+            },
+        ));
+        suggestions.extend(self.registry.mcp_menu(filter).into_iter().map(
+            |(name, description)| Suggestion {
+                value: format!("/{name}"),
+                description: Some(description),
                 span: Span::new(0, position),
                 append_whitespace: true,
                 ..Suggestion::default()
@@ -981,6 +996,61 @@ impl std::fmt::Debug for Seat {
     }
 }
 
+/// Keep the surface controls identical in Emacs, Vim insert and Vim normal.
+fn composer_keybindings(mut keybindings: Keybindings) -> Keybindings {
+    for (modifiers, code) in [
+        (KeyModifiers::CONTROL, KeyCode::Char('j')),
+        (KeyModifiers::CONTROL, KeyCode::Enter),
+        (KeyModifiers::SHIFT, KeyCode::Enter),
+        (KeyModifiers::ALT, KeyCode::Enter),
+    ] {
+        keybindings.add_binding(
+            modifiers,
+            code,
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+    }
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keybindings
+}
+
+fn emacs_composer() -> Emacs {
+    let mut keybindings = composer_keybindings(default_emacs_keybindings());
+    add_action_menu(&mut keybindings);
+    Emacs::new(keybindings)
+}
+
+fn add_action_menu(keybindings: &mut Keybindings) {
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Char('/'),
+        ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
+            ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+        ]),
+    );
+}
+
+fn composer_editor(vim: bool) -> Box<dyn EditMode> {
+    if vim {
+        let mut insert = composer_keybindings(default_vi_insert_keybindings());
+        add_action_menu(&mut insert);
+        Box::new(Vi::new(
+            insert,
+            composer_keybindings(default_vi_normal_keybindings()),
+        ))
+    } else {
+        Box::new(emacs_composer())
+    }
+}
+
 impl Seat {
     /// Build the applicable editor and, for a terminal, its only output port.
     ///
@@ -988,10 +1058,25 @@ impl Seat {
     /// submits its first line as a whole prompt, which is the failure that
     /// makes pasting one impossible. `CLI.md` §6.1.
     pub fn new(cancel: CancelToken) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
+        Self::with_keyboard(cancel, &ego_core::config::UiLayer::default())
+    }
+
+    pub(crate) fn with_keyboard(
+        cancel: CancelToken,
+        preferences: &ego_core::config::UiLayer,
+    ) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
+        let registry = Arc::new(
+            ActionRegistry::final_surface()
+                .with_keybindings(
+                    preferences
+                        .keybindings
+                        .as_ref()
+                        .unwrap_or(&Default::default()),
+                )
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
+        );
         let (ingress, control) = interactive_control();
         let terminal = std::io::stdin().is_terminal();
-        let registry = Arc::new(ActionRegistry::final_surface());
-
         if !terminal {
             return Ok((
                 Self {
@@ -1010,39 +1095,17 @@ impl Seat {
         let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
             &registry,
         ))));
-        let mut keybindings = default_emacs_keybindings();
-        // Raw LF arrives as Ctrl+J; only an unmodified Enter submits.
-        for code in [KeyCode::Char('j'), KeyCode::Enter] {
-            keybindings.add_binding(
-                KeyModifiers::CONTROL,
-                code,
-                ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
-            );
-        }
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Tab,
-            ReedlineEvent::UntilFound(vec![
-                ReedlineEvent::Menu(ACTION_MENU.to_string()),
-                ReedlineEvent::MenuNext,
-            ]),
-        );
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Char('/'),
-            ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
-                ReedlineEvent::Menu(ACTION_MENU.to_string()),
-            ]),
-        );
-        let mode = SurfaceEditMode::with_status(
-            Emacs::new(keybindings),
+        let mode = SurfaceEditMode::with_editor(
+            composer_editor(preferences.vim.unwrap_or(false)),
             phase.clone(),
             Arc::clone(&status),
         );
         let asked_for_image = mode.asked_for_image();
         let mut editor = Reedline::create()
             .with_edit_mode(Box::new(mode))
+            .with_highlighter(Box::new(background_notice::NoticeHighlighter(Arc::clone(
+                &status,
+            ))))
             .with_completer(Box::new(ActionCompleter {
                 registry: Arc::clone(&registry),
             }))
@@ -1199,6 +1262,9 @@ impl Seat {
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
+                    Dispatch::McpContext(command) => {
+                        Line::HostCommand(HostCommand::McpContext(command))
+                    }
                     Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
                     Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
                     Dispatch::Config(arguments) => {
@@ -2108,6 +2174,7 @@ fn write_printer_message(output: &mut impl std::io::Write, message: &str) -> std
 }
 
 mod action_execution;
+mod background_notice;
 mod edit_mode;
 mod permission;
 mod permission_modal;
@@ -2174,3 +2241,6 @@ pub(super) fn await_permission_printer_release() {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use question::test_resumed_round_terminal;

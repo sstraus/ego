@@ -178,6 +178,7 @@ mod lifecycle {
 
     fn quote() -> PricingQuote {
         PricingQuote {
+            web_search: None,
             revision: revision(),
             currency: CurrencyCode::new("USD").expect("USD is valid"),
             uncached_input: Some("0.000003".parse().unwrap()),
@@ -216,6 +217,7 @@ mod lifecycle {
 
     fn request_for(model: &str) -> GenRequest {
         GenRequest {
+            web_search: None,
             cache: None,
             model: model.to_string(),
             messages: Conversation::new(vec![Message::text(Role::User, "x".repeat(200_000))])
@@ -244,6 +246,7 @@ mod lifecycle {
             cache_write_tokens: 0,
             cache_write_extended_tokens: 0,
             output_tokens: output,
+            web_search_requests: 0,
             reasoning_tokens: None,
         }
     }

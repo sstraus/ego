@@ -1263,6 +1263,13 @@ impl Catalogue {
         self.hosted.get(slug).map(|hosted| &hosted.capabilities)
     }
 
+    /// The admission rates an operator supplied for this exact `provider/model` slug.
+    pub(crate) fn supplied_rates(&self, slug: &str) -> Option<&ResolvedRates> {
+        self.hosted
+            .get(slug)
+            .and_then(|hosted| hosted.rates.as_ref())
+    }
+
     /// Current supplied rows owned by `provider`, without rates or credentials.
     pub fn enumerate_hosted(
         &self,

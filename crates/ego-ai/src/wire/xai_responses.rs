@@ -143,7 +143,12 @@ fn carries_reasoning(req: &GenRequest) -> bool {
         .messages()
         .iter()
         .flat_map(|message| &message.content)
-        .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
+        .any(|block| {
+            matches!(
+                block,
+                ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. }
+            )
+        })
 }
 
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -216,14 +221,15 @@ fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
                     }
                     ContentBlock::Image { .. }
                     | ContentBlock::Text { .. }
-                    | ContentBlock::Reasoning { .. } => {}
+                    | ContentBlock::Reasoning { .. }
+                    | ContentBlock::ProviderContent { .. } => {}
                 }
             }
             continue;
         }
         for block in &message.content {
             match block {
-                ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. } => {}
                 ContentBlock::Image { .. } => return Err(Inexpressible::ImageRoleNotSupported),
                 ContentBlock::Text { text } => match message.role {
                     Role::System | Role::User => items.push(serde_json::json!({
@@ -392,6 +398,7 @@ fn map_usage(raw: &RawValue) -> Option<Usage> {
         cache_write_tokens: 0,
         cache_write_extended_tokens: 0,
         output_tokens: usage.output_tokens,
+        web_search_requests: 0,
         reasoning_tokens: usage
             .output_tokens_details
             .as_ref()
