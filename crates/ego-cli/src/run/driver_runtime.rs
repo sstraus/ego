@@ -1015,30 +1015,6 @@ fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String 
     format!("{}…", label[..boundary].trim_end())
 }
 
-#[cfg(test)]
-mod setup_picker_label_tests {
-    use super::*;
-
-    /// Catches: shortening a home path hides a sibling prefix or breaks a segment.
-    #[test]
-    fn home_labels_preserve_path_boundaries_and_terminal_cells() {
-        let home = Some(Path::new("/home/operator"));
-        for (path, width, expected) in [
-            ("/home/operator/.cargo/registry", 70, "~/.cargo/registry"),
-            ("/home/operator", 70, "~"),
-            ("/home/operator-other/file", 70, "/home/operator-other/file"),
-            ("/home/operator/.cargo/registry", 12, "~/.cargo/…"),
-            ("/home/operator/indivisiblesegment", 8, "~/…"),
-            ("/workspace/日本語/segment", 19, "/workspace/日本語/…"),
-            ("indivisiblesegment", 8, "…"),
-        ] {
-            let label = setup_picker_label(Path::new(path), home, width);
-            assert_eq!(label, expected);
-            assert!(crate::render::line::Line::plain(label).width() <= width);
-        }
-    }
-}
-
 async fn run_interactive_setup(
     prompt: String,
     selection: &model::GenerationSelection,
@@ -3892,4 +3868,28 @@ fn activate_new_session<'store>(
     *active = target;
     admit_successor_context(evidence, active, run_context)?;
     Ok(EpochStart::New)
+}
+
+#[cfg(test)]
+mod setup_picker_label_tests {
+    use super::*;
+
+    /// Catches: shortening a home path hides a sibling prefix or breaks a segment.
+    #[test]
+    fn home_labels_preserve_path_boundaries_and_terminal_cells() {
+        let home = Some(Path::new("/home/operator"));
+        for (path, width, expected) in [
+            ("/home/operator/.cargo/registry", 70, "~/.cargo/registry"),
+            ("/home/operator", 70, "~"),
+            ("/home/operator-other/file", 70, "/home/operator-other/file"),
+            ("/home/operator/.cargo/registry", 12, "~/.cargo/…"),
+            ("/home/operator/indivisiblesegment", 8, "~/…"),
+            ("/workspace/日本語/segment", 19, "/workspace/日本語/…"),
+            ("indivisiblesegment", 8, "…"),
+        ] {
+            let label = setup_picker_label(Path::new(path), home, width);
+            assert_eq!(label, expected);
+            assert!(crate::render::line::Line::plain(label).width() <= width);
+        }
+    }
 }
