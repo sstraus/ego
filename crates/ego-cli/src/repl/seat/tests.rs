@@ -1126,23 +1126,34 @@ fn disconnected_receipt_pump_leaves_an_operator_notice() {
     );
 }
 
-// Catches: live token/thinking progress wrapping into the input on a narrow terminal.
+// Catches: progress using the startup width after a terminal resize.
 #[test]
-fn working_row_stays_within_terminal_width() {
-    for width in [20, 40, 80] {
-        let mut status = SurfaceStatus {
-            activity: true,
-            activity_output_chars: 123_456,
-            thinking_since: Some(Instant::now() - Duration::from_secs(12)),
-            ..SurfaceStatus::default()
-        };
-        status.permission_capabilities.width = width;
-        let waiting = Waiting::new(Arc::new(Mutex::new(status)));
+fn working_row_stays_within_live_terminal_width_after_resize() {
+    let mut initial = SurfaceStatus {
+        activity: true,
+        activity_output_chars: 123_456,
+        thinking_since: Some(Instant::now() - Duration::from_secs(12)),
+        width: 120,
+        ..SurfaceStatus::default()
+    };
+    initial.permission_capabilities.width = 120;
+    let status = Arc::new(Mutex::new(initial));
+    let mut mode = SurfaceEditMode::with_status(
+        Emacs::default(),
+        SurfacePhase::new(EditPhase::Idle),
+        Arc::clone(&status),
+    );
+    let waiting = Waiting::new(status);
+    for width in [20_u16, 40, 80, 120, 1] {
+        assert!(matches!(
+            mode.parse_event(ReedlineRawEvent::try_from(Event::Resize(width, 24)).unwrap()),
+            ReedlineEvent::Resize(w, 24) if w == width
+        ));
         let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
         let row = indicator.lines().next().unwrap();
         let visible = row.replace("\x1b[2m", "").replace("\x1b[22m", "");
         assert!(
-            crate::render::line::cells(&visible) < width,
+            crate::render::line::cells(&visible) <= usize::from(width).saturating_sub(1),
             "{width}: {row:?}"
         );
         assert!(indicator.ends_with("\n> "), "{indicator:?}");

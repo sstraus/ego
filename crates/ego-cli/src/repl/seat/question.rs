@@ -1613,7 +1613,12 @@ fn status_row(status: &SurfaceStatus) -> String {
             ACTIVITY_FRAMES[(elapsed.as_secs() as usize) % ACTIVITY_FRAMES.len()],
             crate::render::duration(elapsed)
         );
-        let width = status.permission_capabilities.width.saturating_sub(1);
+        let width = if status.width == 0 {
+            status.permission_capabilities.width
+        } else {
+            status.width
+        }
+        .saturating_sub(1);
         let hint = "· Esc to interrupt";
         let line = crate::render::line::Line::plain(&activity);
         if line.width() + hint.len() <= width {
