@@ -3312,7 +3312,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         mut driven: DriveOutcome,
     ) -> Result<TurnOutcome, StoreError> {
         loop {
+            let waiting_for_user = matches!(driven, DriveOutcome::WaitingForUser);
             let (exit_reason, denied) = match driven {
+                DriveOutcome::WaitingForUser => (ExitReason::Completed, None),
                 DriveOutcome::Ended(exit_reason, denied) => (exit_reason, denied),
                 DriveOutcome::QuestionRequired => {
                     if self.state().context_request.is_some() {
@@ -3342,7 +3344,22 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             let ok = matches!(exit_reason, ExitReason::Completed);
             // Observe before completion: the reducer resets the blocker audit only
             // when a turn completed without an observation of the same condition.
+            if waiting_for_user
+                && let Some(goal) = self.state().goal
+                && goal.state == crate::goal::GoalState::Active
+            {
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::GoalCheckStopped {
+                        id: goal.id,
+                        reason: "waiting for user after blocked progress".into(),
+                    },
+                )?;
+            }
             let continuation = if ok
+                && !waiting_for_user
                 && !self.is_context_command_turn(turn)
                 && self.must_stop().is_none()
                 && self.state().context_request.is_none()
@@ -4037,6 +4054,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     selector,
                 } => {
                     let call = &pending[index];
+                    let waiting_for_user = ok && blocked_progress(&call.args, &result);
                     self.tools
                         .finish_result(&mut result, self.invocation, call.item);
                     self.journal.append(
@@ -4060,6 +4078,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             ),
                         )
                         .await;
+                    if waiting_for_user {
+                        self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                        return Ok(Some(DriveOutcome::WaitingForUser));
+                    }
                     continue;
                 }
                 ToolOutcome::Recorded => {
@@ -7626,7 +7648,26 @@ fn drop_reasoning(conversation: Conversation) -> (Conversation, usize, Vec<Strin
     )
 }
 
+/// TUIC's successful blocked report declares a user-wait boundary, not another
+/// observation for the provider. Use admitted result identity, never result prose
+/// or an arbitrary tool named `progress`, to recognize this host contract.
+fn blocked_progress(args: &str, result: &ToolResult) -> bool {
+    let crate::permit::ToolResultProvenance::Foreign { result } = result.provenance() else {
+        return false;
+    };
+    if result.server() != "tuic" || result.tool() != "progress" {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(args) else {
+        return false;
+    };
+    args["type"] == "blocked"
+        || (args["tool_name"] == "progress" && args["arguments"]["type"] == "blocked")
+}
+
 enum DriveOutcome {
+    /// A completed tool has explicitly handed control back to the user.
+    WaitingForUser,
     Ended(ExitReason, Option<Denial>),
     QuestionRequired,
 }
