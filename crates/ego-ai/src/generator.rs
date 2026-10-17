@@ -196,7 +196,8 @@ impl WireGenerator {
         let names = ToolNames::new(req);
         let encoded = names.encode(req);
         let mut request = self.wire.build_request(&target, &encoded)?;
-        if self.service_tier == crate::service_tier::ServiceTier::Fast || self.row.id() == "openai" {
+        if self.service_tier == crate::service_tier::ServiceTier::Fast || self.row.id() == "openai"
+        {
             let slug = format!("{}/{}", self.row.id(), req.model);
             self.service_tier
                 .validate(&slug)
