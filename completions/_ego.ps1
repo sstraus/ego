@@ -45,9 +45,11 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('rules', 'rules', [CompletionResultType]::ParameterValue, 'Inspect and manage persistent permission rules.')
             [CompletionResult]::new('mcp-server', 'mcp-server', [CompletionResultType]::ParameterValue, 'Serve scoped ego runs over MCP on stdio.')
             [CompletionResult]::new('orchestrator', 'orchestrator', [CompletionResultType]::ParameterValue, 'orchestrator')
+            [CompletionResult]::new('worktree', 'worktree', [CompletionResultType]::ParameterValue, 'Inspect or clean up a retained local worktree.')
             break
         }
         'ego;run' {
+            [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable')
@@ -99,12 +101,14 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
+            [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;resume' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
+            [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable')
@@ -156,12 +160,14 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
+            [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;continue' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
+            [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable')
@@ -213,6 +219,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
+            [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -381,6 +388,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--http', '--http', [CompletionResultType]::ParameterName, 'Configure a Streamable HTTP transport')
             [CompletionResult]::new('--cwd', '--cwd', [CompletionResultType]::ParameterName, 'Working directory for the stdio child')
             [CompletionResult]::new('--inherit-env', '--inherit-env', [CompletionResultType]::ParameterName, 'Environment variable inherited by the stdio child. Repeatable')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Explicit HTTP wire profile; never selected by fallback')
             [CompletionResult]::new('--auth', '--auth', [CompletionResultType]::ParameterName, 'HTTP authentication mode')
             [CompletionResult]::new('--stdio', '--stdio', [CompletionResultType]::ParameterName, 'Configure a subprocess transport. Its command follows literal `--`')
             [CompletionResult]::new('--allow-insecure-loopback', '--allow-insecure-loopback', [CompletionResultType]::ParameterName, 'Consent to plaintext HTTP for an exact loopback host')
@@ -579,6 +587,23 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;orchestrator;brief' {
             [CompletionResult]::new('--root', '--root', [CompletionResultType]::ParameterName, 'root')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;worktree' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Inspect a durable local worktree receipt without starting a model')
+            [CompletionResult]::new('cleanup', 'cleanup', [CompletionResultType]::ParameterValue, 'Remove only a clean worktree whose commits are integrated; retain its branch')
+            break
+        }
+        'ego;worktree;show' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;worktree;cleanup' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

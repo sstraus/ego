@@ -118,7 +118,7 @@ async fn a_version_below_ours_is_refused_with_a_sentence_naming_ours() {
 }
 
 /// The capabilities answered are the ones this build has: Streamable HTTP MCP
-/// ACP MCP and image prompts are supported, while SSE, audio, embedded
+/// SSE, ACP MCP and image prompts are supported, while audio, embedded
 /// context and session loading are not.
 ///
 /// A capability advertised is a request invited, so this pins that every
@@ -164,6 +164,6 @@ async fn nothing_is_advertised_that_this_build_cannot_do() {
         .and_then(serde_json::Value::as_object)
         .expect("an initialize response states MCP capabilities");
     assert_eq!(mcp.get("http"), Some(&serde_json::json!(true)));
-    assert_eq!(mcp.get("sse"), Some(&serde_json::json!(false)));
+    assert_eq!(mcp.get("sse"), Some(&serde_json::json!(true)));
     assert_eq!(mcp.get("acp"), Some(&serde_json::json!(true)));
 }

@@ -28,6 +28,7 @@ _ego() {
         case $line[1] in
             (run)
 _arguments "${_arguments_options[@]}" : \
+'(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
 '-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '*--var=[Supply one declared agent-file template variable]:KEY=VALUE:_default' \
@@ -79,6 +80,7 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
+'--vim[Use Vim normal/insert editing in the interactive composer]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::prompt -- The prompt. `-` reads it from stdin:_default' \
@@ -87,6 +89,7 @@ _arguments "${_arguments_options[@]}" : \
 (resume)
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
+'(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
 '-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '*--var=[Supply one declared agent-file template variable]:KEY=VALUE:_default' \
@@ -138,6 +141,7 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
+'--vim[Use Vim normal/insert editing in the interactive composer]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::id -- The session to continue. Omit it for the latest in this workspace:_default' \
@@ -147,6 +151,7 @@ _arguments "${_arguments_options[@]}" : \
 (continue)
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
+'(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
 '-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '*--var=[Supply one declared agent-file template variable]:KEY=VALUE:_default' \
@@ -198,6 +203,7 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
+'--vim[Use Vim normal/insert editing in the interactive composer]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::id -- The session to continue. Omit it for the latest in this workspace:_default' \
@@ -418,6 +424,7 @@ _arguments "${_arguments_options[@]}" : \
 '(--stdio)--http=[Configure a Streamable HTTP transport]:URL:_default' \
 '(--http)--cwd=[Working directory for the stdio child]:DIR:_files' \
 '(--http)*--inherit-env=[Environment variable inherited by the stdio child. Repeatable]:NAME:_default' \
+'(--stdio)--profile=[Explicit HTTP wire profile; never selected by fallback]:PROFILE:(current legacy-sse)' \
 '(--stdio)--auth=[HTTP authentication mode]:AUTH:(none oauth)' \
 '(--http)--stdio[Configure a subprocess transport. Its command follows literal \`--\`]' \
 '(--stdio)--allow-insecure-loopback[Consent to plaintext HTTP for an exact loopback host]' \
@@ -698,6 +705,38 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(worktree)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ego__subcmd__worktree_commands" \
+"*::: :->worktree" \
+&& ret=0
+
+    case $state in
+    (worktree)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ego-worktree-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':receipt:_default' \
+&& ret=0
+;;
+(cleanup)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':receipt:_default' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
         esac
     ;;
 esac
@@ -728,6 +767,7 @@ _ego_commands() {
 'rules:Inspect and manage persistent permission rules.' \
 'mcp-server:Serve scoped ego runs over MCP on stdio.' \
 'orchestrator:' \
+'worktree:Inspect or clean up a retained local worktree.' \
     )
     _describe -t commands 'ego commands' commands "$@"
 }
@@ -1009,6 +1049,24 @@ _ego__subcmd__setup_commands() {
 _ego__subcmd__usage_commands() {
     local commands; commands=()
     _describe -t commands 'ego usage commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__worktree_commands] )) ||
+_ego__subcmd__worktree_commands() {
+    local commands; commands=(
+'show:Inspect a durable local worktree receipt without starting a model' \
+'cleanup:Remove only a clean worktree whose commits are integrated; retain its branch' \
+    )
+    _describe -t commands 'ego worktree commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__worktree__subcmd__cleanup_commands] )) ||
+_ego__subcmd__worktree__subcmd__cleanup_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego worktree cleanup commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__worktree__subcmd__show_commands] )) ||
+_ego__subcmd__worktree__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego worktree show commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_ego" ]; then
