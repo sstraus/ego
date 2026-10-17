@@ -246,7 +246,9 @@ pub fn root_command() -> clap::Command {
     fn named(name: &'static str, command: clap::Command) -> clap::Command {
         command.name(name)
     }
-    clap::Command::new("ego")
+    RunCommand::command()
+        .name("ego")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("Run an agent, from one command line.")
         // `ego help` is not one of the 17 commands `CLI.md` §2 documents, and
         // building the tree would otherwise invent it — putting a subcommand in
