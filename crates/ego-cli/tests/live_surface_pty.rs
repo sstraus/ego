@@ -1238,7 +1238,9 @@ fn successor_accepts_next_turn(action: &str) {
         );
         let start = output.len();
         until_prompt_from(&reader, &mut output, start);
-        let shown = normalized(&output);
+        // Redraws may occur between wrapped notice rows; inspect the actual
+        // terminal, not the interleaved live-frame bytes in the write stream.
+        let shown = screen_rows(&output, 24, 100).join("\n");
         assert!(
             shown.contains("the session log could not be written")
                 && support::notice_prose(&shown).contains("Is a directory"),
@@ -6137,7 +6139,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
             let start = output.len();
             input.write_all(b"/compact\r").expect("compact command");
             input.flush().expect("compact command flush");
-            until_normalized(
+            until_notice_prose(
                 &reader,
                 &mut output,
                 start,
@@ -6317,7 +6319,9 @@ fn fork_after_a_turn() -> String {
         &format!("ego resume {}", support::FIXTURE_SESSION_ID),
     );
     drain_until_quiet(&reader, &mut output);
-    let receipt = support::notice_prose(&normalized(&output[fork_start..]));
+    // Read the terminal's retained receipt, excluding transient status redraws
+    // interleaved between its explicitly wrapped rows in the byte stream.
+    let receipt = support::notice_prose(&screen_rows(&output, ROWS, COLS).join("\n"));
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
     assert!(session.quit(input).success());
