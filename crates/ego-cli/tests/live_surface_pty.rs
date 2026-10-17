@@ -2,10 +2,10 @@
 mod background_notice;
 #[path = "live_surface_pty/blank_prompt.rs"]
 mod blank_prompt;
-#[path = "live_surface_pty/busy_notice.rs"]
-mod busy_notice;
 #[path = "live_surface_pty/busy_commands.rs"]
 mod busy_commands;
+#[path = "live_surface_pty/busy_notice.rs"]
+mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
 #[path = "live_surface_pty/finish_queue.rs"]
@@ -14,10 +14,10 @@ mod finish_queue;
 mod foreign_judge_reason;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
-#[path = "live_surface_pty/metadata_refusal.rs"]
-mod metadata_refusal;
 #[path = "live_surface_pty/mcp_inventory.rs"]
 mod mcp_inventory;
+#[path = "live_surface_pty/metadata_refusal.rs"]
+mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/mode_picker.rs"]
@@ -36,10 +36,10 @@ mod raw_columns;
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
-#[path = "live_surface_pty/slash_inspections.rs"]
-mod slash_inspections;
 #[path = "live_surface_pty/slash_completion.rs"]
 mod slash_completion;
+#[path = "live_surface_pty/slash_inspections.rs"]
+mod slash_inspections;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 mod support;
@@ -9437,7 +9437,12 @@ fn followup_tools_default_has_no_per_tool_notices() {
         let start = output.len();
         input.write_all(b"/tools\r").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "/tools details for the full list");
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "/tools details for the full list",
+        );
         until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
         drain_until_quiet(&reader, &mut output);
         let visible = normalized(&output[start..]);

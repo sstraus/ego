@@ -1018,7 +1018,6 @@ fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String 
     format!("{}…", label[..boundary].trim_end())
 }
 
-
 async fn run_interactive_setup(
     prompt: String,
     selection: &model::GenerationSelection,
@@ -3696,6 +3695,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
                                 active.id(),
                                 clock,
                                 current.context,
+                                seat.width(),
                                 diagnostics,
                             )
                             .await;
@@ -3824,4 +3824,3 @@ mod setup_picker_label_tests {
         }
     }
 }
-

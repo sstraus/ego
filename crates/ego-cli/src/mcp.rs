@@ -273,7 +273,9 @@ pub(crate) fn publish_add(
 pub(crate) fn repl_add_args(arguments: &str) -> Result<McpArgs, UsageError> {
     let mut tokens = vec!["ego".into(), "mcp".into()];
     tokens.extend(shell_words::split(arguments).map_err(|error| UsageError(error.to_string()))?);
-    match crate::cli::parse(tokens).map_err(|_| UsageError(crate::repl::actions::MCP_GRAMMAR.into()))? {
+    match crate::cli::parse(tokens)
+        .map_err(|_| UsageError(crate::repl::actions::MCP_GRAMMAR.into()))?
+    {
         crate::cli::Invocation::Mcp(args) if matches!(args.action, McpAction::Add { .. }) => {
             Ok(*args)
         }
