@@ -625,6 +625,58 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     }
 }
 
+// Catches: an inspection queued in the finishing turn is answered against a new session.
+#[test]
+fn pending_inspections_are_answered_before_a_queued_session_switch() {
+    let (inspection_sender, inspections) = crossbeam::channel::unbounded();
+    let (input_sender, input) = crossbeam::channel::unbounded();
+    let (control, _control_receiver) = bounded(CHANNEL_CAPACITY);
+    let (_ingress, coordinator) = interactive_control();
+    let registry = Arc::new(ActionRegistry::final_surface());
+    let seat = Seat {
+        kind: SeatKind::Live(Box::new(LiveSeat {
+            input,
+            inspections,
+            inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
+            control,
+            activated: AtomicBool::new(false),
+            break_signal: Arc::new(AtomicBool::new(false)),
+            phase: SurfacePhase::new(EditPhase::Idle),
+            status: Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
+                &registry,
+            )))),
+            git_worker: Mutex::new(None),
+            activity_worker: Mutex::new(None),
+            output_owner: Mutex::new(None),
+            owner: Mutex::new(None),
+        })),
+        terminal: true,
+        registry,
+        coordinator: Mutex::new(Some(coordinator)),
+    };
+    // The active driver can finish with an inspection still waiting. A subsequent
+    // /new must not move that already-admitted request to the next session.
+    // Repeat because crossbeam randomizes selection when both inboxes are ready.
+    for _ in 0..32 {
+        let inspection = Line::HostCommand(HostCommand::Action(ActionId::Usage));
+        inspection_sender
+            .send(HostCommand::Action(ActionId::Usage))
+            .unwrap();
+        input_sender
+            .send(Line::HostCommand(HostCommand::Action(ActionId::New)))
+            .unwrap();
+        assert_eq!(
+            seat.read(),
+            inspection,
+            "pending /usage must be answered before /new changes the active session"
+        );
+        assert_eq!(
+            seat.read(),
+            Line::HostCommand(HostCommand::Action(ActionId::New))
+        );
+    }
+}
+
 #[test]
 fn enabling_policy_controls_without_catalogue_leaves_permissions_disabled() {
     let (seat, _) = Seat::new(CancelToken::new()).expect("test seat");
