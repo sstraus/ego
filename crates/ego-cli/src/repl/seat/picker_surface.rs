@@ -582,7 +582,16 @@ mod tests {
             ModelAvailabilityCause::IncompleteFacts,
             ModelAvailabilityCause::MappingUnavailable,
         ] {
-            let text = provider_unavailable("ollama", cause);
+            let mut view = view();
+            view.models.retain(|row| row.slug.provider == "anthropic");
+            view.models[0].slug.provider = "ollama".to_owned();
+            view.models[0].availability = ModelAvailability::Unavailable {
+                cause,
+                message: "private discovery details".to_owned(),
+            };
+            let text = model_picker_prompt(&view, 120, 24);
+            assert!(text.contains("ollama — unavailable"), "{text}");
+            assert!(!text.contains("private discovery details"), "{text}");
             assert!(!text.contains("login"));
             assert!(!text.contains(&format!("{cause:?}")));
             assert!(

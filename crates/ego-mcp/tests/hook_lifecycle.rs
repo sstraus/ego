@@ -3934,3 +3934,274 @@ async fn decline_port_durably_invalidates_the_remote_operation_without_sending()
     );
     assert_eq!(fixture.spawner.calls(), 1);
 }
+
+// Factory-level regressions: bypassing factory routing must fail these probes.
+mod transport_selection_boundary {
+    use super::*;
+    use ego_core::config::{McpHttpConfig, McpServerConfig};
+    use ego_core::credentials::SecretMaterial;
+    use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
+    use ego_core::permit::{GuardedIo, InvocationDigest, McpHttpClaim, ToolError};
+    use ego_mcp::{McpHttpOperationFactory, McpOperation, McpOperationFactory};
+    use std::ffi::OsString;
+    use std::sync::atomic::AtomicBool;
+
+    fn owner() -> Arc<McpContinuationOwner> {
+        context_free_owner(
+            Arc::new(Journal::default()),
+            Arc::new(ExactCaptureResolver::default()),
+        )
+    }
+    struct DuplexProbe(AtomicBool);
+
+    impl<'io> GuardedIo<'io> for DuplexProbe {
+        fn write(&self, _: &CanonPath, _: &[u8]) -> Result<(), ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not write a file")
+        }
+
+        fn read(&self, _: &CanonPath) -> Result<Vec<u8>, ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not read a file")
+        }
+
+        fn list(
+            &self,
+            _: &ego_core::permit::ScanRequest,
+        ) -> Result<ego_core::permit::Scan, ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not list files")
+        }
+
+        fn search(
+            &self,
+            _: &ego_core::permit::ScanRequest,
+            _: &dyn ego_core::permit::LineMatcher,
+        ) -> Result<ego_core::permit::Found, ego_core::permit::IoDenied> {
+            unreachable!("stdio selection does not search files")
+        }
+
+        fn exec<'a>(
+            &'a self,
+            _: &'a SpawnSpec,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult, ego_core::permit::ProcessError>>
+        {
+            unreachable!("stdio selection uses guarded duplex")
+        }
+
+        fn read_evidence<'a>(
+            &'a self,
+            _: &'a ego_core::store::evidence::EvidenceRead,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<ego_core::store::evidence::EvidencePage, ToolError>,
+        > {
+            unreachable!("stdio selection does not read evidence")
+        }
+
+        fn guarded_http(
+            &self,
+            _: PreparedCall,
+            _: ego_core::permit::HttpRequest,
+        ) -> futures::future::BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            unreachable!("stdio selection does not use HTTP")
+        }
+
+        fn claim_mcp_http(&self, _: PreparedCall) -> Result<McpHttpClaim, TransportError> {
+            self.0.store(true, Ordering::SeqCst);
+            Err(TransportError::definitely_unsent(
+                TransportFailure::Exchange("HTTP claim probe".into()),
+            ))
+        }
+
+        fn guarded_duplex(
+            &self,
+            _: PreparedCall,
+        ) -> futures::future::BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+            self.0.store(true, Ordering::SeqCst);
+            Box::pin(std::future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::Exchange("duplex probe".into()),
+            ))))
+        }
+
+        fn store_evidence(
+            &self,
+            _: &[u8],
+        ) -> Result<ego_core::store::evidence::EvidenceRef, ToolError> {
+            unreachable!("stdio selection does not store evidence")
+        }
+    }
+
+    fn tuic_admission() -> McpServerAdmission {
+        let environment = [
+            ("TUIC_SOCKET", "/repo/mcp.sock"),
+            ("TUIC_SESSION", "550e8400-e29b-41d4-a716-446655440a01"),
+        ];
+        let config = McpServerConfig::stdio(
+            "/opt/tuic/tuic-bridge".into(),
+            Vec::new(),
+            None,
+            environment
+                .iter()
+                .map(|(name, _)| name.parse().expect("TUIC variable name"))
+                .collect(),
+        )
+        .expect("TUIC stdio config");
+        let material = McpTransportMaterial::stdio(
+            environment
+                .into_iter()
+                .map(|(name, value)| {
+                    ego_mcp::McpEnvironmentBinding::new(
+                        name.parse().expect("TUIC variable name"),
+                        SecretMaterial::new(value.as_bytes().to_vec()),
+                    )
+                })
+                .collect(),
+        );
+        McpServerAdmission::new(
+            "tuicommander".parse().expect("TUIC server name"),
+            config,
+            material,
+        )
+        .expect("TUIC admission")
+    }
+
+    // Catches: HTTP hooks cross the guarded claim boundary with a changed transport.
+    #[test]
+    fn http_hook_rejects_changed_transport_before_claiming_the_selected_call() {
+        let config = McpHttpConfig::new(
+            "https://example.com/mcp".parse::<url::Url>().unwrap(),
+            ego_core::config::McpHttpAuth::None,
+            false,
+        )
+        .unwrap();
+        let admission = Arc::new(
+            McpServerAdmission::new(
+                "fixture".parse().unwrap(),
+                McpServerConfig::Http(config.clone()),
+                McpTransportMaterial::http(Vec::new()),
+            )
+            .unwrap(),
+        );
+        let operation = || {
+            McpOperation::captured(
+                McpSubject::Tool {
+                    server: "fixture".into(),
+                    name: "lookup".into(),
+                },
+                McpOperationKind::CallTool,
+                McpAdmissionFingerprint::new("capture", "fixture/lookup", "schema").unwrap(),
+                serde_json::json!({}),
+                vec![],
+            )
+        };
+        let probe = DuplexProbe(AtomicBool::new(false));
+        let factory =
+            McpHttpOperationFactory::new(owner(), 64 * 1024, Duration::from_secs(30)).unwrap();
+        let result = futures::executor::block_on(factory.execute_hook(
+            admission.clone(),
+            factory.prepare(admission.clone(), operation()).unwrap(),
+            &probe,
+            EffectScope::new(Duration::from_secs(30)),
+        ));
+        assert!(result.unwrap_err().to_string().contains("HTTP claim probe"));
+        assert!(probe.0.swap(false, Ordering::SeqCst));
+        let changed = McpHttpConfig::new(
+            "https://other.example/mcp".parse::<url::Url>().unwrap(),
+            ego_core::config::McpHttpAuth::None,
+            false,
+        )
+        .unwrap();
+        let changed_admission = Arc::new(
+            McpServerAdmission::new(
+                "fixture".parse().unwrap(),
+                McpServerConfig::Http(changed),
+                McpTransportMaterial::http(Vec::new()),
+            )
+            .unwrap(),
+        );
+        let result = futures::executor::block_on(factory.execute_hook(
+            changed_admission,
+            factory.prepare(admission, operation()).unwrap(),
+            &probe,
+            EffectScope::new(Duration::from_secs(30)),
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("transport fingerprint changed")
+        );
+        assert!(!probe.0.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn selected_tuic_search_reaches_guarded_duplex_after_observation() {
+        let server_admission = Arc::new(tuic_admission());
+        let factory =
+            McpStdioOperationFactory::new(owner(), 64 * 1024, Duration::from_secs(30)).unwrap();
+        let McpServerConfig::Stdio(config) = server_admission.config() else {
+            panic!("TUIC admission must be stdio")
+        };
+        let subject = McpSubject::Tool {
+            server: "tuicommander".into(),
+            name: "search_tools".into(),
+        };
+        let input = serde_json::json!({"query": "terminal"});
+        let invocation = (
+            ego_core::permit::ForeignToolId::new("tuicommander", "search_tools")
+                .expect("selected tool"),
+            InvocationDigest::from_bytes(&serde_json::to_vec(&input).expect("selected input")),
+        );
+        let operation = McpOperation::captured(
+            subject.clone(),
+            McpOperationKind::CallTool,
+            McpAdmissionFingerprint::new("capture-v1", "tuicommander/search_tools", "schema-v1")
+                .expect("admission fingerprint"),
+            input.clone(),
+            vec![invocation.clone()],
+        );
+        let planned = factory
+            .prepare(server_admission.clone(), operation)
+            .expect("planned selected call");
+        let envelope = planned.mcp_envelope().expect("selected envelope");
+        let observed = SpawnSpec::new(
+            vec![OsString::from(&config.command)],
+            Some(CanonPath::new(
+                std::fs::canonicalize(std::env::current_dir().expect("current directory"))
+                    .expect("canonical current directory"),
+            )),
+            Some(Duration::from_secs(30)),
+            planned
+                .ops()
+                .iter()
+                .find_map(|op| match op {
+                    ego_core::permit::Op::Spawn { spec } => Some(spec.env_policy().clone()),
+                    _ => None,
+                })
+                .expect("planned environment"),
+        )
+        .expect("observed spawn");
+        let selected = PreparedCall::mcp_stdio(
+            subject,
+            McpOperationKind::CallTool,
+            vec![invocation],
+            envelope.admission().clone(),
+            envelope.transport_fingerprint(),
+            "tuicommander",
+            observed,
+            &input,
+        )
+        .expect("observed selected call");
+        let probe = DuplexProbe(AtomicBool::new(false));
+        let result = futures::executor::block_on(factory.execute_hook(
+            server_admission.clone(),
+            selected,
+            &probe,
+            EffectScope::new(Duration::from_secs(30)),
+        ));
+
+        assert!(result.is_err(), "probe intentionally has no bridge process");
+        assert!(
+            probe.0.load(Ordering::SeqCst),
+            "selected search must reach the guarded duplex"
+        );
+    }
+}

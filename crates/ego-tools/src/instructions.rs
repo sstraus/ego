@@ -144,7 +144,7 @@ fn unsupported_external() -> std::io::Result<fs::File> {
     ))
 }
 
-#[cfg(any(not(unix), test))]
+#[cfg(not(unix))]
 fn open_portable(path: &Path) -> std::io::Result<fs::File> {
     // In-tree reads retain the static-link policy. External imports never use
     // this check-then-open path because they need substitution protection.
@@ -206,12 +206,18 @@ mod tests {
     }
 
     /// Catches unsupported external imports being opened with the portable path.
+    #[cfg(not(unix))]
     #[test]
     fn portable_external_import_stays_unsupported() {
-        assert_eq!(
-            unsupported_external().unwrap_err().kind(),
-            std::io::ErrorKind::Unsupported
-        );
+        let tree = tempfile::tempdir().unwrap();
+        let path = tree.path().join("external.md");
+        fs::write(&path, "external rules").unwrap();
+        let Found::Refused(Refusal::Unreadable { message }) =
+            OsInstructionIo.load_external(&path, 100)
+        else {
+            panic!("external instructions must fail closed on this platform")
+        };
+        assert!(message.contains("race-safe external instruction reads are unsupported"));
     }
 
     /// Catches losing absence, exact byte limits, or regular-file checks.
@@ -220,20 +226,20 @@ mod tests {
         let tree = tempfile::tempdir().unwrap();
         let root = tree.path().canonicalize().unwrap();
         let path = root.join("AGENTS.md");
-        assert_eq!(read_instruction(open_portable(&path), 4), Found::Absent);
+        assert_eq!(OsInstructionIo.load(&path, 4), Found::Absent);
         fs::write(&path, "rule").unwrap();
         assert_eq!(
-            read_instruction(open_portable(&path), 4),
+            OsInstructionIo.load(&path, 4),
             Found::Read {
                 bytes: b"rule".to_vec()
             }
         );
         assert_eq!(
-            read_instruction(open_portable(&path), 3),
+            OsInstructionIo.load(&path, 3),
             Found::Refused(Refusal::TooLarge { limit: 3 })
         );
         assert_eq!(
-            read_instruction(open_portable(&root), 4),
+            OsInstructionIo.load(&root, 4),
             Found::Refused(Refusal::NotAFile)
         );
     }
@@ -251,7 +257,7 @@ mod tests {
         symlink(root.join("real"), root.join("linked")).unwrap();
         for path in [root.join("AGENTS.md"), root.join("linked/AGENTS.md")] {
             assert_eq!(
-                read_instruction(open_portable(&path), 100),
+                OsInstructionIo.load(&path, 100),
                 Found::Refused(Refusal::Symlink)
             );
         }
@@ -263,11 +269,11 @@ mod tests {
         let tree = tempfile::tempdir().unwrap();
         let path = tree.path().canonicalize().unwrap().join("AGENTS.md");
         fs::write(&path, "workspace rules").unwrap();
-        let mut text = String::new();
-        open_portable(&path)
-            .unwrap()
-            .read_to_string(&mut text)
-            .unwrap();
-        assert_eq!(text, "workspace rules");
+        assert_eq!(
+            OsInstructionIo.load(&path, 100),
+            Found::Read {
+                bytes: b"workspace rules".to_vec()
+            }
+        );
     }
 }

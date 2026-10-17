@@ -287,7 +287,7 @@ fn cost_text(cost: &CostBreakdown) -> String {
         }
     }));
     if !cost.subscription_unknown.is_empty() {
-        parts.push("unpriced subscription-equivalent (standard API)".to_owned());
+        parts.push("unpriced nonmonetary usage (no API equivalent)".to_owned());
     }
     if parts.is_empty() {
         "-".to_owned()
@@ -462,14 +462,14 @@ mod text_red {
         assert_cost_cells(
             subscription.clone(),
             &format!(
-                "0.0000 USD + {label} (partial; unpriced) + unpriced subscription-equivalent (standard API)"
+                "0.0000 USD + {label} (partial; unpriced) + unpriced nonmonetary usage (no API equivalent)"
             ),
         );
         subscription.subscription_equivalent.clear();
         subscription.known.clear();
         let text = assert_cost_cells(
             subscription,
-            "unpriced subscription-equivalent (standard API)",
+            "unpriced nonmonetary usage (no API equivalent)",
         );
         assert!(!text.contains("0.0000 USD"), "{text}");
         assert_cost_cells(usd(0, 0), "0.0000 USD");
