@@ -2402,6 +2402,10 @@ impl SessionState {
             return;
         }
         match transition {
+            GoalTransition::Blocked { reason } => {
+                goal.state = GoalState::Blocked;
+                goal.blocker_reason = Some(reason.clone());
+            }
             GoalTransition::BlockerObserved { reason } => {
                 goal.observe_blocker(ev.env.turn, reason);
             }

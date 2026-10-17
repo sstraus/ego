@@ -2318,17 +2318,42 @@ block the goal. A changed condition resets that count. The default allowance is
 checks first start. The allowance and consumed count survive resume. Internal
 continuations count toward `--max-turns`. `ego run --goal TEXT`
 sets an operator-owned objective. The `goal` tool sets or updates a model-authored
-objective, but cannot replace an operator-owned active goal. Provider, permission,
-pause, cancellation and budget stops do not admit automatic work. Invalid checks
-and exhausted allowances emit a visible diagnostic and retain the active goal;
+objective, but cannot replace an operator-owned active goal. Text output shows a
+`Goal (operator|automated): OBJECTIVE` receipt when a goal first appears and when
+the model updates it. Each automatic turn shows `Goal turn n of N: CONDITION`
+before its work output. A goal-check stop shows the objective, turns used, stop
+reason, last unmet condition and next actions: `/goal show`, `/goal achieve`,
+`/goal block`, and `--goal-turns N` (which sets the allowance when checks first
+start, not after it is exhausted). These receipts remain visible with `--quiet`;
+headless text sends them to stderr, not answer stdout. JSON/JSONL and ACP keep
+their existing structured contracts.
+
+The native status row includes `goal n/N` while a goal is active, including when
+a check stop retains that active goal. Until checks configure the durable
+allowance, the denominator is `pending`. The segment uses the existing
+width-bounded renderer; a disabled status row stays disabled. Achieved and
+blocked goals do not retain this active segment.
+
+Provider, permission, pause, cancellation and budget stops do not admit automatic
+work. Invalid checks and exhausted allowances emit a visible diagnostic and retain the active goal;
 they never claim achievement. ACP session objective metadata exposes `goalStatus`,
 `goalStop`, and `goalContinuationTurns` separately from work-turn completion.
 
 `--goal-check-command '["/path/to/check", "arg"]'` selects a command evaluator
 instead of a model. It receives objective and session evidence JSON on stdin
-and returns only `{ "achieved": true|false, "reason": "evidence or unmet condition" }`
-on stdout. Its exact exec authority must be granted by ordinary policy; it uses
-the same confinement and cancellation scope, with a 60-second timeout. Command
+and returns only
+`{ "verdict": "achieved|continue|needs_operator", "reason": "evidence or unmet condition" }`.
+The `verdict` is required and must be exactly one of those three values; the old
+`achieved` boolean is not accepted. `achieved` requires evidence of success.
+`continue` admits automatic work only when the agent can act on the unmet
+condition. `needs_operator` blocks the goal at once, records the reason and
+shows an actionable stop receipt without consuming an automatic work turn.
+Use it for login, approval, decisions or input that requires a person. A blocked
+goal is terminal: after resolving the blocker, `/goal set TEXT` starts a new
+goal. The stop receipt states this; `/goal achieve` and `/goal block` require an
+active goal. Model checks use the same contract and receive these instructions. The command writes
+its verdict on stdout. Its exact exec authority must be granted by ordinary
+policy; it uses the same confinement and cancellation scope, with a 60-second timeout. Command
 checks do not incur model cost. Model checks remain accounted generations.
 Stderr is not part of the verdict. If the command exits unsuccessfully, the
 visible goal-check diagnostic includes at most 4096 UTF-8 bytes from the end of
