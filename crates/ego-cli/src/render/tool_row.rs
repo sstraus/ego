@@ -409,7 +409,7 @@ fn dim(text: String) -> Line {
 /// The shared hidden-line count for compact tool and prompt output.
 pub(crate) fn hidden_lines(hidden: usize, width: usize) -> Line {
     dim(format!(
-        "  … {hidden} more {} · /expand shows all",
+        "  … {hidden} more {} · Option+O or /expand",
         if hidden == 1 { "line" } else { "lines" }
     ))
     .truncate_to(width)
@@ -558,7 +558,7 @@ mod tests {
                 assert!(rendered.rows.lines().count() <= 5);
                 if let Some(hidden) = hidden {
                     assert!(
-                        grid.contains(hidden) && grid.contains("/expand shows all"),
+                        grid.contains(hidden) && grid.contains("Option+O or /expand"),
                         "{grid}"
                     );
                 }
@@ -637,7 +637,7 @@ mod tests {
         );
         let rows: Vec<_> = record.rows.lines().collect();
         assert_eq!(rows.len(), 5, "{rows:?}");
-        assert_eq!(rows[1], "  … 17 more lines · /expand shows all");
+        assert_eq!(rows[1], "  … 17 more lines · Option+O or /expand");
         assert_eq!(rows[2..], ["  18", "  19", "  20"]);
         assert!(record.detail.contains("  1\n"));
         assert!(record.detail.contains("  20"));

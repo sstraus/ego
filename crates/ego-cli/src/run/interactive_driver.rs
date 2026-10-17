@@ -536,14 +536,17 @@ pub(super) async fn interactive_process(
     let services = InteractiveServices { evidence };
 
     if let Some(surface) = surface {
-        let output = InteractiveOutput::new(surface);
+        let output = Arc::new(InteractiveOutput::new(surface));
+        let diagnostics: Arc<dyn crate::output::Diagnostics> = output.clone();
+        seat.install_diagnostics(Arc::downgrade(&diagnostics));
+        drop(diagnostics);
         let ended = interactive_through(
             args,
             cancel,
             Arc::clone(&seat),
             capabilities,
             quiet,
-            &output,
+            output.as_ref(),
             services,
         )
         .await;

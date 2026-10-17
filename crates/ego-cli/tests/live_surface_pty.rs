@@ -3550,6 +3550,117 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
     );
 }
 
+// Catches: Meta-o being queued as composer input or refused while a turn runs.
+#[test]
+fn busy_expand_shortcut_shows_hidden_output_without_submitting_draft() {
+    busy_expand_shortcut_transcript(false);
+}
+
+// Catches: a truncated row advertising only /expand, hiding the live shortcut.
+#[test]
+fn busy_expand_hint_names_the_live_shortcut() {
+    busy_expand_shortcut_transcript(true);
+}
+
+fn busy_expand_shortcut_transcript(check_hint: bool) {
+    // Screen markdown emits complete paragraphs, not a single trailing newline.
+    // Finish this paragraph before gating the response tail.
+    let (sampling, gate) = gated_paced_line("EXPAND-TURN-STILL-RUNNING\n");
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "expand-exec",
+                "exec",
+                r#"{"argv":["printf","HIDDEN-FIRST\nHIDDEN-SECOND\nTAIL-ONE\nTAIL-TWO\nTAIL-THREE\n"],"cwd":null,"timeout_ms":1000}"#,
+            )),
+            sampling,
+        ],
+        ..Plan::default()
+    });
+    // Release the fixture worker even when an assertion fails.
+    struct ReleaseOnDrop(Arc<ReleaseGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"show five output lines\r")
+        .expect("submit turn");
+    input.flush().expect("submit turn flush");
+    until_normalized(&reader, &mut output, 0, "EXPAND-TURN-STILL-RUNNING");
+    let collapsed = normalized(&output);
+    assert!(collapsed.contains("2 more lines"), "{collapsed}");
+    if check_hint {
+        // Assert before exercising the shortcut so each regression has its own oracle.
+        assert!(
+            collapsed.contains("2 more lines · Option+O or /expand"),
+            "the truncated row must advertise the running-turn shortcut: {collapsed}"
+        );
+    }
+    // Only match a standalone output line: the exec header also names its argv.
+    assert!(!collapsed.contains("  HIDDEN-FIRST\n"), "{collapsed}");
+
+    let draft_start = output.len();
+    input.write_all(b"unsent expand draft").expect("busy draft");
+    input.flush().expect("busy draft flush");
+    until_from(&reader, &mut output, draft_start, b"unsent expand draft");
+    // Text appears before the repaint finishes its cursor query. Sending Meta-o
+    // during that query lets the terminal-position reader consume the key.
+    until_from(&reader, &mut output, draft_start, b"\x1b[?25h");
+    drain_until_quiet(&reader, &mut output);
+    let expand_start = output.len();
+    input.write_all(b"\x1bo").expect("Meta-o");
+    input.flush().expect("Meta-o flush");
+    until_normalized(&reader, &mut output, expand_start, "  HIDDEN-FIRST\n");
+    until_normalized(&reader, &mut output, expand_start, "  HIDDEN-SECOND\n");
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "shortcut must not submit a turn"
+    );
+
+    gate.release();
+    until_normalized(&reader, &mut output, expand_start, "qwen3 · ");
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear preserved draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from(&reader, &mut output, clear_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert_eq!(stub.generations().len(), 2, "draft must not queue a turn");
+    assert!(
+        !stub
+            .generations()
+            .iter()
+            .any(|request| request.to_string().contains("unsent expand draft")),
+        "the unsent draft must never reach the provider"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {

@@ -291,13 +291,24 @@ fn help_routes_to_scrollback_instead_of_becoming_a_multiline_prompt() {
     assert_eq!(status.lock().unwrap().notice, None);
 }
 
+// Catches: expansion waiting in the host input queue until a running turn ends.
 #[test]
-fn expand_reaches_the_host_and_leaves_no_status_notice() {
+fn expand_writes_scrollback_without_waiting_for_the_host() {
     let mut editor = Reedline::create();
     let phase = SurfacePhase::new(EditPhase::Idle);
     let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::new(
         ActionRegistry::final_surface(),
     ))));
+
+    let (sender, rows) = crossbeam::channel::unbounded();
+    let output = Arc::new(crate::output::InteractiveOutput::new(SurfaceOutput::new(
+        sender,
+        CancelToken::new(),
+    )));
+    let diagnostics: Arc<dyn crate::output::Diagnostics> = output.clone();
+    diagnostics.tool_row("compact row", "full output".to_owned());
+    rows.try_iter().for_each(drop);
+    status.lock().unwrap().diagnostics = Some(Arc::downgrade(&diagnostics));
 
     let line = apply_surface_effect(
         &mut editor,
@@ -307,10 +318,8 @@ fn expand_reaches_the_host_and_leaves_no_status_notice() {
         false,
     );
 
-    assert_eq!(
-        line,
-        Some(Line::HostCommand(HostCommand::Action(ActionId::Expand)))
-    );
+    assert_eq!(line, None);
+    assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["\n", "full output\n"]);
     assert_eq!(status.lock().unwrap().notice, None);
 }
 
