@@ -1,3 +1,5 @@
+#[path = "live_surface_pty/slash_completion.rs"]
+mod slash_completion;
 #[path = "live_surface_pty/background_notice.rs"]
 mod background_notice;
 #[path = "live_surface_pty/busy_notice.rs"]

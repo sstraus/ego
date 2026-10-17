@@ -268,6 +268,10 @@ impl ActionMenu {
 }
 
 impl Menu for ActionMenu {
+    fn submit_on_accept(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
