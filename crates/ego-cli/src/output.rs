@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ego_core::cost::{CumulativeCost, RateSource};
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
@@ -184,22 +184,43 @@ impl TextOutput for Stdout {
     }
 }
 
-/// How many finished tool calls the expand key can reach back to.
+/// How many tool calls and collapsed prompts the expand key retains.
 const EXPANDABLE_CALLS: usize = 16;
+
+/// One history shared by submission receipts and finished tool output.
+#[derive(Default)]
+pub(crate) struct ExpansionHistory(Mutex<VecDeque<String>>);
+
+impl ExpansionHistory {
+    pub(crate) fn remember(&self, detail: String) {
+        let mut entries = self.0.lock().expect("expansion detail lock");
+        if entries.len() == EXPANDABLE_CALLS {
+            entries.pop_front();
+        }
+        entries.push_back(detail);
+    }
+
+    pub(crate) fn latest(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("expansion detail lock")
+            .back()
+            .cloned()
+    }
+}
 
 /// Interactive text and diagnostics serialized into complete logical rows.
 pub struct InteractiveOutput {
     inner: Mutex<SurfaceOutput>,
-    /// Detail of the most recent tool calls, oldest first. Its own lock: the
-    /// rows are written through `inner` and the detail is only ever read back.
-    tools: Mutex<VecDeque<String>>,
+    /// Shared with the terminal owner's prompt submission renderer.
+    details: Arc<ExpansionHistory>,
 }
 
 impl InteractiveOutput {
     pub fn new(output: SurfaceOutput) -> Self {
         Self {
+            details: Arc::clone(&output.details),
             inner: Mutex::new(output),
-            tools: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -214,15 +235,11 @@ impl Diagnostics for InteractiveOutput {
             let mut output = self.inner.lock().expect("surface output lock");
             let _ = output.write_tool(rows);
         }
-        let mut tools = self.tools.lock().expect("tool detail lock");
-        if tools.len() == EXPANDABLE_CALLS {
-            tools.pop_front();
-        }
-        tools.push_back(detail);
+        self.details.remember(detail);
     }
 
     fn expand_last_tool(&self) {
-        let detail = self.tools.lock().expect("tool detail lock").back().cloned();
+        let detail = self.details.latest();
         match detail {
             Some(detail) => self.line(&detail),
             None => self.note("no tool call to expand yet"),
@@ -1045,7 +1062,10 @@ mod tests {
         for call in 0..(EXPANDABLE_CALLS + 5) {
             output.tool_row("row", format!("detail {call}"));
         }
-        assert_eq!(output.tools.lock().unwrap().len(), EXPANDABLE_CALLS);
-        assert_eq!(output.tools.lock().unwrap().front().unwrap(), "detail 5");
+        assert_eq!(output.details.0.lock().unwrap().len(), EXPANDABLE_CALLS);
+        assert_eq!(
+            output.details.0.lock().unwrap().front().unwrap(),
+            "detail 5"
+        );
     }
 }

@@ -1252,3 +1252,47 @@ fn configured_shortcuts_reach_the_surface_and_both_help_projections() {
         assert!(!help.contains("Option+P"), "{help}");
     }
 }
+
+// Catches: a submitted prompt longer than the preview limit floods the transcript.
+#[test]
+fn long_prompt_echo_is_collapsed() {
+    let waiting = Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default())));
+    let prompt = (1..=20)
+        .map(|n| format!("brief line {n}\n"))
+        .collect::<String>();
+    let receipt = waiting
+        .render_prompt_submission(&prompt, 120)
+        .expect("long submissions need a compact receipt");
+    assert_eq!(
+        receipt,
+        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · /expand shows all"
+    );
+}
+
+// Catches: collapsed input is not reachable through the tool expansion action.
+#[test]
+fn collapsed_prompt_and_tool_output_share_expansion_history() {
+    use crate::output::{Diagnostics, InteractiveOutput};
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let waiting = Waiting::new(Arc::clone(&status));
+    let (sender, rows) = crossbeam::channel::unbounded();
+    let mut surface = SurfaceOutput::new(sender, CancelToken::new());
+    surface.details = Arc::clone(&status.lock().unwrap().details);
+    let output = InteractiveOutput::new(surface);
+    output.tool_row("old tool", "old detail".into());
+    let _ = rows.try_iter().collect::<Vec<_>>();
+    let prompt = "one\ntwo\nthree\nfour";
+    assert!(waiting.render_prompt_submission(prompt, 80).is_some());
+    output.expand_last_tool();
+    assert!(
+        rows.try_iter()
+            .collect::<String>()
+            .contains("> one\n… two\n… three\n… four")
+    );
+    // A short submission, including /expand itself, must not replace the detail.
+    assert!(waiting.render_prompt_submission("/expand", 80).is_none());
+    output.tool_row("new tool", "new detail".into());
+    let _ = rows.try_iter().collect::<Vec<_>>();
+    output.expand_last_tool();
+    assert!(rows.try_iter().collect::<String>().contains("new detail"));
+}

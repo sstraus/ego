@@ -396,6 +396,7 @@ fn repaint_status(status: &SharedStatus) {
 }
 
 struct SurfaceStatus {
+    details: Arc<crate::output::ExpansionHistory>,
     setup_cancel: Option<tokio::sync::watch::Sender<bool>>,
     queue: QueueStatus,
     drafts: usize,
@@ -454,6 +455,7 @@ impl SurfaceStatus {
 impl Default for SurfaceStatus {
     fn default() -> Self {
         Self {
+            details: Arc::default(),
             setup_cancel: None,
             queue: QueueStatus::default(),
             drafts: 0,
@@ -702,6 +704,7 @@ enum SurfaceMessage {
 }
 
 pub struct SurfaceOutput {
+    pub(crate) details: Arc<crate::output::ExpansionHistory>,
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
@@ -717,6 +720,7 @@ pub struct SurfaceOutput {
 impl SurfaceOutput {
     pub fn new(sender: Sender<String>, cancel: CancelToken) -> Self {
         Self {
+            details: Arc::default(),
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
@@ -761,6 +765,7 @@ impl SurfaceOutput {
             .expect("output pump thread");
         (
             Self {
+                details: Arc::default(),
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
@@ -1132,6 +1137,7 @@ impl Seat {
         // Host metadata never waits for the row printer or consumes a row.
         let (signal_sender, signals) = crossbeam::channel::unbounded();
         output.signals = Some(signal_sender);
+        output.details = Arc::clone(&status.lock().expect("surface status lock").details);
         output.status = Some(Arc::clone(&status));
         let active_signals = signals.clone();
         editor = editor.with_idle_callback(Box::new(move || {
