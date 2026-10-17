@@ -177,8 +177,7 @@ async fn open_scope_phase(
     {
         let effective = &settings.effective;
         host.diagnostics.note(&format!(
-            "ego {} · {model}\nmode {} ({}) · sandbox {} ({})\n{}",
-            env!("CARGO_PKG_VERSION"),
+            "model {model}\nmode {} ({}) · sandbox {} ({})\n{}",
             effective.mode.unwrap_or(Mode::Default),
             effective.mode_provenance,
             settings.confinement.level(),

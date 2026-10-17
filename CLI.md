@@ -1164,6 +1164,12 @@ session, provider, model, or marked prefix starts a new comparison. Missing inpu
 usage is unknown, not a miss. These observations do not change public JSON events
 or durable accounting and are suppressed by `-q`.
 
+When a turn ends, on-screen text output prints elapsed time, completion status,
+and local time. Successful builtin `edit` calls contribute measured added and
+removed lines to a `tracked edits +N -M` receipt. These counts are not a Git diff:
+repeated edits are accumulated, and unmeasured tools do not contribute. Colour
+follows the terminal gate. Quiet and redirected output omit these receipts.
+
 ### 4.8 Diagnostics (`EGO_LOG`, `EGO_LOG_FILE`)
 
 The `tracing` events this build emits reach nobody by default. Two environment
@@ -1276,6 +1282,11 @@ batches, then repaints only the ephemeral status, menu, and composer rows.
 History, completion, multiline editing, bracketed paste, and concurrent output
 use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
+
+Interactive startup prints the application name and version before configuration,
+trust, provider, or MCP notices. It reports the selected model, effective posture,
+and key hints after admission. Startup notices remain visible; `--quiet` keeps
+its existing announcement policy. The name does not require a resolved model.
 
 The live seat enters raw mode before startup discovery, so lines typed before
 the composer appears retain their Enter boundaries without cooked terminal
@@ -1758,6 +1769,12 @@ whenever the terminal can represent their combined whole segments. If physical
 width cannot represent that critical set, whole segments degrade in the order
 drafts, queue, interrupt; the retained priority is interrupt, then queue, then
 drafts, and the surface emits one overflow diagnostic.
+
+The live Working row also shows an approximate output-token count from model
+text (four characters per token, rounded up), not provider usage. Tool output is
+excluded. Reasoning deltas start a thinking interval; answer text, tool starts,
+and turn completion clear it. A new turn resets progress. The row is bounded to
+the terminal width and omits the interruption hint when it does not fit.
 
 ### 6.6 Prompted compaction starts a clean session
 

@@ -172,6 +172,63 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
     assert!(indicator.ends_with("\n> "));
 }
 
+/// Catches: tool output being counted as model tokens, or thinking staying
+/// active once the answer starts. Reasoning starts with a delta, not a start event.
+#[test]
+fn working_progress_tracks_only_model_text_and_current_reasoning() {
+    use ego_core::public::{ItemKind, PublicEvent};
+    let turn = ego_core::event::id::TurnId::new();
+    let item = ego_core::event::id::ItemId::new();
+    let mut status = SurfaceStatus::default();
+    status.begin_activity();
+    status.observe_generation_progress(&PublicEvent::ItemDelta {
+        turn,
+        item,
+        kind: ItemKind::Reasoning,
+        text: "thought".into(),
+    });
+    assert!(status.thinking_since.is_some());
+    status.observe_generation_progress(&PublicEvent::ItemDelta {
+        turn,
+        item,
+        kind: ItemKind::Tool,
+        text: "tool output".into(),
+    });
+    assert_eq!(status.activity_output_chars, 7);
+    status.observe_generation_progress(&PublicEvent::ItemDelta {
+        turn,
+        item,
+        kind: ItemKind::AgentMessage,
+        text: "answer".into(),
+    });
+    assert_eq!(status.activity_output_chars, 13);
+    assert!(status.thinking_since.is_none());
+    status.begin_activity();
+    assert_eq!(
+        status.activity_output_chars, 13,
+        "same busy turn retains progress"
+    );
+    status.activity = false;
+    status.begin_activity();
+    assert_eq!(status.activity_output_chars, 0, "next turn starts fresh");
+}
+
+/// Catches: estimated output tokens being presented as an exact provider
+/// count, or a live reasoning interval disappearing from the working row.
+#[test]
+fn busy_surface_labels_estimated_tokens_and_active_thinking() {
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        activity: true,
+        activity_output_chars: 1_752,
+        thinking_since: Some(Instant::now() - Duration::from_secs(1)),
+        ..SurfaceStatus::default()
+    }));
+    let waiting = Waiting::new(status);
+    let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+    assert!(indicator.contains("↓ ~438 tokens"), "{indicator}");
+    assert!(indicator.contains("thinking started 1s ago"), "{indicator}");
+}
+
 // Catches: long turns shown as raw seconds, or losing the smaller unit at a boundary.
 #[test]
 fn working_indicator_formats_long_elapsed_time() {
@@ -1077,6 +1134,40 @@ fn disconnected_receipt_pump_leaves_an_operator_notice() {
             .as_ref(),
         "Permission receipt could not reach the output pump | > "
     );
+}
+
+// Catches: progress using the startup width after a terminal resize.
+#[test]
+fn working_row_stays_within_live_terminal_width_after_resize() {
+    let mut initial = SurfaceStatus {
+        activity: true,
+        activity_output_chars: 123_456,
+        thinking_since: Some(Instant::now() - Duration::from_secs(12)),
+        width: 120,
+        ..SurfaceStatus::default()
+    };
+    initial.permission_capabilities.width = 120;
+    let status = Arc::new(Mutex::new(initial));
+    let mut mode = SurfaceEditMode::with_status(
+        Emacs::default(),
+        SurfacePhase::new(EditPhase::Idle),
+        Arc::clone(&status),
+    );
+    let waiting = Waiting::new(status);
+    for width in [20_u16, 40, 80, 120, 1] {
+        assert!(matches!(
+            mode.parse_event(ReedlineRawEvent::try_from(Event::Resize(width, 24)).unwrap()),
+            ReedlineEvent::Resize(w, 24) if w == width
+        ));
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        let row = indicator.lines().next().unwrap();
+        let visible = row.replace("\x1b[2m", "").replace("\x1b[22m", "");
+        assert!(
+            crate::render::line::cells(&visible) <= usize::from(width).saturating_sub(1),
+            "{width}: {row:?}"
+        );
+        assert!(indicator.ends_with("\n> "), "{indicator:?}");
+    }
 }
 
 // Catches: a long retry cause wraps onto the composer, or an elapsed delay underflows.

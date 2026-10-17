@@ -72,18 +72,7 @@ pub(super) fn run_trust(
         args.trust_workspace,
         selected.as_deref(),
         |context| match driver {
-            Driver::Interactive { seat, .. } if seat.has_human() => {
-                let question_context = if args.quiet {
-                    context.to_string()
-                } else {
-                    format!(
-                        "ego {} · {}\n{context}",
-                        env!("CARGO_PKG_VERSION"),
-                        args.model.as_deref().unwrap_or("model pending")
-                    )
-                };
-                Some(seat.trust(root, &question_context))
-            }
+            Driver::Interactive { seat, .. } if seat.has_human() => Some(seat.trust(root, context)),
             _ => None,
         },
     )

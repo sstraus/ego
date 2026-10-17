@@ -1,5 +1,7 @@
 //! Own interactive process entry, terminal announcements, and model switching.
 
+use std::io::IsTerminal;
+
 use super::*;
 
 /// The currency a session settles in.
@@ -451,6 +453,7 @@ pub(super) async fn run_process(
     let signalling = Signalling {
         inner: sink,
         announce: &announce,
+        seat: None,
     };
 
     let ended = run_with_registry(
@@ -511,6 +514,11 @@ pub(super) async fn interactive_process(
         });
     }
 
+    // Identity precedes keyboard/configuration admission, trust, and provider/MCP
+    // setup. These paths keep their own diagnostics; none need buffering.
+    if !args.quiet && std::io::stdin().is_terminal() {
+        out.note(&format!("ego {}", env!("CARGO_PKG_VERSION")));
+    }
     let quiet = args.quiet;
     let environment = Environment::read();
     let capabilities = Capabilities::of(&Terminal {
@@ -587,6 +595,7 @@ pub(super) async fn interactive_through(
     let signalling = Signalling {
         inner: &text_sink,
         announce: &announce,
+        seat: Some(&seat),
     };
     seat.announce_waits(capabilities, quiet);
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
@@ -930,6 +939,7 @@ fn excerpt(text: Option<&str>, cells: usize) -> Option<String> {
 pub(super) struct Signalling<'a> {
     pub(super) inner: &'a dyn EventSink,
     pub(super) announce: &'a Announce<'a>,
+    pub(super) seat: Option<&'a repl::Seat>,
 }
 
 impl EventSink for Signalling<'_> {
@@ -943,6 +953,11 @@ impl EventSink for Signalling<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.inner.publish(event, state);
+        if !self.announce.quiet
+            && let Some(seat) = self.seat
+        {
+            seat.observe_generation_progress(event);
+        }
         self.announce.emit(self.announce.signal(event, state));
     }
 }
