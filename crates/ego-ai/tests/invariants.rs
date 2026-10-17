@@ -1208,7 +1208,7 @@ async fn fast_contract_catches_missing_wire_tier_and_unmultiplied_turn_cost() {
         if tier == ServiceTier::Fast {
             assert_eq!(body["service_tier"], "fast");
         } else {
-            assert!(body.get("service_tier").is_none());
+            assert_eq!(body["service_tier"], "default");
         }
         assert_eq!(
             state.cost,

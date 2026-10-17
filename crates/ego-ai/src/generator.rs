@@ -196,23 +196,30 @@ impl WireGenerator {
         let names = ToolNames::new(req);
         let encoded = names.encode(req);
         let mut request = self.wire.build_request(&target, &encoded)?;
-        if self.service_tier == crate::service_tier::ServiceTier::Fast {
+        if self.service_tier == crate::service_tier::ServiceTier::Fast || self.row.id() == "openai" {
             let slug = format!("{}/{}", self.row.id(), req.model);
             self.service_tier
                 .validate(&slug)
                 .map_err(wire::RequestRefused::new)?;
-            let support = crate::service_tier::fast_support(&slug).expect("validated fast support");
+            let support = (self.service_tier == crate::service_tier::ServiceTier::Fast)
+                .then(|| crate::service_tier::fast_support(&slug).expect("validated fast support"));
             let mut body: serde_json::Value =
                 serde_json::from_slice(request.body.as_deref().ok_or_else(|| {
-                    wire::RequestRefused::new("fast requires a JSON request body")
+                    wire::RequestRefused::new("service tier requires a JSON request body")
                 })?)
                 .map_err(|error| wire::RequestRefused::new(error.to_string()))?;
-            body[support.wire_field] = support.wire_value.into();
+            // OpenAI omission inherits the project tier, which may be Fast.
+            let (field, value) = support
+                .as_ref()
+                .map_or(("service_tier", "default"), |support| {
+                    (support.wire_field, support.wire_value)
+                });
+            body[field] = value.into();
             request.body = Some(
                 serde_json::to_vec(&body)
                     .map_err(|error| wire::RequestRefused::new(error.to_string()))?,
             );
-            if let Some(beta) = support.beta_header {
+            if let Some(beta) = support.and_then(|support| support.beta_header) {
                 // Preserve beta capabilities already requested by the wire.
                 let previous = request
                     .headers

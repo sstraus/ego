@@ -1125,7 +1125,8 @@ async fn fast_contract_catches_provider_field_drift_and_silent_unsupported_tiers
                     }));
                 }
             } else {
-                assert!(body.get(field).is_none());
+                assert_ne!(body[field], "fast");
+                assert_ne!(body[field], "priority");
             }
         }
     }
