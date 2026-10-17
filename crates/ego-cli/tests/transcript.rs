@@ -146,7 +146,7 @@ fn transcript_contract_preserves_chat_goals_lineage_and_follow_cursor() {
         "model = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'off'\n",
     );
     let marker = places.workspace_path().join("checked-once");
-    let checker = places.file("check.sh", "if test -f \"$1\"; then\n printf '%s\\n' '{\"achieved\":true,\"reason\":\"script verified\"}'\nelse\n touch \"$1\"\n printf '%s\\n' '{\"achieved\":false,\"reason\":\"continue once\"}'\nfi\n");
+    let checker = places.file("check.sh", "if test -f \"$1\"; then\n printf '%s\\n' '{\"verdict\":\"achieved\",\"reason\":\"script verified\"}'\nelse\n touch \"$1\"\n printf '%s\\n' '{\"verdict\":\"continue\",\"reason\":\"continue once\"}'\nfi\n");
     let check = json!(["/bin/sh", checker, marker]).to_string();
     let run = places
         .ego(&stub)

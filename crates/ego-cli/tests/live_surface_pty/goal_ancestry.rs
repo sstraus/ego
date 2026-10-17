@@ -22,7 +22,7 @@ fn goal_continuations_compact_without_cross_session_parent() {
         places.file("AGENTS.md", "# goal ancestry fixture\n");
         let checker = places.file(
             "checker.sh",
-            "cat >/dev/null\nprintf '%s\\n' '{\"achieved\":false,\"reason\":\"operator verification remains\"}'\n",
+            "cat >/dev/null\nprintf '%s\\n' '{\"verdict\":\"continue\",\"reason\":\"operator verification remains\"}'\n",
         );
         let command = serde_json::json!(["/bin/sh", checker]).to_string();
         let turns = continuations.to_string();
