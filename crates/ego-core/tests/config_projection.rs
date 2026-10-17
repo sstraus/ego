@@ -38,6 +38,8 @@ fn snapshot_has_exact_target_and_closed_canonical_schema_order() {
             ManagedConfigKey::Network,
             ManagedConfigKey::Roots,
             ManagedConfigKey::ExecPaths,
+            ManagedConfigKey::Keybindings,
+            ManagedConfigKey::Vim,
         ]
     );
     assert_eq!(

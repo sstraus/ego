@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, IsTerminal, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ego_core::cost::{CumulativeCost, RateSource};
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
@@ -184,22 +184,43 @@ impl TextOutput for Stdout {
     }
 }
 
-/// How many finished tool calls the expand key can reach back to.
+/// How many tool calls and collapsed prompts the expand key retains.
 const EXPANDABLE_CALLS: usize = 16;
+
+/// One history shared by submission receipts and finished tool output.
+#[derive(Default)]
+pub(crate) struct ExpansionHistory(Mutex<VecDeque<String>>);
+
+impl ExpansionHistory {
+    pub(crate) fn remember(&self, detail: String) {
+        let mut entries = self.0.lock().expect("expansion detail lock");
+        if entries.len() == EXPANDABLE_CALLS {
+            entries.pop_front();
+        }
+        entries.push_back(detail);
+    }
+
+    pub(crate) fn latest(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("expansion detail lock")
+            .back()
+            .cloned()
+    }
+}
 
 /// Interactive text and diagnostics serialized into complete logical rows.
 pub struct InteractiveOutput {
     inner: Mutex<SurfaceOutput>,
-    /// Detail of the most recent tool calls, oldest first. Its own lock: the
-    /// rows are written through `inner` and the detail is only ever read back.
-    tools: Mutex<VecDeque<String>>,
+    /// Shared with the terminal owner's prompt submission renderer.
+    details: Arc<ExpansionHistory>,
 }
 
 impl InteractiveOutput {
     pub fn new(output: SurfaceOutput) -> Self {
         Self {
+            details: Arc::clone(&output.details),
             inner: Mutex::new(output),
-            tools: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -216,15 +237,11 @@ impl Diagnostics for InteractiveOutput {
             let mut output = self.inner.lock().expect("surface output lock");
             let _ = output.write_tool(rows);
         }
-        let mut tools = self.tools.lock().expect("tool detail lock");
-        if tools.len() == EXPANDABLE_CALLS {
-            tools.pop_front();
-        }
-        tools.push_back(detail);
+        self.details.remember(detail);
     }
 
     fn expand_last_tool(&self) {
-        let detail = self.tools.lock().expect("tool detail lock").back().cloned();
+        let detail = self.details.latest();
         match detail {
             Some(detail) => self.line(&detail),
             None => self.note("no tool call to expand yet"),
@@ -541,6 +558,16 @@ impl EventSink for TextSink<'_> {
             }
         }
         match event {
+            PublicEvent::PlanUpdated { .. } if !self.quiet => {
+                self.finish();
+                for step in &state.plan.steps {
+                    self.out
+                        .note(&format!("[{:?}] {}: {}", step.status, step.id, step.text));
+                }
+                if state.plan.steps.is_empty() {
+                    self.out.note("Plan cleared");
+                }
+            }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
@@ -974,6 +1001,38 @@ mod tests {
     }
 
     #[test]
+    fn terminal_plan_rows_use_reduced_state_and_respect_quiet_progress() {
+        // Catches: terminal renders stale operation payloads instead of the authoritative plan.
+        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+        let mut state = SessionState::default();
+        state.plan.steps = vec![PlanStep {
+            id: "stable".into(),
+            text: "Verify output".into(),
+            status: StepStatus::Blocked,
+        }];
+        let event = PublicEvent::PlanUpdated {
+            turn: ego_core::event::id::TurnId::new(),
+            update: PlanUpdate::Step {
+                id: "stable".into(),
+                status: StepStatus::Blocked,
+            },
+        };
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain());
+        sink.publish(&event, &state);
+        assert_eq!(
+            *out.notes.lock().unwrap(),
+            ["[Blocked] stable: Verify output"]
+        );
+        state.plan.steps.clear();
+        sink.publish(&event, &state);
+        assert_eq!(out.notes.lock().unwrap().last().unwrap(), "Plan cleared");
+        let quiet_out = Recorded::default();
+        TextSink::new(&quiet_out, true, Capabilities::plain()).publish(&event, &state);
+        assert!(quiet_out.notes.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_tool_call_is_drawn_once_when_it_finishes_and_never_as_raw_json() {
         let out = Recorded::default();
         let sink = TextSink::new(&out, false, Capabilities::plain());
@@ -1119,7 +1178,10 @@ mod tests {
         for call in 0..(EXPANDABLE_CALLS + 5) {
             output.tool_row("row", format!("detail {call}"));
         }
-        assert_eq!(output.tools.lock().unwrap().len(), EXPANDABLE_CALLS);
-        assert_eq!(output.tools.lock().unwrap().front().unwrap(), "detail 5");
+        assert_eq!(output.details.0.lock().unwrap().len(), EXPANDABLE_CALLS);
+        assert_eq!(
+            output.details.0.lock().unwrap().front().unwrap(),
+            "detail 5"
+        );
     }
 }

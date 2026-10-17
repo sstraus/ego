@@ -130,6 +130,10 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         picker: Arc<Mutex<ModelPicker>>,
         notice: Option<String>,
     ) -> crate::model_picker::PickerOutcome;
+    /// Read-only host requests can be answered without waiting for a model turn.
+    fn next_inspection(&self) -> futures::future::BoxFuture<'_, repl::HostCommand> {
+        Box::pin(futures::future::pending())
+    }
     fn busy(&self) {}
     fn idle(&self) {}
     /// How long the current or last turn waited on a modal.

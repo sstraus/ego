@@ -961,6 +961,13 @@ impl fmt::Display for PermissionRequest {
                 Op::Write { path, change } => {
                     write!(f, "\n- write {}", TerminalSafe(&path.to_string()))?;
                     match change {
+                        Change::Notebook(edit) => write!(
+                            f,
+                            "\n  notebook cell edit: {}\n  other cells, metadata and outputs are retained",
+                            TerminalSafe(
+                                &serde_json::to_string(edit).expect("closed cell edit codec")
+                            )
+                        )?,
                         Change::Whole(content) => write!(
                             f,
                             "\n  whole content ({} bytes): {}",
@@ -1481,7 +1488,7 @@ impl PolicyEngine {
                         Op::Read { path: read },
                         write @ Op::Write {
                             path,
-                            change: Change::Replace { .. },
+                            change: Change::Replace { .. } | Change::Notebook(_),
                         },
                     ],
                     Op::Read { .. },

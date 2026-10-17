@@ -124,6 +124,8 @@ fn real_adapter_reads_exact_stored_values_in_canonical_order_without_writes() {
             (ManagedConfigKey::Network, None),
             (ManagedConfigKey::Roots, None),
             (ManagedConfigKey::ExecPaths, None),
+            (ManagedConfigKey::Keybindings, None),
+            (ManagedConfigKey::Vim, None),
         ]
     );
     assert_eq!(io.writes.load(Ordering::SeqCst), 0);
