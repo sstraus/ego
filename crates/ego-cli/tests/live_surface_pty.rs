@@ -1222,10 +1222,12 @@ fn successor_accepts_next_turn(action: &str) {
         );
         let start = output.len();
         until_prompt_from(&reader, &mut output, start);
-        let shown = normalized(&output);
+        // Redraws may occur between wrapped notice rows; inspect the actual
+        // terminal, not the interleaved live-frame bytes in the write stream.
+        let shown = screen_rows(&output, 24, 100).join("\n");
         assert!(
             shown.contains("the session log could not be written")
-                && shown.contains("Is a directory"),
+                && support::notice_prose(&shown).contains("Is a directory"),
             "wrong failure: {shown}"
         );
         assert_eq!(
@@ -1748,7 +1750,7 @@ fn image_paste_refuses_unsupported_model_before_reading_image() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let rendered = normalized(&output[paste_start..]);
-        if rendered.contains("does not support image input")
+        if support::notice_prose(&rendered).contains("does not support image input")
             || rendered.contains("[image: unreadable.png]")
         {
             break;
@@ -1765,7 +1767,7 @@ fn image_paste_refuses_unsupported_model_before_reading_image() {
         .expect("restore image permissions");
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
-        result.contains("does not support image input"),
+        support::notice_prose(&result).contains("does not support image input"),
         "no capability refusal: {result:?}"
     );
     assert!(
@@ -2864,6 +2866,28 @@ fn normalized(bytes: &[u8]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// Read the complete semantic notice, independent of physical terminal wraps.
+fn until_notice_prose(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !support::notice_prose(&normalized(&output[start..])).contains(needle) {
+        output.extend(
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "notice wait failed for {needle:?}: {error}; {}",
+                        normalized(&output[start..])
+                    )
+                }),
+        );
+    }
 }
 
 fn until_normalized(
@@ -5985,7 +6009,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
             let start = output.len();
             input.write_all(b"/compact\r").expect("compact command");
             input.flush().expect("compact command flush");
-            until_normalized(
+            until_notice_prose(
                 &reader,
                 &mut output,
                 start,
@@ -6158,8 +6182,16 @@ fn fork_after_a_turn() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
+    until_notice_prose(
+        &reader,
+        &mut output,
+        fork_start,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
     drain_until_quiet(&reader, &mut output);
-    let receipt = normalized(&output[fork_start..]);
+    // Read the terminal's retained receipt, excluding transient status redraws
+    // interleaved between its explicitly wrapped rows in the byte stream.
+    let receipt = support::notice_prose(&screen_rows(&output, ROWS, COLS).join("\n"));
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
     assert!(session.quit(input).success());
@@ -6260,6 +6292,12 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
+    until_notice_prose(
+        &reader,
+        &mut output,
+        fork_start,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
     drain_until_quiet(&reader, &mut output);
     let after = screen_rows(&output, ROWS, COLS);
     input.write_all(b"/quit\r").expect("quit");
@@ -8608,7 +8646,14 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     input.write_all(format!("/{action}\r").as_bytes()).unwrap();
     input.flush().unwrap();
     until_successor_receipt_ready(&reader, &mut output, start, action, &stub);
-    let receipt = normalized(&output[start..]);
+    until_notice_prose(
+        &reader,
+        &mut output,
+        start,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
+    drain_until_quiet(&reader, &mut output);
+    let receipt = support::notice_prose(&normalized(&output[start..]));
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = session.quit(input);

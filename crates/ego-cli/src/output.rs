@@ -313,7 +313,8 @@ pub fn note(message: &str) {
 /// Plain human notices share the answer renderer's word and cell layout.
 /// A missing terminal width keeps redirected diagnostics byte-for-byte intact.
 pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
-    let Some(width) = width else {
+    // Zero is an unmeasured surface width, not a one-cell terminal.
+    let Some(width) = width.filter(|width| *width > 0) else {
         return text.to_owned();
     };
     text.split('\n')
@@ -905,6 +906,14 @@ mod tests {
         let mut err = Vec::new();
         write_note(&mut err, message, None);
         assert_eq!(String::from_utf8(err).unwrap(), format!("εgo: {message}\n"));
+    }
+
+    // Catches: unmeasured surface geometry splits a permission receipt into characters.
+    #[test]
+    fn unmeasured_notice_width_preserves_receipt_bytes() {
+        let receipt = "Allowed run seq 1 3\n  next receipt";
+        assert_eq!(wrap_notice(receipt, Some(0)), receipt);
+        assert_eq!(wrap_notice(receipt, None), receipt);
     }
 
     // Catches: multiline notice wrapping drops blank rows or measures Unicode in bytes.
