@@ -82,6 +82,9 @@ _ego() {
             ego,usage)
                 cmd="ego__subcmd__usage"
                 ;;
+            ego,worktree)
+                cmd="ego__subcmd__worktree"
+                ;;
             ego__subcmd__auth,login)
                 cmd="ego__subcmd__auth__subcmd__login"
                 ;;
@@ -163,6 +166,12 @@ _ego() {
             ego__subcmd__rules,revoke)
                 cmd="ego__subcmd__rules__subcmd__revoke"
                 ;;
+            ego__subcmd__worktree,cleanup)
+                cmd="ego__subcmd__worktree__subcmd__cleanup"
+                ;;
+            ego__subcmd__worktree,show)
+                cmd="ego__subcmd__worktree__subcmd__show"
+                ;;
             *)
                 ;;
         esac
@@ -170,12 +179,172 @@ _ego() {
 
     case "${cmd}" in
         ego)
-            opts="-h --help run resume continue fork rm compact export ls usage models hooks doctor setup acp a2a auth mcp config roots rules mcp-server orchestrator"
+            opts="-f -m -C -c -q -h -V --worktree --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --vim --help --version run resume continue fork rm compact export ls usage models hooks doctor setup acp a2a auth mcp config roots rules mcp-server orchestrator worktree"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --worktree)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -f)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --var)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --attach)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --model)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sandbox)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --thinking)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --read-only-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --system)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --append-system)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output-style)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --instructions)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tools)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --allow)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --deny)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --session)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --session-id)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --session-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -C)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output)
+                    COMPREPLY=($(compgen -W "text json jsonl" -- "${cur}"))
+                    return 0
+                    ;;
+                --artifact-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --schema)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --schema-retries)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --retry)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --fallback)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --budget)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-output-tokens)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --goal)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --context-interval)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --goal-turns)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --goal-check-command)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-turns)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --mcp)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --mode)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --set)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -c)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -214,7 +383,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__acp)
-            opts="-C -h --session-dir --sandbox --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --listen --allow-public-bind --max-connections --connection-lifetime --max-ingress-bytes --help"
+            opts="-C -h --session-dir --sandbox --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --listen --allow-public-bind --max-connections --connection-lifetime --max-ingress-bytes --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -241,6 +410,10 @@ _ego() {
                     return 0
                     ;;
                 --append-system)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output-style)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -544,13 +717,17 @@ _ego() {
             return 0
             ;;
         ego__subcmd__continue)
-            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --help"
+            opts="-f -m -C -c -q -h --answer --worktree --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --vim --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --answer)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --worktree)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -595,6 +772,10 @@ _ego() {
                     return 0
                     ;;
                 --append-system)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output-style)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -894,7 +1075,7 @@ _ego() {
             return 0
             ;;
         ego__subcmd__mcp__subcmd__add)
-            opts="-h --stdio --http --cwd --inherit-env --auth --allow-insecure-loopback --help"
+            opts="-h --stdio --http --cwd --inherit-env --profile --auth --allow-insecure-loopback --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -910,6 +1091,10 @@ _ego() {
                     ;;
                 --inherit-env)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --profile)
+                    COMPREPLY=($(compgen -W "current legacy-sse" -- "${cur}"))
                     return 0
                     ;;
                 --auth)
@@ -1050,13 +1235,17 @@ _ego() {
             return 0
             ;;
         ego__subcmd__resume)
-            opts="-f -m -C -c -q -h --answer --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --help"
+            opts="-f -m -C -c -q -h --answer --worktree --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --vim --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --answer)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --worktree)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1101,6 +1290,10 @@ _ego() {
                     return 0
                     ;;
                 --append-system)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output-style)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1444,12 +1637,16 @@ _ego() {
             return 0
             ;;
         ego__subcmd__run)
-            opts="-f -m -C -c -q -h --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --help"
+            opts="-f -m -C -c -q -h --worktree --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --vim --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --worktree)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --file)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -1491,6 +1688,10 @@ _ego() {
                     return 0
                     ;;
                 --append-system)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output-style)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1658,6 +1859,48 @@ _ego() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__worktree)
+            opts="-h --help show cleanup"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__worktree__subcmd__cleanup)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        ego__subcmd__worktree__subcmd__show)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 *)
                     COMPREPLY=()
                     ;;

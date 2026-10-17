@@ -187,6 +187,7 @@ const TOOLS: &[(&str, Head)] = &[
     ("http", Head::Net),
     ("cat", Head::Read),
     ("edit", Head::Write),
+    ("notebook_edit", Head::Write),
     ("glob", Head::List),
     ("ls", Head::List),
     ("grep", Head::Search),

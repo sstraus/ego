@@ -782,7 +782,7 @@ mod acp_golden {
                 },
             ),
         ]);
-        let plan = ego_acp::project::project_goal_plan_v1(state.goal.as_ref()).unwrap();
+        let plan = ego_acp::project::project_objective_v1(state.goal.as_ref()).unwrap();
         let wire = serde_json::to_value(plan).unwrap();
         assert!(
             wire.to_string()
@@ -810,7 +810,7 @@ mod acp_golden {
             )
             .is_empty()
         );
-        for (state_name, expected_status) in [
+        for (state_name, _expected_status) in [
             ("active", "in_progress"),
             ("achieved", "completed"),
             ("blocked", "pending"),
@@ -874,15 +874,13 @@ mod acp_golden {
                 );
                 assert_eq!(updates.len(), 1, "goal state {state_name}");
                 let plan = serde_json::to_value(&updates[0]).unwrap();
-                assert_eq!(plan["sessionUpdate"], "plan");
-                let entries = plan["entries"].as_array().unwrap();
-                assert_eq!(entries.len(), 1, "goal is one entry, not fabricated steps");
-                assert_eq!(entries[0]["content"], "Deliver the goal");
-                assert_eq!(
-                    entries[0]["status"], expected_status,
-                    "goal state {state_name}"
+                assert_eq!(plan["sessionUpdate"], "session_info_update");
+                assert!(
+                    plan.get("entries").is_none(),
+                    "an objective is not a plan step"
                 );
-                assert_eq!(entries[0]["_meta"]["ego"]["goalState"], state_name);
+                assert_eq!(plan["_meta"]["ego"]["objective"], "Deliver the goal");
+                assert_eq!(plan["_meta"]["ego"]["goalState"], state_name);
             }
         }
     }

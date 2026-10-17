@@ -60,11 +60,12 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
         ),
     ];
     let render = |action: &crate::repl::actions::ActionRegistration| {
-        let shortcut = action
-            .shortcuts()
-            .first()
-            .map(|shortcut| format!(" [Meta-{shortcut}]"))
-            .unwrap_or_default();
+        let labels = registry.shortcut_labels(action.id());
+        let shortcut = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", labels.join(", "))
+        };
         match registry.availability(action.id()) {
             Availability::Disabled { owner } => format!(
                 "/{}{shortcut} — {} [unavailable: {owner}]",
@@ -170,7 +171,6 @@ fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
         }
         Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
-        Dispatch::Config(_) => Some("config is unavailable while a turn is running"),
         Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
         _ => None,
     }
@@ -228,10 +228,19 @@ fn submit_busy_line(
             route_session_metadata(status, operation, true);
             return None;
         }
+        Dispatch::Config(arguments) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Config(arguments)), false));
+        }
         Dispatch::Tasks(arguments) => {
             editor.run_edit_commands(&[EditCommand::Clear]);
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             return Some((Line::HostCommand(HostCommand::Tasks(arguments)), false));
+        }
+        Dispatch::UnknownSlash(message) => {
+            commit_to_transcript(status, &message);
+            return None;
         }
         Dispatch::Refused { reason } => {
             status.lock().expect("surface status lock").notice = Some(reason.to_owned());
@@ -247,7 +256,6 @@ fn submit_busy_line(
         | Dispatch::McpContext(_)
         | Dispatch::Mcp(_)
         | Dispatch::Setup(_)
-        | Dispatch::Config(_)
         | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
         Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
     }
@@ -298,6 +306,18 @@ pub(super) fn surface_line(
     drafts: &mut DraftStash,
 ) -> (Line, bool) {
     loop {
+        if phase.get() == EditPhase::Busy {
+            let notice = status.lock().expect("surface status lock").notice.take();
+            if let Some(notice) = notice {
+                // A host command suspends the live prompt in place. Retire it
+                // before the notice is queued, including at the bottom row
+                // where resuming the old footprint would scroll it into history.
+                if editor.erase_last_prompt().is_err() {
+                    return (Line::Ended, true);
+                }
+                commit_to_transcript(status, &format!("{}: {notice}", crate::DISPLAY_NAME));
+            }
+        }
         let signal = editor.read_line(prompt);
         // Hold only the isolated PTY child at the real suspended-read boundary.
         #[cfg(test)]
@@ -407,6 +427,10 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Hooks => {
                     return (Line::HostCommand(HostCommand::Hooks), failed);
+                }
+                Dispatch::UnknownSlash(message) => {
+                    commit_to_transcript(status, &message);
+                    continue;
                 }
                 Dispatch::Refused { reason } => {
                     status.lock().expect("surface status lock").notice = Some(reason.to_owned());

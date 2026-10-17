@@ -115,6 +115,8 @@ pub enum SessionProcessAction {
 pub enum Change {
     /// Every byte of the file, replaced.
     Whole(Vec<u8>),
+    /// One ID-addressed notebook cell operation; other state is retained.
+    Notebook(NotebookCellEdit),
     /// The one occurrence of `old_string`, replaced by `new_string`.
     ///
     /// One, not the first: a tool preparing this must refuse a call whose
@@ -124,6 +126,31 @@ pub enum Change {
         old_string: String,
         new_string: String,
     },
+}
+
+/// A cell mutation, bound into the same permission identity as other writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "edit_mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NotebookCellEdit {
+    Replace {
+        cell_id: String,
+        new_source: String,
+    },
+    Insert {
+        cell_id: Option<String>,
+        cell_type: NotebookCellType,
+        new_source: String,
+    },
+    Delete {
+        cell_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotebookCellType {
+    Code,
+    Markdown,
 }
 
 /// Which kind of operation a denial or a question is about.
@@ -771,6 +798,13 @@ impl PreparedCall {
                 Op::List { pattern, .. } => frame(&mut digest, pattern.as_bytes()),
                 Op::Search { query, .. } => frame(&mut digest, query.as_bytes()),
                 Op::Write { change, .. } => match change {
+                    Change::Notebook(edit) => {
+                        frame(&mut digest, b"notebook");
+                        frame(
+                            &mut digest,
+                            &serde_json::to_vec(edit).expect("closed cell edit codec"),
+                        );
+                    }
                     Change::Whole(bytes) => {
                         frame(&mut digest, b"whole");
                         frame(&mut digest, bytes);
