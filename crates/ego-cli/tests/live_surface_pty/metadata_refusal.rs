@@ -38,7 +38,22 @@ fn unknown_metadata_subcommands_print_usage_without_changing_state() {
         until_prompt_from(&reader, &mut output, start);
         drain_until_quiet(&reader, &mut output);
     }
-    let before = std::fs::read_to_string(&journal).expect("metadata journal");
+    // Echoed input and an intermediate repaint can precede durable metadata
+    // application. Establish the real baseline before testing refusal effects.
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    let before = loop {
+        let journal = std::fs::read_to_string(&journal).expect("metadata journal");
+        if journal.contains("\"kind\":\"GoalSet\"")
+            && journal.contains("\"kind\":\"SessionTitleChanged\"")
+        {
+            break journal;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "metadata was not durably applied: {journal}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let mut expected_usages = Vec::new();
     for (command, usage) in [
         (

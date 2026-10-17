@@ -8759,7 +8759,7 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
         "--sandbox",
         "off",
     ]);
-    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, Some((24, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -8783,7 +8783,7 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
         &format!("ego resume {}", support::FIXTURE_SESSION_ID),
     );
     drain_until_quiet(&reader, &mut output);
-    let receipt = support::notice_prose(&normalized(&output[start..]));
+    let receipt = support::notice_prose(&screen_rows(&output, 24, 100).join("\n"));
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = session.quit(input);

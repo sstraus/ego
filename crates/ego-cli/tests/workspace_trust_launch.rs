@@ -303,7 +303,7 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
                 "--thinking",
                 "off",
             ])
-            .run_pty_trusting("yes", "/skills details");
+            .run_pty_trusting_screen("yes", "/skills details");
         assert_eq!(result.code, Some(0), "{}", result.stdout);
         assert_eq!(
             result.stdout.contains("Trust project files"),
@@ -315,11 +315,7 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
         assert!(
             result
                 .stdout
-                .lines()
-                // This fixed-cursor PTY fixture interleaves a composer prefix
-                // between notice rows, including oversized path fragments.
-                .map(|line| line.trim_start().strip_prefix("> ").unwrap_or(line))
-                .flat_map(str::split_whitespace)
+                .split_whitespace()
                 .collect::<String>()
                 .contains(&skill.display().to_string()),
             "{}",
