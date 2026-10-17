@@ -41,6 +41,7 @@ pub mod hooks;
 pub mod host_ports;
 pub mod mcp;
 pub mod mcp_server;
+pub mod memory;
 pub mod metadata;
 pub mod model;
 pub mod model_picker;
