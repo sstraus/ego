@@ -2431,9 +2431,10 @@ For a custom style, create `$EGO_HOME/output-styles/NAME.md` (or
 `~/.ego/output-styles/NAME.md` when `EGO_HOME` is unset). The file is plain
 UTF-8 prompt text, not a configuration or agent envelope. Names contain 1–80
 ASCII letters, digits, underscores or hyphens. Files must be nonempty, contain
-no NUL bytes, and be at most 64 KiB. The user home directory, style directory
-and style file must not be symlinks. Missing or invalid styles refuse the run;
-there is no fallback to a workspace file. Install only styles you trust.
+no NUL bytes, and be at most 64 KiB. Operator-owned catalogue and file symlinks
+are followed; the opened target must be a regular file. Missing or invalid styles
+refuse the run; there is no fallback to a workspace file. Install only styles you
+trust.
 
 The selected name and source (`builtin` or the user file path) appear in a
 diagnostic, not protocol stdout. Styles are explicit launch selections; they

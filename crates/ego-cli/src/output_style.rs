@@ -47,26 +47,14 @@ pub(crate) fn load(name: &str, home: Option<&Path>) -> Result<Style, UsageError>
     let directory = home.join("output-styles");
     let path = directory.join(format!("{name}.md"));
     let refuse = |error| UsageError(format!("--output-style {name}: {error}"));
-    // The operator's catalogue is the authority, not a linked project catalogue.
-    for component in [home, directory.as_path()] {
-        let metadata = std::fs::symlink_metadata(component).map_err(refuse)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(UsageError(format!(
-                "--output-style catalogue {} must be a directory, not a symlink",
-                component.display()
-            )));
-        }
-    }
-    let metadata = std::fs::symlink_metadata(&path).map_err(refuse)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    let file = std::fs::File::open(&path).map_err(refuse)?;
+    if !file.metadata().map_err(refuse)?.is_file() {
         return Err(UsageError(format!(
-            "--output-style {name} must be a regular file, not a symlink"
+            "--output-style {name} must be a regular file"
         )));
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(&path)
-        .map_err(refuse)?
-        .take(MAX_BYTES + 1)
+    file.take(MAX_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(refuse)?;
     if bytes.len() as u64 > MAX_BYTES {
@@ -155,13 +143,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn linked_styles_cannot_import_workspace_text() {
-        // Catches: an operator catalogue link importing untrusted workspace text.
+    fn operator_links_load_regular_targets_and_reject_nonfiles() {
+        // Catches: operator-installed file/catalogue/home links being refused,
+        // or a linked non-file being admitted as style text.
         let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir(home.path().join("output-styles")).unwrap();
+        let directory = home.path().join("output-styles");
+        std::fs::create_dir(&directory).unwrap();
         let outside = home.path().join("outside.md");
-        std::fs::write(&outside, "Untrusted").unwrap();
-        std::os::unix::fs::symlink(outside, home.path().join("output-styles/linked.md")).unwrap();
+        std::fs::write(&outside, "Trusted linked text").unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("linked.md")).unwrap();
+        assert_eq!(
+            load("linked", Some(home.path())).unwrap().text,
+            "Trusted linked text"
+        );
+        let alias = home.path().join("alias");
+        std::fs::create_dir(&alias).unwrap();
+        std::os::unix::fs::symlink(&directory, alias.join("output-styles")).unwrap();
+        assert_eq!(
+            load("linked", Some(&alias)).unwrap().text,
+            "Trusted linked text"
+        );
+        let home_alias = home.path().join("home-alias");
+        std::os::unix::fs::symlink(&alias, &home_alias).unwrap();
+        assert_eq!(
+            load("linked", Some(&home_alias)).unwrap().text,
+            "Trusted linked text"
+        );
+        std::os::unix::fs::symlink(&directory, directory.join("nonfile.md")).unwrap();
+        assert!(load("nonfile", Some(home.path())).is_err());
+        std::fs::remove_file(&outside).unwrap();
         assert!(load("linked", Some(home.path())).is_err());
     }
 }
