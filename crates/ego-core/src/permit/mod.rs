@@ -52,8 +52,8 @@ pub use grant::{
 };
 pub use path::CanonPath;
 pub use prepared_call::{
-    Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, Op, OpName, PreparedCall,
-    SecretEgressAuthority, SessionProcessAction,
+    Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, NotebookCellEdit, NotebookCellType, Op,
+    OpName, PreparedCall, SecretEgressAuthority, SessionProcessAction,
 };
 pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots, check_root_ceilings};
 pub use sandbox_grant::{SandboxAccess, SandboxGrant, SandboxGrantPort};
@@ -73,4 +73,4 @@ pub use tool::{
 };
 
 mod terminal_text;
-pub use terminal_text::{TerminalSafe, shell_word, terminal_safe};
+pub use terminal_text::{TerminalSafe, shell_word, terminal_output_safe, terminal_safe};

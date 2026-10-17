@@ -1124,6 +1124,8 @@ pub struct SessionState {
     /// The session's current goal, if one has been set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalRecord>,
+    #[serde(default)]
+    pub plan: crate::plan::Plan,
     /// Per-turn state, keyed by turn id.
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
@@ -1260,6 +1262,7 @@ impl Default for SessionState {
             pause: PauseState::Running,
             holds: HoldReceipts::default(),
             goal: None,
+            plan: crate::plan::Plan::default(),
             turns: HashMap::default(),
             items: HashMap::default(),
             detached_execs: BTreeMap::default(),
@@ -1981,6 +1984,9 @@ impl SessionState {
             | EventKind::GoalCheckStopped { .. }
             | EventKind::GoalUpdated { .. }
             | EventKind::GoalTransitioned { .. } => self.apply_goal(ev),
+            EventKind::PlanUpdated { update } => {
+                let _ = self.plan.apply(update);
+            }
             EventKind::ContextRequested { request } => {
                 self.context_request = Some(request.clone());
             }

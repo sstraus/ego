@@ -1,3 +1,6 @@
+#[path = "legacy_sse.rs"]
+mod legacy_sse;
+
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -791,6 +794,47 @@ impl McpClient {
                 profile,
                 effects,
             }) => {
+                if config.profile == ego_core::config::McpHttpProfile::LegacySse {
+                    let mut drop_guard = DiscoverDropGuard::new(Arc::clone(&self.control));
+                    let outcome = async {
+                        let transport = legacy_sse::LegacySse::open(
+                            self.server.clone(),
+                            config,
+                            profile,
+                            effects,
+                            self.options,
+                            Arc::clone(&self.control),
+                        )
+                        .await?;
+                        let info = ClientInfo::new(
+                            ClientCapabilities::default(),
+                            Implementation::new("ego", env!("CARGO_PKG_VERSION")),
+                        )
+                        .with_protocol_version(ProtocolVersion::V_2024_11_05);
+                        serve_client_with_lifecycle(
+                            info,
+                            transport,
+                            ClientLifecycleMode::Initialize,
+                        )
+                        .await
+                        .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))
+                    }
+                    .await;
+                    drop_guard.disarm();
+                    return match outcome {
+                        Ok(service) => {
+                            self.state = ClientState::Running {
+                                service,
+                                duplex: None,
+                            };
+                            Ok(())
+                        }
+                        Err(error) => {
+                            self.state = ClientState::Failed { duplex: None };
+                            Err(error)
+                        }
+                    };
+                }
                 let backend = EgoStreamableHttpClient {
                     server: self.server.clone(),
                     url: config.url.as_url().clone(),

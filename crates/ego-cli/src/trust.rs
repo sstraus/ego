@@ -206,7 +206,7 @@ fn collect_executable_declarations(
                         env_keys: env_keys_in(entry),
                         details: details_in(
                             entry,
-                            &["transport", "cwd", "allow_insecure_loopback"],
+                            &["transport", "profile", "cwd", "allow_insecure_loopback"],
                         ),
                     },
                 );

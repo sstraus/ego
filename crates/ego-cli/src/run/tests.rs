@@ -1056,6 +1056,13 @@ fn only_a_long_run_is_worth_interrupting_someone_over() {
         "{long:?}"
     );
 
+    // Catches: the completed-turn notification using a different format from the working row.
+    let hour = loud.postamble(&RunTermination::Done, Duration::from_secs(3900));
+    assert!(
+        hour.contains("\x1b]9;εgo: done after 1h 05m\x07"),
+        "{hour:?}"
+    );
+
     let quiet = Announce::new(&out, capabilities, true);
     assert!(
         !quiet
@@ -1105,6 +1112,16 @@ fn a_long_title_is_cut_where_a_grapheme_ends() {
 
 #[test]
 fn a_duration_is_written_for_a_person() {
+    use crate::render::duration;
+
+    // Catches: turn notifications retaining minutes after the hour boundary.
+    assert_eq!(duration(Duration::from_secs(3600)), "1h 00m");
+    assert_eq!(duration(Duration::from_secs(3900)), "1h 05m");
+    assert_eq!(duration(Duration::from_secs(3959)), "1h 05m");
+    assert_eq!(
+        duration(Duration::from_secs(u64::MAX)),
+        "5124095576030431h 00m"
+    );
     assert_eq!(duration(Duration::from_secs(9)), "9s");
     assert_eq!(duration(Duration::from_secs(60)), "1m 0s");
     assert_eq!(duration(Duration::from_secs(252)), "4m 12s");
@@ -3177,4 +3194,53 @@ fn native_search_registry_does_not_require_or_select_exa() {
             "paid native search requires explicit selection"
         );
     }
+}
+
+#[test]
+fn output_style_precedes_explicit_appends_and_session_replace_suppresses_it() {
+    // Catches: style overriding explicit appends or leaking into a session replacement.
+    #[derive(Default)]
+    struct Notes(Mutex<Vec<String>>);
+    impl crate::output::Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+    let root = tempdir().unwrap();
+    let effective = ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap();
+    let mut args = protocol_args(
+        None,
+        crate::cli::SessionShape {
+            system: Some("base".into()),
+            output_style: Some("concise".into()),
+            append_system: Some("explicit tail".into()),
+            bare: true,
+            ..Default::default()
+        },
+    );
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Append,
+        text: "session tail".into(),
+    });
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        assembled.text,
+        "base\n\nUse concise, direct answers. Omit unnecessary detail, but retain material risks, failures and uncertainty.\n\nexplicit tail\n\nsession tail"
+    );
+    assert_eq!(*notes.0.lock().unwrap(), ["output style concise: builtin"]);
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Replace,
+        text: "replacement".into(),
+    });
+    // Even a missing launch style must not be loaded after a session replacement.
+    args.output_style = Some("missing".into());
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(assembled.text, "replacement");
+    assert!(notes.0.lock().unwrap().is_empty());
 }

@@ -32,6 +32,7 @@ pub mod mcp;
 pub mod orchestration_events;
 pub mod orchestrator;
 pub mod permit;
+pub mod plan;
 pub mod public;
 pub mod question;
 pub mod run;

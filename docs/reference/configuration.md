@@ -201,7 +201,7 @@ An invocation-scoped JSON entry cannot be a tombstone.
 | Transport | Keys and defaults |
 | --- | --- |
 | `stdio` | Required `transport="stdio"`, `command`; `args=[]`, `cwd` absent, `inherit_env=[]` |
-| `http` | Required `transport="http"`, `url`; `auth="none"` (or `oauth`), `allow_insecure_loopback=false` |
+| `http` | Required `transport="http"`, `url`; `profile="current"` (or explicit `legacy-sse`), `auth="none"` (or `oauth`), `allow_insecure_loopback=false` |
 | Tombstone | `removed=true`, with no transport fields |
 
 HTTP URLs reject embedded credentials. HTTP without TLS needs the explicit

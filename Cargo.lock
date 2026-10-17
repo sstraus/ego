@@ -1388,6 +1388,7 @@ dependencies = [
  "hmac 0.12.1",
  "html2text",
  "ignore",
+ "jsonschema",
  "keyring",
  "landlock",
  "nix 0.31.3",
