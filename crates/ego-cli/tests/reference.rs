@@ -122,3 +122,21 @@ fn the_reference_documents_every_command_and_no_others() {
         "the reference's sections are the parser's commands, in the parser's order",
     );
 }
+
+#[test]
+fn docs_review_root_completion_does_not_omit_interactive_options() {
+    for (shell, _) in COMPLETIONS {
+        let script = completion(*shell);
+        for option in ["model", "mode", "version"] {
+            assert!(script.contains(option), "{shell}: missing root {option}");
+        }
+    }
+    let mut root = root_command();
+    root.build();
+    for option in ["model", "mode", "directory", "version"] {
+        assert!(
+            root.get_arguments().any(|arg| arg.get_id() == option),
+            "missing root {option}"
+        );
+    }
+}
