@@ -3543,7 +3543,9 @@ fn busy_expand_hint_names_the_live_shortcut() {
 }
 
 fn busy_expand_shortcut_transcript(check_hint: bool) {
-    let (sampling, gate) = gated_paced_line("EXPAND-TURN-STILL-RUNNING");
+    // Screen markdown emits complete paragraphs, not a single trailing newline.
+    // Finish this paragraph before gating the response tail.
+    let (sampling, gate) = gated_paced_line("EXPAND-TURN-STILL-RUNNING\n");
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call(
@@ -3555,18 +3557,29 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
         ],
         ..Plan::default()
     });
-    let ego = Ego::against(&stub).conversing().args([
-        "--model",
-        "ollama/qwen3",
-        "--session-id",
-        support::FIXTURE_SESSION_ID,
-        "--mode",
-        "yolo",
-        "--sandbox",
-        "off",
-    ]);
+    // Release the fixture worker even when an assertion fails.
+    struct ReleaseOnDrop(Arc<ReleaseGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -3576,7 +3589,7 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
         .write_all(b"show five output lines\r")
         .expect("submit turn");
     input.flush().expect("submit turn flush");
-    until(&reader, &mut output, b"EXPAND-TURN-STILL-RUNNING");
+    until_normalized(&reader, &mut output, 0, "EXPAND-TURN-STILL-RUNNING");
     let collapsed = normalized(&output);
     assert!(collapsed.contains("2 more lines"), "{collapsed}");
     if check_hint {
@@ -3593,6 +3606,10 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
     input.write_all(b"unsent expand draft").expect("busy draft");
     input.flush().expect("busy draft flush");
     until_from(&reader, &mut output, draft_start, b"unsent expand draft");
+    // Text appears before the repaint finishes its cursor query. Sending Meta-o
+    // during that query lets the terminal-position reader consume the key.
+    until_from(&reader, &mut output, draft_start, b"\x1b[?25h");
+    drain_until_quiet(&reader, &mut output);
     let expand_start = output.len();
     input.write_all(b"\x1bo").expect("Meta-o");
     input.flush().expect("Meta-o flush");
