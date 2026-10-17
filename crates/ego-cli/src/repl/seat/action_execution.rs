@@ -966,7 +966,7 @@ pub(super) fn apply_surface_effect(
                     .iter()
                     .map(|(name, disabled)| (name, *disabled)),
             );
-            commit_to_transcript(status, &inventory);
+            status.lock().expect("surface status lock").notice = Some(inventory);
         }
         SurfaceActionEffect::Tasks => {
             return Some(Line::HostCommand(HostCommand::Tasks(String::new())));
