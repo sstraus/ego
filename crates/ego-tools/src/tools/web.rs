@@ -254,6 +254,85 @@ pub trait SearchBackend: Send + Sync {
         'io: 'a;
 }
 
+/// Retain both explicitly selected search routes until generation resolves its provider.
+pub fn selected_web_search(
+    local: Option<Arc<dyn ego_core::permit::Tool>>,
+) -> Arc<dyn ego_core::permit::Tool> {
+    Arc::new(ego_core::permit::Typed(SelectedWebSearch { local }))
+}
+
+struct SelectedWebSearch {
+    local: Option<Arc<dyn ego_core::permit::Tool>>,
+}
+impl TypedTool for SelectedWebSearch {
+    type Params = WebSearchParams;
+    fn name(&self) -> &str {
+        HostedWebSearch.name()
+    }
+    fn description(&self) -> &str {
+        HostedWebSearch.description()
+    }
+    fn admits_hosted_search(&self) -> bool {
+        true
+    }
+    fn local_search_tool(&self) -> Option<Arc<dyn ego_core::permit::Tool>> {
+        self.local.clone()
+    }
+    fn prepare_typed(
+        &self,
+        params: Self::Params,
+        ctx: &PrepareCtx<'_>,
+    ) -> Result<PreparedCall, ToolError> {
+        HostedWebSearch.prepare_typed(params, ctx)
+    }
+    fn execute<'a, 'io>(
+        &'a self,
+        call: PreparedCall,
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
+        HostedWebSearch.execute(call, io)
+    }
+}
+
+/// Declaration for a provider-executed tool. Local execution always refuses.
+pub struct HostedWebSearch;
+
+impl TypedTool for HostedWebSearch {
+    fn admits_hosted_search(&self) -> bool {
+        true
+    }
+
+    type Params = WebSearchParams;
+    fn name(&self) -> &str {
+        "web_search"
+    }
+    fn description(&self) -> &str {
+        "Search the web using the active provider hosted tool. Uses the model provider credential, incurs provider search fees and token charges, and returns cited sources. At most five searches per generation. No Exa fallback."
+    }
+    fn prepare_typed(
+        &self,
+        _params: Self::Params,
+        _ctx: &PrepareCtx<'_>,
+    ) -> Result<PreparedCall, ToolError> {
+        Err(invalid(
+            "hosted web search is executed by the provider, never locally; no fallback is used",
+        ))
+    }
+    fn execute<'a, 'io>(
+        &'a self,
+        _call: PreparedCall,
+        _io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
+        Box::pin(async { Err(invalid("hosted web search cannot execute locally")) })
+    }
+}
+
 #[derive(Default)]
 pub struct WebSearch {
     backend: Option<Arc<dyn SearchBackend>>,

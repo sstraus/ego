@@ -14,11 +14,43 @@ use crate::run::{RunAppend, RunRevision, RunTransaction};
 use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore};
 
+/// A trusted, immutable task definition. All authority fields are ceilings.
+#[derive(Clone, Debug)]
+pub struct NamedAgent {
+    pub name: String,
+    pub prompt: String,
+    pub model: Option<ModelRef>,
+    pub tools: Option<BTreeSet<String>>,
+    pub mode: Option<Mode>,
+    pub deny: Vec<crate::permit::rule::Rule>,
+    pub sandbox: Option<crate::permit::Confinement>,
+    /// When present, only the existing workspace root is admitted.
+    pub roots: Option<Vec<crate::permit::CanonPath>>,
+}
+
+struct NamedModelSource {
+    owner: Arc<dyn GenerationModelSource>,
+    model: ModelRef,
+}
+impl GenerationModelSource for NamedModelSource {
+    fn resolve<'a>(
+        &'a self,
+        request: GenerationModelRequest,
+    ) -> BoxFuture<
+        'a,
+        Result<GenerationProfile, crate::generation_model_source::GenerationModelError>,
+    > {
+        self.owner.resolve(request.with_model(self.model.clone()))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TaskRequest {
     name: String,
     prompt: String,
+    agent: Option<String>,
+    plan_step: Option<String>,
 }
 
 pub(super) fn descriptor() -> ToolDescriptor {
@@ -27,8 +59,10 @@ pub(super) fn descriptor() -> ToolDescriptor {
         description: "Run an isolated child agent with your tools, permissions, sandbox, offline posture and shared budget. Children cannot delegate. Returns only its bounded final answer.".into(),
         parameters: json!({"type":"object", "additionalProperties":false,
             "required":["name","prompt"], "properties": {
+                "plan_step":{"type":"string", "description":"Existing durable plan step ID. Child execution marks it in_progress, then completed or blocked."},
                 "name":{"type":"string", "minLength":1,"maxLength":80},
-                "prompt":{"type":"string", "minLength":1,"maxLength":65536}
+                "prompt":{"type":"string", "minLength":1,"maxLength":65536},
+                "agent":{"type":"string", "minLength":1,"maxLength":80}
             }}),
     }
 }
@@ -191,19 +225,30 @@ impl EventSink for TaskSink<'_> {
 struct TaskPolicySource {
     owner: Arc<dyn GenerationPolicySource>,
     snapshot: Arc<GenerationPolicySnapshot>,
+    definition: Option<NamedAgent>,
 }
 impl GenerationPolicySource for TaskPolicySource {
     fn current(&self) -> Result<Arc<PolicyEngine>, String> {
         Ok(self.capture()?.policy())
     }
     fn capture(&self) -> Result<GenerationPolicyCapture, String> {
-        self.owner.restore(self.snapshot.clone())
+        let capture = self.owner.restore(self.snapshot.clone())?;
+        match &self.definition {
+            Some(definition) => capture
+                .task_ceiling(
+                    definition.mode,
+                    &definition.deny,
+                    definition.roots.as_deref(),
+                )
+                .map_err(|error| error.to_string()),
+            None => Ok(capture),
+        }
     }
     fn restore(
         &self,
         snapshot: Arc<GenerationPolicySnapshot>,
     ) -> Result<GenerationPolicyCapture, String> {
-        if snapshot.digest() != self.snapshot.digest() {
+        if snapshot.digest() != self.capture()?.snapshot().digest() {
             return Err("task cannot widen its captured parent policy".into());
         }
         self.capture()
@@ -330,6 +375,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
         let mut completed = BTreeSet::new();
         let serial = Arc::new(futures::lock::Mutex::new(()));
         let mut work = Vec::new();
+        let mut claimed_steps = BTreeSet::new();
         for call in pending {
             if !matches!(call.selected.as_ref(), Some(Ok(RegisteredTool::Task))) {
                 continue;
@@ -355,6 +401,89 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     continue;
                 }
             };
+            let definition = request
+                .agent
+                .as_ref()
+                .map(|name| {
+                    self.tools
+                        .named_agents
+                        .iter()
+                        .find(|agent| &agent.name == name)
+                        .cloned()
+                        .ok_or_else(|| format!("unknown named agent `{name}`"))
+                        .and_then(|definition| {
+                            if definition.sandbox.is_some_and(|sandbox| {
+                                self.config
+                                    .identity
+                                    .as_ref()
+                                    .is_none_or(|identity| sandbox != identity.sandbox)
+                            }) {
+                                return Err(
+                                    "named agent sandbox must match the captured parent backend"
+                                        .into(),
+                                );
+                            }
+                            snapshot
+                                .validate_task_roots(definition.roots.as_deref())
+                                .map_err(str::to_owned)?;
+                            Ok(definition)
+                        })
+                })
+                .transpose();
+            let definition = match definition {
+                Ok(definition) => definition,
+                Err(error) => {
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted {
+                            ok: false,
+                            result: self.tools.masked_result(ToolResult::builtin(error)),
+                        },
+                    )?;
+                    completed.insert(call.item);
+                    continue;
+                }
+            };
+            if let Some(id) = &request.plan_step {
+                let update = crate::plan::PlanUpdate::Step {
+                    id: id.clone(),
+                    status: crate::plan::StepStatus::InProgress,
+                };
+                let valid = if claimed_steps.insert(id.clone()) {
+                    self.state().plan.apply(&update)
+                } else {
+                    Err(format!("plan step already assigned in this batch: {id}"))
+                };
+                if let Err(error) = valid {
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted {
+                            ok: false,
+                            result: self.tools.masked_result(ToolResult::builtin(error)),
+                        },
+                    )?;
+                    completed.insert(call.item);
+                    continue;
+                }
+            }
+            let mut request = request;
+            if let Some(definition) = &definition {
+                request.prompt = format!("{}\n\n{}", definition.prompt, request.prompt);
+            }
+            let source = match definition
+                .as_ref()
+                .and_then(|definition| definition.model.clone())
+            {
+                Some(model) => Arc::new(NamedModelSource {
+                    owner: self.source.clone(),
+                    model,
+                }) as Arc<dyn GenerationModelSource>,
+                None => self.source.clone(),
+            };
             let task = TaskExecution {
                 session: self.session_id,
                 parent: self.journal.clone(),
@@ -362,20 +491,37 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                 evidence: self.evidence,
                 clock: self.journal.clock(),
                 runtime: GenerationRuntime {
-                    source: self.source.clone(),
+                    source,
                     policy_source: Arc::new(TaskPolicySource {
                         owner: self.policy_source.clone(),
                         snapshot: snapshot.clone(),
+                        definition: definition.clone(),
                     }),
                     gate: self.gate.clone(),
-                    config: self.config.clone(),
+                    config: {
+                        let mut config = self.config.clone();
+                        if definition
+                            .as_ref()
+                            .is_some_and(|definition| definition.model.is_some())
+                        {
+                            config.fallbacks.clear();
+                        }
+                        config
+                    },
                     admission: self.admission.clone(),
                     invocation: self.invocation,
                     retry_pause: self.retry_pause.clone(),
                 },
                 tools: self
                     .tools
-                    .task_child(request.name.clone(), serial.clone(), self.cancel.clone())
+                    .task_child(
+                        request.name.clone(),
+                        serial.clone(),
+                        self.cancel.clone(),
+                        definition
+                            .as_ref()
+                            .and_then(|definition| definition.tools.clone()),
+                    )
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?,
                 cancel: self.cancel.clone(),
                 judge: self.judge.clone(),
@@ -396,11 +542,41 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     })
                     .or_else(|| self.inherited_effect_tools.clone()),
             };
+            if let Some(id) = &request.plan_step {
+                self.journal.append(
+                    turn,
+                    None,
+                    Some(call.started),
+                    EventKind::PlanUpdated {
+                        update: crate::plan::PlanUpdate::Step {
+                            id: id.clone(),
+                            status: crate::plan::StepStatus::InProgress,
+                        },
+                    },
+                )?;
+            }
             let journal = self.journal.clone();
             let item = call.item;
             let started = call.started;
             work.push(async move {
-                let (ok, result) = task.run(started, request).await?;
+                let step = request.plan_step.clone();
+                let outcome = task.run(started, request).await;
+                if let Some(id) = step {
+                    let status = if matches!(&outcome, Ok((true, _))) {
+                        crate::plan::StepStatus::Completed
+                    } else {
+                        crate::plan::StepStatus::Blocked
+                    };
+                    journal.append(
+                        turn,
+                        None,
+                        Some(started),
+                        EventKind::PlanUpdated {
+                            update: crate::plan::PlanUpdate::Step { id, status },
+                        },
+                    )?;
+                }
+                let (ok, result) = outcome?;
                 journal.append(
                     turn,
                     Some(item),

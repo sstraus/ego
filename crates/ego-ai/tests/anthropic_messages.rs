@@ -54,6 +54,7 @@ fn conversation(messages: Vec<Message>) -> Conversation {
 /// silently stops being sent has nowhere to hide.
 fn wide_request() -> GenRequest {
     GenRequest {
+        web_search: None,
         cache: None,
         model: "claude-opus-5".to_string(),
         messages: conversation(vec![
@@ -113,6 +114,7 @@ fn the_system_prompt_is_a_top_level_parameter_and_not_a_message() {
 #[test]
 fn every_system_turn_lands_in_the_one_slot_the_api_offers() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::System, "You are terse."),
@@ -138,6 +140,7 @@ fn every_system_turn_lands_in_the_one_slot_the_api_offers() {
 #[test]
 fn a_tool_result_is_a_block_inside_a_user_turn() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
@@ -194,6 +197,7 @@ fn a_tool_result_is_a_block_inside_a_user_turn() {
 #[test]
 fn a_failed_tool_result_carries_the_flag_that_says_so() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "read it"),
@@ -232,6 +236,7 @@ fn a_failed_tool_result_carries_the_flag_that_says_so() {
 #[test]
 fn a_request_with_no_ceiling_is_refused_rather_than_given_one() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         max_output_tokens: None,
         ..wide_request()
@@ -269,6 +274,7 @@ fn an_effort_level_is_sent_verbatim_beside_adaptive_thinking() {
         (ThinkingLevel::Max, "max"),
     ] {
         let body = body_of(&GenRequest {
+            web_search: None,
             cache: None,
             thinking: level,
             ..wide_request()
@@ -302,6 +308,7 @@ fn an_effort_level_is_sent_verbatim_beside_adaptive_thinking() {
 #[test]
 fn off_disables_thinking_and_states_no_effort_at_all() {
     let body = body_of(&GenRequest {
+        web_search: None,
         cache: None,
         thinking: ThinkingLevel::Off,
         ..wide_request()
@@ -323,6 +330,7 @@ fn off_disables_thinking_and_states_no_effort_at_all() {
 #[test]
 fn minimal_is_refused_and_the_refusal_names_the_six_that_work() {
     let refused = request_body(&GenRequest {
+        web_search: None,
         cache: None,
         thinking: ThinkingLevel::Minimal,
         ..wide_request()
@@ -379,6 +387,7 @@ fn declining_parallel_calls_is_spelled_on_tool_choice() {
     );
 
     let declined = body_of(&GenRequest {
+        web_search: None,
         cache: None,
         parallel_tool_calls: false,
         ..wide_request()
@@ -389,6 +398,7 @@ fn declining_parallel_calls_is_spelled_on_tool_choice() {
     );
 
     let toolless = body_of(&GenRequest {
+        web_search: None,
         cache: None,
         tools: Vec::new(),
         parallel_tool_calls: false,
@@ -420,6 +430,7 @@ fn declining_parallel_calls_is_spelled_on_tool_choice() {
 fn reasoning_state_is_replayed_exactly_as_the_provider_minted_it() {
     let block = r#"{"type":"thinking","thinking":"Due file, quindi.","signature":"EpoGCpcGCkgIBRABGAIiQL2f"}"#;
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
@@ -463,6 +474,7 @@ fn reasoning_state_is_replayed_exactly_as_the_provider_minted_it() {
 #[test]
 fn reasoning_state_from_another_dialect_is_refused_rather_than_sent() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "hi"),
@@ -496,6 +508,7 @@ fn reasoning_state_from_another_dialect_is_refused_rather_than_sent() {
 #[test]
 fn reasoning_state_that_is_not_json_is_refused() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "hi"),
@@ -527,6 +540,7 @@ fn reasoning_state_that_is_not_json_is_refused() {
 #[test]
 fn tool_arguments_that_are_not_json_are_refused() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "read it"),
@@ -567,6 +581,7 @@ fn tool_arguments_that_are_not_json_are_refused() {
 #[test]
 fn a_system_turn_that_is_not_text_is_refused() {
     let req = GenRequest {
+        web_search: None,
         cache: None,
         messages: conversation(vec![
             Message::text(Role::User, "go"),
@@ -683,6 +698,7 @@ fn a_golden_transcript_decodes_to_an_exact_event_sequence() {
                 cache_write_tokens: 60,
                 cache_write_extended_tokens: 40,
                 output_tokens: 250,
+                web_search_requests: 0,
                 reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::Stop),
@@ -752,6 +768,7 @@ fn a_cache_write_with_no_split_is_all_at_standard_retention() {
             cache_write_tokens: 100,
             cache_write_extended_tokens: 0,
             output_tokens: 96,
+            web_search_requests: 0,
             reasoning_tokens: None,
         }
     );
@@ -808,11 +825,8 @@ fn a_tool_transcript_ends_as_tool_use() {
 
 /// Every stop reason this protocol publishes, and what it becomes.
 ///
-/// `pause_turn` is the one with no mapping and it is not given one: it means
-/// "send the response back as-is to continue", which is loop behaviour, and
-/// both available readings destroy it — `Stop` truncates an answer the provider
-/// intended to resume, `Error` aborts it. It is reported as an error that says
-/// what happened, so the operator learns the truth rather than a mistranslation.
+/// `pause_turn` resumes the provider loop without a local tool dispatch.
+/// Unknown reasons still fail closed and name the unsupported discriminator.
 #[test]
 fn each_stop_reason_becomes_what_it_means_or_says_it_cannot() {
     for (spelled, expected) in [
@@ -822,7 +836,7 @@ fn each_stop_reason_becomes_what_it_means_or_says_it_cannot() {
         ("tool_use", StopReason::ToolUse),
         ("refusal", StopReason::Error),
         ("model_context_window_exceeded", StopReason::Error),
-        ("pause_turn", StopReason::Error),
+        ("pause_turn", StopReason::Continue),
         (
             "a_reason_invented_after_this_was_written",
             StopReason::Error,
@@ -848,7 +862,7 @@ fn each_stop_reason_becomes_what_it_means_or_says_it_cannot() {
 #[test]
 fn an_unmappable_stop_reason_says_which_one_it_was() {
     let transcript = "event: message_delta\n\
-         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"pause_turn\"},\"usage\":{\"output_tokens\":3}}\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"future_stop_reason\"},\"usage\":{\"output_tokens\":3}}\n\
          \n\
          event: message_stop\n\
          data: {\"type\":\"message_stop\"}\n\n";
@@ -861,7 +875,7 @@ fn an_unmappable_stop_reason_says_which_one_it_was() {
         })
         .expect("an unmappable reason is reported");
     assert!(
-        said.contains("pause_turn"),
+        said.contains("future_stop_reason"),
         "the operator must learn which reason it was: {said}"
     );
 }

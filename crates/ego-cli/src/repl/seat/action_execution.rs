@@ -60,11 +60,12 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
         ),
     ];
     let render = |action: &crate::repl::actions::ActionRegistration| {
-        let shortcut = action
-            .shortcuts()
-            .first()
-            .map(|shortcut| format!(" [Meta-{shortcut}]"))
-            .unwrap_or_default();
+        let labels = registry.shortcut_labels(action.id());
+        let shortcut = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", labels.join(", "))
+        };
         match registry.availability(action.id()) {
             Availability::Disabled { owner } => format!(
                 "/{}{shortcut} — {} [unavailable: {owner}]",
@@ -103,6 +104,12 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 .map(|(name, description)| format!("  /{name}  {description}")),
         );
     }
+    logical.extend(
+        registry
+            .mcp_menu("")
+            .into_iter()
+            .map(|(name, description)| format!("  /{name}  {description}")),
+    );
     logical.push("Keys".to_owned());
     logical.extend(
         registry
@@ -159,6 +166,9 @@ fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
         Dispatch::Skills(_) => Some("skill actions are unavailable while a turn is running"),
         Dispatch::Export(_) => Some("export is unavailable while a turn is running"),
         Dispatch::Fork(_) => Some("switching forks is unavailable while a turn is running"),
+        Dispatch::McpContext(_) => {
+            Some("MCP context commands are unavailable while a turn is running")
+        }
         Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
         Dispatch::Config(_) => Some("config is unavailable while a turn is running"),
@@ -235,6 +245,7 @@ fn submit_busy_line(
         | Dispatch::Skills(_)
         | Dispatch::Export(_)
         | Dispatch::Fork(_)
+        | Dispatch::McpContext(_)
         | Dispatch::Mcp(_)
         | Dispatch::Setup(_)
         | Dispatch::Config(_)
@@ -382,6 +393,9 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Tasks(arguments) => {
                     return (Line::HostCommand(HostCommand::Tasks(arguments)), failed);
+                }
+                Dispatch::McpContext(command) => {
+                    return (Line::HostCommand(HostCommand::McpContext(command)), failed);
                 }
                 Dispatch::Mcp(arguments) => {
                     return (Line::HostCommand(HostCommand::Mcp(arguments)), failed);

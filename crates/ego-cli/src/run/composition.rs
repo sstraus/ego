@@ -249,6 +249,7 @@ pub(super) fn tools(
         history,
         environment,
         ego_core::orchestrator::Mode::Observe,
+        None,
     )
 }
 
@@ -271,11 +272,23 @@ pub(super) fn tools_with_mode(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
     orchestration: ego_core::orchestrator::Mode,
+    _model: Option<&str>,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
+    if selected.is_some_and(|names| names.iter().any(|name| name == "web_search")) {
+        let local = all
+            .iter()
+            .find(|tool| tool.descriptor().name == "web_search")
+            .and_then(RegisteredTool::as_effect)
+            .cloned();
+        all.retain(|tool| tool.descriptor().name != "web_search");
+        all.push(RegisteredTool::Effect(
+            ego_tools::tools::selected_web_search(local),
+        ));
+    }
     if profile == Some("coordinator") {
         all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
             ego_tools::tools::MemoryLookup,
@@ -289,6 +302,7 @@ pub(super) fn tools_with_mode(
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     all.push(RegisteredTool::Task);
     all.push(RegisteredTool::Goal);
+    all.push(RegisteredTool::Plan);
     if let Some(source) = history {
         for tool in [
             ego_core::history::HistoryTool::Search,
@@ -1031,6 +1045,13 @@ pub(super) fn prepared_materials(
             .policy()
             .map_err(|error| UsageError(error.to_string()))?,
         orchestration_mode(&settings.effective),
+        args.model.as_deref().or_else(|| {
+            settings
+                .effective
+                .model
+                .as_ref()
+                .map(|model| model.0.as_str())
+        }),
     )?;
     let slug = args
         .model

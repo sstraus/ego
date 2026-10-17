@@ -639,6 +639,26 @@ pub fn ego_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ego"))
 }
 
+/// Process keyboard preferences come only from the user file, before any terminal
+/// owner exists. Project/session admission must never change the human's keys.
+pub(crate) fn keyboard_preferences(vim: bool) -> Result<ego_core::config::UiLayer, UsageError> {
+    keyboard_preferences_at(ego_home().as_deref(), vim)
+}
+
+fn keyboard_preferences_at(
+    home: Option<&Path>,
+    vim: bool,
+) -> Result<ego_core::config::UiLayer, UsageError> {
+    let mut preferences = match home {
+        Some(home) => layer(Source::User, &home.join("config.toml"))?
+            .and_then(|layer| layer.value.ui)
+            .unwrap_or_default(),
+        None => ego_core::config::UiLayer::default(),
+    };
+    preferences.vim = Some(vim || preferences.vim.unwrap_or(false));
+    Ok(preferences)
+}
+
 /// Authentication configuration for `ego auth`.
 ///
 /// The command has no workspace/trust flags, so only the system and user
@@ -1226,6 +1246,8 @@ enum InvocationMcpServer {
         inherit_env: Vec<McpEnvironmentName>,
     },
     Http {
+        #[serde(default)]
+        profile: ego_core::config::McpHttpProfile,
         name: McpServerName,
         url: McpHttpUrl,
         #[serde(default)]
@@ -1248,12 +1270,16 @@ impl InvocationMcpServer {
                 .map(|server| (name, server))
                 .map_err(|error| UsageError(error.to_string())),
             Self::Http {
+                profile,
                 name,
                 url,
                 auth,
                 allow_insecure_loopback,
             } => McpHttpConfig::new(url, auth, allow_insecure_loopback)
-                .map(McpServerConfig::Http)
+                .map(|mut config| {
+                    config.profile = profile;
+                    McpServerConfig::Http(config)
+                })
                 .map(|server| (name, server))
                 .map_err(|error| UsageError(error.to_string())),
         }
@@ -1382,8 +1408,17 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     // changes every config diagnostic and belongs with `Source::rank` going
     // public (`ARCHITECTURE.md`
     // "Consequences"), not with whichever caller noticed it.
-    ConfigLayer::parse(Source::Flags, &toml)
-        .map_err(|err| UsageError(format!("the command line: {err}")))
+    let layer = ConfigLayer::parse(Source::Flags, &toml)
+        .map_err(|err| UsageError(format!("the command line: {err}")))?;
+    if layer
+        .value
+        .ui
+        .as_ref()
+        .is_some_and(|ui| ui.keybindings.is_some() || ui.vim.is_some())
+    {
+        return Err(UsageError("keyboard preferences are user/process-only: use ego config set ui.keybindings=TABLE or --vim, not -c".into()));
+    }
+    Ok(layer)
 }
 
 /// The model-selection flags as one precedence layer.
@@ -1595,5 +1630,69 @@ mod config_repl_tests {
             assert!(repl_set_args(invalid).is_err(), "{invalid}");
         }
         assert_eq!(std::fs::read_to_string(path).unwrap(), disk);
+    }
+}
+
+#[cfg(test)]
+mod keyboard_preference_tests {
+    use super::*;
+
+    // Catches: keyboard bootstrap consults repository settings or --vim loses to the user file.
+    #[test]
+    fn keyboard_bootstrap_is_user_only_and_cli_vim_wins() {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("config.toml"),
+            "[ui]\nvim=false\nkeybindings={model=['Ctrl+P']}\n",
+        )
+        .unwrap();
+        let saved = keyboard_preferences_at(Some(user.path()), false).unwrap();
+        assert_eq!(saved.vim, Some(false));
+        assert_eq!(saved.keybindings.unwrap()["model"], vec!["Ctrl+P"]);
+        assert_eq!(
+            keyboard_preferences_at(Some(user.path()), true)
+                .unwrap()
+                .vim,
+            Some(true)
+        );
+        assert_eq!(
+            keyboard_preferences_at(None, false).unwrap().vim,
+            Some(false)
+        );
+        std::fs::write(user.path().join("config.toml"), "[ui]\nvim=true\n").unwrap();
+        assert_eq!(
+            keyboard_preferences_at(Some(user.path()), false)
+                .unwrap()
+                .vim,
+            Some(true)
+        );
+        let layers = [ConfigLayer::parse(
+            Source::Project,
+            "[ui]\nvim=true\nkeybindings={model=['Ctrl+P']}\n",
+        )
+        .unwrap()];
+        let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+        assert_eq!(effective.ui.vim, None);
+        assert_eq!(effective.ui.keybindings, None);
+    }
+
+    // Catches: malformed user preferences are silently replaced by default keys.
+    #[test]
+    fn keyboard_bootstrap_refuses_invalid_user_types_and_per_turn_overrides() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "[ui]\nvim='yes'\n").unwrap();
+        assert!(keyboard_preferences_at(Some(home.path()), false).is_err());
+        let crate::cli::Invocation::Interactive(mut args) =
+            crate::cli::parse(vec!["ego".into()]).unwrap()
+        else {
+            panic!("interactive")
+        };
+        args.set = vec!["ui.vim=true".into()];
+        assert!(
+            args_layer(&args)
+                .unwrap_err()
+                .0
+                .contains("user/process-only")
+        );
     }
 }

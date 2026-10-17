@@ -300,7 +300,7 @@ fn project<'a>(messages: &'a [Message]) -> Result<(Option<String>, Vec<Step<'a>>
                     data: base64::engine::general_purpose::STANDARD.encode(image.bytes()),
                     mime_type: image.media_type().mime(),
                 }),
-                ContentBlock::Reasoning { state } => {
+                ContentBlock::Reasoning { state } | ContentBlock::ProviderContent { state } => {
                     flush(turn, &mut pending, &mut steps);
                     if state.dialect != DIALECT {
                         return Err(Inexpressible::ReasoningStateFromAnotherDialect {
@@ -907,6 +907,7 @@ fn into_usage(usage: &WireUsage) -> Usage {
         // This API states no cache-write figure at all, at either retention.
         cache_write_tokens: 0,
         cache_write_extended_tokens: 0,
+        web_search_requests: 0,
         reasoning_tokens: Some(usage.total_thought_tokens),
         output_tokens: usage
             .total_output_tokens

@@ -710,6 +710,8 @@ pub enum Ceiling {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenCategory {
+    /// Provider-side web searches, not tokens.
+    WebSearch,
     /// Input tokens billed at the full rate — not served from cache.
     UncachedInput,
     /// Input tokens served from the provider's prompt cache.

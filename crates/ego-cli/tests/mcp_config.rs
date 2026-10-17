@@ -200,3 +200,45 @@ fn invalid_at_names_missing_separator_mixed_options_applicability_loopback_alias
         );
     }
 }
+
+#[test]
+fn add_legacy_sse_keeps_explicit_profile_in_the_typed_payload() {
+    let Invocation::Mcp(args) = parse_ok(&[
+        "ego",
+        "mcp",
+        "add",
+        "events",
+        "--http",
+        "https://example.test/sse",
+        "--profile",
+        "legacy-sse",
+    ]) else {
+        panic!("MCP");
+    };
+    let McpAction::Add {
+        server: ego_core::config::McpServerConfig::Http(http),
+        ..
+    } = args.action
+    else {
+        panic!("HTTP");
+    };
+    assert_eq!(http.profile, ego_core::config::McpHttpProfile::LegacySse);
+    assert!(
+        parse(
+            [
+                "ego",
+                "mcp",
+                "add",
+                "events",
+                "--http",
+                "https://example.test/sse",
+                "--profile",
+                "auto"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        )
+        .is_err()
+    );
+}

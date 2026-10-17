@@ -5,6 +5,7 @@
 //! and transcript output stay live without creating a second terminal writer.
 
 mod clipboard;
+mod keyboard;
 mod keys;
 mod seat;
 
@@ -67,6 +68,7 @@ pub enum HostCommand {
     Setup(String),
     Tasks(String),
     Mcp(String),
+    McpContext(actions::McpContextCommand),
     Background,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
@@ -486,3 +488,6 @@ mod live_surface_red {
         pump.join().expect("output pump thread panicked");
     }
 }
+
+#[cfg(test)]
+pub(crate) use seat::test_resumed_round_terminal;
