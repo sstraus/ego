@@ -18,6 +18,7 @@ fn initial_ready_prompt_resets_stale_host_working_state() {
     input.flush().expect("flush");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
+    record_slash_capture(&output, 24, 80);
     let ready = String::from_utf8_lossy(&output[start..]).into_owned();
     for command in [b"/help\r".as_slice(), b"/usage\r", b"/version\r"] {
         let start = output.len();

@@ -9,7 +9,7 @@ members = [
     "crates/ego-mcp",
     "crates/ego-cli",
 ]
-exclude = ["vendor/process-wrap", "vendor/reedline"]
+exclude = ["vendor/process-wrap", "vendor/reedline", "vendor/crossterm"]
 resolver = "3"
 
 [workspace.package]
@@ -62,3 +62,8 @@ debug = "line-tables-only"
 # opt-level 0 that read cost ~4.7 s per session/new in a dev build.
 [profile.dev.package.sha2]
 opt-level = 3
+
+[patch.crates-io]
+# DEFERRED (2026-10-17) — Drop this copy when upstream fixes Escape/CPR
+# ownership in src/event/source/unix/{mio,tty}.rs, Parser::advance (lines 198/247).
+crossterm = { path = "vendor/crossterm" }

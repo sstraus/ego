@@ -675,7 +675,7 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
             &root,
             session::store_root(args.session_dir.as_ref()).map_err(|error| error.to_string())?,
         );
-        let store = Arc::new(session::jsonl(store_root, root));
+        let store = Arc::new(session::jsonl(store_root, root.clone()));
         let lifecycle = SessionLifecycle::new(store, Arc::new(NoLiveRuns), Arc::new(SystemClock));
         let publication = lifecycle
             .delete_with_force(args.source, args.force)
@@ -687,6 +687,11 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
                 Stderr.note(&diagnostic)
             }
             _ => {}
+        }
+        if let Err(error) = ego_tools::checkpoint::CheckpointFs::close(&root, args.source) {
+            Stderr.note(&format!(
+                "session deleted, but checkpoint cleanup failed: {error}"
+            ));
         }
         out.line(&format!("deleted {}", args.source));
         Ok(())

@@ -42,7 +42,9 @@ fn idle_screen(session: &mut ModalSession) -> Vec<String> {
         let screen = session.screen();
         let mut rows = screen.iter().rev().filter(|row| !row.trim().is_empty());
         if rows.next().is_some_and(|row| row.starts_with('>'))
-            && rows.next().is_some_and(|row| row.contains(" · ctx "))
+            && rows
+                .next()
+                .is_some_and(|row| row.contains("▱") || row.contains("▰"))
         {
             return screen;
         }

@@ -90,6 +90,7 @@ complete -c ego -n "__fish_ego_needs_command" -a "usage" -d 'Report usage, conte
 complete -c ego -n "__fish_ego_needs_command" -a "models" -d 'List the shared model catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
+complete -c ego -n "__fish_ego_needs_command" -a "checkpoint" -d 'Preview or selectively restore session-owned Git file checkpoints.'
 complete -c ego -n "__fish_ego_needs_command" -a "setup" -d 'Inspect expected work without running effects.'
 complete -c ego -n "__fish_ego_needs_command" -a "acp" -d 'Serve the Agent Client Protocol on stdio or an endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
@@ -317,6 +318,14 @@ complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcomman
 complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -l json -d 'Emit the exact versioned health snapshot'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_subcommand_from preview restore close" -s C -l directory -r -F
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_subcommand_from preview restore close" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_subcommand_from preview restore close" -a "preview" -d 'List checkpoint IDs, paths, effects, and external-change conflicts as JSON'
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_subcommand_from preview restore close" -a "restore" -d 'Restore one selected checkpoint; external changes are never forced'
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_subcommand_from preview restore close" -a "close" -d 'Close checkpoint ownership and delete the session\'s private Git ref'
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and __fish_seen_subcommand_from preview" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and __fish_seen_subcommand_from restore" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand checkpoint; and __fish_seen_subcommand_from close" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand setup" -l items -d 'Limit proposals to these report item IDs (comma-separated)' -r
 complete -c ego -n "__fish_ego_using_subcommand setup" -l judge -d 'Offer a validated judge for unresolved policy; never authorizes an action' -r
 complete -c ego -n "__fish_ego_using_subcommand setup" -l profile -r

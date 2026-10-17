@@ -55,7 +55,6 @@ printf '{"verdict":"continue","reason":"Verification remains after %s"}\n' "$ste
         input.flush().unwrap();
         until_prompt_from(&reader, &mut output, start);
         let start = output.len();
-        let ready_before = support::ready_prompt_count(&output);
         input.write_all(b"finish this task\r").unwrap();
         input.flush().unwrap();
         until_normalized(
@@ -64,7 +63,11 @@ printf '{"verdict":"continue","reason":"Verification remains after %s"}\n' "$ste
             start,
             &format!("REGRESSION-MARKER-ANSWER-{continuations}"),
         );
-        until_prompt_after(&reader, &mut output, ready_before);
+        // Intermediate goal continuations also draw empty composers. Only
+        // the final stop receipt establishes that /compact can run idle.
+        until_normalized(&reader, &mut output, start, "Goal stopped:");
+        let stopped = start + find(&output[start..], b"Goal stopped:");
+        until_prompt_from(&reader, &mut output, stopped);
         drain_until_quiet(&reader, &mut output);
         let start = output.len();
         input.write_all(b"/compact\r").unwrap();

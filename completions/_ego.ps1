@@ -91,6 +91,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('models', 'models', [CompletionResultType]::ParameterValue, 'List the shared model catalogue.')
             [CompletionResult]::new('hooks', 'hooks', [CompletionResultType]::ParameterValue, 'Inspect the admitted system and user hook catalogue.')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Report a read-only redacted health snapshot of this installation.')
+            [CompletionResult]::new('checkpoint', 'checkpoint', [CompletionResultType]::ParameterValue, 'Preview or selectively restore session-owned Git file checkpoints.')
             [CompletionResult]::new('setup', 'setup', [CompletionResultType]::ParameterValue, 'Inspect expected work without running effects.')
             [CompletionResult]::new('acp', 'acp', [CompletionResultType]::ParameterValue, 'Serve the Agent Client Protocol on stdio or an endpoint.')
             [CompletionResult]::new('a2a', 'a2a', [CompletionResultType]::ParameterValue, 'Serve the Agent2Agent protocol on a local or loopback endpoint.')
@@ -365,6 +366,31 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;doctor' {
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the exact versioned health snapshot')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;checkpoint' {
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'C')
+            [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'directory')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('preview', 'preview', [CompletionResultType]::ParameterValue, 'List checkpoint IDs, paths, effects, and external-change conflicts as JSON')
+            [CompletionResult]::new('restore', 'restore', [CompletionResultType]::ParameterValue, 'Restore one selected checkpoint; external changes are never forced')
+            [CompletionResult]::new('close', 'close', [CompletionResultType]::ParameterValue, 'Close checkpoint ownership and delete the session''s private Git ref')
+            break
+        }
+        'ego;checkpoint;preview' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;checkpoint;restore' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;checkpoint;close' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

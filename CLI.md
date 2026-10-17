@@ -37,6 +37,8 @@ ego ls                        list sessions (this workspace; --all for every one
 ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
                               --force acknowledges an uncertain run
 ego fork <ID> [--at ITEM_ID]   branch after a completed turn
+ego checkpoint [-C DIR] <ID> preview|restore COMMIT|close
+                              inspect or selectively undo builtin file edits
 ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
                               publish one idempotent checkpoint target
 ego export <ID> [--sanitize] [--format md|json|jsonl|transcript] [--file PATH]
@@ -1239,9 +1241,9 @@ model call. They use the existing effect permission path and refuse a command
 from a generation that is no longer admitted. ACP announces the same commands
 and their JSON argument schemas when the admitted runtime opens a prompt.
 
-Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
+Slash commands: `/help /model /thinking /fast on|off /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
-/name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
+/name /goal /tasks /tools /expand /skills /hooks /memory /init /setup /retry /version`. These 32 canonical commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1254,11 +1256,42 @@ To send literal text that starts with `/` (for example `/tmp/x`), add a leading
 space. Bracketed paste also remains literal prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
-25-command action registry: a typed complete slash is classified as an action,
+32-command action registry: a typed complete slash is classified as an action,
 while bracketed paste and non-command text remain ordinary prompts. Completion,
 menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
+
+### Reviewed persistent memory and project initialization
+
+`/memory [project|user] [list | show ID | set ID TITLE CONTENT | disable ID | delete ID]`
+uses the native MDKB index in the workspace or ego user directory. The selected
+scope must already have a `.mdkb` index; initialize it explicitly with `mdkb init`.
+Quote a title or content that contains spaces. `set` creates or replaces the
+record as an operator-authored `topic` with `user_statement` provenance and the
+`ego-reviewed` tag. `list` and `show` expose native provenance and lifecycle
+metadata. Every mutation requires review of the exact proposed content and
+scope. Disable preserves the record and source provenance, adds `ego-disabled`,
+and sets native TTL to zero so ordinary MDKB retrieval excludes it. Native
+MDKB expiry and archive rules still apply. Delete uses native MDKB removal;
+native archive and history may retain content. It is not secure erasure.
+
+These actions require workspace trust. Plan mode, read-only confinement, root
+limits, and explicit write denies remain effective. No model response, tool
+result, or conversation is automatically saved. Review must exclude secrets and
+untrusted tool instructions. Memory bodies are not automatically promoted to
+system instructions. This surface adds no second memory store.
+
+`/init` builds a deterministic, local `AGENTS.md` proposal and shows the diff
+before confirmation. It creates `CLAUDE.md` only as the relative sibling symlink
+`AGENTS.md`. Existing `AGENTS.md` content is preserved. An independent
+`CLAUDE.md`, an unexpected symlink, denied write, or changed reviewed state is
+refused. No model call is required. This explicit operator control-file workflow
+does not grant general directory-write authority to tools or setup. Partial I/O
+failures are reported and existing files are never overwritten. Use `/refresh`
+after initialization to request the normal trust admission in a new prompt epoch.
+Both commands are refused while a turn is running; a non-human seat cannot
+confirm a mutation.
 
 Arguments that do not belong to a selected local action are usage errors, not
 model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
@@ -1628,6 +1661,26 @@ and the interrupt segment remains visible while expedited or ordinary
 interruption is pending. `trust` renders `trusted` or `untrusted` and counts as
 inactive while trusted, so width pressure drops it from exactly the sessions
 whose posture is not worth reporting.
+
+The compact default reads as:
+
+```text
+gpt-6-sol · medium · yolo ▰▰▱▱▱▱▱▱▱▱ 58k/272k ≈$0.66 ~/G/p/mdkb ⎇ feat/configurable-embedder●
+```
+
+The ten context cells fill in proportion to measured occupancy. The meter is
+green below 60%, yellow from 60%, and red from 85%. Missing occupancy reads
+`▱▱▱▱▱▱▱▱▱▱ ?/272k` when the window is known. Colour is optional; the count
+and window remain visible without it. `≈$` means subscription-equivalent cost
+at standard API prices, not billed spend. `$` means billed cost. `(partial)`
+marks an estimate that excludes mixed or unpriced usage; `unpriced` means no
+complete price is available. `/statusline` explains these symbols in its setup
+selector. Home is `~`, intermediate path components use their first letter,
+and the final component stays complete. `⎇` precedes the branch; `●` means
+uncommitted changes. These symbols are standard single-cell BMP characters,
+not emoji or private font glyphs. Under width pressure, branch, cwd, and cost
+drop in that order before model, reasoning, mode, and context. At widths too
+small for that core, whole fields still drop rather than wrap or truncate.
 
 Configuration stores one final resolved shape rather than a preset plus a
 second override language:
@@ -2018,6 +2071,25 @@ in this table reaches the credential store — `ego auth status` reports an id, 
 kind and an expiry, never a header.
 
 ### 7.2 `models.toml` — hosted model capabilities, in three layers
+
+Per-model execution tier defaults use a separate map in the system or user model
+file. `standard` is the default; `fast` is refused unless the shared catalogue
+has verified support and pricing for that full slug:
+
+```toml
+[service_tier]
+"openai/gpt-6.1-sol" = "fast"
+"openai-codex/gpt-6.1-sol" = "standard"
+```
+
+`/fast on` and `/fast off` override the current model's tier for this session at
+an idle boundary. The receipt names the token-price premium and any distinct
+included-subscription usage multiplier. The status snapshot exposes `fast`, and
+the default status row includes it when enabled. Token quotes and Codex's
+separate API-equivalent estimate use the selected tier; unavailable prices stay
+unknown, not zero. `ego models` lists verified fast support and its multiplier.
+See `ARCHITECTURE.md` for provider evidence and account limits.
+
 
 Hosted providers do not tell ego what their models can do, so those facts are
 *supplied*: stated by an authority rather than guessed. There are three, and
@@ -2488,6 +2560,33 @@ HTTP 401 triggers refresh without replaying the operation; retry the operation
 when requested. Missing or revoked credentials require a new explicit login.
 Servers that advertise only confidential-client authentication are not supported.
 
+
+### Session-owned file checkpoints
+
+Builtin `write` and `edit` save pre-edit bytes in private Git commit objects before
+changing files. This works in Git worktrees, including dirty and untracked files,
+without changing HEAD or the user's index. Outside Git, builtin results explicitly
+state that no checkpoint is available.
+
+```text
+ego checkpoint [-C DIR] SESSION_ID preview
+ego checkpoint [-C DIR] SESSION_ID restore CHECKPOINT_COMMIT
+ego checkpoint [-C DIR] SESSION_ID close
+```
+
+Preview emits JSON with each checkpoint's path, restore effect, and conflict state.
+Restore selects exactly one checkpoint and refuses external changes, missing edited
+files, external atomic replacements, symlinks, and permission changes. There is no force flag: preserve or resolve
+an external edit before retrying. Restore successive edits to a file newest first.
+A created file is deleted when its creation checkpoint is restored. Repeating a
+completed restore is safe. Binary preimages are preserved byte-for-byte.
+
+Refs live at `refs/ego/checkpoints/SESSION_ID`; normal exit keeps them for recovery.
+Explicit checkpoint close or `ego rm` removes the selected repository's session
+ref, without changing files. Git GC later removes unreachable objects. Child
+sessions own separate refs. With multiple repositories, close each with `-C`.
+Exec commands, MCP effects, arbitrary deletes, and external editors are not captured.
+Checkpoint objects contain original file bytes; do not push private checkpoint refs.
 ### Named output styles
 
 `--output-style NAME` selects a response-style overlay for a CLI session or a

@@ -54,6 +54,7 @@ fn selected_completion(accept: &[u8], tab_first: bool) {
             drain_until_quiet(&reader, &mut output);
             assert_eq!(normalized(&output[start..]).matches("mcp:").count(), 1);
         }));
+        record_slash_capture(&output, rows, cols);
         input.write_all(b"\x15/quit\r").expect("exit");
         input.flush().expect("flush");
         session.quit(input);

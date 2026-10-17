@@ -381,6 +381,46 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(checkpoint)
+_arguments "${_arguments_options[@]}" : \
+'-C+[]:DIRECTORY:_files' \
+'--directory=[]:DIRECTORY:_files' \
+'-h[Print help]' \
+'--help[Print help]' \
+':session:_default' \
+":: :_ego__subcmd__checkpoint_commands" \
+"*::: :->checkpoint" \
+&& ret=0
+
+    case $state in
+    (checkpoint)
+        words=($line[2] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ego-checkpoint-command-$line[2]:"
+        case $line[2] in
+            (preview)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(restore)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':checkpoint:_default' \
+&& ret=0
+;;
+(close)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (setup)
 _arguments "${_arguments_options[@]}" : \
 '*--items=[Limit proposals to these report item IDs (comma-separated)]:ITEMS:_default' \
@@ -820,6 +860,7 @@ _ego_commands() {
 'models:List the shared model catalogue.' \
 'hooks:Inspect the admitted system and user hook catalogue.' \
 'doctor:Report a read-only redacted health snapshot of this installation.' \
+'checkpoint:Preview or selectively restore session-owned Git file checkpoints.' \
 'setup:Inspect expected work without running effects.' \
 'acp:Serve the Agent Client Protocol on stdio or an endpoint.' \
 'a2a:Serve the Agent2Agent protocol on a local or loopback endpoint.' \
@@ -867,6 +908,30 @@ _ego__subcmd__auth__subcmd__logout_commands() {
 _ego__subcmd__auth__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'ego auth status commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint_commands] )) ||
+_ego__subcmd__checkpoint_commands() {
+    local commands; commands=(
+'preview:List checkpoint IDs, paths, effects, and external-change conflicts as JSON' \
+'restore:Restore one selected checkpoint; external changes are never forced' \
+'close:Close checkpoint ownership and delete the session'\''s private Git ref' \
+    )
+    _describe -t commands 'ego checkpoint commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint__subcmd__close_commands] )) ||
+_ego__subcmd__checkpoint__subcmd__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego checkpoint close commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint__subcmd__preview_commands] )) ||
+_ego__subcmd__checkpoint__subcmd__preview_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego checkpoint preview commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint__subcmd__restore_commands] )) ||
+_ego__subcmd__checkpoint__subcmd__restore_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego checkpoint restore commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__compact_commands] )) ||
 _ego__subcmd__compact_commands() {

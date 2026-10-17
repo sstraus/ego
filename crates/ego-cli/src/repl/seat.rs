@@ -96,6 +96,7 @@ struct Actions {
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
     Mode,
+    Fast,
     Export,
     Plan,
     Yolo,
@@ -119,6 +120,8 @@ enum SurfaceActionEffect {
     Hooks,
     Doctor,
     Setup,
+    Memory,
+    Init,
     Config,
     Quit,
     Version,
@@ -128,6 +131,7 @@ enum SurfaceActionEffect {
 struct McpSurfaceActions {
     registry: Arc<McpRegistryController>,
     native_tools: Arc<[RegisteredTool]>,
+    servers: Vec<(ego_core::config::McpServerName, bool)>,
 }
 
 struct SurfaceActionSink {
@@ -138,6 +142,7 @@ impl ActionSink for SurfaceActionSink {
     fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
         let effect = match action.id {
             ActionId::Mode => SurfaceActionEffect::Mode,
+            ActionId::Fast => SurfaceActionEffect::Fast,
             ActionId::Plan => SurfaceActionEffect::Plan,
             ActionId::Yolo => SurfaceActionEffect::Yolo,
             ActionId::Permissions => SurfaceActionEffect::Permissions,
@@ -161,6 +166,8 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Hooks => SurfaceActionEffect::Hooks,
             ActionId::Setup => SurfaceActionEffect::Setup,
             ActionId::Doctor => SurfaceActionEffect::Doctor,
+            ActionId::Memory => SurfaceActionEffect::Memory,
+            ActionId::Init => SurfaceActionEffect::Init,
             ActionId::Config => SurfaceActionEffect::Config,
             ActionId::Quit => SurfaceActionEffect::Quit,
             ActionId::Version => SurfaceActionEffect::Version,
@@ -196,6 +203,7 @@ impl Completer for ActionCompleter {
         }
         if position == line.len()
             && (self.registry.resolve_slash(filter).is_some()
+                || self.registry.resolve_alias(filter).is_some()
                 || self
                     .registry
                     .mcp_menu(filter)
@@ -230,6 +238,26 @@ impl Completer for ActionCompleter {
                 ..Suggestion::default()
             })
             .collect::<Vec<_>>();
+        suggestions.extend(
+            self.registry
+                .aliases()
+                .into_iter()
+                .filter(|alias| alias.starts_with(filter))
+                .map(|alias| Suggestion {
+                    value: format!("/{alias}"),
+                    description: Some(
+                        if alias == "history" {
+                            "/history QUERY — search sessions"
+                        } else {
+                            "/resume [ID] or /continue [ID] — resume a session"
+                        }
+                        .to_owned(),
+                    ),
+                    span: Span::new(0, position),
+                    append_whitespace: false,
+                    ..Suggestion::default()
+                }),
+        );
         suggestions.extend(self.registry.skill_menu(filter).into_iter().map(
             |(name, description)| Suggestion {
                 value: format!("/{name}"),
@@ -375,7 +403,8 @@ fn rebuild_snapshot(
     status.snapshot = Some(SurfaceSnapshot::from_state_with_git(
         base.session,
         state,
-        SelectionFacts::new(selection.identity, selection.thinking, base.mode),
+        SelectionFacts::new(selection.identity, selection.thinking, base.mode)
+            .with_fast(selection.service_tier == ego_ai::service_tier::ServiceTier::Fast),
         seat,
         base.git,
     ));
@@ -642,6 +671,7 @@ pub struct StatusSetup {
 pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentName] = &[
     ego_core::config::StatusSegmentName::Model,
     ego_core::config::StatusSegmentName::Effort,
+    ego_core::config::StatusSegmentName::Fast,
     ego_core::config::StatusSegmentName::Mode,
     ego_core::config::StatusSegmentName::Context,
     ego_core::config::StatusSegmentName::Cost,
@@ -1291,6 +1321,7 @@ impl Seat {
                     .registry
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
+                    Dispatch::Details(action) => Line::HostCommand(HostCommand::Details(action)),
                     Dispatch::History(query) => Line::HostCommand(HostCommand::History(query)),
                     Dispatch::Resume(id) => Line::HostCommand(HostCommand::Resume(id)),
                     Dispatch::SessionMetadata(operation) => {
@@ -1309,6 +1340,11 @@ impl Seat {
                     }
                     Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
                     Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
+                    Dispatch::Memory(arguments) => {
+                        Line::HostCommand(HostCommand::Memory(arguments))
+                    }
+                    Dispatch::Init(arguments) => Line::HostCommand(HostCommand::Init(arguments)),
+                    Dispatch::Fast(enabled) => Line::HostCommand(HostCommand::Fast(enabled)),
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
@@ -1444,6 +1480,7 @@ impl Seat {
         }));
         for action in [
             ActionId::Mode,
+            ActionId::Fast,
             ActionId::Plan,
             ActionId::Yolo,
             ActionId::Permissions,
@@ -1465,6 +1502,8 @@ impl Seat {
             ActionId::Expand,
             ActionId::Skills,
             ActionId::Hooks,
+            ActionId::Memory,
+            ActionId::Init,
             ActionId::Retry,
             ActionId::Config,
             ActionId::Doctor,
@@ -1491,6 +1530,12 @@ impl Seat {
             status.model_selection = Some(selection);
             status.config_store = Some(config_store);
             status.mcp_actions = Some(McpSurfaceActions {
+                servers: mcp_registry
+                    .status()
+                    .servers()
+                    .iter()
+                    .map(|server| (server.name().clone(), false))
+                    .collect(),
                 registry: mcp_registry,
                 native_tools: native_tools.into(),
             });
@@ -1511,6 +1556,19 @@ impl Seat {
             .set_availability(ActionId::Compact, availability);
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
+        }
+    }
+
+    /// Keep the busy inventory bound to the same session-local enablement as idle commands.
+    pub(crate) fn set_mcp_session_servers(
+        &self,
+        servers: Vec<(ego_core::config::McpServerName, bool)>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            if let Some(actions) = status.mcp_actions.as_mut() {
+                actions.servers = servers;
+            }
         }
     }
 
@@ -2249,6 +2307,35 @@ fn own_terminal(
                     line
                 };
                 let ended = matches!(line, Line::Ended);
+                if phase.get() == EditPhase::Busy
+                    && let Line::HostCommand(command) = &line
+                {
+                    let label = match command {
+                        HostCommand::Action(action) => {
+                            let current = status.lock().expect("surface status lock");
+                            format!(
+                                "/{}",
+                                current
+                                    .actions
+                                    .as_ref()
+                                    .expect("installed actions")
+                                    .registry
+                                    .help(*action)
+                                    .name()
+                            )
+                        }
+                        HostCommand::Tasks(_) => "/tasks".to_owned(),
+                        HostCommand::Config(_) => "/config".to_owned(),
+                        HostCommand::Fork(_) => "/fork".to_owned(),
+                        HostCommand::Resume(_) => "/resume".to_owned(),
+                        HostCommand::History(_) => "/history".to_owned(),
+                        _ => "local command".to_owned(),
+                    };
+                    commit_to_transcript(
+                        &status,
+                        &format!("{label} pending until the current turn ends"),
+                    );
+                }
                 if input.send(line).is_err() || (ended && failed) {
                     break;
                 }

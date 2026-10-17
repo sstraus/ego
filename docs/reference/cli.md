@@ -25,6 +25,7 @@ Run an agent, from one command line.
 - `ego models` — List the shared model catalogue.
 - `ego hooks` — Inspect the admitted system and user hook catalogue.
 - `ego doctor` — Report a read-only redacted health snapshot of this installation.
+- `ego checkpoint` — Preview or selectively restore session-owned Git file checkpoints.
 - `ego setup` — Inspect expected work without running effects.
 - `ego acp` — Serve the Agent Client Protocol on stdio or an endpoint.
 - `ego a2a` — Serve the Agent2Agent protocol on a local or loopback endpoint.
@@ -478,6 +479,53 @@ Report a read-only redacted health snapshot of this installation.
 
 - `-h, --help` — Print help
 - `--json` — Emit the exact versioned health snapshot Default: `false`.
+
+## `ego checkpoint`
+
+```text
+Usage: ego checkpoint [OPTIONS] <SESSION> <COMMAND>
+```
+
+Preview or selectively restore session-owned Git file checkpoints.
+
+- `ego checkpoint preview` — List checkpoint IDs, paths, effects, and external-change conflicts as JSON
+- `ego checkpoint restore` — Restore one selected checkpoint; external changes are never forced
+- `ego checkpoint close` — Close checkpoint ownership and delete the session's private Git ref
+
+- `-C, --directory <DIRECTORY>` — (undocumented) Default: `.`.
+- `-h, --help` — Print help
+- `<SESSION>` — (undocumented) Required.
+
+## `ego checkpoint preview`
+
+```text
+Usage: ego checkpoint <SESSION> preview
+```
+
+List checkpoint IDs, paths, effects, and external-change conflicts as JSON
+
+- `-h, --help` — Print help
+
+## `ego checkpoint restore`
+
+```text
+Usage: ego checkpoint <SESSION> restore <CHECKPOINT>
+```
+
+Restore one selected checkpoint; external changes are never forced
+
+- `-h, --help` — Print help
+- `<CHECKPOINT>` — (undocumented) Required.
+
+## `ego checkpoint close`
+
+```text
+Usage: ego checkpoint <SESSION> close
+```
+
+Close checkpoint ownership and delete the session's private Git ref
+
+- `-h, --help` — Print help
 
 ## `ego setup`
 

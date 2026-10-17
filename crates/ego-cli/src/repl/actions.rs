@@ -14,6 +14,7 @@ pub enum ActionId {
     Help,
     Model,
     Thinking,
+    Fast,
     Mode,
     Plan,
     Yolo,
@@ -39,9 +40,16 @@ pub enum ActionId {
     Expand,
     Skills,
     Hooks,
+    Memory,
+    Init,
     Retry,
     Version,
 }
+
+pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
+pub(crate) const GOAL_GRAMMAR: &str = "usage: /goal [show|set TEXT|achieve|block REASON]";
+pub(crate) const MCP_GRAMMAR: &str =
+    "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
@@ -103,6 +111,7 @@ impl Eq for McpContextCommand {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
+    Details(ActionId),
     History(String),
     Resume(Option<String>),
     SessionMetadata(SessionMetadataOperation),
@@ -111,7 +120,10 @@ pub enum Dispatch {
     Export(ExportSelection),
     Fork(ego_core::event::id::ItemId),
     Hooks,
+    Memory(String),
+    Init(String),
     Config(String),
+    Fast(bool),
     Setup(String),
     Tasks(String),
     Mcp(String),
@@ -126,6 +138,7 @@ pub enum Dispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSurfaceAction {
     List,
+    Details,
     Diagnose,
     Rescan,
 }
@@ -509,6 +522,11 @@ impl ActionRegistry {
                 .shortcut('p')
                 .shortcut_hint("models"),
             enabled(Thinking, "thinking", "Choose reasoning effort"),
+            enabled(
+                Fast,
+                "fast",
+                "Set fast tier: /fast on|off (premium token price)",
+            ),
             enabled(Mode, "mode", "Inspect or change execution mode")
                 .unavailable("the interactive mode controller"),
             enabled(Plan, "plan", "Enter plan mode").unavailable("the interactive mode controller"),
@@ -520,11 +538,7 @@ impl ActionRegistry {
                 "Inspect effective permission rules",
             )
             .unavailable("the interactive permission controller"),
-            enabled(
-                Mcp,
-                "mcp",
-                "List MCP servers, toggle session state, or add a server",
-            ),
+            enabled(Mcp, "mcp", MCP_GRAMMAR),
             enabled(Sessions, "sessions", "Browse durable sessions")
                 .alias("history")
                 .alias("resume")
@@ -546,7 +560,7 @@ impl ActionRegistry {
                 "Inspect configuration — /config [perimeter | set KEY VALUE]",
             ),
             enabled(Setup, "setup", "Inspect expected work without effects"),
-            enabled(Doctor, "doctor", "Diagnose local subsystem health"),
+            enabled(Doctor, "doctor", "Show health — /doctor [details]"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(
                 Refresh,
@@ -554,23 +568,29 @@ impl ActionRegistry {
                 "Apply current instructions in a new prompt epoch",
             ),
             enabled(New, "new", "Create a durable session"),
-            enabled(Name, "name", "Set durable session display metadata"),
-            enabled(Goal, "goal", "Manage the persistent goal lifecycle"),
+            enabled(Name, "name", NAME_GRAMMAR),
+            enabled(Goal, "goal", GOAL_GRAMMAR),
             enabled(
                 Tasks,
                 "tasks",
                 "Inspect background exec — /tasks [ID | cancel ID]",
             ),
-            enabled(Tools, "tools", "Inspect available tools"),
+            enabled(Tools, "tools", "Show tools — /tools [details]"),
             enabled(
                 Expand,
                 "expand",
                 "Show the last tool output or collapsed prompt",
             )
             .shortcut('o'),
-            enabled(Skills, "skills", "List or invoke admitted skills")
-                .unavailable("the skill catalogue"),
+            enabled(
+                Skills,
+                "skills",
+                "Show skills — /skills [details|diagnose|rescan|invoke NAME]",
+            )
+            .unavailable("the skill catalogue"),
             enabled(Hooks, "hooks", "Inspect admitted hooks"),
+            enabled(Memory, "memory", "Review scoped persistent MDKB memories"),
+            enabled(Init, "init", "Review project instruction initialization"),
             enabled(Retry, "retry", "Retry a waiting provider now").shortcut('r'),
             enabled(Version, "version", "Show packaged version information"),
         ])
@@ -1033,6 +1053,7 @@ impl ActionRegistry {
         };
         match raw_arguments {
             "" | "list" => Dispatch::Skills(SkillSurfaceAction::List),
+            "details" => Dispatch::Skills(SkillSurfaceAction::Details),
             "diagnose" => Dispatch::Skills(SkillSurfaceAction::Diagnose),
             "rescan" => Dispatch::Skills(SkillSurfaceAction::Rescan),
             arguments => match parse_skill_invoke(arguments) {
@@ -1045,7 +1066,7 @@ impl ActionRegistry {
                     }
                 }
                 None => Dispatch::Refused {
-                    reason: "usage: /skills [list|diagnose|rescan|invoke <name> [arguments]]",
+                    reason: "usage: /skills [list|details|diagnose|rescan|invoke <name> [arguments]]",
                 },
             },
         }
@@ -1108,6 +1129,15 @@ impl ActionRegistry {
         let id = self
             .resolve_slash(name)
             .or_else(|| self.resolve_alias(name))?;
+        if id == ActionId::Fast {
+            return Some(match raw_arguments.trim() {
+                "on" => Dispatch::Fast(true),
+                "off" => Dispatch::Fast(false),
+                _ => Dispatch::Refused {
+                    reason: "usage: /fast on|off; fast uses premium token pricing",
+                },
+            });
+        }
         if matches!(
             id,
             ActionId::Mode | ActionId::Plan | ActionId::Yolo | ActionId::Permissions
@@ -1119,6 +1149,9 @@ impl ActionRegistry {
                     reason: "usage: /mode, /plan, /yolo, and /permissions take no arguments",
                 }
             });
+        }
+        if matches!(id, ActionId::Tools | ActionId::Doctor) && raw_arguments.trim() == "details" {
+            return Some(Dispatch::Details(id));
         }
         Some(if no_arguments {
             Dispatch::Action(id)
@@ -1162,6 +1195,24 @@ impl ActionRegistry {
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
             if name.starts_with("mcp__") || name.starts_with("mcp_resource__") {
                 return self.classify_mcp_context(name, raw_arguments);
+            }
+            if name == "memory" && self.resolve_slash(name) == Some(ActionId::Memory) {
+                return if self.availability(ActionId::Memory) == Availability::Enabled {
+                    Dispatch::Memory(raw_arguments.trim().to_owned())
+                } else {
+                    Dispatch::Refused {
+                        reason: "memory is unavailable",
+                    }
+                };
+            }
+            if name == "init" && self.resolve_slash(name) == Some(ActionId::Init) {
+                return if self.availability(ActionId::Init) == Availability::Enabled {
+                    Dispatch::Init(raw_arguments.trim().to_owned())
+                } else {
+                    Dispatch::Refused {
+                        reason: "init is unavailable",
+                    }
+                };
             }
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
@@ -1322,7 +1373,7 @@ fn parse_name_action(arguments: &str) -> Dispatch {
             Some(text) => NameOperation::Set(text.to_owned()),
             None => {
                 return Dispatch::Refused {
-                    reason: "usage: /name [show|set TEXT|clear]",
+                    reason: NAME_GRAMMAR,
                 };
             }
         },
@@ -1341,7 +1392,7 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
                 (tail, GoalOperation::Block as fn(String) -> GoalOperation)
             } else {
                 return Dispatch::Refused {
-                    reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                    reason: GOAL_GRAMMAR,
                 };
             };
             match keyword
@@ -1352,7 +1403,7 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
                 Some(text) => operation(text.to_owned()),
                 None => {
                     return Dispatch::Refused {
-                        reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                        reason: GOAL_GRAMMAR,
                     };
                 }
             }

@@ -41,6 +41,7 @@ pub mod hooks;
 pub mod host_ports;
 pub mod mcp;
 pub mod mcp_server;
+pub mod memory;
 pub mod metadata;
 pub mod model;
 pub mod model_picker;
@@ -87,3 +88,5 @@ fn __ego_internal_network_probe_v1() {
     }
     assert!(ego_tools::exec::dispatch_network_probe(std::env::args_os()).expect("probe envelope"));
 }
+
+pub mod checkpoint;

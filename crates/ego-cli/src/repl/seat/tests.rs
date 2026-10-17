@@ -450,6 +450,7 @@ fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
         vec![
             Segment::Model,
             Segment::Effort,
+            Segment::Fast,
             Segment::Mode,
             Segment::Context,
             Segment::Cost,
@@ -1116,6 +1117,83 @@ fn retry_row_is_bounded_and_expired_countdown_saturates() {
     );
 }
 
+#[test]
+fn persistent_instruction_actions_487_route_menus_and_refuse_busy_ingress() {
+    // Catches: menu actions lack an owner or busy slash input mutates persistent state.
+    let pending = Arc::new(Mutex::new(None));
+    let mut sink = SurfaceActionSink {
+        pending: Arc::clone(&pending),
+    };
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    for (id, effect, dispatch, expected) in [
+        (
+            ActionId::Memory,
+            SurfaceActionEffect::Memory,
+            Dispatch::Memory(String::new()),
+            HostCommand::Memory(String::new()),
+        ),
+        (
+            ActionId::Init,
+            SurfaceActionEffect::Init,
+            Dispatch::Init(String::new()),
+            HostCommand::Init(String::new()),
+        ),
+    ] {
+        assert_eq!(
+            sink.invoke(LocalAction { id, busy: false }),
+            LocalActionOutcome::Completed
+        );
+        assert_eq!(
+            pending
+                .lock()
+                .unwrap()
+                .take()
+                .map(|value| std::mem::discriminant(&value)),
+            Some(std::mem::discriminant(&effect))
+        );
+        assert!(super::action_execution::busy_dispatch_refusal(&dispatch).is_some());
+        assert!(
+            matches!(apply_surface_effect(&mut editor, &phase, &status, effect, false), Some(Line::HostCommand(command)) if command == expected)
+        );
+    }
+}
+/// Catches: discovery descriptions omit the grammar of argument-bearing commands.
+#[test]
+fn slash_help_shows_name_goal_and_mcp_grammar() {
+    let registry = ActionRegistry::final_surface();
+    let help = render_action_help(&registry, 120);
+    for grammar in [
+        "/name [show|set TEXT|clear]",
+        "/goal [show|set TEXT|achieve|block REASON]",
+        "/mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
+    ] {
+        assert!(help.contains(grammar), "missing {grammar}: {help}");
+        assert!(
+            registry
+                .iter()
+                .any(|action| action.description_text().contains(grammar)),
+            "menu must use the same grammar: {grammar}"
+        );
+    }
+}
+
+/// Catches: alias spellings cannot be discovered without accidentally submitting a prompt.
+#[test]
+fn slash_aliases_complete_without_changing_unknown_prompt_policy() {
+    let registry = Arc::new(ActionRegistry::final_surface());
+    let mut completer = ActionCompleter { registry };
+    for (prefix, alias) in [
+        ("/resu", "/resume"),
+        ("/cont", "/continue"),
+        ("/hist", "/history"),
+    ] {
+        let result = completer.complete(prefix, prefix.len());
+        assert!(result.suggestions().iter().any(|item| item.value == alias));
+    }
+}
+
 fn vim_surface(phase: SurfacePhase, status: SharedStatus) -> SurfaceEditMode {
     SurfaceEditMode::with_editor(composer_editor(true), phase, status)
 }
@@ -1329,7 +1407,7 @@ fn long_prompt_echo_is_collapsed() {
         .expect("long submissions need a compact receipt");
     assert_eq!(
         receipt,
-        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · /expand shows all"
+        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · Option+O or /expand"
     );
 }
 
@@ -1355,14 +1433,13 @@ fn collapsed_prompt_and_tool_output_share_expansion_history() {
     );
     // A short submission, including /expand itself, must not replace the detail.
     assert_eq!(
-        waiting.render_prompt_submission("/expand", 80),
-        Some("> /expand".to_owned())
+        waiting.render_prompt_submission("/expand", 80).as_deref(),
+        Some("> /expand")
     );
     output.expand_last_tool();
-    assert!(
-        rows.try_iter()
-            .collect::<String>()
-            .contains("> one\n… two\n… three\n… four")
+    assert_eq!(
+        rows.try_iter().collect::<String>(),
+        "\n> one\n… two\n… three\n… four\n"
     );
     output.tool_row("new tool", "new detail".into());
     let _ = rows.try_iter().collect::<Vec<_>>();

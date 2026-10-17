@@ -16,7 +16,7 @@ use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tempfile::NamedTempFile;
 
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt as _;
@@ -95,14 +95,14 @@ impl PathResolver for OsFs {
 /// The type is the deterministic boundary between preparation and commit:
 /// dropping it removes the [`NamedTempFile`] and leaves the target unchanged;
 /// `commit` is the only operation that publishes the new inode.
-struct PreparedReplacement {
+pub(crate) struct PreparedReplacement {
     target: PathBuf,
     parent: PathBuf,
     temp: NamedTempFile,
 }
 
 impl PreparedReplacement {
-    fn new(target: &Path, bytes: &[u8]) -> io::Result<Self> {
+    pub(crate) fn new(target: &Path, bytes: &[u8]) -> io::Result<Self> {
         let parent = target.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -139,7 +139,11 @@ impl PreparedReplacement {
         })
     }
 
-    fn commit(self) -> io::Result<()> {
+    pub(crate) fn metadata(&self) -> io::Result<fs::Metadata> {
+        self.temp.as_file().metadata()
+    }
+
+    pub(crate) fn commit(self) -> io::Result<()> {
         let Self {
             target,
             parent,

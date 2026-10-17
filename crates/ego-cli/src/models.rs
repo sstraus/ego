@@ -639,6 +639,7 @@ fn render_text(snapshot: &ModelCatalogueSnapshot) -> Vec<String> {
             "OUTPUT".into(),
             "REASONING".into(),
             "METERING".into(),
+            "FAST".into(),
             "SOURCE".into(),
             "FRESHNESS".into(),
             "AVAILABILITY".into(),
@@ -651,6 +652,19 @@ fn render_text(snapshot: &ModelCatalogueSnapshot) -> Vec<String> {
                 ceiling(entry.capabilities.max_output_tokens),
                 reasoning(&entry.capabilities.reasoning_efforts),
                 metering(entry.metering).into(),
+                entry
+                    .fast_support()
+                    .map(|support| {
+                        format!(
+                            "{}x tokens{}",
+                            support.token_price_multiplier,
+                            support
+                                .included_usage_multiplier
+                                .map(|usage| format!(", {usage}x included usage"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or_else(|| "unsupported: no verified tier/price".into()),
                 provenance(&entry.provenance),
                 freshness(entry.freshness).into(),
                 availability(&entry.availability),

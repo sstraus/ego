@@ -83,8 +83,11 @@ impl TypedTool for WriteTool {
             // params — see `prepare_typed`.
             io.write(&path, &contents)?;
             Ok(ToolResult::builtin(format!(
-                "wrote {} bytes to {path}",
-                contents.len()
+                "wrote {} bytes to {path}{}",
+                contents.len(),
+                io.write_notice(&path)
+                    .map(|notice| format!("\n{notice}"))
+                    .unwrap_or_default()
             )))
         })
     }

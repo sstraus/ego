@@ -57,15 +57,15 @@ fn row(state: &SessionState, names: &[StatusSegmentName], width: usize) -> Strin
 }
 
 #[test]
-fn context_reads_as_a_share_of_the_window_never_as_a_raw_count() {
+fn context_bar_and_counts_show_occupancy_without_hiding_the_window() {
     let names = [StatusSegmentName::Context];
     // 3_000 of 1_000_000 is 0.3%; 42_000 of 200_000 is 21%; 500 of 128_000
     // is well under a tenth of a percent.
     for (used, window, expected) in [
-        (3_000, 1_000_000, "ctx 0.3%/1M"),
-        (42_000, 200_000, "ctx 21.0%/200k"),
-        (500, 128_000, "ctx 0.4%/128k"),
-        (1_000_000, 1_000_000, "ctx 100.0%/1M"),
+        (3_000, 1_000_000, "▱▱▱▱▱▱▱▱▱▱ 3k/1M"),
+        (42_000, 200_000, "▰▰▱▱▱▱▱▱▱▱ 42k/200k"),
+        (500, 128_000, "▱▱▱▱▱▱▱▱▱▱ 500/128k"),
+        (1_000_000, 1_000_000, "▰▰▰▰▰▰▰▰▰▰ 1M/1M"),
     ] {
         let shown = row(
             &state(Some(used), Some(window), CumulativeCost::Unstarted),
@@ -85,15 +85,15 @@ fn context_without_a_stated_window_shows_the_count_and_never_a_percentage() {
         &names,
         120,
     );
-    assert_eq!(unbounded, "ctx 2.5k");
+    assert_eq!(unbounded, "▱▱▱▱▱▱▱▱▱▱ 2.5k/?");
     let nothing_yet = row(&state(None, None, CumulativeCost::Unstarted), &names, 120);
-    assert_eq!(nothing_yet, "ctx unmeasured");
+    assert_eq!(nothing_yet, "▱▱▱▱▱▱▱▱▱▱ ?/?");
     let window_only = row(
         &state(None, Some(1_000_000), CumulativeCost::Unstarted),
         &names,
         120,
     );
-    assert_eq!(window_only, "ctx unmeasured/1M");
+    assert_eq!(window_only, "▱▱▱▱▱▱▱▱▱▱ ?/1M");
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn recorded_cost_shows_with_a_currency_mark() {
         ("USD", "2.5", "$2.50"),
         ("USD", "0", "$0.000"),
         ("USD", "0.0000164", "<$0.001"),
-        ("EUR", "0.5", "0.500 EUR"),
+        ("EUR", "0.5", "0.50 EUR"),
     ] {
         let known = CumulativeCost::Known {
             total: money(currency, amount),
@@ -126,7 +126,7 @@ fn an_unpriced_or_unstarted_cost_is_absent_rather_than_a_false_zero() {
     ] {
         let shown = row(&state(None, None, cost.clone()), &names, 120);
         let expected = if matches!(cost, CumulativeCost::Unknown(_)) {
-            "glm-5.3-flash · unpriced"
+            "glm-5.3-flash unpriced"
         } else {
             "glm-5.3-flash"
         };
@@ -167,14 +167,17 @@ fn the_row_degrades_by_dropping_lower_priority_fields_and_keeps_context() {
     for (width, expected) in [
         (
             120,
-            "glm-5.3-flash · low · default · ctx 0.3%/1M · $0.002 · cwd=/workspace/ego",
+            "glm-5.3-flash · low · default ▱▱▱▱▱▱▱▱▱▱ 3k/1M $0.002 /w/ego",
         ),
         (
             80,
-            "glm-5.3-flash · low · default · ctx 0.3%/1M · $0.002 · cwd=/workspace/ego",
+            "glm-5.3-flash · low · default ▱▱▱▱▱▱▱▱▱▱ 3k/1M $0.002 /w/ego",
         ),
-        (60, "glm-5.3-flash · low · default · ctx 0.3%/1M · $0.002"),
-        (40, "glm-5.3-flash · low · ctx 0.3%/1M"),
+        (
+            60,
+            "glm-5.3-flash · low · default ▱▱▱▱▱▱▱▱▱▱ 3k/1M $0.002 /w/ego",
+        ),
+        (40, "glm-5.3-flash · low ▱▱▱▱▱▱▱▱▱▱ 3k/1M"),
     ] {
         let line = StatusLine::render(&surface, &names, width);
         assert_eq!(line.text(), expected, "width {width}");
@@ -241,7 +244,7 @@ fn context_and_cost_follow_the_durable_usage_events_of_the_session() {
 
     let replayed = SessionState::replay(log);
     let names = [StatusSegmentName::Context, StatusSegmentName::Cost];
-    assert_eq!(row(&replayed, &names, 120), "ctx 0.7%/1M · $0.012");
+    assert_eq!(row(&replayed, &names, 120), "▱▱▱▱▱▱▱▱▱▱ 7k/1M $0.012");
 }
 
 #[test]
@@ -268,8 +271,7 @@ fn idle_queue_drafts_and_interrupt_do_not_occupy_the_row() {
 
 #[test]
 fn context_outlives_an_untrusted_posture_under_width_pressure() {
-    // model 13 + ctx 11 + trust=untrusted 15 + two separators 6 = 45 cells:
-    // at 40, one of the two optional fields has to go, and it is trust.
+    // At 40 cells, trust cannot fit beside model and the complete context meter.
     let names = [
         StatusSegmentName::Model,
         StatusSegmentName::Context,
@@ -279,11 +281,14 @@ fn context_outlives_an_untrusted_posture_under_width_pressure() {
     let surface = snapshot_for(&facts, Trust::Untrusted);
 
     let narrow = StatusLine::render(&surface, &names, 40);
-    assert_eq!(narrow.text(), "glm-5.3-flash · ctx 0.3%/1M");
+    assert_eq!(narrow.text(), "glm-5.3-flash ▱▱▱▱▱▱▱▱▱▱ 3k/1M");
     assert!(narrow.omitted(StatusSegmentName::Trust));
 
     let wide = StatusLine::render(&surface, &names, 60);
-    assert_eq!(wide.text(), "glm-5.3-flash · ctx 0.3%/1M · trust=untrusted");
+    assert_eq!(
+        wide.text(),
+        "glm-5.3-flash ▱▱▱▱▱▱▱▱▱▱ 3k/1M trust=untrusted"
+    );
 }
 
 #[test]
@@ -294,25 +299,25 @@ fn a_zero_window_never_divides_and_falls_back_to_the_count() {
         &names,
         120,
     );
-    assert_eq!(shown, "ctx 2.5k");
+    assert_eq!(shown, "▱▱▱▱▱▱▱▱▱▱ 2.5k/?");
 }
 
 #[test]
-fn context_beyond_the_window_is_reported_as_over_one_hundred_percent() {
+fn context_beyond_the_window_saturates_the_bar_but_preserves_the_count() {
     let names = [StatusSegmentName::Context];
     let over = row(
         &state(Some(150_000), Some(100_000), CumulativeCost::Unstarted),
         &names,
         120,
     );
-    assert_eq!(over, "ctx 150.0%/100k");
+    assert_eq!(over, "▰▰▰▰▰▰▰▰▰▰ 150k/100k");
     let extreme = row(
         &state(Some(u64::MAX), Some(1), CumulativeCost::Unstarted),
         &names,
         120,
     );
     assert!(
-        extreme.starts_with("ctx ") && extreme.ends_with("/1"),
+        extreme.starts_with("▰▰▰▰▰▰▰▰▰▰ ") && extreme.ends_with("/1"),
         "{extreme}"
     );
 }
@@ -390,9 +395,14 @@ fn estimated_cost(amount: &str) -> CostDelta {
 fn subscription_equivalent_is_labelled_and_does_not_become_budget_spend() {
     let state = replay_costs([estimated_cost("0.002"), estimated_cost("0.0001")]);
     assert!(state.cost.known().unwrap().amount.is_zero());
+    assert_eq!(row(&state, &[StatusSegmentName::Cost], 120), "≈$0.002");
     assert_eq!(
-        row(&state, &[StatusSegmentName::Cost], 120),
-        "$0.002 subscription-equivalent (standard API)"
+        row(
+            &replay_costs([estimated_cost("0.661")]),
+            &[StatusSegmentName::Cost],
+            120
+        ),
+        "≈$0.66"
     );
 }
 
@@ -418,7 +428,7 @@ fn mixed_or_unpriced_generations_cannot_look_like_a_complete_estimate() {
     ] {
         assert_eq!(
             row(&replay_costs(costs), &[StatusSegmentName::Cost], 120),
-            "$0.002 subscription-equivalent (standard API) (partial; mixed/unpriced)"
+            "≈$0.002 (partial)"
         );
     }
 }
@@ -446,9 +456,9 @@ fn legacy_policy_attribution_decodes_without_an_equivalent_price() {
 fn rendered_status_explains_unmeasured_context() {
     let names = [StatusSegmentName::Context, StatusSegmentName::Cost];
     for (used, window, expected) in [
-        (None, None, "ctx unmeasured"),
-        (None, Some(1_000_000), "ctx unmeasured/1M"),
-        (Some(7_010), Some(1_000_000), "ctx 0.7%/1M"),
+        (None, None, "▱▱▱▱▱▱▱▱▱▱ ?/?"),
+        (None, Some(1_000_000), "▱▱▱▱▱▱▱▱▱▱ ?/1M"),
+        (Some(7_010), Some(1_000_000), "▱▱▱▱▱▱▱▱▱▱ 7k/1M"),
     ] {
         let facts = state(used, window, CumulativeCost::Unstarted);
         for width in [80, 120, 200] {
@@ -456,10 +466,6 @@ fn rendered_status_explains_unmeasured_context() {
             let mut terminal = vt100::Parser::new(4, width as u16, 0);
             terminal.process(shown.as_bytes());
             assert_eq!(terminal.screen().contents(), expected, "width={width}");
-            println!(
-                "status width={width} grid={:?}",
-                terminal.screen().contents()
-            );
         }
         for width in 1..25 {
             let shown = row(&facts, &names, width);
@@ -471,7 +477,7 @@ fn rendered_status_explains_unmeasured_context() {
     }
     // A resumed log without any occupancy event has no measurement to invent.
     let resumed = SessionState::replay(Vec::<DomainEvent>::new());
-    assert_eq!(row(&resumed, &names, 80), "ctx unmeasured");
+    assert_eq!(row(&resumed, &names, 80), "▱▱▱▱▱▱▱▱▱▱ ?/?");
     // Compaction creates a checkpoint-seeded session, not a zero occupancy event.
     let compacted = SessionState::replay([DomainEvent {
         env: Envelope {
@@ -490,7 +496,7 @@ fn rendered_status_explains_unmeasured_context() {
             checkpoint: "Retained facts".into(),
         },
     }]);
-    assert_eq!(row(&compacted, &names, 80), "ctx unmeasured");
+    assert_eq!(row(&compacted, &names, 80), "▱▱▱▱▱▱▱▱▱▱ ?/?");
 }
 
 // Catches: the active goal counter survives achievement or five blocker observations.
@@ -574,4 +580,48 @@ fn goal_status_follows_durable_allowance_and_disappears_when_terminal() {
         }
         assert!(!row(&facts, &names, 80).contains("goal"));
     }
+}
+
+#[test]
+fn fast_contract_catches_hidden_fast_selection_or_mislabelled_equivalent() {
+    let mut cost = estimated_cost("0.004");
+    if let CostDelta::Known {
+        attribution:
+            CostAttribution::MeteringPolicy {
+                equivalent: Some(equivalent),
+                ..
+            },
+        ..
+    } = &mut cost
+    {
+        let ego_core::cost::SubscriptionEquivalent::V1 { service_tier, .. } = equivalent.as_mut();
+        *service_tier = "fast".into();
+    }
+    let state = replay_costs([cost]);
+    let selected = SelectionFacts::new(
+        ModelRef("openai-codex/gpt-6.1-sol".into()),
+        ThinkingLevel::Low,
+        Mode::Default,
+    )
+    .with_fast(true);
+    let snapshot = SurfaceSnapshot::from_state(
+        SessionId::new(),
+        &state,
+        selected,
+        SeatFacts::new(QueueStatus::default(), 0, "/ws", Trust::Trusted),
+        None,
+    );
+    assert_eq!(snapshot.fast(), "fast");
+    let rendered = StatusLine::render(
+        &snapshot,
+        &[StatusSegmentName::Fast, StatusSegmentName::Cost],
+        180,
+    );
+    assert_eq!(rendered.text(), "fast ≈$0.004");
+    let standard = snapshot_for(&SessionState::default(), Trust::Trusted);
+    assert_eq!(standard.fast(), "");
+    assert_eq!(
+        StatusLine::render(&standard, &[StatusSegmentName::Fast], 80).text(),
+        ""
+    );
 }

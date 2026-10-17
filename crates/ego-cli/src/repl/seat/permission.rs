@@ -527,7 +527,7 @@ pub(super) const STATUSLINE_PRESETS: [(&str, &str, &[ego_core::config::StatusSeg
         ),
         (
             "default",
-            "Default — model, effort, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
+            "Default — model, effort, fast, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
             DEFAULT_STATUSLINE_SEGMENTS,
         ),
         (
@@ -565,7 +565,7 @@ pub(super) fn choose_statusline_preset(
         phase,
         status,
         busy,
-        "Choose status-line setup",
+        "Choose status-line setup\n▰/▱: context used/window; green <60%, yellow ≥60%, red ≥85%.\n≈$: subscription-equivalent (standard API), not billed; $: billed.\n(partial): mixed/unpriced usage; ?: context unmeasured.\n⎇: branch; ●: uncommitted changes; path: abbreviated cwd.",
         &choices,
         (false, true, None),
     ) {
