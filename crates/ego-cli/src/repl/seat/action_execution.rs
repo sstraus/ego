@@ -187,7 +187,6 @@ pub(super) fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str>
         Dispatch::Memory(_) | Dispatch::Init(_) => {
             Some("memory and init are unavailable while a turn is running")
         }
-        Dispatch::Config(_) => Some("config is unavailable while a turn is running"),
         Dispatch::Fast(_) => Some("fast tier cannot change while a turn is running"),
         Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
         _ => None,
@@ -273,7 +272,6 @@ fn submit_busy_line(
         | Dispatch::Setup(_)
         | Dispatch::Memory(_)
         | Dispatch::Init(_)
-        | Dispatch::Config(_)
         | Dispatch::Fast(_)
         | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
         Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
