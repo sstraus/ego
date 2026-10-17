@@ -1664,13 +1664,16 @@ impl Prompt for Waiting {
         if let Some(receipt) = background_notice::row(buffer, width) {
             return Some(receipt);
         }
-        let (receipt, detail) = crate::render::prompt_echo::collapsed(buffer, width)?;
-        self.status
-            .lock()
-            .expect("surface status lock")
-            .details
-            .remember(detail);
-        Some(receipt)
+        if let Some((receipt, detail)) = crate::render::prompt_echo::collapsed(buffer, width) {
+            self.status
+                .lock()
+                .expect("surface status lock")
+                .details
+                .remember(detail);
+            return Some(receipt);
+        }
+        // Commit only the input, never the live status or composer notices.
+        Some(format!("> {}", buffer.replace('\n', "\n… ")))
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {
