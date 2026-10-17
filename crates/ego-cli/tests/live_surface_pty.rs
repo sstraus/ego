@@ -3575,6 +3575,14 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
         ],
         ..Plan::default()
     });
+    // Release the fixture even when an assertion fails, before Stub joins its worker.
+    struct ReleaseOnDrop(Arc<ReleaseGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
     let ego = Ego::against(&stub)
         .conversing()
         .args([
@@ -3589,7 +3597,7 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
-    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").expect("trust answer");
@@ -3616,6 +3624,10 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
     input.write_all(b"unsent expand draft").expect("busy draft");
     input.flush().expect("busy draft flush");
     until_from(&reader, &mut output, draft_start, b"unsent expand draft");
+    // Text appears before the repaint finishes its cursor query. Sending Meta-o
+    // during that query lets the terminal-position reader consume the key.
+    until_from(&reader, &mut output, draft_start, b"\x1b[?25h");
+    drain_until_quiet(&reader, &mut output);
     let expand_start = output.len();
     input.write_all(b"\x1bo").expect("Meta-o");
     input.flush().expect("Meta-o flush");

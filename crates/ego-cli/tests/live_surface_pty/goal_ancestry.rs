@@ -134,6 +134,7 @@ fn goal_continuations_compact_without_cross_session_parent() {
         let metadata = places
             .ego(&stub)
             .subcommand("resume")
+            .without_fixture_thinking()
             .args([&target, "--goal", "show", "--output", "json"])
             .run();
         assert_eq!(metadata.code, Some(0), "{}", metadata.stderr);

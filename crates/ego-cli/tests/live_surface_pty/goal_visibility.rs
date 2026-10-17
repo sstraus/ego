@@ -43,7 +43,7 @@ fn goal_visibility_transcript() -> String {
             &checker,
         ])
         .env("TERM", "xterm-256color");
-    let (session, mut input, reader) = PtySession::start(&ego, 32, 180, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 32, 180, Some((32, 180)));
     let mut output = Vec::new();
     until_prompt_from(&reader, &mut output, 0);
     let start = output.len();
@@ -61,10 +61,21 @@ fn goal_visibility_transcript() -> String {
     input.flush().unwrap();
     assert!(session.quit(input).success());
     assert_eq!(stub.generations().len(), 4);
-    normalized(&output[start..])
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    // Inspect durable terminal rows, not raw repaint bytes: the working line
+    // can be erased and redrawn between the rows of a wrapped receipt.
+    let mut parser = vt100::Parser::new(32, 180, 1_000);
+    parser.process(&output);
+    let live = parser.screen().contents();
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let depth = parser.screen().scrollback();
+    let mut history = String::new();
+    for offset in (1..=depth).rev() {
+        parser.screen_mut().set_scrollback(offset);
+        history.push_str(&parser.screen().rows(0, 180).next().unwrap());
+        history.push('\n');
+    }
+    history.push_str(&live);
+    history.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // Catches: model-authored goals start or change silently.
