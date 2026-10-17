@@ -66,7 +66,7 @@ ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               canonical intent + matching rule, dry)
 ego usage  [--period P] [--all-roles] [--json] cost and token report
 ego acp [--tools LIST | --no-tools] [--allow RULE] [--deny RULE]
-        [--profile NAME] [--append-system TEXT|@file]
+        [--profile NAME] [--append-system TEXT|@file] [--output-style NAME]
         [--instructions FILE]
         [--listen ENDPOINT [--allow-public-bind]
          [--max-connections N] [--connection-lifetime DURATION]
@@ -104,10 +104,10 @@ Notes:
   scripted multi-turn conversations — a pipeline can carry a session through
   several stages. One session pool across interactive and headless runs
   (Codex split them and had to add `--include-non-interactive` to re-merge).
-- For standard ACP client libraries and runnable isolated examples, see
-  [ACP client libraries](docs/integrations/acp-clients.md).
 - For an installation-free IDE custom-agent setup over native ACP, see
   [IDE setup](docs/integrations/ide.md); no `--ide` auto-connect flag is required.
+- For standard ACP client libraries and runnable isolated examples, see
+  [ACP client libraries](docs/integrations/acp-clients.md).
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
   Headless multi-turn streaming uses this same ACP stdio connection, not an
@@ -369,6 +369,7 @@ the final grammar.
     --thinking L        off|minimal|low|medium|high|xhigh|max   (pi's scale)
     --system TEXT|@file          replace system prompt
     --append-system TEXT|@file   append to it
+    --output-style NAME         select a trusted prompt-only response style
 ```
 
 **Permissions and confinement** (one axis pair, Codex-style)
@@ -576,6 +577,7 @@ and what it is told about where it is working.
     --allow RULE / --deny RULE   what it is allowed to do
     --profile NAME               which stored configuration layer applies
     --append-system TEXT|@file   what it is told, appended to the prompt
+    --output-style NAME         trusted prompt-only response style
     --instructions FILE          which instruction file, named not discovered
 ```
 
@@ -1231,7 +1233,10 @@ opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
 checks are projections of one action registry rather than parallel command
 implementations. An exact registered action executes with one `Enter`; a
 partial completion remains inert until explicitly submitted, and pasted slash
-text remains ordinary prompt input.
+text remains ordinary prompt input. A submitted unknown slash command is refused
+locally with the nearest command names and never starts a model generation.
+To send literal text that starts with `/` (for example `/tmp/x`), add a leading
+space. Bracketed paste also remains literal prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
 32-command action registry: a typed complete slash is classified as an action,
@@ -1275,6 +1280,12 @@ Arguments that do not belong to a selected local action are usage errors, not
 model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
 configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
 points to that root syntax without consuming a provider turn.
+
+Read-only `/tasks [ID]`, `/config`, `/config perimeter`, and `/usage` answer
+while a turn runs. They read the current session journal, admitted configuration,
+and durable usage records without starting a generation. State-changing commands
+remain on their existing host-command path; an inspection does not cancel,
+restart, or complete the active turn.
 
 `/help` renders task-oriented Discover, Model, Control, Session, Integrations
 and Surface groups from that registry into transcript scrollback. `/doctor`
@@ -1380,10 +1391,16 @@ it is drawn (a resize applies to later rows): the target gives way first, the
 mark, verb, outcome and duration last. Text from a tool result is shown with
 control characters replaced, never passed to the terminal.
 
+A submitted prompt that exceeds three terminal rows shows its first three rows
+and a count of hidden rows. Short prompts keep their normal echo. This changes
+only the displayed receipt, not the prompt sent to the model or saved in history.
+`/expand` shows the full prompt if it is the most recent expandable entry; a
+later tool call replaces it as the expansion target.
+
 `/expand`, also `Alt-O`, prints the full result of the most recent tool call
 under its row: for `edit`, the line diff; for every other tool, the whole
-result text the model received, up to 256 KiB. Only the 16 most recent calls of
-the session are kept, and only the latest can be shown. It runs between turns,
+result text the model received, up to 256 KiB. Only the 16 most recent tool calls
+and collapsed prompts of the session are kept, and only the latest can be shown. It runs between turns,
 like `/help`. Headless runs write each row to stderr, prefixed `εgo:`, and have
 no expand key.
 
@@ -2548,3 +2565,69 @@ ref, without changing files. Git GC later removes unreachable objects. Child
 sessions own separate refs. With multiple repositories, close each with `-C`.
 Exec commands, MCP effects, arbitrary deletes, and external editors are not captured.
 Checkpoint objects contain original file bytes; do not push private checkpoint refs.
+### Named output styles
+
+`--output-style NAME` selects a response-style overlay for a CLI session or a
+served session launch (`ego acp`). With no selection, the prompt
+is unchanged. The built-in catalogue contains `concise` and `explanatory`.
+These names are reserved and cannot be overridden by user files.
+
+For a custom style, create `$EGO_HOME/output-styles/NAME.md` (or
+`~/.ego/output-styles/NAME.md` when `EGO_HOME` is unset). The file is plain
+UTF-8 prompt text, not a configuration or agent envelope. Names contain 1–80
+ASCII letters, digits, underscores or hyphens. Files must be nonempty, contain
+no NUL bytes, and be at most 64 KiB. Operator-owned catalogue and file symlinks
+are followed; the opened target must be a regular file. Missing or invalid styles
+refuse the run; there is no fallback to a workspace file. Install only styles you
+trust.
+
+The selected name and source (`builtin` or the user file path) appear in a
+diagnostic, not protocol stdout. Styles are explicit launch selections; they
+are not discovered from workspace files or stored as a session preference.
+To resume with a style, pass the flag again.
+
+Composition order is base instructions or `--system`, then the selected style,
+then `--append-system`, then a session prompt in append mode. A session prompt
+in replace mode suppresses the launch style and launch append. An explicit
+style is available with `--bare`, which disables ambient discovery, not launch
+options. Styles do not select tools, change permission policy, execute commands
+or expand `@file` text inside the style. The overlay affects model instructions,
+not the terminal renderer or the machine-readable output format.
+
+### Notebook cell edits
+
+`notebook_edit` is a builtin available through the same tool registry to CLI,
+ACP, and runtime consumers. Use `--tools notebook_edit` to select it explicitly.
+It accepts `path`, an explicit `edit_mode`, and mode-specific fields:
+
+- `replace`: `cell_id` and `new_source`. Change only the source of that cell.
+- `insert`: `cell_type` (`code` or `markdown`), `new_source`, and optional
+  `cell_id`. Insert after that ID, or at the start when the ID is omitted/null.
+- `delete`: `cell_id`. Remove that cell only.
+
+The file must be a valid UTF-8 nbformat 4.5 notebook with unique stable IDs,
+no larger than 16 MiB before or after the edit. Invalid files and missing IDs
+are refused without a write. Notebooks with integer tokens outside the i64/u64
+range are also refused to prevent rounding saved data. Inserted cells receive a
+new random ID. Existing IDs, metadata, outputs, execution counts, and attachments remain unchanged
+unless their cell is deleted. The tool does not execute a kernel or clear old
+outputs. JSON formatting can change; preservation is semantic, not byte-for-byte.
+
+Each call declares read and write effects on the same resolved file. A matching
+`write(pattern)` allow covers the supporting read, as for `edit`. Explicit read
+and write denies, workspace confinement, and plan mode still apply. Concurrent
+`notebook_edit` calls in one ego process are serialized. Do not edit the notebook
+from another process during a call: external writers do not share that lock,
+and a pre-publication reread is not an operating-system compare-and-swap.
+
+Reference contracts captured 2026-10-16:
+
+- <https://code.claude.com/docs/en/tools-reference.md>, NotebookEdit section:
+  cell-ID targeting, replace/insert/delete, and UTF-8 refusal. ego uses its own
+  lowercase tool name and requires an explicit edit mode.
+- <https://nbformat.readthedocs.io/en/latest/format_description.html>:
+  source representation, metadata, outputs, and stable ID rules.
+- `crates/ego-tools/src/tools/nbformat.v4.schema.json` is the Jupyter v4.5
+  schema recorded from
+  <https://raw.githubusercontent.com/jupyter/nbformat/main/nbformat/v4/nbformat.v4.schema.json>.
+  The upstream BSD license is stored beside it as `nbformat.LICENSE`.

@@ -51,6 +51,7 @@ pub(crate) mod onboarding;
 pub(crate) mod orchestration_observer;
 pub mod orchestrator;
 pub mod output;
+pub(crate) mod output_style;
 pub mod perimeter;
 pub mod prompt;
 pub mod provider_http;

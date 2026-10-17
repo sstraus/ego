@@ -6,6 +6,8 @@ mod background_notice;
 mod blank_prompt;
 #[path = "live_surface_pty/busy_commands.rs"]
 mod busy_commands;
+#[path = "live_surface_pty/busy_notice.rs"]
+mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
 #[path = "live_surface_pty/finish_queue.rs"]
@@ -24,12 +26,18 @@ mod mcp_inventory;
 mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
+#[path = "live_surface_pty/mode_picker.rs"]
+mod mode_picker;
 #[path = "live_surface_pty/notice_wrap.rs"]
 mod notice_wrap;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/picker_roles.rs"]
 mod picker_roles;
+#[path = "live_surface_pty/plan_denial.rs"]
+mod plan_denial;
+#[path = "live_surface_pty/prompt_echo.rs"]
+mod prompt_echo;
 #[path = "live_surface_pty/prompt_readiness.rs"]
 mod prompt_readiness;
 #[path = "live_surface_pty/raw_columns.rs"]
@@ -40,6 +48,8 @@ mod retry_line;
 mod setup;
 #[path = "live_surface_pty/slash_completion.rs"]
 mod slash_completion;
+#[path = "live_surface_pty/slash_inspections.rs"]
+mod slash_inspections;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
 #[path = "live_surface_pty/status_compact.rs"]

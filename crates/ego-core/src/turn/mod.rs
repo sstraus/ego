@@ -1232,6 +1232,7 @@ pub struct TurnLoop<'session, 'turn> {
     judge: Option<JudgeContext>,
     main_model_identity: Option<ModelRef>,
     last_request: Option<GenRequest>,
+    last_generator: Option<Arc<dyn crate::generator::port::Generator>>,
     compaction_source_tools: Option<Vec<ToolDescriptor>>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
@@ -1412,6 +1413,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             judge: None,
             main_model_identity: None,
             last_request: None,
+            last_generator: None,
             compaction_source_tools: None,
             analysis_cache: None,
             analysis_observation: None,
@@ -4634,6 +4636,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     attempt: additional_attempts,
                 })?;
             }
+            self.last_generator = Some(Arc::clone(&profile.generator));
             let stream = profile.generator.generate(request, attempt);
             let drained = self
                 .drain(
@@ -7105,12 +7108,19 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         })
     }
 
+    fn release_question_connection(&self) {
+        if let Some(generator) = &self.last_generator {
+            generator.release_idle_connection(self.session_id);
+        }
+    }
+
     async fn run_question(
         &mut self,
         turn: TurnId,
         call: &PendingCall,
         request: crate::question::QuestionRequest,
     ) -> Result<ToolOutcome, StoreError> {
+        self.release_question_connection();
         let question = ItemId::new();
         let request_event = self.journal.append(
             turn,
@@ -7214,6 +7224,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         required: crate::mcp::ForeignInputRequired,
         mut reopened: Option<(ItemId, EventId)>,
     ) -> Result<ToolOutcome, StoreError> {
+        self.release_question_connection();
         let mut parent = parent;
         let mut required = required;
         loop {

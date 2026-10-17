@@ -132,6 +132,7 @@ pub enum Dispatch {
     Immediate,
     InteractiveIngress,
     Refused { reason: &'static str },
+    UnknownSlash(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -578,7 +579,7 @@ impl ActionRegistry {
             enabled(
                 Expand,
                 "expand",
-                "Show the full output of the last tool call",
+                "Show the last tool output or collapsed prompt",
             )
             .shortcut('o'),
             enabled(
@@ -1163,6 +1164,28 @@ impl ActionRegistry {
         })
     }
 
+    fn unknown_slash(&self, name: &str) -> Dispatch {
+        let mut candidates = self
+            .names()
+            .into_iter()
+            .chain(self.aliases())
+            .map(str::to_owned)
+            .chain(self.skill_menu("").into_iter().map(|(name, _)| name))
+            .map(|candidate| (command_distance(name, &candidate), candidate))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        let suggestions = candidates
+            .into_iter()
+            .take(3)
+            .map(|(_, name)| format!("/{name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Dispatch::UnknownSlash(format!(
+            "Unknown slash command. Nearest commands: {suggestions}. Use /help for syntax; add a leading space to send literal text that starts with /."
+        ))
+    }
+
     pub fn classify(&self, submission: Submission) -> Dispatch {
         if submission.origin == InputOrigin::Typed
             && let Some(command) = submission.text.strip_prefix('/')
@@ -1263,7 +1286,7 @@ impl ActionRegistry {
             }
             let capture = match self.skill_capture() {
                 Ok(Some(capture)) => capture,
-                Ok(None) => return Dispatch::Prompt,
+                Ok(None) => return self.unknown_slash(name),
                 Err(_) => {
                     return Dispatch::Refused {
                         reason: "the skill catalogue view is unavailable",
@@ -1273,9 +1296,27 @@ impl ActionRegistry {
             if let Some(operation) = admitted_skill_operation(&capture, name, raw_arguments) {
                 return Dispatch::Skill(operation);
             }
+            return self.unknown_slash(name);
         }
         Dispatch::Prompt
     }
+}
+
+// Bound typo matching independently of a pasted or accidentally huge command name.
+fn command_distance(left: &str, right: &str) -> usize {
+    let mut row = (0..=right.chars().count()).collect::<Vec<_>>();
+    for (i, a) in left.chars().take(64).enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b) in right.chars().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(a != b));
+            diagonal = above;
+        }
+    }
+    row[right.chars().count()]
 }
 
 /// `/export [local|sanitized] [md|json|jsonl]`, in either order.
@@ -1398,6 +1439,52 @@ fn admitted_skill_operation(
         .descriptor(name)
         .filter(|spec| spec.descriptor().user_invocable)
         .map(|spec| AdmittedSkillOperation::invoke(spec.descriptor(), raw_arguments))
+}
+
+#[cfg(test)]
+mod unknown_slash_tests {
+    use super::*;
+
+    // Catches: literal slash text is refused even when its origin or leading space escapes it.
+    #[test]
+    fn literal_slash_text_keeps_its_prompt_boundary() {
+        let registry = ActionRegistry::final_surface();
+        for (input, origin) in [
+            (" /tmp/x", InputOrigin::Typed),
+            ("/histor", InputOrigin::BracketedPaste),
+            ("ordinary prompt", InputOrigin::Typed),
+        ] {
+            assert_eq!(
+                registry.classify(registry.submit(input, origin)),
+                Dispatch::Prompt
+            );
+        }
+        for input in ["/tmp/x", "/", "/model-only"] {
+            assert!(matches!(
+                registry.classify(registry.submit(input, InputOrigin::Typed)),
+                Dispatch::UnknownSlash(_)
+            ));
+        }
+        assert_eq!(
+            registry.classify(registry.submit("/help", InputOrigin::Typed)),
+            Dispatch::Action(ActionId::Help)
+        );
+    }
+
+    // Catches: a mistyped command crosses the prompt boundary and starts a paid turn.
+    #[test]
+    fn unknown_slash_input_is_refused_locally_with_suggestions() {
+        let registry = ActionRegistry::final_surface();
+        for (input, suggestion) in [("/histor", "/history"), ("/resum", "/resume")] {
+            let dispatch = registry.classify(registry.submit(input, InputOrigin::Typed));
+            assert_ne!(
+                dispatch,
+                Dispatch::Prompt,
+                "{input} must never start a generation"
+            );
+            assert!(format!("{dispatch:?}").contains(suggestion));
+        }
+    }
 }
 
 #[cfg(test)]

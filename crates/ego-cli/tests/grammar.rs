@@ -1633,3 +1633,19 @@ fn vim_flag_selects_only_interactive_composer_editing() {
     assert!(refused(["resume", "--vim", "--", "hello"]).contains("interactive"));
     assert!(answered(["--help"]).contains("--vim"));
 }
+
+#[test]
+fn output_style_is_shared_by_run_and_served_session_shape() {
+    // Catches: a served session silently dropping the launch output style.
+    let run = parsed(["run", "--output-style", "concise", "hello"]);
+    let acp = served(["acp", "--output-style", "concise"]);
+    assert_eq!(run.output_style.as_deref(), Some("concise"));
+    assert_eq!(acp.shape.output_style, run.output_style);
+    assert_eq!(
+        parsed(["resume", "--output-style", "concise", "next step"])
+            .output_style
+            .as_deref(),
+        Some("concise")
+    );
+    assert!(parsed(["run", "hello"]).output_style.is_none());
+}

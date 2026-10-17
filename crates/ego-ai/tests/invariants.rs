@@ -407,6 +407,39 @@ async fn turn_over_http(
     fixture: TurnFixture,
 ) -> (ego_core::turn::TurnOutcome, SessionState) {
     let TurnFixture { registry, tier } = fixture;
+    turn_over_http_with_question(
+        slug,
+        row,
+        wire,
+        http,
+        retry,
+        retry_pause,
+        (
+            registry
+                .into_iter()
+                .map(ego_core::turn::RegisteredTool::Effect)
+                .collect(),
+            None,
+            tier,
+        ),
+    )
+    .await
+}
+
+async fn turn_over_http_with_question(
+    slug: &str,
+    row: ProviderRow,
+    wire: &'static dyn WireFormat,
+    http: Arc<dyn Http>,
+    retry: u32,
+    retry_pause: Arc<dyn ego_core::turn::RetryPause>,
+    question: (
+        Vec<ego_core::turn::RegisteredTool>,
+        Option<Arc<dyn ego_core::question::Elicitor>>,
+        Option<ego_ai::service_tier::ServiceTier>,
+    ),
+) -> (ego_core::turn::TurnOutcome, SessionState) {
+    let (registry, elicitor, tier) = question;
     let slug = ModelSlug::parse(slug).expect("a constant this file controls");
     // Through the catalogue rather than around it: "configuration" is the
     // claim, and a row handed straight to the generator would prove only that
@@ -484,7 +517,7 @@ async fn turn_over_http(
             invocation: RunInvocationId::new(),
             retry_pause,
         },
-        Tools::new(
+        Tools::from_registry(
             &registry,
             ToolEffectPorts::new(
                 &fs,
@@ -498,6 +531,10 @@ async fn turn_over_http(
         ),
     )
     .expect("budget gate is available");
+
+    if let Some(elicitor) = elicitor {
+        loop_ = loop_.with_elicitor(elicitor);
+    }
 
     let outcome = loop_
         .run("list the files")
@@ -1217,4 +1254,210 @@ async fn fast_contract_catches_missing_wire_tier_and_unmultiplied_turn_cost() {
             }
         );
     }
+}
+// regression case: completed Codex sockets must not survive a human wait.
+#[derive(Default)]
+struct QuestionSocketState {
+    now: std::sync::atomic::AtomicU64,
+    live: std::sync::atomic::AtomicUsize,
+    opened: std::sync::atomic::AtomicUsize,
+    sent: Mutex<Vec<serde_json::Value>>,
+    fail_after_answer: std::sync::atomic::AtomicBool,
+}
+
+struct QuestionHttp(Arc<QuestionSocketState>);
+struct QuestionSocket {
+    state: Arc<QuestionSocketState>,
+    last_used: u64,
+    frames: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl Drop for QuestionSocket {
+    fn drop(&mut self) {
+        self.state
+            .live
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Http for QuestionHttp {
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        panic!("WebSocket test must not silently fall back to HTTP")
+    }
+
+    fn open_websocket(
+        &self,
+        _call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<Box<dyn ego_ai::http::HttpWebSocket>, TransportError>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.0.opened.fetch_add(1, SeqCst);
+        self.0.live.fetch_add(1, SeqCst);
+        let socket = QuestionSocket {
+            last_used: self.0.now.load(SeqCst),
+            state: self.0.clone(),
+            frames: Default::default(),
+        };
+        Box::pin(async move { Ok(Box::new(socket) as Box<dyn ego_ai::http::HttpWebSocket>) })
+    }
+}
+
+impl ego_ai::http::HttpWebSocket for QuestionSocket {
+    fn send(&mut self, call: PreparedHttpCall) -> BoxFuture<'_, Result<(), TransportError>> {
+        Box::pin(async move {
+            use std::sync::atomic::Ordering::SeqCst;
+            let (_, _, _, request) = call.into_parts();
+            let body: serde_json::Value = serde_json::from_slice(request.body()).unwrap();
+            let now = self.state.now.load(SeqCst);
+            if now - self.last_used > 60 {
+                return Err(TransportError::possibly_sent(TransportFailure::Exchange(
+                    "provider idle limit".into(),
+                )));
+            }
+            if now > 0 && self.state.fail_after_answer.swap(false, SeqCst) {
+                return Err(TransportError::definitely_unsent(
+                    TransportFailure::Connect("real connection failure after answer".into()),
+                ));
+            }
+            self.last_used = now;
+            let first = self.state.sent.lock().unwrap().is_empty();
+            self.state.sent.lock().unwrap().push(body);
+            if first {
+                let args = serde_json::json!({"prompt":"Choose", "mode":"single", "options":[{"id":"yes","label":"Yes"}], "free_text":false}).to_string();
+                let call = serde_json::json!({"type":"function_call", "id":"fc_question", "call_id":"question_1", "name":"ask_question", "arguments":args});
+                self.frames.push_back(
+                    serde_json::to_vec(
+                        &serde_json::json!({"type":"response.output_item.added", "item":call}),
+                    )
+                    .unwrap(),
+                );
+                self.frames.push_back(serde_json::to_vec(&serde_json::json!({"type":"response.completed", "response":{"id":"resp_question", "status":"completed", "output":[call], "usage":{"input_tokens":8,"output_tokens":3}}})).unwrap());
+            } else {
+                // Reuse the recorded provider text frames, not a hand-written answer dialect.
+                self.frames.extend(
+                    CODEX_TEXT
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .map(|line| line.as_bytes().to_vec()),
+                );
+            }
+            Ok(())
+        })
+    }
+
+    fn receive(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
+        Box::pin(future::ready(Ok(self.frames.pop_front())))
+    }
+}
+
+struct WaitingQuestion {
+    state: Arc<QuestionSocketState>,
+    live_during_wait: Arc<std::sync::atomic::AtomicUsize>,
+    available: bool,
+}
+
+impl ego_core::question::Elicitor for WaitingQuestion {
+    fn elicit<'a>(
+        &'a self,
+        _question: ego_core::event::id::ItemId,
+        _request: ego_core::question::QuestionRequest,
+    ) -> BoxFuture<'a, Result<ego_core::question::QuestionOutcome, ego_core::question::ElicitorError>>
+    {
+        Box::pin(async move {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.live_during_wait
+                .store(self.state.live.load(SeqCst), SeqCst);
+            self.state.now.store(1801, SeqCst);
+            if !self.available {
+                return Ok(ego_core::question::QuestionOutcome::Unavailable);
+            }
+            Ok(ego_core::question::QuestionOutcome::Answered(
+                ego_core::question::QuestionAnswer::single("yes"),
+            ))
+        })
+    }
+}
+
+async fn question_wait_turn(fail_after_answer: bool, available: bool) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let sockets = Arc::new(QuestionSocketState::default());
+    sockets.fail_after_answer.store(fail_after_answer, SeqCst);
+    let live = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+    let pause = Arc::new(RecordedBodyPause::default());
+    let (outcome, state) = turn_over_http_with_question(
+        "openai/gpt-6.1-sol",
+        ProviderRow::openai_at(Url::parse("https://fixture.invalid/backend-api/").unwrap()),
+        &ego_ai::wire::openai_codex_responses::OpenAiCodexResponses,
+        Arc::new(QuestionHttp(sockets.clone())),
+        6,
+        pause.clone(),
+        (
+            vec![ego_core::turn::RegisteredTool::HumanInput(Arc::new(
+                ego_core::question::AskQuestionTool,
+            ))],
+            Some(Arc::new(WaitingQuestion {
+                state: sockets.clone(),
+                live_during_wait: live.clone(),
+                available,
+            })),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        live.load(SeqCst),
+        0,
+        "completed provider socket stayed open during the human wait"
+    );
+    if !available {
+        assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+        assert!(state.pending_question().is_some());
+        assert_eq!(sockets.sent.lock().unwrap().len(), 1);
+        assert_eq!(sockets.live.load(SeqCst), 0);
+        return;
+    }
+    assert_eq!(outcome.exit_reason, ExitReason::Completed);
+    assert_eq!(answer(&state), "ok");
+    let requests = sockets.sent.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one question request, one answer continuation"
+    );
+    assert!(
+        requests[1].get("previous_response_id").is_none(),
+        "connection-local response ID must not survive the question"
+    );
+    assert!(
+        requests[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call_output")
+    );
+    assert_eq!(
+        sockets.opened.load(SeqCst),
+        if fail_after_answer { 3 } else { 2 }
+    );
+    assert_eq!(
+        pause.0.lock().unwrap().len(),
+        usize::from(fail_after_answer)
+    );
+}
+
+#[tokio::test]
+async fn question_wait_does_not_hold_the_provider_stream() {
+    // Catches: the completed provider socket idles out while the question waits.
+    question_wait_turn(false, true).await;
+}
+
+#[tokio::test]
+async fn question_answer_still_retries_a_real_connection_failure() {
+    // Catches: releasing idle state disables genuine post-answer network retries.
+    question_wait_turn(true, true).await;
+}
+
+#[tokio::test]
+async fn unavailable_question_host_releases_the_provider_connection_before_suspension() {
+    // Catches: a durable pending question retains its previous provider socket.
+    question_wait_turn(false, false).await;
 }

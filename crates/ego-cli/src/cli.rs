@@ -248,7 +248,9 @@ pub fn root_command() -> clap::Command {
     fn named(name: &'static str, command: clap::Command) -> clap::Command {
         command.name(name)
     }
-    clap::Command::new("ego")
+    RunCommand::command()
+        .name("ego")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("Run an agent, from one command line.")
         // `ego help` is not one of the 17 commands `CLI.md` §2 documents, and
         // building the tree would otherwise invent it — putting a subcommand in
@@ -632,6 +634,7 @@ pub struct SessionShape {
     pub system: Option<String>,
     pub bare: bool,
     pub append_system: Option<String>,
+    pub output_style: Option<String>,
     pub instructions: Option<PathBuf>,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
@@ -648,6 +651,7 @@ impl From<Shape> for SessionShape {
             system: shape.system,
             bare: shape.bare,
             append_system: shape.append_system,
+            output_style: shape.output_style,
             instructions: shape.instructions,
             allow: shape.allow,
             deny: shape.deny,
@@ -845,6 +849,7 @@ pub struct Args {
     pub system: Option<String>,
     pub session_prompt: Option<ego_core::config::SessionSystemPrompt>,
     pub append_system: Option<String>,
+    pub output_style: Option<String>,
     pub instructions: Option<PathBuf>,
     pub bare: bool,
     pub trust_workspace: bool,
@@ -2105,6 +2110,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         system: shape.system,
         session_prompt: None,
         append_system: shape.append_system,
+        output_style: shape.output_style,
         instructions: shape.instructions,
         bare: shape.bare,
         trust_workspace: flags.trust_workspace,

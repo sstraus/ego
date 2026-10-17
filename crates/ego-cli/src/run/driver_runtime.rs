@@ -764,6 +764,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     cancel: &cancel,
                                     last: &mut last,
                                     mcp_errors: &mcp_errors,
+                                    jsonl_store,
+                                    root: &root,
+                                    clock: &clock,
+                                    skill_profile_layers: skill_profile_layers.as_deref(),
                                 },
                                 resumed_turn,
                                 asked,
@@ -3464,6 +3468,28 @@ fn report_interactive_turn_end(
         ));
     }
 
+    if let RunTermination::PermissionRequired {
+        action,
+        by: DeniedBy::Decided(ego_core::permit::Authority::Mode { mode: Mode::Plan }),
+    } = termination
+    {
+        use unicode_width::UnicodeWidthStr;
+
+        let action = ego_core::permit::terminal_safe(action);
+        let message = format!(
+            "stopped: permission refused — {action}\n\
+             Use /mode to choose a mode that permits this action, then resubmit."
+        );
+        let prefix_width = format!("{}: ", crate::DISPLAY_NAME).width();
+        let room = seat.width().saturating_sub(prefix_width + 1).max(1);
+        let rows = message
+            .lines()
+            .flat_map(|line| crate::render::Line::plain(line).wrap(room))
+            .map(|line| line.text())
+            .collect::<Vec<_>>();
+        diagnostics.note(&rows.join("\n"));
+    }
+
     if let RunTermination::Failed { message } = termination {
         diagnostics.note(&format!("{message}; fix the error and retry, or use /quit"));
     }
@@ -3571,6 +3597,10 @@ struct InteractiveTurnPhase<'a, 'session, 'store> {
     cancel: &'a CancelToken,
     last: &'a mut Ended,
     mcp_errors: &'a [String],
+    jsonl_store: &'a JsonlStore,
+    root: &'a Path,
+    clock: &'a SystemClock,
+    skill_profile_layers: Option<&'a [Sourced<ConfigLayer>]>,
 }
 
 async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
@@ -3620,6 +3650,10 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         cancel,
         last,
         mcp_errors,
+        jsonl_store,
+        root,
+        clock,
+        skill_profile_layers,
     } = input;
     // Per turn, for the reason `build` documents.
     seat.busy();
@@ -3708,16 +3742,62 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     let mut loop_ = loop_
         .with_automatic_compaction()
         .with_interactive_control(control);
-    let driven = drive_interactive_input(
-        turns,
-        &mut loop_,
-        resumed_turn,
-        asked,
-        images,
-        &turn_cancel,
-        diagnostics,
-    )
-    .await;
+    let driven = {
+        let driving = drive_interactive_input(
+            turns,
+            &mut loop_,
+            resumed_turn,
+            asked,
+            images,
+            &turn_cancel,
+            diagnostics,
+        );
+        futures::pin_mut!(driving);
+        loop {
+            let inspection = seat.next_inspection();
+            match futures::future::select(driving.as_mut(), inspection).await {
+                futures::future::Either::Left((result, _)) => break result,
+                futures::future::Either::Right((command, _)) => {
+                    assert!(
+                        command.is_read_only_inspection(),
+                        "inspection inbox is read-only"
+                    );
+                    let current = session_hooks.state.state();
+                    match command {
+                        repl::HostCommand::Tasks(arguments) => {
+                            diagnostics.note(&background_tasks(
+                                &arguments,
+                                &current,
+                                session_hook_ports.process(),
+                            ));
+                        }
+                        repl::HostCommand::Action(repl::actions::ActionId::Config) => {
+                            diagnostics.note(&crate::config::repl_text(
+                                effective,
+                                skill_profile_layers.unwrap_or_default(),
+                                &perimeter,
+                            ));
+                        }
+                        repl::HostCommand::Config(arguments) if arguments == "perimeter" => {
+                            diagnostics.note(&perimeter.text())
+                        }
+                        repl::HostCommand::Action(repl::actions::ActionId::Usage) => {
+                            report_session_usage(
+                                jsonl_store,
+                                root,
+                                active.id(),
+                                clock,
+                                current.context,
+                                diagnostics,
+                            )
+                            .await;
+                        }
+                        _ => unreachable!("the inspection inbox accepts only read-only requests"),
+                    }
+                }
+            }
+        }
+    };
     *last_generation_request = loop_.last_generation_request();
     drop(loop_);
     *state = session_hooks.state.state();
@@ -3735,8 +3815,8 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     let Some((termination, result)) = driven else {
         return Ok((false, perimeter));
     };
-    between();
     report_interactive_turn_end(&termination, cancel, seat, turn_started, diagnostics);
+    between();
     *last = Ended {
         termination,
         session: active.id(),

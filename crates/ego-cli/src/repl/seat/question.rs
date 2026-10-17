@@ -1645,11 +1645,12 @@ fn status_row(status: &SurfaceStatus) -> String {
     if status.activity {
         let elapsed = status
             .activity_since
-            .map(|started| started.elapsed().as_secs())
-            .unwrap_or(0);
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
         return format!(
-            "{} Working {elapsed}s \x1b[2m· Esc to interrupt\x1b[22m\n",
-            ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
+            "{} Working {} \x1b[2m· Esc to interrupt\x1b[22m\n",
+            ACTIVITY_FRAMES[(elapsed.as_secs() as usize) % ACTIVITY_FRAMES.len()],
+            crate::render::duration(elapsed)
         );
     }
     let text = status
@@ -1666,11 +1667,17 @@ fn status_row(status: &SurfaceStatus) -> String {
 
 impl Prompt for Waiting {
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
-        // Commit only the input, never the live status or composer notices.
-        Some(
-            background_notice::row(buffer, usize::from(width).saturating_sub(1))
-                .unwrap_or_else(|| format!("> {}", buffer.replace('\n', "\n… "))),
-        )
+        let width = usize::from(width).saturating_sub(1);
+        if let Some(receipt) = background_notice::row(buffer, width) {
+            return Some(receipt);
+        }
+        let (receipt, detail) = crate::render::prompt_echo::collapsed(buffer, width)?;
+        self.status
+            .lock()
+            .expect("surface status lock")
+            .details
+            .remember(detail);
+        Some(receipt)
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {

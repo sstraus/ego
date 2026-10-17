@@ -67,7 +67,7 @@ pub(super) fn choose_permission_action(
         busy,
         "Choose permission operation",
         &options,
-        (true, false),
+        (true, false, None),
     ) {
         PermissionField::Value(id) => choices
             .iter()
@@ -128,7 +128,7 @@ fn build_permission_request(
                 busy,
                 "Choose rule effect",
                 &[("allow", "Allow"), ("deny", "Deny")],
-                (false, false),
+                (false, false, None),
             ) {
                 PermissionField::Value(value) => value,
                 PermissionField::Cancelled => return None,
@@ -252,7 +252,7 @@ fn read_permission_call(
         busy,
         "Choose admitted tool",
         &borrowed,
-        (false, false),
+        (false, false, None),
     ) {
         PermissionField::Value(value) => value,
         PermissionField::Cancelled => {
@@ -303,7 +303,7 @@ fn select_permission_value(
     busy: bool,
     prompt: &str,
     choices: &[(&str, &str)],
-    (cancel_missing_key, ignore_unexpected_line): (bool, bool),
+    (cancel_missing_key, ignore_unexpected_line, initial_choice): (bool, bool, Option<&str>),
 ) -> PermissionField {
     if choices.is_empty() {
         return PermissionField::Cancelled;
@@ -324,6 +324,14 @@ fn select_permission_value(
             .iter()
             .map(|option| SelectorOption::new(option.id.clone(), option.label.clone())),
     )));
+    if let Some(index) =
+        initial_choice.and_then(|id| request.options.iter().position(|option| option.id == id))
+    {
+        selector
+            .lock()
+            .expect("permission value selector lock")
+            .key(SelectorKey::Number(index + 1));
+    }
     let saved = enter_modal(editor, phase, status);
     status
         .lock()
@@ -408,11 +416,23 @@ pub(super) fn choose_policy_mode(
     status: &SharedStatus,
     busy: bool,
 ) -> Option<Line> {
+    let current = status
+        .lock()
+        .expect("surface status lock")
+        .status_base
+        .as_ref()
+        .map(|base| base.mode);
+    let Some(current) = current else {
+        return permission_failure(status, "the effective execution mode is unavailable");
+    };
     let mut controller = PolicyControlController::new();
     let modes = controller.mode_options();
     let options = modes
         .iter()
-        .map(|mode| (mode.as_str(), format!("{mode:?}")))
+        .map(|mode| {
+            let suffix = if *mode == current { " ✓ current" } else { "" };
+            (mode.as_str(), format!("{mode:?}{suffix}"))
+        })
         .collect::<Vec<_>>();
     let borrowed = options
         .iter()
@@ -425,7 +445,7 @@ pub(super) fn choose_policy_mode(
         busy,
         "Choose execution mode",
         &borrowed,
-        (true, false),
+        (true, false, Some(current.as_str())),
     ) {
         PermissionField::Value(id) => modes
             .iter()
@@ -547,7 +567,7 @@ pub(super) fn choose_statusline_preset(
         busy,
         "Choose status-line setup\n▰/▱: context used/window; green <60%, yellow ≥60%, red ≥85%.\n≈$: subscription-equivalent (standard API), not billed; $: billed.\n(partial): mixed/unpriced usage; ?: context unmeasured.\n⎇: branch; ●: uncommitted changes; path: abbreviated cwd.",
         &choices,
-        (false, true),
+        (false, true, None),
     ) {
         PermissionField::Value(id) => STATUSLINE_PRESETS
             .iter()
@@ -611,6 +631,53 @@ pub(super) fn configure_statusline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches: initializing the current option prevents navigation to a different mode.
+    #[test]
+    fn initialized_permission_selector_still_applies_navigation() {
+        let mut editor = Reedline::create();
+        let phase = SurfacePhase::new(EditPhase::Idle);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            picker_keys: vec!["down".into(), "enter".into()],
+            ..SurfaceStatus::default()
+        }));
+        let result = select_permission_value(
+            &mut editor,
+            &phase,
+            &status,
+            false,
+            "Choose execution mode",
+            &[("plan", "Plan"), ("default", "Default"), ("auto", "Auto")],
+            (true, false, Some("default")),
+        );
+        assert!(matches!(result, PermissionField::Value(id) if id == "auto"));
+        assert!(status.lock().unwrap().question_selector.is_none());
+    }
+
+    // Catches: a preselected option is accepted on Escape instead of cancelling.
+    #[test]
+    fn initialized_permission_selector_cancels_without_accepting() {
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("draft text".into())]);
+        let phase = SurfacePhase::new(EditPhase::Idle);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            picker_keys: vec!["escape".into()],
+            ..SurfaceStatus::default()
+        }));
+        let result = select_permission_value(
+            &mut editor,
+            &phase,
+            &status,
+            false,
+            "Choose execution mode",
+            &[("plan", "Plan"), ("default", "Default")],
+            (true, false, Some("default")),
+        );
+        assert!(matches!(result, PermissionField::Cancelled));
+        assert_eq!(editor.current_buffer_contents(), "draft text");
+        assert_eq!(phase.get(), EditPhase::Idle);
+        assert!(status.lock().unwrap().question_selector.is_none());
+    }
 
     // Catches: sharing the selector silently retries a missing action-menu key.
     #[test]

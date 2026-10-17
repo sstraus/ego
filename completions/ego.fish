@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_ego_global_optspecs
-    string join \n h/help
+    string join \n worktree= f/file= var= attach= m/model= offline sandbox= thinking= read-only-dir= system= bare append-system= output-style= instructions= tools= no-tools allow= deny= profile= trust-workspace session= session-id= ephemeral session-dir= C= output= artifact-dir= schema= schema-retries= retry= fallback= budget= max-output-tokens= goal= no-context-tool context-clear context-interval= goal-turns= goal-check-command= max-turns= timeout= mcp= mode= plan yolo c/set= q/quiet no-color plain vim h/help V/version
 end
 
 function __fish_ego_needs_command
@@ -24,6 +24,58 @@ function __fish_ego_using_subcommand
     contains -- $cmd[1] $argv
 end
 
+complete -c ego -n "__fish_ego_needs_command" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
+complete -c ego -n "__fish_ego_needs_command" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
+complete -c ego -n "__fish_ego_needs_command" -l var -d 'Supply one declared agent-file template variable' -r
+complete -c ego -n "__fish_ego_needs_command" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
+complete -c ego -n "__fish_ego_needs_command" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
+complete -c ego -n "__fish_ego_needs_command" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
+complete -c ego -n "__fish_ego_needs_command" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
+complete -c ego -n "__fish_ego_needs_command" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
+complete -c ego -n "__fish_ego_needs_command" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_needs_command" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_needs_command" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
+complete -c ego -n "__fish_ego_needs_command" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
+complete -c ego -n "__fish_ego_needs_command" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
+complete -c ego -n "__fish_ego_needs_command" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
+complete -c ego -n "__fish_ego_needs_command" -l deny -d 'Deny rule, e.g. \'write(**)\'. Repeatable' -r
+complete -c ego -n "__fish_ego_needs_command" -l profile -d 'Layer [profile.NAME] from config' -r
+complete -c ego -n "__fish_ego_needs_command" -l session -d 'Named session: created or attached' -r
+complete -c ego -n "__fish_ego_needs_command" -l session-id -d 'A session id supplied by the caller' -r
+complete -c ego -n "__fish_ego_needs_command" -l session-dir -d 'Override the store location' -r -F
+complete -c ego -n "__fish_ego_needs_command" -s C -d 'Run as if started in DIR' -r -F
+complete -c ego -n "__fish_ego_needs_command" -l output -d 'text|json|jsonl' -r -f -a "text\t''
+json\t''
+jsonl\t''"
+complete -c ego -n "__fish_ego_needs_command" -l artifact-dir -d 'Override the sanitized run-artifact root for profile `ci`' -r -F
+complete -c ego -n "__fish_ego_needs_command" -l schema -d 'JSON Schema the final answer must validate against; `@file` or inline' -r
+complete -c ego -n "__fish_ego_needs_command" -l schema-retries -d 'How many times to re-prompt on a schema mismatch' -r
+complete -c ego -n "__fish_ego_needs_command" -l retry -d 'Additional delivery-safe attempts for each candidate' -r
+complete -c ego -n "__fish_ego_needs_command" -l fallback -d 'Ordered provider/model candidate used after a delivery-safe failure' -r
+complete -c ego -n "__fish_ego_needs_command" -l budget -d 'Hard cap: \'2.5$\' or \'400k\' tokens' -r
+complete -c ego -n "__fish_ego_needs_command" -l max-output-tokens -d 'Maximum generated tokens per request' -r
+complete -c ego -n "__fish_ego_needs_command" -l goal -d 'Set a checked session objective' -r
+complete -c ego -n "__fish_ego_needs_command" -l context-interval -d 'Minimum completed turns between model-requested transitions' -r
+complete -c ego -n "__fish_ego_needs_command" -l goal-turns -d 'Maximum automatic goal continuation turns' -r
+complete -c ego -n "__fish_ego_needs_command" -l goal-check-command -d 'Evaluator argv as a JSON string array; reads evidence JSON on stdin' -r
+complete -c ego -n "__fish_ego_needs_command" -l max-turns -d 'Cap the turns this run may take' -r
+complete -c ego -n "__fish_ego_needs_command" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
+complete -c ego -n "__fish_ego_needs_command" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
+complete -c ego -n "__fish_ego_needs_command" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
+complete -c ego -n "__fish_ego_needs_command" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
+complete -c ego -n "__fish_ego_needs_command" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
+complete -c ego -n "__fish_ego_needs_command" -l bare -d 'No ambient discovery, even in a trusted workspace'
+complete -c ego -n "__fish_ego_needs_command" -l no-tools -d 'Offer no tools at all'
+complete -c ego -n "__fish_ego_needs_command" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_needs_command" -l ephemeral -d 'Refused: every run uses a durable session'
+complete -c ego -n "__fish_ego_needs_command" -l no-context-tool -d 'Disable model-requested context transitions'
+complete -c ego -n "__fish_ego_needs_command" -l context-clear -d 'Permit the model to discard conversation history using clear'
+complete -c ego -n "__fish_ego_needs_command" -l plan -d 'Shorthand for --mode plan'
+complete -c ego -n "__fish_ego_needs_command" -l yolo -d 'Shorthand for --mode yolo'
+complete -c ego -n "__fish_ego_needs_command" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
+complete -c ego -n "__fish_ego_needs_command" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
+complete -c ego -n "__fish_ego_needs_command" -l plain -d 'Append plain output without terminal styling or live retry updates'
+complete -c ego -n "__fish_ego_needs_command" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
 complete -c ego -n "__fish_ego_needs_command" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_needs_command" -f -a "run" -d 'Run an agent from a prompt, headless.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "resume" -d 'Continue a session; no ID = latest in this workspace.'
@@ -59,6 +111,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l thinking -d 'off|minimal
 complete -c ego -n "__fish_ego_using_subcommand run" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
@@ -112,6 +165,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l thinking -d 'off|mini
 complete -c ego -n "__fish_ego_using_subcommand resume" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
@@ -165,6 +219,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l thinking -d 'off|mi
 complete -c ego -n "__fish_ego_using_subcommand continue" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
@@ -216,8 +271,8 @@ jsonl\t''"
 complete -c ego -n "__fish_ego_using_subcommand fork" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand rm" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand rm" -s C -d 'Run as if started in DIR' -r -F
-complete -c ego -n "__fish_ego_using_subcommand rm" -l yes
-complete -c ego -n "__fish_ego_using_subcommand rm" -l force
+complete -c ego -n "__fish_ego_using_subcommand rm" -l yes -d 'Supply deletion confirmation without prompting; required without terminal stdin'
+complete -c ego -n "__fish_ego_using_subcommand rm" -l force -d 'Acknowledge an uncertain prior run; does not replace deletion confirmation and is not a general override'
 complete -c ego -n "__fish_ego_using_subcommand rm" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand compact" -l budget -d 'Hard spend ceiling, as for run' -r
 complete -c ego -n "__fish_ego_using_subcommand compact" -l max-output-tokens -d 'Maximum generated tokens per request' -r
@@ -228,7 +283,7 @@ complete -c ego -n "__fish_ego_using_subcommand compact" -l output -d 'text|json
 json\t''
 jsonl\t''"
 complete -c ego -n "__fish_ego_using_subcommand compact" -s h -l help -d 'Print help'
-complete -c ego -n "__fish_ego_using_subcommand export" -l format -r -f -a "md\t''
+complete -c ego -n "__fish_ego_using_subcommand export" -l format -d 'Transcript format; JSONL is stdout-only and cannot be combined with --file' -r -f -a "md\t''
 json\t''
 jsonl\t''
 transcript\t''"
@@ -281,15 +336,16 @@ complete -c ego -n "__fish_ego_using_subcommand acp" -l sandbox -d 'The weakest 
 complete -c ego -n "__fish_ego_using_subcommand acp" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l system -d 'Replace the system prompt. `@file` reads it from a file' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l append-system -d 'Append to the system prompt. `@file` reads it from a file' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l output-style -d 'Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l instructions -d 'Use this instruction file instead of discovering one' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -l tools -d 'Restrict the builtin tools to this comma-separated list' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l allow -d 'Allow rule, e.g. \'read(src/**)\'. Repeatable' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l deny -d 'Deny rule, e.g. \'write(**)\'. Repeatable' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l profile -d 'Layer [profile.NAME] from config' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l listen -d 'Serve on a socket path or address instead of stdio' -r
-complete -c ego -n "__fish_ego_using_subcommand acp" -l max-connections -d 'Maximum simultaneous listener connections' -r
-complete -c ego -n "__fish_ego_using_subcommand acp" -l connection-lifetime -d 'Maximum lifetime of one listener connection: 90s, 10m or 2h' -r
-complete -c ego -n "__fish_ego_using_subcommand acp" -l max-ingress-bytes -d 'Maximum cumulative bytes read from one listener connection' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l max-connections -d 'Maximum simultaneous listener connections (runtime default: 32)' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l connection-lifetime -d 'Maximum lifetime of one listener connection: 90s, 10m or 2h (runtime default: 24h)' -r
+complete -c ego -n "__fish_ego_using_subcommand acp" -l max-ingress-bytes -d 'Maximum cumulative bytes read from one listener connection (runtime default: 134217728 bytes)' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l no-tools -d 'Offer no tools at all'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l allow-public-bind -d 'Serve on an address reachable from outside this machine'

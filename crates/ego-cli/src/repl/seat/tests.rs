@@ -172,6 +172,36 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
     assert!(indicator.ends_with("\n> "));
 }
 
+// Catches: long turns shown as raw seconds, or losing the smaller unit at a boundary.
+#[test]
+fn working_indicator_formats_long_elapsed_time() {
+    for (seconds, expected) in [
+        (0, "0s"),
+        (42, "42s"),
+        (59, "59s"),
+        (60, "1m 0s"),
+        (1511, "25m 11s"),
+        (3599, "59m 59s"),
+        (3600, "1h 00m"),
+        (3900, "1h 05m"),
+        (86400, "24h 00m"),
+    ] {
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            activity: true,
+            activity_since: Some(Instant::now() - Duration::from_secs(seconds)),
+            ..SurfaceStatus::default()
+        }));
+        let waiting = Waiting::new(status);
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        assert!(
+            indicator.contains(&format!(
+                "Working {expected} \x1b[2m· Esc to interrupt\x1b[22m\n"
+            )),
+            "{seconds}s rendered as {indicator:?}"
+        );
+    }
+}
+
 #[test]
 fn failed_answer_output_does_not_claim_a_visible_reply() {
     use crate::output::{InteractiveOutput, TextOutput};
@@ -558,6 +588,7 @@ fn adding_a_registry_key_changes_the_banner_and_the_help_without_editing_either(
 #[test]
 fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let phase = SurfacePhase::new(EditPhase::Idle);
+    let (_inspection_sender, inspections) = crossbeam::channel::unbounded();
     let (input_sender, input) = bounded(CHANNEL_CAPACITY);
     input_sender
         .send(Line::Submitted("initial".to_string()))
@@ -568,6 +599,8 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let seat = Seat {
         kind: SeatKind::Live(Box::new(LiveSeat {
             input,
+            inspections,
+            inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
             control: seat_control,
             activated: AtomicBool::new(false),
             break_signal: Arc::new(AtomicBool::new(false)),
@@ -597,6 +630,58 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
         assert!(
             status.reply_started.load(Ordering::Acquire),
             "re-entering busy during one turn must retain visible answer state"
+        );
+    }
+}
+
+// Catches: an inspection queued in the finishing turn is answered against a new session.
+#[test]
+fn pending_inspections_are_answered_before_a_queued_session_switch() {
+    let (inspection_sender, inspections) = crossbeam::channel::unbounded();
+    let (input_sender, input) = crossbeam::channel::unbounded();
+    let (control, _control_receiver) = bounded(CHANNEL_CAPACITY);
+    let (_ingress, coordinator) = interactive_control();
+    let registry = Arc::new(ActionRegistry::final_surface());
+    let seat = Seat {
+        kind: SeatKind::Live(Box::new(LiveSeat {
+            input,
+            inspections,
+            inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
+            control,
+            activated: AtomicBool::new(false),
+            break_signal: Arc::new(AtomicBool::new(false)),
+            phase: SurfacePhase::new(EditPhase::Idle),
+            status: Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
+                &registry,
+            )))),
+            git_worker: Mutex::new(None),
+            activity_worker: Mutex::new(None),
+            output_owner: Mutex::new(None),
+            owner: Mutex::new(None),
+        })),
+        terminal: true,
+        registry,
+        coordinator: Mutex::new(Some(coordinator)),
+    };
+    // The active driver can finish with an inspection still waiting. A subsequent
+    // /new must not move that already-admitted request to the next session.
+    // Repeat because crossbeam randomizes selection when both inboxes are ready.
+    for _ in 0..32 {
+        let inspection = Line::HostCommand(HostCommand::Action(ActionId::Usage));
+        inspection_sender
+            .send(HostCommand::Action(ActionId::Usage))
+            .unwrap();
+        input_sender
+            .send(Line::HostCommand(HostCommand::Action(ActionId::New)))
+            .unwrap();
+        assert_eq!(
+            seat.read(),
+            inspection,
+            "pending /usage must be answered before /new changes the active session"
+        );
+        assert_eq!(
+            seat.read(),
+            Line::HostCommand(HostCommand::Action(ActionId::New))
         );
     }
 }
@@ -1307,4 +1392,48 @@ fn configured_shortcuts_reach_the_surface_and_both_help_projections() {
         assert!(help.contains("Ctrl+P"), "{help}");
         assert!(!help.contains("Option+P"), "{help}");
     }
+}
+
+// Catches: a submitted prompt longer than the preview limit floods the transcript.
+#[test]
+fn long_prompt_echo_is_collapsed() {
+    let waiting = Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default())));
+    let prompt = (1..=20)
+        .map(|n| format!("brief line {n}\n"))
+        .collect::<String>();
+    let receipt = waiting
+        .render_prompt_submission(&prompt, 120)
+        .expect("long submissions need a compact receipt");
+    assert_eq!(
+        receipt,
+        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · Option+O or /expand"
+    );
+}
+
+// Catches: collapsed input is not reachable through the tool expansion action.
+#[test]
+fn collapsed_prompt_and_tool_output_share_expansion_history() {
+    use crate::output::{Diagnostics, InteractiveOutput};
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let waiting = Waiting::new(Arc::clone(&status));
+    let (sender, rows) = crossbeam::channel::unbounded();
+    let mut surface = SurfaceOutput::new(sender, CancelToken::new());
+    surface.details = Arc::clone(&status.lock().unwrap().details);
+    let output = InteractiveOutput::new(surface);
+    output.tool_row("old tool", "old detail".into());
+    let _ = rows.try_iter().collect::<Vec<_>>();
+    let prompt = "one\ntwo\nthree\nfour";
+    assert!(waiting.render_prompt_submission(prompt, 80).is_some());
+    output.expand_last_tool();
+    assert!(
+        rows.try_iter()
+            .collect::<String>()
+            .contains("> one\n… two\n… three\n… four")
+    );
+    // A short submission, including /expand itself, must not replace the detail.
+    assert!(waiting.render_prompt_submission("/expand", 80).is_none());
+    output.tool_row("new tool", "new detail".into());
+    let _ = rows.try_iter().collect::<Vec<_>>();
+    output.expand_last_tool();
+    assert!(rows.try_iter().collect::<String>().contains("new detail"));
 }
