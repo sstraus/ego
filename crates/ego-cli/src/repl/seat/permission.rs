@@ -340,12 +340,14 @@ fn select_permission_value(
     repaint_status(status);
     let result = loop {
         let question = Question::new(
-            question_selector_prompt(&request, &selector),
+            question_selector_prompt(&request, &selector, status),
             Arc::clone(status),
         );
-        match queued_selector_line(status)
-            .unwrap_or_else(|| answer(false, editor.read_line(&question)))
-        {
+        match queued_selector_line(status).unwrap_or_else(|| {
+            let line = answer(false, editor.read_line(&question));
+            let _ = editor.erase_last_prompt();
+            line
+        }) {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
                 let Some(key) = next_selector_key(status, &command) else {
                     if cancel_missing_key {

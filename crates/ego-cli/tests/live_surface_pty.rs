@@ -18,6 +18,8 @@ mod missing_program;
 mod mode_picker;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
+#[path = "live_surface_pty/picker_roles.rs"]
+mod picker_roles;
 #[path = "live_surface_pty/plan_denial.rs"]
 mod plan_denial;
 #[path = "live_surface_pty/prompt_echo.rs"]
