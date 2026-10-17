@@ -125,7 +125,7 @@ fn goal_command_binary_invokes_evaluator_and_persists_achievement() {
         .subcommand("resume")
         .args([
             support::FIXTURE_SESSION_ID,
-            "--goal",
+            "--goal-operation",
             "show",
             "--output",
             "json",

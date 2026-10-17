@@ -51,3 +51,71 @@ fn option_value_equal_to_goal_is_not_metadata() {
         .to_string();
     assert!(error.contains("a value is required for '--name"), "{error}");
 }
+
+// Catches: the two aliases assign different meanings to the same goal arguments.
+#[test]
+fn resume_and_continue_share_goal_grammar() {
+    for goal in ["show", "Ship the release", "set=This is an objective"] {
+        let resume = parse(&["resume", SESSION, "--goal", goal, "continue work"]).unwrap();
+        let continued = parse(&["continue", SESSION, "--goal", goal, "continue work"]).unwrap();
+        assert_eq!(resume, continued);
+    }
+    for operation in ["show", "set=Ship", "achieve", "block=API unavailable"] {
+        let resume = parse(&["resume", SESSION, "--goal-operation", operation]).unwrap();
+        assert!(matches!(resume, Invocation::SessionMetadata(_)));
+        assert_eq!(
+            resume,
+            parse(&["continue", SESSION, "--goal-operation", operation]).unwrap()
+        );
+    }
+}
+
+// Catches: resume steals a launch objective for the metadata-only operation parser.
+#[test]
+fn resumed_launch_goal_is_not_metadata() {
+    for alias in ["resume", "continue"] {
+        let Invocation::Resume(args) =
+            parse(&[alias, SESSION, "--goal", "Ship the release", "do the work"]).unwrap()
+        else {
+            panic!("a prompted resume must start the resumed run");
+        };
+        assert_eq!(args.goal.as_deref(), Some("Ship the release"));
+        assert_eq!(args.prompt.as_deref(), Some("do the work"));
+        for tail in [
+            vec!["task"],
+            vec!["--model", "ollama/qwen3"],
+            vec!["--goal", "launch objective"],
+        ] {
+            let mut words = vec![alias, SESSION, "--goal-operation", "show"];
+            words.extend(tail);
+            assert!(
+                parse(&words).is_err(),
+                "metadata accepted run input: {words:?}"
+            );
+        }
+        let Invocation::Answered(help) = parse(&[alias, "--help"]).unwrap() else {
+            panic!("help")
+        };
+        assert!(
+            help.contains("--goal-operation") && help.contains("--goal <GOAL>"),
+            "{help}"
+        );
+    }
+    for alias in ["resume", "continue"] {
+        let command = cli::root_command()
+            .get_subcommands()
+            .find(|command| command.get_name() == alias)
+            .unwrap()
+            .clone();
+        assert!(
+            command
+                .get_arguments()
+                .any(|argument| argument.get_long() == Some("goal-operation"))
+        );
+        assert!(
+            command
+                .get_arguments()
+                .any(|argument| argument.get_long() == Some("goal"))
+        );
+    }
+}

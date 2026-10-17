@@ -26,9 +26,9 @@ name does not prove a provider credential or confinement backend is available.
 | `ego mcp-server` | Serve rooted runs on MCP stdio |
 | `ego a2a --listen ENDPOINT` | Serve local/loopback A2A discovery; operational methods are refused |
 
-`ego resume ID --name ...` and `--goal ...` manage metadata outside the REPL;
+`ego resume ID --name ...` and `--goal-operation ...` manage metadata outside the REPL;
 these accept `--name show|set=TEXT|clear` and
-`--goal show|set=TEXT|achieve|block=REASON`. They are covered in
+`--goal-operation show|set=TEXT|achieve|block=REASON`. They are covered in
 [sessions](../guides/sessions.md) and captured binary help.
 
 ## Flags and defaults

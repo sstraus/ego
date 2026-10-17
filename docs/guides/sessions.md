@@ -39,7 +39,7 @@ History is derived from durable records, not a second authority for execution.
 
 Use `/name` to inspect/set the durable display name and `/goal` to manage the
 persistent goal lifecycle. Headless metadata uses `ego resume ID --name ...` or
-`ego resume ID --goal ...`; use its metadata help for exact operations. A metadata
+`ego resume ID --goal-operation ...`; use its metadata help for exact operations. A metadata
 change requires an explicit session ID and does not submit a provider prompt.
 
 ## Fork

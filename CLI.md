@@ -32,7 +32,7 @@ ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or s
 ego continue [ID] [PROMPT]    continue the latest saved session; shares resume options
 ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
                               --answer QUESTION_ID=JSON answers pending input;
-                              --name and --goal are metadata-only operations
+                              --name and --goal-operation are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
 ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
                               --force acknowledges an uncertain run
@@ -130,7 +130,7 @@ Notes:
   published-but-durability-uncertain file remains visible and is not retried.
 - Metadata-only session operations reuse `resume` and never start a model turn:
   `ego resume ID --name show|set=TEXT|clear [--output text|json|jsonl]` and
-  `ego resume ID --goal show|set=TEXT|achieve|block=REASON` with optional
+  `ego resume ID --goal-operation show|set=TEXT|achieve|block=REASON` with optional
   `--output text|json|jsonl`. They do not accept a prompt or `--answer` in the
   same invocation.
 
@@ -460,7 +460,7 @@ confined execs. The launcher was subsequently fixed.
                         the explicit `ci` profile
     --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
     --name OP           resume only; show|set=TEXT|clear, metadata-only
-    --goal OP           resume only; show|set=TEXT|achieve|block=REASON,
+    --goal-operation OP resume/continue only; show|set=TEXT|achieve|block=REASON,
                         metadata-only
 ```
 
@@ -671,7 +671,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--session-dir` | **yes** | |
 | `--artifact-dir` | **yes** | `ego run`/`ego resume` only, and only with the exact selected profile name `ci`; flags override `[profile.ci].artifact_dir` |
 | `--answer` | **yes** | `ego resume --answer QUESTION_ID=JSON` validates and durably settles pending questions before continuing the session |
-| `--name`, `--goal` | **yes** | metadata-only `ego resume ID` operations from §2; they cannot be combined with a prompt, answer, or run-only override |
+| `--name`, `--goal-operation` | **yes** | metadata-only `ego resume ID` / `ego continue ID` operations from §2; they cannot be combined with a prompt, answer, or run-only override |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
@@ -2310,7 +2310,8 @@ operator prompt. Five consecutive observations of the same normalized condition
 block the goal. A changed condition resets that count. The default allowance is
 20 automatic work turns per goal identity; `--goal-turns N` sets it when
 checks first start. The allowance and consumed count survive resume. Internal
-continuations count toward `--max-turns`. `ego run --goal TEXT`
+continuations count toward `--max-turns`. `ego run --goal TEXT` (also `ego resume ID --goal TEXT` and
+`ego continue ID --goal TEXT`)
 sets an operator-owned objective. The `goal` tool sets or updates a model-authored
 objective, but cannot replace an operator-owned active goal. Provider, permission,
 pause, cancellation and budget stops do not admit automatic work. Invalid checks
