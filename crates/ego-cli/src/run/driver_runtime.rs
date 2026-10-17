@@ -2642,6 +2642,8 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 source: active.id(),
                 sanitize: selection.sanitize,
                 format: selection.format,
+                follow: false,
+                after: None,
                 file: None,
                 session_dir: args.session_dir.clone(),
                 directory: args.directory.clone(),

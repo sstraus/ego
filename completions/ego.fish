@@ -285,11 +285,14 @@ jsonl\t''"
 complete -c ego -n "__fish_ego_using_subcommand compact" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand export" -l format -d 'Transcript format; JSONL is stdout-only and cannot be combined with --file' -r -f -a "md\t''
 json\t''
-jsonl\t''"
+jsonl\t''
+transcript\t''"
+complete -c ego -n "__fish_ego_using_subcommand export" -l after -d 'Only emit transcript events after this session-local sequence' -r
 complete -c ego -n "__fish_ego_using_subcommand export" -l file -d 'Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted' -r -F
 complete -c ego -n "__fish_ego_using_subcommand export" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand export" -s C -d 'Run as if started in DIR' -r -F
 complete -c ego -n "__fish_ego_using_subcommand export" -l sanitize -d 'Remove private content structurally; exports are unsanitized by default'
+complete -c ego -n "__fish_ego_using_subcommand export" -l follow -d 'Follow committed local transcript events until stopped'
 complete -c ego -n "__fish_ego_using_subcommand export" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand ls" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand ls" -s C -d 'Run as if started in DIR' -r -F

@@ -393,9 +393,11 @@ Usage: ego export [OPTIONS] <SOURCE>
 
 Export a session locally or as a structurally sanitized bundle.
 
+- `--after <SEQ>` — Only emit transcript events after this session-local sequence
 - `-C <DIR>` — Run as if started in DIR
 - `--file <PATH>` — Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted
-- `--format <FORMAT>` — Transcript format; JSONL is stdout-only and cannot be combined with --file Default: `md`. Values: `md`, `json`, `jsonl`.
+- `--follow` — Follow committed local transcript events until stopped Default: `false`.
+- `--format <FORMAT>` — Transcript format; JSONL is stdout-only and cannot be combined with --file Default: `md`. Values: `md`, `json`, `jsonl`, `transcript`.
 - `-h, --help` — Print help
 - `--sanitize` — Remove private content structurally; exports are unsanitized by default Default: `false`.
 - `--session-dir <SESSION_DIR>` — Override the store location

@@ -304,10 +304,12 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;export'= {
             cand --format 'Transcript format; JSONL is stdout-only and cannot be combined with --file'
+            cand --after 'Only emit transcript events after this session-local sequence'
             cand --file 'Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted'
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
             cand --sanitize 'Remove private content structurally; exports are unsanitized by default'
+            cand --follow 'Follow committed local transcript events until stopped'
             cand -h 'Print help'
             cand --help 'Print help'
         }

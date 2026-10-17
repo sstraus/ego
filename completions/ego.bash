@@ -909,14 +909,18 @@ _ego() {
             return 0
             ;;
         ego__subcmd__export)
-            opts="-C -h --sanitize --format --file --session-dir --help"
+            opts="-C -h --sanitize --format --follow --after --file --session-dir --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --format)
-                    COMPREPLY=($(compgen -W "md json jsonl" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "md json jsonl transcript" -- "${cur}"))
+                    return 0
+                    ;;
+                --after)
+                    COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
                 --file)

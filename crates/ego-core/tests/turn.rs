@@ -1973,13 +1973,13 @@ mod turn {
         }
         for (bytes, limit, achieved, diagnostic) in [
             (
-                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                br#"{"verdict":"achieved","reason":"verification passed"}"#.to_vec(),
                 1024,
                 true,
                 "",
             ),
             (
-                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                br#"{"verdict":"achieved","reason":"verification passed"}"#.to_vec(),
                 4,
                 false,
                 "truncated",
@@ -2587,7 +2587,7 @@ mod turn {
     fn goal_reply(achieved: bool, reason: &str) -> Vec<AiEvent> {
         vec![
             AiEvent::TextDelta {
-                text: json!({"achieved": achieved, "reason": reason}).to_string(),
+                text: json!({"verdict": if achieved { "achieved" } else { "continue" }, "reason": reason}).to_string(),
             },
             AiEvent::Usage(Usage {
                 uncached_input_tokens: 2,
@@ -2609,7 +2609,10 @@ mod turn {
                     },
                     AiEvent::Stop(StopReason::Stop),
                 ],
-                goal_reply(false, "artifact is not verified"),
+                goal_reply(
+                    false,
+                    "operator login is complete; artifact is not verified",
+                ),
                 vec![
                     AiEvent::TextDelta {
                         text: "artifact verified".into(),
@@ -2658,7 +2661,90 @@ mod turn {
                 |m| m["role"] == "system" && m.to_string().contains("artifact is not verified")
             )
         );
+        // Operator-related words alone do not override an explicit continue verdict.
+        assert!(continuation.as_array().unwrap().iter().any(|m| {
+            m["role"] == "system"
+                && m.to_string()
+                    .contains("operator login is complete; artifact is not verified")
+        }));
         assert_eq!(SessionState::replay(events).goal, Some(goal));
+    }
+
+    #[test]
+    fn goal_check_needs_operator_blocks_even_with_zero_allowance_and_no_keywords() {
+        // Catches: a typed human wait is treated as ordinary unmet work or budget exhaustion.
+        for allowance in [0, 20] {
+            let (state, events, calls) = run_checked_goal(
+                vec![
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    vec![
+                        AiEvent::TextDelta {
+                            text: json!({"verdict":"needs_operator", "reason":"condition unavailable"}).to_string(),
+                        },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                ],
+                allowance,
+            );
+            let goal = state.goal.as_ref().unwrap();
+            assert_eq!(goal.state, ego_core::goal::GoalState::Blocked);
+            assert_eq!(
+                goal.blocker_reason.as_deref(),
+                Some("condition unavailable")
+            );
+            assert_eq!(goal.continuation_turns, 0);
+            assert_eq!(goal.blocker_observations, 0);
+            assert_eq!(calls.len(), 2);
+            assert!(calls[1].tools.is_empty());
+            let instruction = serde_json::to_string(&calls[1].messages).unwrap();
+            for expected in ["needs_operator", "human action", "login", "approval"] {
+                assert!(instruction.contains(expected), "{instruction}");
+            }
+            assert!(events.iter().any(|event| matches!(&event.kind,
+                EventKind::GoalCheckStopped { reason, .. } if reason == "goal needs operator: condition unavailable")));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, EventKind::GoalContinuation { .. }))
+            );
+            assert_eq!(SessionState::replay(events).goal, state.goal);
+        }
+    }
+
+    #[test]
+    fn goal_check_rejects_retired_boolean_and_open_ended_verdicts() {
+        // Catches: an old boolean alias or unknown verdict bypasses the closed checker contract.
+        for raw in [
+            r#"{"achieved":true,"reason":"verified"}"#,
+            r#"{"verdict":"unknown","reason":"verified"}"#,
+            r#"{"reason":"verified"}"#,
+            r#"{"verdict":"achieved","reason":"verified","achieved":true}"#,
+            r#"{"verdict":"achieved","reason":" "}"#,
+        ] {
+            let (state, events, calls) = run_checked_goal(
+                vec![
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    vec![
+                        AiEvent::TextDelta { text: raw.into() },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                ],
+                20,
+            );
+            let goal = state.goal.unwrap();
+            assert_eq!(goal.state, ego_core::goal::GoalState::Active, "{raw}");
+            assert_eq!(
+                goal.check_stop.as_deref(),
+                Some("goal check returned an invalid verdict"),
+                "{raw}"
+            );
+            assert_eq!(calls.len(), 2);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, EventKind::GoalContinuation { .. }))
+            );
+        }
     }
 
     #[test]
@@ -2933,7 +3019,7 @@ mod turn {
             ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
                 *self.input.lock().unwrap() = input.to_vec();
                 Box::pin(async {
-                    let bytes = br#"{"achieved":true,"reason":"artifact verified"}"#;
+                    let bytes = br#"{"verdict":"achieved","reason":"artifact verified"}"#;
                     Ok(ToolResult::new(vec![
                         ego_core::permit::ToolContentBlock::process(
                             ego_core::permit::StreamProvenance::Stdout,

@@ -172,6 +172,14 @@ pub(super) struct ExportCommand {
     #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
     pub(super) format: ExportFormat,
 
+    /// Follow committed local transcript events until stopped.
+    #[arg(long)]
+    pub(super) follow: bool,
+
+    /// Only emit transcript events after this session-local sequence.
+    #[arg(long, value_name = "SEQ")]
+    pub(super) after: Option<u64>,
+
     /// Write to PATH instead of stdout; its parent must exist. Refuse symlinks,
     /// non-regular targets and existing files with different bytes; identical bytes are accepted.
     #[arg(long, value_name = "PATH")]
