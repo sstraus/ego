@@ -2584,6 +2584,251 @@ mod turn {
         )
     }
 
+    struct RecordedProgressTool {
+        name: &'static str,
+        server: &'static str,
+        fail: bool,
+    }
+
+    impl TypedTool for RecordedProgressTool {
+        type Params = serde_json::Value;
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "Recorded TUIC progress boundary"
+        }
+        fn prepare_typed(
+            &self,
+            _params: Self::Params,
+            _ctx: &PrepareCtx<'_>,
+        ) -> Result<PreparedCall, ToolError> {
+            Ok(PreparedCall::new(
+                self.name(),
+                Op::Read {
+                    path: CanonPath::new("/ws/progress"),
+                },
+            ))
+        }
+        fn execute<'a, 'io>(
+            &'a self,
+            _call: PreparedCall,
+            _io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+        where
+            'io: 'a,
+        {
+            Box::pin(async {
+                if self.fail {
+                    return Err(ToolError::InvalidParams("progress rejected".into()));
+                }
+                let recorded = if self.name == "call_tool" {
+                    include_str!("fixtures/tuic-wrapped-progress-2026-10-17.json")
+                } else {
+                    include_str!("fixtures/tuic-blocked-progress-2026-10-17.json")
+                };
+                let mut captured: serde_json::Value = serde_json::from_str(recorded).unwrap();
+                captured["provenance"]["result"]["server"] = json!(self.server);
+                Ok(serde_json::from_value(captured).unwrap())
+            })
+        }
+    }
+
+    fn progress_round(kind: &str, id: usize) -> Vec<AiEvent> {
+        vec![
+            AiEvent::TextDelta {
+                text: format!("May I proceed with choice {id}?"),
+            },
+            AiEvent::ToolCall {
+                call_id: format!("progress-{id}"),
+                name: "progress".into(),
+                args: json!({"type":kind}).to_string(),
+            },
+            AiEvent::Stop(StopReason::ToolUse),
+        ]
+    }
+
+    fn run_progress_turn(
+        scripts: Vec<Vec<AiEvent>>,
+        goal: bool,
+    ) -> (SessionState, Vec<DomainEvent>, Vec<GenRequest>) {
+        run_progress_fixture(scripts, goal, "progress", "tuic", false)
+    }
+
+    fn run_progress_fixture(
+        scripts: Vec<Vec<AiEvent>>,
+        goal: bool,
+        name: &'static str,
+        server: &'static str,
+        fail: bool,
+    ) -> (SessionState, Vec<DomainEvent>, Vec<GenRequest>) {
+        let mut fx = Fixture::new(scripts);
+        fx.registry = vec![Arc::new(Typed(RecordedProgressTool { name, server, fail }))];
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let mut loop_ = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        )
+        .with_goal(goal.then(|| "produce a verified artifact".into()), 20);
+        assert_eq!(
+            block_on(loop_.run("work")).unwrap().exit_reason,
+            ExitReason::Completed
+        );
+        (
+            loop_.into_state().unwrap(),
+            fx.store.events(),
+            fx.generator.calls(),
+        )
+    }
+
+    #[test]
+    fn blocked_progress_ends_turn_before_another_generation() {
+        // Catches: successful blocked progress reopens main generation or goal continuation.
+        for goal in [false, true] {
+            let (state, events, calls) = run_progress_turn(
+                (0..7).map(|id| progress_round("blocked", id)).collect(),
+                goal,
+            );
+            assert_eq!(
+                calls.len(),
+                1,
+                "blocked progress must return control, not ask again"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.kind, EventKind::ToolCallCompleted { ok: true, .. }))
+                    .count(),
+                1
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e.kind, EventKind::GoalContinuation { .. }))
+            );
+            if goal {
+                assert_eq!(
+                    state.goal.as_ref().unwrap().state,
+                    ego_core::goal::GoalState::Active
+                );
+                assert!(events.iter().any(|e| matches!(&e.kind, EventKind::GoalCheckStopped { reason, .. } if reason == "waiting for user after blocked progress")));
+            }
+            assert_eq!(SessionState::replay(events).goal, state.goal);
+        }
+    }
+
+    #[test]
+    fn blocked_progress_wrapper_closes_unstarted_siblings() {
+        // Catches: call_tool wrapping hides the wait declaration or executes sibling effects after it.
+        let (_, events, calls) = run_progress_fixture(
+            vec![vec![
+                AiEvent::TextDelta {
+                    text: "May I proceed?".into(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "wrapped".into(),
+                    name: "call_tool".into(),
+                    args: json!({"tool_name":"progress","arguments":{"type":"blocked"}})
+                        .to_string(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "sibling".into(),
+                    name: "call_tool".into(),
+                    args: json!({"tool_name":"progress","arguments":{"type":"done"}}).to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ]],
+            true,
+            "call_tool",
+            "tuic",
+            false,
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::ToolCallCompleted { ok: true, .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::ToolCallCompleted { ok: false, .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn done_progress_keeps_long_tool_chains_and_final_answers_working() {
+        // Catches: a progress notification is treated as terminal regardless of its type.
+        let mut scripts: Vec<_> = (0..12).map(|id| progress_round("done", id)).collect();
+        scripts.push(vec![
+            AiEvent::TextDelta {
+                text: "Finished".into(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]);
+        let (_, events, calls) = run_progress_turn(scripts, false);
+        assert_eq!(calls.len(), 13);
+        assert!(events.iter().any(
+            |e| matches!(&e.kind, EventKind::AssistantMessage { text } if text == "Finished")
+        ));
+    }
+
+    #[test]
+    fn failed_or_unrelated_progress_does_not_claim_a_user_wait() {
+        // Catches: a failed report or another server's tool takes TUIC's turn-ending authority.
+        for (server, fail) in [("unrelated", false), ("tuic", true)] {
+            let (_, _, calls) = run_progress_fixture(
+                vec![
+                    progress_round("blocked", 0),
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ],
+                false,
+                "progress",
+                server,
+                fail,
+            );
+            assert_eq!(calls.len(), 2);
+        }
+    }
+
+    #[test]
+    fn question_without_tools_returns_without_another_generation() {
+        // Catches: ordinary assistant questions are retried without new user input.
+        let (_, _, calls) = run_progress_turn(
+            vec![vec![
+                AiEvent::TextDelta {
+                    text: "May I proceed?".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ]],
+            false,
+        );
+        assert_eq!(calls.len(), 1);
+    }
+
     fn goal_reply(achieved: bool, reason: &str) -> Vec<AiEvent> {
         vec![
             AiEvent::TextDelta {
