@@ -18,10 +18,10 @@ mod goal_ancestry;
 mod goal_visibility;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
-#[path = "live_surface_pty/metadata_refusal.rs"]
-mod metadata_refusal;
 #[path = "live_surface_pty/mcp_inventory.rs"]
 mod mcp_inventory;
+#[path = "live_surface_pty/metadata_refusal.rs"]
+mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/notice_wrap.rs"]
@@ -3575,16 +3575,19 @@ fn busy_expand_shortcut_transcript(check_hint: bool) {
         ],
         ..Plan::default()
     });
-    let ego = Ego::against(&stub).conversing().args([
-        "--model",
-        "ollama/qwen3",
-        "--session-id",
-        support::FIXTURE_SESSION_ID,
-        "--mode",
-        "yolo",
-        "--sandbox",
-        "off",
-    ]);
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# live surface fixture\n");
     let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
@@ -9555,6 +9558,12 @@ fn followup_tools_default_has_no_per_tool_notices() {
         let start = output.len();
         input.write_all(b"/tools\r").unwrap();
         input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "/tools details for the full list",
+        );
         until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
         drain_until_quiet(&reader, &mut output);
         let visible = normalized(&output[start..]);

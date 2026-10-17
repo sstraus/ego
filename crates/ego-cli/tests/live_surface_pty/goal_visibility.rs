@@ -55,12 +55,16 @@ fn goal_visibility_transcript() -> String {
         start,
         "goal continuation budget exhausted",
     );
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "goal 1/1");
+    drain_until_quiet(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
     assert_eq!(stub.generations().len(), 4);
     normalized(&output[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // Catches: model-authored goals start or change silently.
@@ -140,12 +144,15 @@ fn goal_visibility_needs_operator_blocks_without_spending_allowance() {
     let start = output.len();
     input.write_all(b"verify the account\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "Goal stopped:");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "active goal");
+    drain_until_quiet(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    let transcript = normalized(&output[start..]);
+    let transcript = normalized(&output[start..])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let log = std::fs::read_to_string(
         places
             .home_path()

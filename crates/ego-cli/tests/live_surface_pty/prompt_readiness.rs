@@ -7,6 +7,7 @@ fn initial_ready_prompt_resets_stale_host_working_state() {
     let ego = Ego::against(&stub)
         .conversing()
         .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color")
         .env("TUIC_SOCKET", "/nonexistent/ego-readiness.sock");
     ego.file("AGENTS.md", "# Prompt readiness fixture\n");
     let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
