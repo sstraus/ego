@@ -93,7 +93,7 @@ fn section(out: &mut String, command: &Command, path: &str) {
                 // them, which is also the order the usage line puts them in.
                 arg.get_long().is_none() && arg.get_short().is_none(),
                 arg.get_id().as_str().to_owned(),
-                spelling(arg),
+                format!("{}{}", spelling(arg), metadata(command, arg)),
             )
         })
         .collect();
@@ -155,6 +155,50 @@ fn spelling(arg: &clap::Arg) -> String {
         let _ = write!(spelling, " <{}>", value_name(arg));
     }
     format!("- `{spelling}` — {}", help(arg))
+}
+
+/// Preserve the constraints clap exposes without changing the parser grammar.
+fn metadata(command: &Command, arg: &clap::Arg) -> String {
+    let mut out = String::new();
+    if arg.is_required_set() {
+        out.push_str(" Required.");
+    }
+    let defaults: Vec<_> = arg
+        .get_default_values()
+        .iter()
+        .map(|value| format!("`{}`", value.to_string_lossy()))
+        .collect();
+    if !defaults.is_empty() {
+        let _ = write!(out, " Default: {}.", defaults.join(", "));
+    }
+    if matches!(
+        arg.get_action(),
+        clap::ArgAction::Append | clap::ArgAction::Count
+    ) {
+        out.push_str(" Repeatable.");
+    }
+    let values: Vec<_> = arg
+        .get_possible_values()
+        .into_iter()
+        .filter(|value| !value.is_hide_set())
+        .map(|value| format!("`{}`", value.get_name()))
+        .collect();
+    if !values.is_empty() {
+        let _ = write!(out, " Values: {}.", values.join(", "));
+    }
+    let conflicts: Vec<_> = command
+        .get_arg_conflicts_with(arg)
+        .into_iter()
+        .map(|other| match (other.get_long(), other.get_short()) {
+            (Some(long), _) => format!("`--{long}`"),
+            (_, Some(short)) => format!("`-{short}`"),
+            _ => format!("`<{}>`", value_name(other)),
+        })
+        .collect();
+    if !conflicts.is_empty() {
+        let _ = write!(out, " Conflicts: {}.", conflicts.join(", "));
+    }
+    out
 }
 
 fn positional(arg: &clap::Arg) -> String {

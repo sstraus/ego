@@ -254,15 +254,15 @@ pub(super) struct AcpCommand {
     #[arg(long, requires = "listen")]
     pub(super) allow_public_bind: bool,
 
-    /// Maximum simultaneous listener connections.
+    /// Maximum simultaneous listener connections (runtime default: 32).
     #[arg(long, requires = "listen")]
     pub(super) max_connections: Option<NonZeroU32>,
 
-    /// Maximum lifetime of one listener connection: 90s, 10m or 2h.
+    /// Maximum lifetime of one listener connection: 90s, 10m or 2h (runtime default: 24h).
     #[arg(long, requires = "listen", value_parser = positive_duration)]
     pub(super) connection_lifetime: Option<Duration>,
 
-    /// Maximum cumulative bytes read from one listener connection.
+    /// Maximum cumulative bytes read from one listener connection (runtime default: 134217728 bytes).
     #[arg(long, requires = "listen")]
     pub(super) max_ingress_bytes: Option<NonZeroU64>,
 }

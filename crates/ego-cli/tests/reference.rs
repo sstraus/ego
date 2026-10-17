@@ -164,3 +164,23 @@ fn docs_review_reference_does_not_drop_nested_leaf_arguments() {
         assert!(section.contains("Usage:"), "{path}: missing usage");
     }
 }
+
+#[test]
+fn docs_review_reference_does_not_erase_argument_constraints() {
+    let rendered = reference();
+    for metadata in [
+        "Default: `2`",
+        "Default: `10`",
+        "Default: `20`",
+        "Default: `read`",
+        "Required.",
+        "Repeatable.",
+        "Values: `read`, `read-write`",
+        "Conflicts: `--tools`",
+        "default: 32",
+        "default: 24h",
+        "default: 134217728 bytes",
+    ] {
+        assert!(rendered.contains(metadata), "missing metadata: {metadata}");
+    }
+}
