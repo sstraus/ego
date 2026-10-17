@@ -21,6 +21,10 @@ definition = {
         "additionalProperties": False,
     },
 }
+if mode.startswith("captured"):
+    with open(sys.argv[2]) as fixture:
+        captured = json.load(fixture)["result"]
+    definition = json.loads(captured["content"][0]["text"])
 if mode.startswith("schedule"):
     with open(sys.argv[2]) as fixture:
         definition = json.load(fixture)
@@ -88,7 +92,7 @@ for line in sys.stdin:
             assert request["params"]["arguments"]["tool_name"] == definition["name"]
         result = {"resultType": "complete", "isError": False}
         if operation == "search_tools":
-            hit = {"name": definition["name"], "summary": definition["description"]} if mode == "schedule-baseline" else definition
+            hit = {"name": definition["name"], "summary": definition["description"]} if mode in ("schedule-baseline", "malformed", "multiple", "empty", "nontext") else definition
             result["content"] = [{"type": "text", "text": json.dumps({"results": [hit], "count": 1})}]
         elif operation == "call_tool":
             arguments = request["params"]["arguments"]["arguments"]
@@ -100,9 +104,14 @@ for line in sys.stdin:
                 delta = (datetime.fromisoformat(scheduled["once_local"]) - datetime.now()).total_seconds()
                 assert 3500 < delta <= 3600, delta
                 result["content"] = [{"type": "text", "text": "fixture-scheduled-one-time-check"}]
+            elif mode.startswith("captured"):
+                assert arguments == {"type": "done", "text": "capture replay"}
+                result["content"] = [{"type": "text", "text": "fixture-progress-recorded"}]
             else:
                 assert arguments == {"action": "list"}
                 result["content"] = [{"type": "text", "text": "fixture-repository"}]
+        elif operation == "get_tool_schema" and mode == "captured":
+            result.update(captured)
         elif operation == "get_tool_schema" and mode in ("text", "schedule-baseline"):
             result["content"] = [{"type": "text", "text": json.dumps(definition)}]
         elif operation == "get_tool_schema" and mode == "both":
@@ -136,15 +145,19 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         },
         if mode.starts_with("search") {
             r#"{"query":"list repositories"}"#
+        } else if mode == "captured" {
+            r#"{"tool_name":"progress"}"#
         } else {
             r#"{"tool_name":"repo"}"#
         },
     ))];
-    if matches!(mode, "text" | "both" | "search" | "search-invalid") {
+    if matches!(mode, "text" | "both" | "search" | "search-invalid" | "captured") {
         completions.push(Reply::Sse(tool_call(
             "repo-call",
             "call_tool",
-            if mode == "search-invalid" {
+            if mode == "captured" {
+                r#"{"tool_name":"progress","arguments":{"type":"done","text":"capture replay"}}"#
+            } else if mode == "search-invalid" {
                 r#"{"tool_name":"repo","arguments":{"action":7}}"#
             } else {
                 r#"{"tool_name":"repo","arguments":{"action":"list"}}"#
@@ -152,6 +165,12 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         )));
         completions.push(Reply::Sse(text("REPO-LIST-COMPLETE")));
     } else {
+        completions.push(Reply::Sse(tool_call(
+            "changed-query", "search_tools", r#"{"query":"a different repository query"}"#,
+        )));
+        completions.push(Reply::Sse(tool_call(
+            "schema-retry", "get_tool_schema", r#"{"tool_name":"repo"}"#,
+        )));
         completions.push(Reply::Sse(text("LOOKUP-REFUSED-COMPLETE")));
     }
     let stub = Stub::start(Plan {
@@ -171,13 +190,17 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         "jsonl",
     ]);
     let server = ego.file("collapsed-server.py", SERVER);
+    let captured = ego.file(
+        "captured-schema.json",
+        include_str!("fixtures/tuic-1.8.0-progress-schema-response.json"),
+    );
     let selector = ego.file(
         "mcp.json",
         &serde_json::json!({
             "name": "fixture",
             "transport": "stdio",
             "command": "/usr/bin/python3",
-            "args": [server, mode],
+            "args": [server, mode, captured],
             "inherit_env": []
         })
         .to_string(),
@@ -387,5 +410,27 @@ fn collapsed_schedule_one_hour_needs_one_discovery_hop() {
             &generations[if inline { 1 } else { 2 }],
             "call_tool"
         ));
+    }
+}
+
+/// Catches standard Tool metadata or the captured JSON text envelope losing dispatch authority.
+#[test]
+fn captured_tuic_metadata_and_text_envelope_admit_valid_dispatch() {
+    let (finished, generations) = run_lookup("captured");
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    assert!(!offers_tool(&generations[0], "call_tool"));
+    assert!(generations.iter().skip(1).any(|next| offers_tool(next, "call_tool")));
+    assert!(generations.iter().any(|request| request["messages"].as_array().is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool" && message["content"].as_str().is_some_and(|content| content.contains("fixture-progress-recorded"))))), "{generations:?}; {finished:?}");
+}
+
+/// Catches deterministic envelope incompatibility being mistaken for a retryable query failure.
+#[test]
+fn unsupported_collapsed_envelope_has_terminal_compatibility_diagnostic() {
+    for mode in ["malformed", "multiple", "empty", "nontext"] {
+        let (finished, generations) = run_lookup(mode);
+        assert!(generations.iter().all(|request| !offers_tool(request, "call_tool")), "{mode}: {finished:?}");
+        let report = format!("{generations:?}");
+        assert!(report.contains("non-retryable compatibility error"), "{mode}: {report}");
+        assert!(report.contains("changing the search query cannot repair"), "{mode}: {report}");
     }
 }

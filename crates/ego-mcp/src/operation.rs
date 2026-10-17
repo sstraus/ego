@@ -1713,18 +1713,24 @@ fn schema_lookup_content(result: &CallToolResult) -> Result<Value, McpError> {
         Some(content) => content.clone(),
         None => {
             let [block] = result.content.as_slice() else {
-                return Err(protocol(
+                return Err(schema_compatibility(
                     "collapsed schema lookup requires exactly one JSON text content block",
                 ));
             };
             let text = block.as_text().ok_or_else(|| {
-                protocol("collapsed schema lookup content block is not JSON text")
+                schema_compatibility("collapsed schema lookup content block is not JSON text")
             })?;
             serde_json::from_str(&text.text)
-                .map_err(|_| protocol("collapsed schema lookup text content is not valid JSON"))?
+                .map_err(|_| schema_compatibility("collapsed schema lookup text content is not valid JSON"))?
         }
     };
     Ok(structured_content)
+}
+
+fn schema_compatibility(reason: &str) -> McpError {
+    protocol(format!(
+        "collapsed schema lookup non-retryable compatibility error: {reason}; changing the search query cannot repair this envelope; update the server/client compatibility before retrying"
+    ))
 }
 
 async fn project_outcome(
