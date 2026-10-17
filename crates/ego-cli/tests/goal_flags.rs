@@ -91,7 +91,7 @@ fn goal_command_binary_invokes_evaluator_and_persists_achievement() {
         ..Plan::default()
     });
     let evidence = places.workspace_path().join("evaluator-input.json");
-    let script = places.file("check.sh", "cat > \"$1\"\nprintf '%s\\n' '{\"achieved\":true,\"reason\":\"script verified the work\"}'\n");
+    let script = places.file("check.sh", "cat > \"$1\"\nprintf '%s\\n' '{\"verdict\":\"achieved\",\"reason\":\"script verified the work\"}'\n");
     let command = serde_json::json!(["/bin/sh", script, evidence]).to_string();
     let finished = places
         .ego(&stub)
@@ -147,7 +147,7 @@ fn goal_command_workspace_child_reads_evidence_and_ignores_stderr() {
         ..Plan::default()
     });
     let input = places.workspace_path().join("evidence.json");
-    let script = places.file("check.sh", "cat > \"$1\"\nprintf 'diagnostic noise\\n' >&2\nprintf '%s\\n' '{\"achieved\":true,\"reason\":\"verified\"}'\n");
+    let script = places.file("check.sh", "cat > \"$1\"\nprintf 'diagnostic noise\\n' >&2\nprintf '%s\\n' '{\"verdict\":\"achieved\",\"reason\":\"verified\"}'\n");
     let command = serde_json::json!(["/bin/sh", script, input]).to_string();
     let finished = places
         .ego(&stub)
@@ -310,7 +310,7 @@ fn goal_json_summary_reports_stopped_goal_with_reason() {
 #[test]
 fn goal_json_summary_reports_achieved_goal() {
     let report = goal_json_summary(
-        r#"printf '%s\n' '{"achieved":true,"reason":"verified artifact"}'"#,
+        r#"printf '%s\n' '{"verdict":"achieved","reason":"verified artifact"}'"#,
         0,
     );
     assert_eq!(report["goal"]["status"], "achieved");
@@ -322,7 +322,7 @@ fn goal_json_summary_reports_achieved_goal() {
 #[test]
 fn goal_json_summary_reports_exhausted_goal() {
     let report = goal_json_summary(
-        r#"printf '%s\n' '{"achieved":false,"reason":"artifact missing"}'"#,
+        r#"printf '%s\n' '{"verdict":"continue","reason":"artifact missing"}'"#,
         0,
     );
     assert_eq!(report["goal"]["status"], "exhausted");
@@ -368,4 +368,71 @@ fn goal_json_summary(verdict: &str, continuation_turns: u32) -> serde_json::Valu
     assert_eq!(report["ok"], true);
     assert_eq!(report["exit_reason"], "done");
     report
+}
+
+/// Catches: quiet/headless runs hide goal progress or contaminate answer stdout.
+#[cfg(unix)]
+#[test]
+fn goal_visibility_headless_quiet_keeps_receipts_on_stderr() {
+    use support::{Places, Plan, Reply, Stub, text};
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        ..Plan::default()
+    });
+    let checker = serde_json::json!(["/bin/sh", "-c",
+        "cat >/dev/null; printf '%s\\n' '{\"verdict\":\"continue\",\"reason\":\"artifact missing headless 527\"}'"
+    ]).to_string();
+    let finished = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--quiet",
+            "--goal",
+            "Verify headless artifact 527",
+            "--goal-turns",
+            "1",
+            "--goal-check-command",
+            &checker,
+            "--allow",
+            "exec(/bin/sh *)",
+            "do the work",
+        ])
+        .run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert!(
+        finished.stdout.contains("REGRESSION-MARKER"),
+        "{}",
+        finished.stdout
+    );
+    assert!(
+        finished.stdout.contains("REGRESSION-MARKER"),
+        "{}",
+        finished.stdout
+    );
+    assert!(!finished.stdout.contains("Goal"), "{}", finished.stdout);
+    for receipt in [
+        "Goal (operator): Verify headless artifact 527",
+        "Goal turn 1 of 1: artifact missing headless 527",
+        "Goal stopped: Verify headless artifact 527",
+        "turns 1/1",
+        "/goal show",
+        "/goal achieve",
+        "/goal block",
+        "--goal-turns",
+    ] {
+        assert_eq!(
+            finished.stderr.matches(receipt).count(),
+            1,
+            "missing or repeated {receipt}: {}",
+            finished.stderr
+        );
+    }
+    assert_eq!(stub.generations().len(), 2);
 }

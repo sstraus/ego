@@ -723,6 +723,9 @@ where
     ) -> Result<LifecycleMutation<GoalRecord>, LifecycleError> {
         let session = append.session_id();
         let transition = match transition {
+            GoalTransition::Blocked { reason } => GoalTransition::Blocked {
+                reason: validate_operator_text(reason)?,
+            },
             GoalTransition::BlockerObserved { reason } => GoalTransition::BlockerObserved {
                 reason: validate_operator_text(reason)?,
             },

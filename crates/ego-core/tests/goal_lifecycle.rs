@@ -290,3 +290,32 @@ fn goal_continuation_count_and_stop_survive_replay_for_managed_consumers() {
     assert_eq!(goal["continuation_turns"], 1);
     assert_eq!(goal["check_stop"], "goal continuation budget exhausted (1)");
 }
+
+// Catches: an immediate operator wait is lost on replay or fabricated as five observations.
+#[test]
+fn checked_operator_block_is_durable_without_a_repeated_condition_audit() {
+    let turn = TurnId::new();
+    let (creation, id) = started(turn, 1, GoalOwner::Operator);
+    let blocked = event(
+        turn,
+        2,
+        EventKind::GoalTransitioned {
+            id,
+            transition: GoalTransition::Blocked {
+                reason: "Operator login required".into(),
+            },
+        },
+    );
+    let encoded = serde_json::to_string(&blocked).unwrap();
+    let decoded = serde_json::from_str::<DomainEvent>(&encoded).unwrap();
+    let state = SessionState::replay([creation, decoded]);
+    let goal = state.goal.unwrap();
+    assert_eq!(goal.state, GoalState::Blocked);
+    assert_eq!(
+        goal.blocker_reason.as_deref(),
+        Some("Operator login required")
+    );
+    assert_eq!(goal.blocker_observations, 0);
+    assert_eq!(goal.continuation_turns, 0);
+    assert!(goal.achievement_evidence.is_none());
+}
