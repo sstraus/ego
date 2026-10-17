@@ -4804,10 +4804,17 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     );
     drain_until_quiet(&reader, &mut output);
     let usage = normalized(&output[usage_start..]);
-    assert!(usage.contains("0.0000 USD"), "known usage cost: {usage:?}");
+    assert!(
+        usage.contains("unpriced subscription-equivalent (standard API)"),
+        "nonmonetary usage cost: {usage:?}"
+    );
+    assert!(
+        !usage.contains("0.0000 USD"),
+        "policy zero is not monetary spend: {usage:?}"
+    );
     assert!(
         !usage.contains("unknown"),
-        "cancelled local turn is still free: {usage:?}"
+        "cancelled local turn keeps its nonmonetary cost status: {usage:?}"
     );
     assert!(
         usage.lines().any(|line| {
