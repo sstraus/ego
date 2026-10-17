@@ -796,6 +796,7 @@ enum ConfigurationReport {
         inherit_env: Vec<String>,
     },
     Http {
+        profile: &'static str,
         url: String,
         auth: &'static str,
         allow_insecure_loopback: bool,
@@ -818,6 +819,7 @@ impl ConfigurationReport {
                 inherit_env: stdio.inherit_env.iter().map(ToString::to_string).collect(),
             },
             McpServerConfig::Http(http) => Self::Http {
+                profile: http.profile.as_str(),
                 url: http.url.to_string(),
                 auth: match http.auth {
                     McpHttpAuth::None => "none",

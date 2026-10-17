@@ -42,8 +42,10 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand rules 'Inspect and manage persistent permission rules.'
             cand mcp-server 'Serve scoped ego runs over MCP on stdio.'
             cand orchestrator 'orchestrator'
+            cand worktree 'Inspect or clean up a retained local worktree.'
         }
         &'ego;run'= {
+            cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
             cand --var 'Supply one declared agent-file template variable'
@@ -95,11 +97,13 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --quiet 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --no-color 'Never emit ANSI colour, whatever the terminal claims to support'
             cand --plain 'Append plain output without terminal styling or live retry updates'
+            cand --vim 'Use Vim normal/insert editing in the interactive composer'
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'ego;resume'= {
             cand --answer 'Settle a pending question. Repeat for multiple sibling questions'
+            cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
             cand --var 'Supply one declared agent-file template variable'
@@ -151,11 +155,13 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --quiet 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --no-color 'Never emit ANSI colour, whatever the terminal claims to support'
             cand --plain 'Append plain output without terminal styling or live retry updates'
+            cand --vim 'Use Vim normal/insert editing in the interactive composer'
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'ego;continue'= {
             cand --answer 'Settle a pending question. Repeat for multiple sibling questions'
+            cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
             cand --var 'Supply one declared agent-file template variable'
@@ -207,6 +213,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --quiet 'Suppress progress and diagnostics on stderr; stdout is unaffected'
             cand --no-color 'Never emit ANSI colour, whatever the terminal claims to support'
             cand --plain 'Append plain output without terminal styling or live retry updates'
+            cand --vim 'Use Vim normal/insert editing in the interactive composer'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -358,6 +365,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --http 'Configure a Streamable HTTP transport'
             cand --cwd 'Working directory for the stdio child'
             cand --inherit-env 'Environment variable inherited by the stdio child. Repeatable'
+            cand --profile 'Explicit HTTP wire profile; never selected by fallback'
             cand --auth 'HTTP authentication mode'
             cand --stdio 'Configure a subprocess transport. Its command follows literal `--`'
             cand --allow-insecure-loopback 'Consent to plaintext HTTP for an exact loopback host'
@@ -529,6 +537,20 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;orchestrator;brief'= {
             cand --root 'root'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;worktree'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+            cand show 'Inspect a durable local worktree receipt without starting a model'
+            cand cleanup 'Remove only a clean worktree whose commits are integrated; retain its branch'
+        }
+        &'ego;worktree;show'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;worktree;cleanup'= {
             cand -h 'Print help'
             cand --help 'Print help'
         }

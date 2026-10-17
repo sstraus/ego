@@ -57,6 +57,8 @@ Run an agent from a prompt, headless.
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
+- `--vim` — Use Vim normal/insert editing in the interactive composer
+- `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch
 - `--yolo` — Shorthand for --mode yolo
 - `<PROMPT>` — The prompt. `-` reads it from stdin
 
@@ -112,6 +114,8 @@ Continue a session; no ID = latest in this workspace.
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
+- `--vim` — Use Vim normal/insert editing in the interactive composer
+- `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch
 - `--yolo` — Shorthand for --mode yolo
 - `<ID>` — The session to continue. Omit it for the latest in this workspace
 - `<PROMPT>` — The prompt. `-` reads it from stdin
@@ -198,6 +202,8 @@ Continue a session; no ID = latest in this workspace.
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable
+- `--vim` — Use Vim normal/insert editing in the interactive composer
+- `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch
 - `--yolo` — Shorthand for --mode yolo
 - `<ID>` — The session to continue. Omit it for the latest in this workspace
 - `<PROMPT>` — The prompt. `-` reads it from stdin
@@ -455,6 +461,15 @@ Serve scoped ego runs over MCP on stdio.
 ## `ego orchestrator`
 
 - `orchestrator brief` — Inspect tracked children and unread results without model generation or inbox reads
+
+- `-h, --help` — Print help
+
+## `ego worktree`
+
+Inspect or clean up a retained local worktree.
+
+- `worktree show` — Inspect a durable local worktree receipt without starting a model
+- `worktree cleanup` — Remove only a clean worktree whose commits are integrated; retain its branch
 
 - `-h, --help` — Print help
 

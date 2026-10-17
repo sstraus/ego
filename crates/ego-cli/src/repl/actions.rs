@@ -462,6 +462,7 @@ impl std::fmt::Debug for McpCommandView {
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
     bindings: Vec<KeyBinding>,
+    custom_shortcuts: HashMap<ActionId, Vec<super::keyboard::Shortcut>>,
     live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
     skill_view: Arc<Mutex<Option<SkillCatalogueView>>>,
     mcp_view: Arc<Mutex<McpCommandView>>,
@@ -499,6 +500,7 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         Ok(Self {
             registrations: value.into(),
             bindings: Vec::new(),
+            custom_shortcuts: HashMap::new(),
             live_availability: Arc::new(Mutex::new(HashMap::new())),
             skill_view: Arc::new(Mutex::new(None)),
             mcp_view: Arc::new(Mutex::new(McpCommandView::default())),
@@ -644,11 +646,13 @@ impl ActionRegistry {
             description: binding.description,
         });
         let shortcuts = self.iter().flat_map(|action| {
-            action.shortcuts.iter().map(|shortcut| KeyEntry {
-                label: format!("Option+{}", shortcut.to_ascii_uppercase()),
-                hint: action.shortcut_hint,
-                description: action.description,
-            })
+            self.action_shortcuts(action)
+                .into_iter()
+                .map(|shortcut| KeyEntry {
+                    label: shortcut.label,
+                    hint: action.shortcut_hint,
+                    description: action.description,
+                })
         });
         chords.chain(shortcuts).collect()
     }
@@ -683,20 +687,82 @@ impl ActionRegistry {
             .map(|a| a.id)
     }
     pub fn resolve_shortcut(&self, shortcut: char) -> Option<ActionId> {
-        self.iter()
-            .find(|a| a.shortcuts.contains(&shortcut))
-            .map(|a| a.id)
+        self.resolve_key(KeyEvent::new(KeyCode::Char(shortcut), KeyModifiers::ALT))
     }
-    pub fn resolve_key(&self, key: KeyEvent) -> Option<ActionId> {
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('π'), KeyModifiers::NONE) => self.resolve_shortcut('p'),
-            (KeyCode::Char(character), modifiers)
-                if modifiers == KeyModifiers::ALT || modifiers == KeyModifiers::META =>
-            {
-                self.resolve_shortcut(character)
-            }
-            _ => None,
+
+    pub(crate) fn shortcut_labels(&self, id: ActionId) -> Vec<String> {
+        self.action_shortcuts(self.registration(id))
+            .into_iter()
+            .map(|key| key.label)
+            .collect()
+    }
+
+    /// Replace each named action's complete shortcut list. An empty list
+    /// disables its default; validate the final map so atomic swaps are legal.
+    pub fn with_keybindings(
+        mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Result<Self, String> {
+        for (name, keys) in overrides {
+            let action = self
+                .iter()
+                .find(|action| action.name == name)
+                .ok_or_else(|| {
+                    format!("unknown keybinding action `{name}`; use a canonical /help action name")
+                })?;
+            let id = action.id;
+            let shortcuts = keys
+                .iter()
+                .map(|key| super::keyboard::Shortcut::parse(key))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.custom_shortcuts.insert(id, shortcuts);
         }
+        let mut occupied = HashMap::new();
+        for action in self.iter() {
+            for shortcut in self.action_shortcuts(action) {
+                if let Some(previous) =
+                    occupied.insert((shortcut.code, shortcut.modifiers), action.name)
+                {
+                    return Err(format!(
+                        "shortcut {} conflicts between /{previous} and /{}",
+                        shortcut.label, action.name
+                    ));
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    fn action_shortcuts(&self, action: &ActionRegistration) -> Vec<super::keyboard::Shortcut> {
+        self.custom_shortcuts
+            .get(&action.id)
+            .cloned()
+            .unwrap_or_else(|| {
+                action
+                    .shortcuts
+                    .iter()
+                    .map(|letter| super::keyboard::Shortcut {
+                        code: KeyCode::Char(*letter),
+                        modifiers: KeyModifiers::ALT,
+                        label: format!("Option+{}", letter.to_ascii_uppercase()),
+                    })
+                    .collect()
+            })
+    }
+
+    pub fn resolve_key(&self, mut key: KeyEvent) -> Option<ActionId> {
+        // macOS terminals may send Option+P as its text equivalent.
+        if key.code == KeyCode::Char('π') && key.modifiers.is_empty() {
+            key.code = KeyCode::Char('p');
+            key.modifiers = KeyModifiers::ALT;
+        }
+        self.iter()
+            .find(|action| {
+                self.action_shortcuts(action)
+                    .iter()
+                    .any(|shortcut| shortcut.matches(key))
+            })
+            .map(|action| action.id)
     }
     fn registration(&self, id: ActionId) -> &ActionRegistration {
         self.iter()

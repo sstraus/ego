@@ -47,6 +47,8 @@ complete -c ego -n "__fish_ego_needs_command" -f -a "roots"
 complete -c ego -n "__fish_ego_needs_command" -f -a "rules" -d 'Inspect and manage persistent permission rules.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "mcp-server" -d 'Serve scoped ego runs over MCP on stdio.'
 complete -c ego -n "__fish_ego_needs_command" -f -a "orchestrator"
+complete -c ego -n "__fish_ego_needs_command" -f -a "worktree" -d 'Inspect or clean up a retained local worktree.'
+complete -c ego -n "__fish_ego_using_subcommand run" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l var -d 'Supply one declared agent-file template variable' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
@@ -96,8 +98,10 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l yolo -d 'Shorthand for -
 complete -c ego -n "__fish_ego_using_subcommand run" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand run" -l plain -d 'Append plain output without terminal styling or live retry updates'
+complete -c ego -n "__fish_ego_using_subcommand run" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
 complete -c ego -n "__fish_ego_using_subcommand run" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l var -d 'Supply one declared agent-file template variable' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
@@ -147,8 +151,10 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l yolo -d 'Shorthand fo
 complete -c ego -n "__fish_ego_using_subcommand resume" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l plain -d 'Append plain output without terminal styling or live retry updates'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
 complete -c ego -n "__fish_ego_using_subcommand resume" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l var -d 'Supply one declared agent-file template variable' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
@@ -198,6 +204,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l yolo -d 'Shorthand 
 complete -c ego -n "__fish_ego_using_subcommand continue" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l plain -d 'Append plain output without terminal styling or live retry updates'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
 complete -c ego -n "__fish_ego_using_subcommand continue" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand fork" -l at -r
 complete -c ego -n "__fish_ego_using_subcommand fork" -l session-dir -d 'Override the store location' -r -F
@@ -301,6 +308,8 @@ complete -c ego -n "__fish_ego_using_subcommand mcp; and not __fish_seen_subcomm
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l http -d 'Configure a Streamable HTTP transport' -r
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l cwd -d 'Working directory for the stdio child' -r -F
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l inherit-env -d 'Environment variable inherited by the stdio child. Repeatable' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l profile -d 'Explicit HTTP wire profile; never selected by fallback' -r -f -a "current\t''
+legacy-sse\t''"
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l auth -d 'HTTP authentication mode' -r -f -a "none\t''
 oauth\t''"
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l stdio -d 'Configure a subprocess transport. Its command follows literal `--`'
@@ -394,3 +403,8 @@ complete -c ego -n "__fish_ego_using_subcommand orchestrator; and not __fish_see
 complete -c ego -n "__fish_ego_using_subcommand orchestrator; and not __fish_seen_subcommand_from brief" -f -a "brief" -d 'Inspect tracked children and unread results without model generation or inbox reads'
 complete -c ego -n "__fish_ego_using_subcommand orchestrator; and __fish_seen_subcommand_from brief" -l root -r -F
 complete -c ego -n "__fish_ego_using_subcommand orchestrator; and __fish_seen_subcommand_from brief" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -f -a "show" -d 'Inspect a durable local worktree receipt without starting a model'
+complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -f -a "cleanup" -d 'Remove only a clean worktree whose commits are integrated; retain its branch'
+complete -c ego -n "__fish_ego_using_subcommand worktree; and __fish_seen_subcommand_from show" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand worktree; and __fish_seen_subcommand_from cleanup" -s h -l help -d 'Print help'

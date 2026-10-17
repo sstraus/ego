@@ -742,7 +742,20 @@ impl JsonlStore {
             }
             _ => false,
         };
+        let (metadata, valid_plan) = match metadata.last() {
+            Some(event) if matches!(event.kind, EventKind::PlanUpdated { .. }) => {
+                let valid = match &event.kind {
+                    EventKind::PlanUpdated {
+                        update: update @ ego_core::plan::PlanUpdate::Replace { .. },
+                    } => ego_core::plan::Plan::default().apply(update).is_ok(),
+                    _ => false,
+                };
+                (&metadata[..metadata.len() - 1], valid)
+            }
+            _ => (metadata, true),
+        };
         let valid_shape = valid_context
+            && valid_plan
             && match metadata {
                 [] => true,
                 [only] => is_title(only) || is_goal(only),

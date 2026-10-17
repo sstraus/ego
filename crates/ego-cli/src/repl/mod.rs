@@ -5,6 +5,7 @@
 //! and transcript output stay live without creating a second terminal writer.
 
 mod clipboard;
+mod keyboard;
 mod keys;
 mod seat;
 

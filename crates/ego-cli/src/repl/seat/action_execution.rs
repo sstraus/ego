@@ -67,11 +67,12 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
         ),
     ];
     let render = |action: &crate::repl::actions::ActionRegistration| {
-        let shortcut = action
-            .shortcuts()
-            .first()
-            .map(|shortcut| format!(" [Meta-{shortcut}]"))
-            .unwrap_or_default();
+        let labels = registry.shortcut_labels(action.id());
+        let shortcut = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", labels.join(", "))
+        };
         match registry.availability(action.id()) {
             Availability::Disabled { owner } => format!(
                 "/{}{shortcut} — {} [unavailable: {owner}]",

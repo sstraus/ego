@@ -67,6 +67,7 @@ mod setup_proposals;
 pub(crate) mod skill;
 pub mod trust;
 pub mod usage;
+pub mod worktree;
 pub(crate) mod yaml_envelope;
 
 // Hosts the same child envelope as the production offline probe. The script

@@ -46,7 +46,7 @@ ego export <ID> [--sanitize] [--format md|json|jsonl|transcript] [--file PATH]
                 [-C DIR] [--session-dir DIR]
                               render a session; Markdown is the default
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
-        add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
+        add NAME --http URL [--profile current|legacy-sse] [--auth none|oauth] [--allow-insecure-loopback]
         rm NAME | ls [--json] | login NAME | reload [NAME]
                               shared configuration and live admission service;
                               login NAME --client-id ID | --cimd URL | --dcr
@@ -91,6 +91,7 @@ ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               credential in EGO_A2A_TOKEN. An address reachable
                               from outside this machine is refused by name
                               unless the operator asks for it
+ego worktree show|cleanup RECEIPT_UUID   inspect or safely remove a retained local checkout
 ego orchestrator brief [--root PATH]  read-only TUIC children and unread results
 ego doctor [--json]           read-only redacted health snapshot
 ego setup [PROMPT] [--profile NAME] [--directory PATH]
@@ -105,9 +106,16 @@ Notes:
   (Codex split them and had to add `--include-non-interactive` to re-merge).
 - For standard ACP client libraries and runnable isolated examples, see
   [ACP client libraries](docs/integrations/acp-clients.md).
+- For an installation-free IDE custom-agent setup over native ACP, see
+  [IDE setup](docs/integrations/ide.md); no `--ide` auto-connect flag is required.
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
-- An ACP host may supply a stateless HTTP MCP server in `session/new`. HTTPS
+  Headless multi-turn streaming uses this same ACP stdio connection, not an
+  `--input-format stream-json` selector. See [the headless transcript](docs/integrations/acp.md#headless-multi-turn-stdio)
+  for framing, attachments, cancellation, and permission answers.
+- An ACP host may supply a stateless HTTP or explicit SSE MCP server in
+  `session/new`. The ACP `sse` variant selects the legacy profile; `http`
+  stays current-only. HTTPS
   remains the default. Plain HTTP is admitted only for the exact loopback
   hosts `localhost`, an IPv4 loopback literal, or an IPv6 loopback literal;
   other plaintext hosts are refused. The host does not send ego's
@@ -131,6 +139,34 @@ Notes:
   `ego resume ID --goal show|set=TEXT|achieve|block=REASON` with optional
   `--output text|json|jsonl`. They do not accept a prompt or `--answer` in the
   same invocation.
+
+### Headless ACP stdio example
+
+Launch `ego acp`. Each line below is a separate host-to-agent JSON-RPC frame,
+not one batch to paste into a pipe. Wait for initialization and session creation;
+replace `SESSION` with the returned `sessionId`. Wait for prompt 3 to settle
+before sending prompt 4. While prompt 4 runs, the host can answer an incoming
+permission request and send cancellation:
+
+```jsonl
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[]}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Summarize this repository"}]}}
+{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Check the summary"}]}}
+{"jsonrpc":"2.0","id":"PERMISSION_ID","result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"SESSION"}}
+```
+
+The permission response is conditional: copy the exact ID (including its JSON
+type) from the agent's `session/request_permission`, and select only an offered
+option. Do not send the placeholder literally. Cancellation is a notification;
+if it cancels the active run, the pending prompt response reports
+`stopReason: "cancelled"` (a run that already finished may return `end_turn`).
+Read stdout continuously for responses, `session/update` notifications, and agent requests.
+Close stdin after pending work settles; EOF ends the connection, not a user
+turn. `ego run --output jsonl` remains one-shot event output, not this input
+protocol. The [integration guide](docs/integrations/acp.md#headless-multi-turn-stdio)
+shows both directions, attachment blocks, and flow control.
 
 ### 2.1 Availability — what ships today
 
@@ -433,6 +469,46 @@ confined execs. The launcher was subsequently fixed.
                         metadata-only
 ```
 
+### Managed worktree launch
+
+`ego --worktree BRANCH [PROMPT]` and `ego run --worktree BRANCH [PROMPT]`
+create a new Git branch and linked worktree before session admission. The exact
+branch argument is the operator's approval; ego never invents a branch name.
+This option conflicts with resume, named sessions and caller-supplied session IDs.
+`-C` selects the source repository, including an existing linked worktree or a
+submodule. Tracked files come from HEAD, not from uncommitted source changes.
+Submodules are not initialized or fetched automatically.
+
+Standalone launches retain worktrees on every exit, including startup failure.
+Versioned receipts live under `$EGO_HOME/worktrees` (default `~/.ego/worktrees`),
+and identify the Git common directory, exact checkout, branch, source ref and
+creation state. Standalone processes hold a checkout lease until shutdown; local
+cleanup refuses an active lease. The receipt is durable before Git creation; an interrupted launch
+can be inspected without starting a model:
+
+```
+ego worktree show RECEIPT_UUID
+ego worktree cleanup RECEIPT_UUID
+```
+
+Cleanup is explicit, receipt-targeted and never forced. It refuses dirty state,
+changed repository/branch identity, and commits not reachable from the recorded
+source branch (or the initial commit when the source was detached). It also refuses new commits without upstream reachability evidence from the
+recorded source branch. It retains the branch, never discards unpushed commits,
+and records successful removal. Ignored files also prevent local cleanup.
+Pending receipts survive failures for inspection and recovery. A repeated cleanup
+of a removed receipt is unchanged success. No background or exit cleanup runs.
+Do not edit a checkout concurrently with cleanup; Git performs the final
+non-forced removal check. A cleanup refusal never grants force authority.
+
+With `TUIC_SOCKET` set, launch uses TUIC `repo.worktree_create` and its receipt,
+not a second local ownership record. No fallback to local Git occurs on host
+failure. Hosted cleanup stays with TUIC `repo.worktree_remove` and its lifecycle
+checks; the local receipt commands refuse under TUIC. Launch receipts and retained
+paths are written to stderr, never to protocol or headless result stdout.
+ACP hosts keep their existing explicit workspace ownership; `ego acp` does not
+accept `--worktree` or create a hidden second checkout.
+
 **Scripting contract**
 
 ```
@@ -641,6 +717,22 @@ parent perimeter unchanged. The existing sandbox, offline posture,
 shared budget, cancellation, result bounds and depth-one limit remain in force.
 `tools` and `roots` are named-task ceilings, not supported by explicit `--file`.
 
+The `plan` tool owns one durable ordered plan, separate from the checked goal.
+Call `{"operation":"replace","steps":[{"id":"inspect","text":"Inspect the source","status":"pending"}]}`
+to replace it, or `{"operation":"step","id":"inspect","status":"in_progress"}`
+to update an existing ID. Statuses are `pending`, `in_progress`, `completed`, and
+`blocked`. Keep IDs stable when reordering or replacing steps. IDs are unique,
+printable, nonempty strings of at most 80 bytes; step text must not be empty.
+The plan is limited to 128 steps and 16 KiB of combined IDs and text. An empty
+replacement clears it. Updates are journal events (`plan_updated` in JSONL),
+survive replay, fork, and compaction, and appear as terminal progress rows and
+ACP plan replacements. Plan completion does not achieve the goal.
+
+An optional `task.plan_step` names an existing plan step. The parent records
+`in_progress` before the child runs, then `completed` on success or `blocked`
+on failure. An unknown ID or a second child assigned the same ID in one batch
+is refused before that child runs. Child progress changes only its linked step,
+not the objective or sibling steps. Child-authored plans stay local to the child.
 
 The table distinguishes implemented flags, intentional refusals, frozen M5
 target spellings, and the excluded verbose placeholder. The defect would be §3
@@ -656,7 +748,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 14,
+  "v": 15,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -1356,6 +1448,72 @@ bounded channels.
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
 | `--attach` | **yes** | §3.1's durable image path; interactive `Ctrl+V` and bracketed image paths use the same admission and blob commit |
 | OSC 133 A (prompt mark), OSC 7 (cwd) | excluded | not part of the final M5 terminal contract. `ego run` retains 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
+
+### 6.2.1 Keyboard preferences and Vim editing
+
+The default composer uses Emacs editing. Start `ego --vim` for Vim editing,
+or save `ego config set ui.vim=true` to select it for future interactive
+processes. `--vim` overrides a saved `false` value. The composer starts in
+insert mode; idle `Esc` selects normal mode, and `i` returns to insert mode.
+The prompt shows `[INSERT]`, `[NORMAL]`, or `[VISUAL]`. Vim editing uses the
+bundled Reedline editor, including its motions, operators, counts, and undo.
+Headless `run` and prompted `resume` reject `--vim`; ACP has no terminal
+composer and does not apply keyboard preferences.
+
+Customize action shortcuts in the **user** `config.toml`:
+
+```toml
+[ui]
+vim = true
+keybindings = { model = ["Ctrl+P", "F2"], expand = [] }
+```
+
+The same map can be saved atomically:
+
+```sh
+ego config set 'ui.keybindings={model=["Ctrl+P","F2"],expand=[]}'
+ego config get ui.keybindings
+ego config unset ui.keybindings
+```
+
+Keys in the map are canonical slash action names from `/help`, without the
+slash. Each array replaces that action's complete shortcut list; `[]` removes
+its shortcuts. Unspecified actions keep their defaults: `Option+P` opens the
+model picker, `Option+O` expands tool output, and `Option+R` retries provider
+recovery. `/help` and the startup key hints show the effective shortcuts.
+Unset `ui.keybindings` to restore all defaults.
+
+Supported chords are `Ctrl+LETTER`, `Alt+LETTER`, and `F1` through `F12`.
+Spellings are case-insensitive; `Option` and `Meta` are aliases for `Alt`.
+Letter shortcuts require one ASCII letter. Bare text, mixed modifiers such as
+AltGr, arbitrary escape sequences, and shifted chords cannot be configured.
+This keeps committed Unicode/IME text and terminal paste outside shortcut
+matching. Use a chord that the terminal can transmit; modified Enter reporting
+is not required for configurable shortcuts. The macOS `π` spelling of
+`Option+P` follows the effective binding, not the retired default.
+
+Unknown action names, invalid chords, and duplicate effective chords are
+refused before terminal activation. The check includes unchanged defaults;
+change both actions in one map to swap their keys. Managed `config set` and
+`config batch` also reject invalid maps before publication. Permission,
+picker, paste, draft, suspend, and busy-input controls cannot be remapped;
+terminal aliases such as `Ctrl+I`, `Ctrl+J`, `Ctrl+M`, and `Ctrl+H` are reserved.
+
+Keyboard preferences are user/process-only. They are read before the terminal
+owner starts, apply at the next process start, and remain stable when a session
+or project root changes. Project, local, system, and profile settings do not
+select the keyboard map; `-c` keyboard overrides are refused. These preferences
+do not change the permission mode or confinement.
+
+Vim runs **below** host input routing. Busy `Esc` still interrupts or expedites
+pending input; it does not select normal mode. Modal `Esc` still cancels or
+settles the current decision. Idle `Esc` removes a staged image chip before
+changing Vim mode. Busy Enter queues, Ctrl+Enter steers, Up on an empty composer
+recalls queued input, and Ctrl+S parks/restores drafts in either Vim mode.
+Permission keys and modal text forms keep their existing editing behavior.
+Bracketed paste inserts literal multiline text in both Vim modes; Ctrl+J
+inserts a newline without submitting. Terminal/OS IME pre-edit is owned by the
+terminal; the composer receives its committed Unicode characters.
 
 ### 6.3 Live composer, drafts, queue, and steering
 
@@ -2237,7 +2395,7 @@ blocked goals do not retain this active segment.
 
 Provider, permission, pause, cancellation and budget stops do not admit automatic
 work. Invalid checks and exhausted allowances emit a visible diagnostic and retain the active goal;
-they never claim achievement. ACP managed plan metadata exposes `goalStatus`,
+they never claim achievement. ACP session objective metadata exposes `goalStatus`,
 `goalStop`, and `goalContinuationTurns` separately from work-turn completion.
 
 `--goal-check-command '["/path/to/check", "arg"]'` selects a command evaluator

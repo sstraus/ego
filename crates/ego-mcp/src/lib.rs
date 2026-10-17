@@ -1,6 +1,7 @@
 //! MCP protocol ownership and guarded transport adapters.
 //!
-//! Outbound clients select stateless 2026-07-28. The inbound stdio server
+//! Outbound clients default to stateless 2026-07-28; explicit legacy SSE uses
+//! the 2024-11-05 initialize lifecycle. The inbound stdio server
 //! negotiates its explicit handshake-era revision set through `rmcp`.
 
 mod admission;

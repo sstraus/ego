@@ -304,6 +304,7 @@ pub(crate) fn protocol_effective(
 /// got before these flags existed ([`SessionShape::default`]).
 pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -> Args {
     Args {
+        worktree: None,
         read_only_dir: shape.read_only_dir,
         prompt: None,
         agent_file: None,
@@ -353,6 +354,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         quiet: false,
         no_color: false,
         plain: false,
+        vim: false,
     }
 }
 

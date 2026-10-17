@@ -1107,3 +1107,204 @@ fn slash_aliases_complete_without_changing_unknown_prompt_policy() {
         assert!(result.suggestions().iter().any(|item| item.value == alias));
     }
 }
+
+fn vim_surface(phase: SurfacePhase, status: SharedStatus) -> SurfaceEditMode {
+    SurfaceEditMode::with_editor(composer_editor(true), phase, status)
+}
+
+fn keyboard_event(code: KeyCode, modifiers: KeyModifiers) -> ReedlineRawEvent {
+    ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
+}
+
+// Catches: the wrapper never enters Vim normal mode, or does not return to insertion.
+#[test]
+fn vim_composer_transitions_between_real_normal_and_insert_editing() {
+    use reedline::PromptViMode;
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(SurfacePhase::new(EditPhase::Idle), status);
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Insert));
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('h'), KeyModifiers::NONE)),
+        ReedlineEvent::Edit(vec![EditCommand::InsertChar('h')])
+    );
+    mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Normal));
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('h'), KeyModifiers::NONE)),
+        ReedlineEvent::Multiple(vec![ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::MenuLeft,
+            ReedlineEvent::Edit(vec![EditCommand::MoveLeft { select: false }]),
+        ])])
+    );
+    mode.parse_event(keyboard_event(KeyCode::Char('i'), KeyModifiers::NONE));
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Insert));
+    mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(mode.edit_mode(), PromptEditMode::Vi(PromptViMode::Normal));
+    let waiting = Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default())));
+    assert!(
+        waiting
+            .render_prompt_indicator(mode.edit_mode())
+            .contains("[NORMAL]")
+    );
+}
+
+// Catches: paste is interpreted as Vim commands or submits its first line; IME text is eaten.
+#[test]
+fn vim_composer_preserves_unicode_ime_paste_and_explicit_newlines() {
+    use reedline::PromptViMode;
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(SurfacePhase::new(EditPhase::Idle), Arc::clone(&status));
+    for (character, modifiers) in [
+        ('界', KeyModifiers::NONE),
+        ('é', KeyModifiers::CONTROL | KeyModifiers::ALT),
+    ] {
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Char(character), modifiers)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar(character)])
+        );
+    }
+    for normal in [false, true] {
+        if normal {
+            mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            mode.parse_event(
+                ReedlineRawEvent::try_from(Event::Paste("i界\r\n/help\rbye".into())).unwrap()
+            ),
+            ReedlineEvent::Edit(vec![EditCommand::InsertString("i界\n/help\nbye".into())])
+        );
+        assert_eq!(status.lock().unwrap().origin, InputOrigin::BracketedPaste);
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Enter, KeyModifiers::CONTROL)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            assert_eq!(
+                mode.parse_event(keyboard_event(KeyCode::Enter, modifiers)),
+                ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+            );
+        }
+        assert_eq!(
+            mode.edit_mode(),
+            PromptEditMode::Vi(if normal {
+                PromptViMode::Normal
+            } else {
+                PromptViMode::Insert
+            })
+        );
+    }
+}
+
+// Catches: Vim consumes queue/steer/interrupt/draft keys while a turn runs.
+#[test]
+fn vim_composer_keeps_busy_host_controls_in_both_modes() {
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(phase.clone(), Arc::clone(&status));
+    for normal in [false, true] {
+        phase.set(EditPhase::Idle);
+        if normal {
+            mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+        }
+        phase.set(EditPhase::Busy);
+        let before = mode.edit_mode();
+        for (code, modifiers, command) in [
+            (KeyCode::Enter, KeyModifiers::NONE, BUSY_SUBMIT_COMMAND),
+            (KeyCode::Enter, KeyModifiers::CONTROL, BUSY_STEER_COMMAND),
+            (KeyCode::Esc, KeyModifiers::NONE, INTERRUPT_COMMAND),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL, DRAFT_COMMAND),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                BACKGROUND_COMMAND,
+            ),
+        ] {
+            assert_eq!(
+                mode.parse_event(keyboard_event(code, modifiers)),
+                ReedlineEvent::ExecuteHostCommand(command.into())
+            );
+            assert_eq!(mode.edit_mode(), before);
+        }
+        status.lock().unwrap().queue.queued = 1;
+        let event = mode.parse_event(keyboard_event(KeyCode::Up, KeyModifiers::NONE));
+        let ReedlineEvent::UntilFound(events) = event else {
+            panic!("missing queue recall")
+        };
+        assert_eq!(
+            events[0],
+            ReedlineEvent::ExecuteHostCommandIfEmpty(BUSY_RECALL_COMMAND.into())
+        );
+        assert_eq!(
+            mode.parse_event(keyboard_event(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline])
+        );
+    }
+}
+
+// Catches: normal-mode editing swallows approval keys or leaks into a modal text form.
+#[test]
+fn vim_composer_never_takes_permission_or_modal_text_ownership() {
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let mut mode = vim_surface(phase.clone(), Arc::clone(&status));
+    mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
+    let before = mode.edit_mode();
+    phase.set(EditPhase::Modal);
+    status.lock().unwrap().permission_modal = true;
+    assert_eq!(mode.edit_mode(), PromptEditMode::Emacs);
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('y'), KeyModifiers::NONE)),
+        ReedlineEvent::ExecuteHostCommand(format!("{PERMISSION_DECISION_COMMAND}allow"))
+    );
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE)),
+        ReedlineEvent::ExecuteHostCommand(MODAL_ESCAPE_COMMAND.into())
+    );
+    assert_eq!(
+        mode.parse_event(ReedlineRawEvent::try_from(Event::Paste("y".into())).unwrap()),
+        ReedlineEvent::None
+    );
+    status.lock().unwrap().permission_modal = false;
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('h'), KeyModifiers::NONE)),
+        ReedlineEvent::Edit(vec![EditCommand::InsertChar('h')])
+    );
+    phase.set(EditPhase::Idle);
+    assert_eq!(
+        mode.edit_mode(),
+        before,
+        "a modal must not change the composer mode"
+    );
+}
+
+// Catches: action help retains the old shortcut after runtime dispatch was changed.
+#[test]
+fn configured_shortcuts_reach_the_surface_and_both_help_projections() {
+    let registry = Arc::new(
+        ActionRegistry::final_surface()
+            .with_keybindings(&std::collections::BTreeMap::from([(
+                "model".into(),
+                vec!["Ctrl+P".into()],
+            )]))
+            .unwrap(),
+    );
+    let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
+        &registry,
+    ))));
+    let mut mode = vim_surface(SurfacePhase::new(EditPhase::Idle), status);
+    assert_eq!(
+        mode.parse_event(keyboard_event(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        ReedlineEvent::ExecuteHostCommand(format!("{ACTION_COMMAND}model"))
+    );
+    for help in [
+        render_action_help(&registry, 120),
+        render_key_hints(&registry, 120),
+    ] {
+        assert!(help.contains("Ctrl+P"), "{help}");
+        assert!(!help.contains("Option+P"), "{help}");
+    }
+}

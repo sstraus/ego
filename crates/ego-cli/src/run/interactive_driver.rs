@@ -517,11 +517,18 @@ pub(super) async fn interactive_process(
         flag_plain: args.plain,
         ..Terminal::from_process(args.no_color, &environment)
     });
-    let (seat, surface) = match repl::Seat::new(cancel.clone()) {
+    let keyboard = match config::keyboard_preferences(args.vim) {
+        Ok(preferences) => preferences,
+        Err(error) => return Ended::refused(RunTermination::UsageError { message: error.0 }),
+    };
+    let (seat, surface) = match repl::Seat::with_keyboard(cancel.clone(), &keyboard) {
         Ok(built) => built,
         Err(err) => {
-            return Ended::refused(RunTermination::Failed {
-                message: format!("could not start the terminal owner: {err}"),
+            let message = format!("could not start the terminal owner: {err}");
+            return Ended::refused(if err.kind() == std::io::ErrorKind::InvalidInput {
+                RunTermination::UsageError { message }
+            } else {
+                RunTermination::Failed { message }
             });
         }
     };

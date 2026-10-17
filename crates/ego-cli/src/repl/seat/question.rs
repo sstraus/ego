@@ -1681,10 +1681,16 @@ impl Prompt for Waiting {
         Cow::Borrowed("")
     }
 
-    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+    fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
         let status = self.status.lock().expect("surface status lock");
         let row = status_row(&status);
-        Cow::Owned(format!("{row}{}> ", status_prefix(&status)))
+        let mode = match mode {
+            PromptEditMode::Vi(reedline::PromptViMode::Normal) => "[NORMAL] ",
+            PromptEditMode::Vi(reedline::PromptViMode::Visual) => "[VISUAL] ",
+            PromptEditMode::Vi(reedline::PromptViMode::Insert) => "[INSERT] ",
+            _ => "",
+        };
+        Cow::Owned(format!("{row}{}{mode}> ", status_prefix(&status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,
