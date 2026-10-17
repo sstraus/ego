@@ -53,7 +53,7 @@ pub struct TranscriptEvent {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum TranscriptPayload {
-    Public(PublicEvent),
+    Public(Box<PublicEvent>),
     Goal(TranscriptGoal),
 }
 
@@ -111,7 +111,7 @@ pub fn project_transcript(session: SessionId, event: &DomainEvent) -> Option<Tra
     };
     let payload = match goal {
         Some(goal) => TranscriptPayload::Goal(goal),
-        None => TranscriptPayload::Public(project_public(event)?),
+        None => TranscriptPayload::Public(Box::new(project_public(event)?)),
     };
     Some(TranscriptEvent {
         session,
