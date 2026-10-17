@@ -314,12 +314,12 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;export' {
-            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'format')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Transcript format; JSONL is stdout-only and cannot be combined with --file')
             [CompletionResult]::new('--after', '--after', [CompletionResultType]::ParameterName, 'Only emit transcript events after this session-local sequence')
-            [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'file')
+            [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
-            [CompletionResult]::new('--sanitize', '--sanitize', [CompletionResultType]::ParameterName, 'sanitize')
+            [CompletionResult]::new('--sanitize', '--sanitize', [CompletionResultType]::ParameterName, 'Remove private content structurally; exports are unsanitized by default')
             [CompletionResult]::new('--follow', '--follow', [CompletionResultType]::ParameterName, 'Follow committed local transcript events until stopped')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')

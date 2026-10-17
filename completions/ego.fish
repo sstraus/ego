@@ -77,30 +77,31 @@ complete -c ego -n "__fish_ego_needs_command" -l no-color -d 'Never emit ANSI co
 complete -c ego -n "__fish_ego_needs_command" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_needs_command" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
 complete -c ego -n "__fish_ego_needs_command" -s h -l help -d 'Print help'
-complete -c ego -n "__fish_ego_needs_command" -f -a "run" -d 'Run an agent from a prompt, headless.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "resume" -d 'Continue a session; no ID = latest in this workspace.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "continue" -d 'Continue a session; no ID = latest in this workspace.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "fork" -d 'Fork a session at its tip or after the completed turn containing a message.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "rm" -d 'Delete a stored session (history is retained for descendants).'
-complete -c ego -n "__fish_ego_needs_command" -f -a "compact" -d 'Compact a session into its deterministic successor.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "export" -d 'Export a session locally or as a structurally sanitized bundle.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "ls" -d 'List sessions (this workspace; --all for every one).'
-complete -c ego -n "__fish_ego_needs_command" -f -a "usage" -d 'Report usage, context and cost for this workspace.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "models" -d 'List the shared model catalogue.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "checkpoint" -d 'Preview or selectively restore session-owned Git file checkpoints.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "setup" -d 'Inspect expected work without running effects.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "acp" -d 'Serve the Agent Client Protocol on stdio or an endpoint.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "auth" -d 'Manage subscription credentials.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "mcp" -d 'Manage configured MCP servers.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "config" -d 'Manage stored user configuration.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "roots"
-complete -c ego -n "__fish_ego_needs_command" -f -a "rules" -d 'Inspect and manage persistent permission rules.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "mcp-server" -d 'Serve scoped ego runs over MCP on stdio.'
-complete -c ego -n "__fish_ego_needs_command" -f -a "orchestrator"
-complete -c ego -n "__fish_ego_needs_command" -f -a "worktree" -d 'Inspect or clean up a retained local worktree.'
+complete -c ego -n "__fish_ego_needs_command" -s V -l version -d 'Print version'
+complete -c ego -n "__fish_ego_needs_command" -a "run" -d 'Run an agent from a prompt, headless.'
+complete -c ego -n "__fish_ego_needs_command" -a "resume" -d 'Continue a session; no ID = latest in this workspace.'
+complete -c ego -n "__fish_ego_needs_command" -a "continue" -d 'Continue a session; no ID = latest in this workspace.'
+complete -c ego -n "__fish_ego_needs_command" -a "fork" -d 'Fork a session at its tip or after the completed turn containing a message.'
+complete -c ego -n "__fish_ego_needs_command" -a "rm" -d 'Delete a stored session (history is retained for descendants).'
+complete -c ego -n "__fish_ego_needs_command" -a "compact" -d 'Compact a session into its deterministic successor.'
+complete -c ego -n "__fish_ego_needs_command" -a "export" -d 'Export a session locally or as a structurally sanitized bundle.'
+complete -c ego -n "__fish_ego_needs_command" -a "ls" -d 'List sessions (this workspace; --all for every one).'
+complete -c ego -n "__fish_ego_needs_command" -a "usage" -d 'Report usage, context and cost for this workspace.'
+complete -c ego -n "__fish_ego_needs_command" -a "models" -d 'List the shared model catalogue.'
+complete -c ego -n "__fish_ego_needs_command" -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
+complete -c ego -n "__fish_ego_needs_command" -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
+complete -c ego -n "__fish_ego_needs_command" -a "checkpoint" -d 'Preview or selectively restore session-owned Git file checkpoints.'
+complete -c ego -n "__fish_ego_needs_command" -a "setup" -d 'Inspect expected work without running effects.'
+complete -c ego -n "__fish_ego_needs_command" -a "acp" -d 'Serve the Agent Client Protocol on stdio or an endpoint.'
+complete -c ego -n "__fish_ego_needs_command" -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
+complete -c ego -n "__fish_ego_needs_command" -a "auth" -d 'Manage subscription credentials.'
+complete -c ego -n "__fish_ego_needs_command" -a "mcp" -d 'Manage configured MCP servers.'
+complete -c ego -n "__fish_ego_needs_command" -a "config" -d 'Manage stored user configuration.'
+complete -c ego -n "__fish_ego_needs_command" -a "roots"
+complete -c ego -n "__fish_ego_needs_command" -a "rules" -d 'Inspect and manage persistent permission rules.'
+complete -c ego -n "__fish_ego_needs_command" -a "mcp-server" -d 'Serve scoped ego runs over MCP on stdio.'
+complete -c ego -n "__fish_ego_needs_command" -a "orchestrator"
+complete -c ego -n "__fish_ego_needs_command" -a "worktree" -d 'Inspect or clean up a retained local worktree.'
 complete -c ego -n "__fish_ego_using_subcommand run" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l var -d 'Supply one declared agent-file template variable' -r
@@ -288,10 +289,10 @@ json\t''
 jsonl\t''
 transcript\t''"
 complete -c ego -n "__fish_ego_using_subcommand export" -l after -d 'Only emit transcript events after this session-local sequence' -r
-complete -c ego -n "__fish_ego_using_subcommand export" -l file -r -F
+complete -c ego -n "__fish_ego_using_subcommand export" -l file -d 'Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted' -r -F
 complete -c ego -n "__fish_ego_using_subcommand export" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand export" -s C -d 'Run as if started in DIR' -r -F
-complete -c ego -n "__fish_ego_using_subcommand export" -l sanitize
+complete -c ego -n "__fish_ego_using_subcommand export" -l sanitize -d 'Remove private content structurally; exports are unsanitized by default'
 complete -c ego -n "__fish_ego_using_subcommand export" -l follow -d 'Follow committed local transcript events until stopped'
 complete -c ego -n "__fish_ego_using_subcommand export" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand ls" -l session-dir -d 'Override the store location' -r -F

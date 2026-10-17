@@ -191,7 +191,7 @@ _ego() {
 
     case "${cmd}" in
         ego)
-            opts="-h --help run resume continue fork rm compact export ls usage models hooks doctor checkpoint setup acp a2a auth mcp config roots rules mcp-server orchestrator worktree"
+            opts="-f -m -C -c -q -h -V --worktree --file --var --attach --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --session --session-id --ephemeral --session-dir --output --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo --set --quiet --no-color --plain --vim --help --version run resume continue fork rm compact export ls usage models hooks doctor checkpoint setup acp a2a auth mcp config roots rules mcp-server orchestrator worktree"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

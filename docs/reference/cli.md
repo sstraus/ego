@@ -25,6 +25,7 @@ Run an agent, from one command line.
 - `ego models` — List the shared model catalogue.
 - `ego hooks` — Inspect the admitted system and user hook catalogue.
 - `ego doctor` — Report a read-only redacted health snapshot of this installation.
+- `ego checkpoint` — Preview or selectively restore session-owned Git file checkpoints.
 - `ego setup` — Inspect expected work without running effects.
 - `ego acp` — Serve the Agent Client Protocol on stdio or an endpoint.
 - `ego a2a` — Serve the Agent2Agent protocol on a local or loopback endpoint.
@@ -395,9 +396,9 @@ Export a session locally or as a structurally sanitized bundle.
 
 - `--after <SEQ>` — Only emit transcript events after this session-local sequence
 - `-C <DIR>` — Run as if started in DIR
-- `--file <PATH>` — (undocumented)
-- `--follow` — Follow committed local transcript events until stopped
-- `--format <FORMAT>` — (undocumented)
+- `--file <PATH>` — Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted
+- `--follow` — Follow committed local transcript events until stopped Default: `false`.
+- `--format <FORMAT>` — Transcript format; JSONL is stdout-only and cannot be combined with --file Default: `md`. Values: `md`, `json`, `jsonl`, `transcript`.
 - `-h, --help` — Print help
 - `--sanitize` — Remove private content structurally; exports are unsanitized by default Default: `false`.
 - `--session-dir <SESSION_DIR>` — Override the store location
@@ -481,15 +482,50 @@ Report a read-only redacted health snapshot of this installation.
 
 ## `ego checkpoint`
 
+```text
+Usage: ego checkpoint [OPTIONS] <SESSION> <COMMAND>
+```
+
 Preview or selectively restore session-owned Git file checkpoints.
 
-- `checkpoint preview` — List checkpoint IDs, paths, effects, and external-change conflicts as JSON
-- `checkpoint restore` — Restore one selected checkpoint; external changes are never forced
-- `checkpoint close` — Close checkpoint ownership and delete the session's private Git ref
+- `ego checkpoint preview` — List checkpoint IDs, paths, effects, and external-change conflicts as JSON
+- `ego checkpoint restore` — Restore one selected checkpoint; external changes are never forced
+- `ego checkpoint close` — Close checkpoint ownership and delete the session's private Git ref
 
-- `-C, --directory <DIRECTORY>` — (undocumented)
+- `-C, --directory <DIRECTORY>` — (undocumented) Default: `.`.
 - `-h, --help` — Print help
-- `<SESSION>` — (undocumented)
+- `<SESSION>` — (undocumented) Required.
+
+## `ego checkpoint preview`
+
+```text
+Usage: ego checkpoint <SESSION> preview
+```
+
+List checkpoint IDs, paths, effects, and external-change conflicts as JSON
+
+- `-h, --help` — Print help
+
+## `ego checkpoint restore`
+
+```text
+Usage: ego checkpoint <SESSION> restore <CHECKPOINT>
+```
+
+Restore one selected checkpoint; external changes are never forced
+
+- `-h, --help` — Print help
+- `<CHECKPOINT>` — (undocumented) Required.
+
+## `ego checkpoint close`
+
+```text
+Usage: ego checkpoint <SESSION> close
+```
+
+Close checkpoint ownership and delete the session's private Git ref
+
+- `-h, --help` — Print help
 
 ## `ego setup`
 
