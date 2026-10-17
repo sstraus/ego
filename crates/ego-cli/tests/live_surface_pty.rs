@@ -2906,6 +2906,29 @@ fn until_notice_prose(
     }
 }
 
+// Observe retained terminal prose, not live redraws between wrapped rows.
+fn until_screen_prose(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    rows: u16,
+    cols: u16,
+    needle: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !support::notice_prose(&screen_rows(output, rows, cols).join("\n")).contains(needle) {
+        output.extend(
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "screen wait failed for {needle:?}: {error}; {:?}",
+                        screen_rows(output, rows, cols)
+                    )
+                }),
+        );
+    }
+}
+
 fn until_normalized(
     receiver: &mpsc::Receiver<Vec<u8>>,
     output: &mut Vec<u8>,
@@ -3223,6 +3246,18 @@ fn find(output: &[u8], needle: &[u8]) -> usize {
         .windows(needle.len())
         .position(|window| window == needle)
         .unwrap_or_else(|| panic!("missing PTY marker {:?}", String::from_utf8_lossy(needle)))
+}
+
+// Cancellation receipts precede the driver's idle transition. Require the
+// completed status frame before follow-up input can enter a cursor query.
+fn until_idle_status_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    until_normalized(receiver, output, start, "qwen3 · ");
+    let idle_row = start + find(&output[start..], "qwen3 · ".as_bytes());
+    let idle_frame = output[..idle_row]
+        .windows(b"\x1b[?25l".len())
+        .rposition(|bytes| bytes == b"\x1b[?25l")
+        .expect("idle status belongs to a painter frame");
+    until_draft_ready(receiver, output, idle_frame);
 }
 
 fn until_draft_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
@@ -4859,8 +4894,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
     until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
-    // The receipt precedes the driver's idle transition; observe its status row.
-    until_normalized(&reader, &mut output, cancel_start, "qwen3 · ");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
@@ -5062,8 +5096,7 @@ fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
     until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
-    // The receipt precedes the driver's idle transition; observe its status row.
-    until_normalized(&reader, &mut output, cancel_start, "qwen3 · ");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
@@ -8776,10 +8809,11 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     input.write_all(format!("/{action}\r").as_bytes()).unwrap();
     input.flush().unwrap();
     until_successor_receipt_ready(&reader, &mut output, start, action, &stub);
-    until_notice_prose(
+    until_screen_prose(
         &reader,
         &mut output,
-        start,
+        24,
+        100,
         &format!("ego resume {}", support::FIXTURE_SESSION_ID),
     );
     drain_until_quiet(&reader, &mut output);
