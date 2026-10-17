@@ -619,7 +619,7 @@ fn fast_contract_catches_hidden_fast_selection_or_mislabelled_equivalent() {
     );
     assert_eq!(
         rendered.text(),
-        "fast · $0.004 subscription-equivalent (fast API)"
+        "fast ≈$0.004"
     );
     let standard = snapshot_for(&SessionState::default(), Trust::Trusted);
     assert_eq!(standard.fast(), "");
