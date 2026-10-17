@@ -1089,6 +1089,20 @@ exact prefix `ɛ । `. Every payload is stripped of control characters before i
 goes into a sequence: a tool name, an error message and an intent line all come
 from somewhere that is not ego.
 
+On-screen text output also reports prompt-cache hits from provider usage, with
+compact token counts. For Anthropic Messages requests with an explicit cache
+boundary, a hit followed by a miss on the same marked input produces a qualified
+warning: the provider may have expired or changed its cached entries. A changed
+session, provider, model, or marked prefix starts a new comparison. Missing input
+usage is unknown, not a miss. These observations do not change public JSON events
+or durable accounting and are suppressed by `-q`.
+
+When a turn ends, on-screen text output prints elapsed time, completion status,
+and local time. Successful builtin `edit` calls contribute measured added and
+removed lines to a `tracked edits +N -M` receipt. These counts are not a Git diff:
+repeated edits are accumulated, and unmeasured tools do not contribute. Colour
+follows the terminal gate. Quiet and redirected output omit these receipts.
+
 ### 4.8 Diagnostics (`EGO_LOG`, `EGO_LOG_FILE`)
 
 The `tracing` events this build emits reach nobody by default. Two environment
@@ -1628,6 +1642,12 @@ whenever the terminal can represent their combined whole segments. If physical
 width cannot represent that critical set, whole segments degrade in the order
 drafts, queue, interrupt; the retained priority is interrupt, then queue, then
 drafts, and the surface emits one overflow diagnostic.
+
+The live Working row also shows an approximate output-token count from model
+text (four characters per token, rounded up), not provider usage. Tool output is
+excluded. Reasoning deltas start a thinking interval; answer text, tool starts,
+and turn completion clear it. A new turn resets progress. The row is bounded to
+the terminal width and omits the interruption hint when it does not fit.
 
 ### 6.6 Prompted compaction starts a clean session
 
