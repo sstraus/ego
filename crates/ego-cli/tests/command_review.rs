@@ -195,6 +195,9 @@ fn prompt_shaping_constraints_are_owned_by_clap_and_reference() {
         vec!["acp", "--bare", "--instructions", "missing.md"],
         vec!["run", "--file", "missing.md", "task"],
         vec!["run", "--var", "key=value", "task"],
+        vec!["run", "--var", "key=value"],
+        vec!["--var", "key=value", "task"],
+        vec!["resume", SESSION, "--var", "key=value", "task"],
     ] {
         let error = parse(&words).unwrap_err().to_string();
         assert!(

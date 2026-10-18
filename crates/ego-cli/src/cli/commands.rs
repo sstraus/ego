@@ -718,7 +718,7 @@ pub(super) struct Flags {
     pub(super) file: Option<PathBuf>,
 
     /// Supply one declared agent-file template variable. Requires --file.
-    #[arg(long = "var", value_name = "KEY=VALUE", action = ArgAction::Append, requires = "file")]
+    #[arg(long = "var", value_name = "KEY=VALUE", action = ArgAction::Append, requires = "file", conflicts_with = "prompt")]
     pub(super) vars: Vec<String>,
 
     /// Add exact image bytes as ordered context before the prompt text.
