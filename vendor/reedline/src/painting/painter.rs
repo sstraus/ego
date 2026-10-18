@@ -613,6 +613,9 @@ impl Painter {
         let screen_width = self.screen_width();
         let screen_height = self.screen_height();
 
+        let bounded_lines = lines.with_bounded_footer(screen_width, screen_height);
+        let lines = &bounded_lines;
+
         // We add one here as [`PromptLines::prompt_lines_with_wrap`] intentionally subtracts 1 from the real value.
         self.prompt_height = lines.prompt_lines_with_wrap(screen_width) + 1;
         let lines_before_cursor = lines.required_lines(screen_width, true, None);

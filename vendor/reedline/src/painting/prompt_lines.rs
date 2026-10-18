@@ -1,13 +1,15 @@
-use super::utils::{coerce_crlf, estimate_required_lines, line_width};
+use super::utils::{coerce_crlf, estimate_required_lines, line_width, strip_ansi};
 use crate::{
     Prompt, PromptHistorySearch,
     menu::{Menu, ReedlineMenu},
     prompt::PromptEditMode,
 };
 use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Aggregate of prompt and input string used by `Painter`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PromptLines<'prompt> {
     pub(crate) prompt_str_left: Cow<'prompt, str>,
     pub(crate) prompt_str_right: Cow<'prompt, str>,
@@ -77,11 +79,12 @@ impl<'prompt> PromptLines<'prompt> {
             }
         }
 
-        if !before_cursor && !self.footer.is_empty() {
-            input.push('\n');
-            input += &self.footer;
-        }
-        let lines = estimate_required_lines(&input, terminal_columns);
+        let lines = estimate_required_lines(&input, terminal_columns)
+            + if before_cursor {
+                0
+            } else {
+                usize::from(self.footer_rows(terminal_columns))
+            };
 
         if let Some(menu) = menu {
             lines as u16 + menu.menu_required_lines(terminal_columns)
@@ -90,13 +93,38 @@ impl<'prompt> PromptLines<'prompt> {
         }
     }
 
+    /// Keep whole footer lines within the terminal, leaving one editable row.
+    /// Layout and painting both consume this same bounded view.
+    pub(crate) fn with_bounded_footer(&self, columns: u16, height: u16) -> Self {
+        let mut lines = self.clone();
+        let mut remaining = usize::from(height.saturating_sub(1));
+        let mut end = 0;
+        let mut offset = 0;
+        for line in self.footer.split_inclusive('\n') {
+            let text = line.trim_end_matches(['\r', '\n']);
+            let rows = footer_line_rows(text, columns);
+            if rows > remaining {
+                break;
+            }
+            remaining -= rows;
+            end = offset + text.len();
+            offset += line.len();
+        }
+        lines.footer = Cow::Owned(
+            self.footer[..end]
+                .trim_end_matches(['\r', '\n'])
+                .to_owned(),
+        );
+        lines
+    }
+
     /// Rows reserved below the buffer, excluding the buffer's own final row.
     pub(crate) fn footer_rows(&self, terminal_columns: u16) -> u16 {
-        if self.footer.is_empty() {
-            0
-        } else {
-            estimate_required_lines(&self.footer, terminal_columns) as u16
-        }
+        self.footer
+            .lines()
+            .map(|line| footer_line_rows(line, terminal_columns))
+            .sum::<usize>()
+            .min(u16::MAX as usize) as u16
     }
 
     /// Estimated distance of the cursor to the prompt.
@@ -184,6 +212,24 @@ impl<'prompt> PromptLines<'prompt> {
             estimate as u16
         }
     }
+}
+
+/// Count actual wraps: a wide grapheme cannot split across the right margin.
+fn footer_line_rows(line: &str, columns: u16) -> usize {
+    let columns = usize::from(columns.max(1));
+    let (mut rows, mut col) = (1, 0);
+    for grapheme in strip_ansi(line).graphemes(true) {
+        let width = grapheme.width();
+        if width == 0 {
+            continue;
+        }
+        if col >= columns || col + width > columns {
+            rows += 1;
+            col = 0;
+        }
+        col += width;
+    }
+    rows
 }
 
 #[cfg(test)]
