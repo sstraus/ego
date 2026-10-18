@@ -96,6 +96,7 @@ struct Actions {
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
     Mode,
+    Fast,
     Export,
     Plan,
     Yolo,
@@ -119,6 +120,8 @@ enum SurfaceActionEffect {
     Hooks,
     Doctor,
     Setup,
+    Memory,
+    Init,
     Config,
     Quit,
     Version,
@@ -128,6 +131,7 @@ enum SurfaceActionEffect {
 struct McpSurfaceActions {
     registry: Arc<McpRegistryController>,
     native_tools: Arc<[RegisteredTool]>,
+    servers: Vec<(ego_core::config::McpServerName, bool)>,
 }
 
 struct SurfaceActionSink {
@@ -138,6 +142,7 @@ impl ActionSink for SurfaceActionSink {
     fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
         let effect = match action.id {
             ActionId::Mode => SurfaceActionEffect::Mode,
+            ActionId::Fast => SurfaceActionEffect::Fast,
             ActionId::Plan => SurfaceActionEffect::Plan,
             ActionId::Yolo => SurfaceActionEffect::Yolo,
             ActionId::Permissions => SurfaceActionEffect::Permissions,
@@ -161,6 +166,8 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Hooks => SurfaceActionEffect::Hooks,
             ActionId::Setup => SurfaceActionEffect::Setup,
             ActionId::Doctor => SurfaceActionEffect::Doctor,
+            ActionId::Memory => SurfaceActionEffect::Memory,
+            ActionId::Init => SurfaceActionEffect::Init,
             ActionId::Config => SurfaceActionEffect::Config,
             ActionId::Quit => SurfaceActionEffect::Quit,
             ActionId::Version => SurfaceActionEffect::Version,
@@ -196,6 +203,7 @@ impl Completer for ActionCompleter {
         }
         if position == line.len()
             && (self.registry.resolve_slash(filter).is_some()
+                || self.registry.resolve_alias(filter).is_some()
                 || self
                     .registry
                     .mcp_menu(filter)
@@ -230,6 +238,26 @@ impl Completer for ActionCompleter {
                 ..Suggestion::default()
             })
             .collect::<Vec<_>>();
+        suggestions.extend(
+            self.registry
+                .aliases()
+                .into_iter()
+                .filter(|alias| alias.starts_with(filter))
+                .map(|alias| Suggestion {
+                    value: format!("/{alias}"),
+                    description: Some(
+                        if alias == "history" {
+                            "/history QUERY — search sessions"
+                        } else {
+                            "/resume [ID] or /continue [ID] — resume a session"
+                        }
+                        .to_owned(),
+                    ),
+                    span: Span::new(0, position),
+                    append_whitespace: false,
+                    ..Suggestion::default()
+                }),
+        );
         suggestions.extend(self.registry.skill_menu(filter).into_iter().map(
             |(name, description)| Suggestion {
                 value: format!("/{name}"),
@@ -268,6 +296,10 @@ impl ActionMenu {
 }
 
 impl Menu for ActionMenu {
+    fn submit_on_accept(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -371,7 +403,8 @@ fn rebuild_snapshot(
     status.snapshot = Some(SurfaceSnapshot::from_state_with_git(
         base.session,
         state,
-        SelectionFacts::new(selection.identity, selection.thinking, base.mode),
+        SelectionFacts::new(selection.identity, selection.thinking, base.mode)
+            .with_fast(selection.service_tier == ego_ai::service_tier::ServiceTier::Fast),
         seat,
         base.git,
     ));
@@ -385,7 +418,16 @@ fn repaint_status(status: &SharedStatus) {
             .native_status
             .then(|| status.snapshot.as_ref())
             .flatten()
-            .map(|snapshot| StatusLine::render(snapshot, &status.configured, status.width));
+            .map(|snapshot| {
+                let mut configured = status.configured.clone();
+                configured.extend(status.provider_values.iter().map(|(name, _)| name.clone()));
+                StatusLine::render_with_values(
+                    snapshot,
+                    &configured,
+                    &status.provider_values,
+                    status.width,
+                )
+            });
         (painter, line)
     };
     if let Some(line) = line {
@@ -402,6 +444,8 @@ struct SurfaceStatus {
     drafts: usize,
     activity: bool,
     activity_since: Option<Instant>,
+    activity_output_chars: usize,
+    thinking_since: Option<Instant>,
     /// When the open modal began; the wait is the person's, not the turn's.
     modal_since: Option<Instant>,
     /// The part of the current turn spent waiting on modals.
@@ -414,6 +458,7 @@ struct SurfaceStatus {
     native_status: bool,
     width: usize,
     configured: Vec<StatusSegmentName>,
+    provider_values: Vec<(StatusSegmentName, super::status::SegmentValue)>,
     config_store: Option<Arc<dyn UserConfigStore>>,
     snapshot: Option<SurfaceSnapshot>,
     status_base: Option<StatusBase>,
@@ -439,16 +484,56 @@ struct SurfaceStatus {
     cursor_selectors: bool,
     mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
+    diagnostics: Option<std::sync::Weak<dyn crate::output::Diagnostics>>,
 }
 
 impl SurfaceStatus {
     fn begin_activity(&mut self) {
         if !self.activity {
             self.activity_since = Some(Instant::now());
+            self.activity_output_chars = 0;
+            self.thinking_since = None;
             self.modal_waited = std::time::Duration::ZERO;
             self.reply_started.store(false, Ordering::Release);
         }
         self.activity = true;
+    }
+
+    fn observe_generation_progress(&mut self, event: &ego_core::public::PublicEvent) {
+        use ego_core::public::{ItemKind, PublicEvent};
+        if !self.activity {
+            return;
+        }
+        match event {
+            PublicEvent::ItemDelta {
+                kind: ItemKind::Reasoning,
+                text,
+                ..
+            } => {
+                self.thinking_since.get_or_insert_with(Instant::now);
+                self.activity_output_chars = self
+                    .activity_output_chars
+                    .saturating_add(text.chars().count());
+            }
+            PublicEvent::ItemDelta {
+                kind: ItemKind::AgentMessage,
+                text,
+                ..
+            } => {
+                self.thinking_since = None;
+                self.activity_output_chars = self
+                    .activity_output_chars
+                    .saturating_add(text.chars().count());
+            }
+            PublicEvent::ItemStarted {
+                kind: ItemKind::Tool,
+                ..
+            }
+            | PublicEvent::TurnCompleted { .. } => {
+                self.thinking_since = None;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -461,6 +546,8 @@ impl Default for SurfaceStatus {
             drafts: 0,
             activity: false,
             activity_since: None,
+            activity_output_chars: 0,
+            thinking_since: None,
             modal_since: None,
             modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
@@ -471,6 +558,7 @@ impl Default for SurfaceStatus {
             native_status: false,
             width: 0,
             configured: Vec::new(),
+            provider_values: Vec::new(),
             config_store: None,
             snapshot: None,
             status_base: None,
@@ -489,6 +577,7 @@ impl Default for SurfaceStatus {
             cursor_selectors: false,
             mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
+            diagnostics: None,
         }
     }
 }
@@ -636,6 +725,7 @@ pub struct StatusSetup {
 pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentName] = &[
     ego_core::config::StatusSegmentName::Model,
     ego_core::config::StatusSegmentName::Effort,
+    ego_core::config::StatusSegmentName::Fast,
     ego_core::config::StatusSegmentName::Mode,
     ego_core::config::StatusSegmentName::Context,
     ego_core::config::StatusSegmentName::Cost,
@@ -781,6 +871,20 @@ impl SurfaceOutput {
             },
             owner,
         )
+    }
+
+    pub(crate) fn goal_status(&self, goal: Option<(u32, Option<u32>)>) {
+        if let Some(status) = &self.status {
+            if let Some(snapshot) = status
+                .lock()
+                .expect("surface status lock")
+                .snapshot
+                .as_mut()
+            {
+                snapshot.set_goal(goal);
+            }
+            repaint_status(status);
+        }
     }
 
     pub(crate) fn retry_status(&self, message: Option<(&str, u64)>) {
@@ -1061,6 +1165,15 @@ fn composer_editor(vim: bool) -> Box<dyn EditMode> {
 }
 
 impl Seat {
+    pub(crate) fn observe_generation_progress(&self, event: &ego_core::public::PublicEvent) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status
+                .lock()
+                .expect("surface status lock")
+                .observe_generation_progress(event);
+        }
+    }
+
     /// Build the applicable editor and, for a terminal, its only output port.
     ///
     /// Bracketed paste is not a nicety: without it a pasted stack trace
@@ -1271,6 +1384,7 @@ impl Seat {
                     .registry
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
+                    Dispatch::Details(action) => Line::HostCommand(HostCommand::Details(action)),
                     Dispatch::History(query) => Line::HostCommand(HostCommand::History(query)),
                     Dispatch::Resume(id) => Line::HostCommand(HostCommand::Resume(id)),
                     Dispatch::SessionMetadata(operation) => {
@@ -1289,6 +1403,11 @@ impl Seat {
                     }
                     Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
                     Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
+                    Dispatch::Memory(arguments) => {
+                        Line::HostCommand(HostCommand::Memory(arguments))
+                    }
+                    Dispatch::Init(arguments) => Line::HostCommand(HostCommand::Init(arguments)),
+                    Dispatch::Fast(enabled) => Line::HostCommand(HostCommand::Fast(enabled)),
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
@@ -1385,6 +1504,17 @@ impl Seat {
         }
     }
 
+    /// Let local output actions run without waiting for the turn coordinator.
+    /// A weak reference avoids a cycle through the output's shared surface status.
+    pub(crate) fn install_diagnostics(
+        &self,
+        diagnostics: std::sync::Weak<dyn crate::output::Diagnostics>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status.lock().expect("surface status lock").diagnostics = Some(diagnostics);
+        }
+    }
+
     /// Install one complete local-action topology around the shared picker and
     /// live MCP registry authority.
     pub fn install_model_picker(
@@ -1413,6 +1543,7 @@ impl Seat {
         }));
         for action in [
             ActionId::Mode,
+            ActionId::Fast,
             ActionId::Plan,
             ActionId::Yolo,
             ActionId::Permissions,
@@ -1434,6 +1565,8 @@ impl Seat {
             ActionId::Expand,
             ActionId::Skills,
             ActionId::Hooks,
+            ActionId::Memory,
+            ActionId::Init,
             ActionId::Retry,
             ActionId::Config,
             ActionId::Doctor,
@@ -1460,6 +1593,12 @@ impl Seat {
             status.model_selection = Some(selection);
             status.config_store = Some(config_store);
             status.mcp_actions = Some(McpSurfaceActions {
+                servers: mcp_registry
+                    .status()
+                    .servers()
+                    .iter()
+                    .map(|server| (server.name().clone(), false))
+                    .collect(),
                 registry: mcp_registry,
                 native_tools: native_tools.into(),
             });
@@ -1480,6 +1619,19 @@ impl Seat {
             .set_availability(ActionId::Compact, availability);
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
+        }
+    }
+
+    /// Keep the busy inventory bound to the same session-local enablement as idle commands.
+    pub(crate) fn set_mcp_session_servers(
+        &self,
+        servers: Vec<(ego_core::config::McpServerName, bool)>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            if let Some(actions) = status.mcp_actions.as_mut() {
+                actions.servers = servers;
+            }
         }
     }
 
@@ -1556,6 +1708,26 @@ impl Seat {
         if live.control.send(Control::InsertPasteText { text }).is_ok() {
             live.wake_owner();
         }
+    }
+
+    /// Publish cached results from the epoch-owned guarded status producers.
+    pub(crate) fn set_status_providers(&self, values: Vec<(String, String)>) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        live.status
+            .lock()
+            .expect("surface status lock")
+            .provider_values = values
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    StatusSegmentName::custom(name),
+                    super::status::SegmentValue::text(value),
+                )
+            })
+            .collect();
+        repaint_status(&live.status);
     }
 
     /// Activate native status after session, selection and config are known.
@@ -1828,7 +2000,15 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn key_hints(&self) -> String {
-        render_key_hints(&self.registry, self.width())
+        let width = self.width();
+        let width = if width == 0 {
+            crossterm::terminal::size()
+                .map(|(cols, _)| usize::from(cols))
+                .unwrap_or(0)
+        } else {
+            width
+        };
+        render_key_hints(&self.registry, width)
     }
 
     fn read_startup_model(
@@ -2144,14 +2324,6 @@ fn own_terminal(
             inspection_waker.wake();
             continue;
         }
-        if phase.get() == EditPhase::Busy
-            && matches!(&line, Line::HostCommand(HostCommand::Config(_)))
-        {
-            commit_to_transcript(
-                &status,
-                "config write pending until the active turn finishes; saved defaults apply to future sessions",
-            );
-        }
         match line {
             Line::ExternalBreak(_) => match control.recv() {
                 Ok(Control::Shutdown) | Err(_) => break,
@@ -2210,6 +2382,37 @@ fn own_terminal(
                     line
                 };
                 let ended = matches!(line, Line::Ended);
+                if phase.get() == EditPhase::Busy
+                    && let Line::HostCommand(command) = &line
+                {
+                    let label = match command {
+                        HostCommand::Action(action) => {
+                            let current = status.lock().expect("surface status lock");
+                            format!(
+                                "/{}",
+                                current
+                                    .actions
+                                    .as_ref()
+                                    .expect("installed actions")
+                                    .registry
+                                    .help(*action)
+                                    .name()
+                            )
+                        }
+                        HostCommand::Tasks(_) => "/tasks".to_owned(),
+                        HostCommand::Config(_) => "/config".to_owned(),
+                        HostCommand::Fork(_) => "/fork".to_owned(),
+                        HostCommand::Resume(_) => "/resume".to_owned(),
+                        HostCommand::History(_) => "/history".to_owned(),
+                        _ => "local command".to_owned(),
+                    };
+                    let receipt = if matches!(command, HostCommand::Config(_)) {
+                        "config write pending until the active turn finishes; saved defaults apply to future sessions".to_owned()
+                    } else {
+                        format!("{label} pending until the current turn ends")
+                    };
+                    commit_to_transcript(&status, &receipt);
+                }
                 if input.send(line).is_err() || (ended && failed) {
                     break;
                 }

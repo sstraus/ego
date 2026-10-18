@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-webpki-roots"] }
 ego-core.workspace = true
 ego-mcp.workspace = true
@@ -35,6 +36,7 @@ schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10.9"
+similar = { version = "3.2.0", default-features = false, features = ["text"] }
 hmac = "0.12.1"
 html2text = "0.17"
 tempfile = "3.27.0"

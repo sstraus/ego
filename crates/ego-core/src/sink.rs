@@ -69,6 +69,15 @@ pub trait EventSink: Send + Sync {
     /// publication is what makes that requirement true by construction instead
     /// of by a caller remembering a doc comment.
     fn publish(&self, event: &PublicEvent, state: &SessionState);
+
+    /// Transient, attempt-local cache observation for interactive diagnostics.
+    /// This is not a public event or a durable accounting record.
+    fn cache_observed(
+        &self,
+        _prefix: &crate::generator::attempt::CachePrefix,
+        _usage: Option<crate::state::Usage>,
+    ) {
+    }
 }
 
 /// A borrowed sink is a sink.
@@ -83,6 +92,14 @@ impl<T: EventSink + ?Sized> EventSink for &T {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         (**self).publish(event, state);
+    }
+
+    fn cache_observed(
+        &self,
+        prefix: &crate::generator::attempt::CachePrefix,
+        usage: Option<crate::state::Usage>,
+    ) {
+        (**self).cache_observed(prefix, usage);
     }
 }
 

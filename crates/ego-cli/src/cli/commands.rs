@@ -24,11 +24,12 @@ pub(super) struct RunCommand {
 #[derive(Debug, Parser)]
 #[command(
     name = "ego resume",
-    about = "Continue a session; no ID = latest in this workspace.",
+    about = "Continue a stored session.",
+    after_help = "With terminal input and output, no ID opens the saved-session picker across roots. Otherwise no ID selects the latest session in this workspace. Explicit --output, --answer, --file, stdin prompt '-' or profile ci select headless resumption.\n\nA single non-UUID positional is a prompt-only form, not a session ID. For example: ego resume \"next step\" (or ego continue \"next step\"). Supply a UUID plus a prompt to name a specific session.",
     disable_help_subcommand = true
 )]
 pub(super) struct ResumeCommand {
-    /// The session to continue. Omit it for the latest in this workspace.
+    /// Session UUID; omit it for the terminal picker or headless latest in this workspace.
     pub(super) id: Option<String>,
 
     /// The prompt. `-` reads it from stdin.
@@ -43,28 +44,16 @@ pub(super) struct ResumeCommand {
     )]
     pub(super) answers: Vec<ResumeAnswer>,
 
-    #[command(flatten)]
-    pub(super) flags: Flags,
-}
-
-/// The metadata-only `resume` grammar. No run flag is present by construction.
-#[derive(Debug, Parser)]
-#[command(
-    name = "ego resume",
-    about = "Read or change durable session metadata.",
-    disable_help_subcommand = true
-)]
-pub(super) struct SessionMetadataCommand {
-    pub(super) id: String,
-
-    #[arg(long, value_parser = parse_name_operation, conflicts_with = "goal", required_unless_present = "goal")]
+    /// Read or change the session title without starting a turn: show, set=TEXT, clear.
+    #[arg(long, value_parser = parse_name_operation, requires = "id", conflicts_with_all = ["goal_operation", "prompt", "answers", "resume-run-options"])]
     pub(super) name: Option<NameOperation>,
 
-    #[arg(long, value_parser = parse_goal_operation, conflicts_with = "name", required_unless_present = "name")]
-    pub(super) goal: Option<GoalOperation>,
+    /// Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON.
+    #[arg(long, value_parser = parse_goal_operation, requires = "id", conflicts_with_all = ["name", "prompt", "answers", "resume-run-options"])]
+    pub(super) goal_operation: Option<GoalOperation>,
 
     #[command(flatten)]
-    pub(super) common: Common,
+    pub(super) flags: Flags,
 }
 
 /// `ego ls` — the catalogue.
@@ -171,6 +160,14 @@ pub(super) struct ExportCommand {
     /// Transcript format; JSONL is stdout-only and cannot be combined with --file.
     #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
     pub(super) format: ExportFormat,
+
+    /// Follow committed local transcript events until stopped.
+    #[arg(long)]
+    pub(super) follow: bool,
+
+    /// Only emit transcript events after this session-local sequence.
+    #[arg(long, value_name = "SEQ")]
+    pub(super) after: Option<u64>,
 
     /// Write to PATH instead of stdout; its parent must exist. Refuse symlinks,
     /// non-regular targets and existing files with different bytes; identical bytes are accepted.
@@ -291,7 +288,7 @@ pub(super) struct Shape {
     pub(super) system: Option<String>,
 
     /// No ambient discovery, even in a trusted workspace.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "instructions")]
     pub(super) bare: bool,
 
     /// Append to the system prompt. `@file` reads it from a file.
@@ -712,11 +709,16 @@ pub(super) struct Flags {
     #[arg(long, value_name = "BRANCH", conflicts_with_all = ["session", "session_id"])]
     pub(super) worktree: Option<String>,
     /// Read the instruction and its invocation configuration from an agent file.
-    #[arg(short = 'f', long = "file", value_name = "FILE")]
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        conflicts_with = "prompt"
+    )]
     pub(super) file: Option<PathBuf>,
 
-    /// Supply one declared agent-file template variable.
-    #[arg(long = "var", value_name = "KEY=VALUE", action = ArgAction::Append)]
+    /// Supply one declared agent-file template variable. Requires --file.
+    #[arg(long = "var", value_name = "KEY=VALUE", action = ArgAction::Append, requires = "file", conflicts_with = "prompt")]
     pub(super) vars: Vec<String>,
 
     /// Add exact image bytes as ordered context before the prompt text.
@@ -759,7 +761,7 @@ pub(super) struct Flags {
     pub(super) session_id: Option<String>,
 
     /// Refused: every run uses a durable session.
-    #[arg(long, group = "session-choice")]
+    #[arg(long, group = "session-choice", hide = true)]
     pub(super) ephemeral: bool,
 
     #[command(flatten)]
@@ -926,8 +928,8 @@ impl clap::ValueEnum for RootAccessValue {
     disable_help_subcommand = true
 )]
 pub(super) struct SetupCommand {
-    /// Limit proposals to these report item IDs (comma-separated).
-    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    /// Select proposal item IDs as one comma-separated list; repeat to add IDs.
+    #[arg(long, value_name = "ID[,ID...]", value_delimiter = ',', num_args = 1, action = ArgAction::Append)]
     pub(super) items: Option<Vec<usize>>,
     /// Offer a validated judge for unresolved policy; never authorizes an action.
     #[arg(long)]

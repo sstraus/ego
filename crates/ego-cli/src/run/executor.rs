@@ -197,6 +197,7 @@ pub struct CliRunExecutor {
     pub(super) admission: Arc<EvidenceAdmissionService>,
     pub(super) child_authority: Option<Arc<ChildAuthorityCeiling>>,
     pub(super) child: bool,
+    pub(super) token_family: Option<SessionId>,
 }
 
 #[derive(Clone)]
@@ -599,7 +600,7 @@ impl CliCompactionCommand {
             effect_scope(&confinement, active.evidence(), &cancel, run_deadline, None)
                 .await
                 .map_err(compaction_termination)?;
-        let fs = OsFs;
+        let fs = &active.checkpoint_fs;
         let sink = NullSink;
         let session = Session {
             id: active.id(),
@@ -622,7 +623,7 @@ impl CliCompactionCommand {
             retry_pause: Arc::new(TokioRetryPause),
         };
         let effect_ports = ToolEffectPorts::new(
-            &fs,
+            fs,
             ports.process(),
             active.evidence(),
             ports.resolver_handle(),
@@ -822,6 +823,7 @@ impl CliRunExecutor {
             admission,
             child_authority: None,
             child: false,
+            token_family: None,
         }
     }
 
@@ -895,6 +897,7 @@ impl CliRunExecutor {
                 admission,
                 child_authority: None,
                 child: false,
+                token_family: None,
             },
             policy,
         ))

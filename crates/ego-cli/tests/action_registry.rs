@@ -7,10 +7,11 @@ use ego_cli::repl::actions::{
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
-const NAMES: [&str; 30] = [
+const NAMES: [&str; 33] = [
     "help",
     "model",
     "thinking",
+    "fast",
     "mode",
     "plan",
     "yolo",
@@ -36,6 +37,8 @@ const NAMES: [&str; 30] = [
     "expand",
     "skills",
     "hooks",
+    "memory",
+    "init",
     "retry",
     "version",
 ];
@@ -334,6 +337,27 @@ fn resume_accepts_repeatable_answer_flags_without_splitting_json_values() {
             "0192f3a1-0000-7000-8000-000000000002=not-json".into(),
         ])
         .is_err()
+    );
+}
+
+#[test]
+fn fast_contract_catches_invalid_or_prompt_routed_tier_commands() {
+    let registry = ActionRegistry::final_surface();
+    for (text, enabled) in [("/fast on", true), ("/fast off", false)] {
+        assert_eq!(
+            registry.classify(registry.submit(text, InputOrigin::Typed)),
+            Dispatch::Fast(enabled)
+        );
+    }
+    for text in ["/fast", "/fast turbo", "/fast on extra"] {
+        assert!(matches!(
+            registry.classify(registry.submit(text, InputOrigin::Typed)),
+            Dispatch::Refused { .. }
+        ));
+    }
+    assert_eq!(
+        registry.classify(registry.submit("/fast on", InputOrigin::BracketedPaste)),
+        Dispatch::Prompt
     );
 }
 

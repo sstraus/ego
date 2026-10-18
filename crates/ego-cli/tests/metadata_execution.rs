@@ -42,7 +42,7 @@ impl Fixture {
     }
 
     fn run_goal(&self, operation: &str, output: Option<&str>) -> support::Finished {
-        self.run_for_id(&self.id, "--goal", operation, output)
+        self.run_for_id(&self.id, "--goal-operation", operation, output)
     }
 
     fn run_for_id(
@@ -140,7 +140,7 @@ fn goal_execution_snapshots_profile_ceiling_and_reaches_blocked_and_achieved() {
         .arg(&fixture.id)
         .arg("--session-dir")
         .arg(fixture.sessions.path().to_str().unwrap())
-        .arg("--goal")
+        .arg("--goal-operation")
         .arg("set=Ship the product")
         .arg("--output")
         .arg("json")

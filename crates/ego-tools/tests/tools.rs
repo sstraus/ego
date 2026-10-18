@@ -1105,6 +1105,49 @@ mod edit {
         );
     }
 
+    // Catches: a guarded edit changing the file but dropping its measured
+    // line metadata before the turn's terminal receipt can read the result.
+    #[test]
+    fn guarded_edit_result_carries_the_lines_it_changed() {
+        let ws = editable();
+        let tool = ws.tool("edit");
+        let call = tool
+            .prepare(
+                json!({
+                    "path": "src/main.rs",
+                    "old_string": "    todo!()\n",
+                    "new_string": "    println!(\"done\");\n",
+                }),
+                &ws.ctx(),
+            )
+            .unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &ws.fs,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        let ToolExecution::Complete(result) = block_on(tool.execute(call, &guarded)).unwrap()
+        else {
+            panic!("edit must complete without input");
+        };
+        assert_eq!(
+            result.line_change(),
+            Some(ego_core::permit::LineChange {
+                added: 1,
+                removed: 1,
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    println!(\"done\");\n}\n"
+        );
+    }
+
     #[test]
     fn edit_refuses_text_that_is_not_in_the_file_and_changes_nothing() {
         // The whole reason `edit` is not `write`: it may only land where the
@@ -2799,6 +2842,58 @@ mod native_web {
             .unwrap();
         assert!(ws.authorize(call).is_err());
     }
+}
+
+#[test]
+fn builtin_write_and_edit_checkpoint_real_preimages_but_failed_edit_does_not() {
+    // Catches: wiring capture only to write, or capturing an edit that never mutates.
+    use ego_tools::checkpoint::CheckpointFs;
+    let ws = Workspace::in_mode(Mode::Yolo);
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.root)
+        .args(["init", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let path = ws.file("target", "original bytes");
+    let session = SessionId::new();
+    let filesystem = CheckpointFs::new(session);
+    let invoke = |name: &str, params| {
+        let tool = ws.tool(name);
+        let call = tool.prepare(params, &ws.ctx()).unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &filesystem,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        block_on(tool.execute(call, &guarded))
+    };
+    invoke("write", json!({"path":"target", "contents":"one"})).unwrap();
+    invoke(
+        "edit",
+        json!({"path":"target", "old_string":"one", "new_string":"two"}),
+    )
+    .unwrap();
+    assert!(
+        invoke(
+            "edit",
+            json!({"path":"target", "old_string":"missing", "new_string":"three"})
+        )
+        .is_err()
+    );
+    let preview = CheckpointFs::preview(&ws.root, session).unwrap();
+    assert_eq!(preview.len(), 2);
+    assert_eq!(fs::read(&path).unwrap(), b"two");
+    CheckpointFs::restore(&ws.root, session, &preview[0].checkpoint).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"one");
+    CheckpointFs::restore(&ws.root, session, &preview[1].checkpoint).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"original bytes");
 }
 
 mod notebook_edit {

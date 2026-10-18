@@ -4,7 +4,7 @@
 //! `ARCHITECTURE.md`.
 
 use ego_core::permit::{
-    Change, GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
+    Change, GuardedIo, LineChange, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
 };
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
@@ -134,12 +134,50 @@ impl TypedTool for EditTool {
             }
 
             let after = before.replace(&old_string, &new_string);
+            let change = changed_lines(&before, &after, &old_string, &new_string);
             io.write(&path, after.as_bytes())?;
             Ok(ToolResult::builtin(format!(
-                "replaced 1 occurrence in {path}"
-            )))
+                "replaced 1 occurrence in {path}{}",
+                io.write_notice(&path)
+                    .map(|notice| format!("\n{notice}"))
+                    .unwrap_or_default()
+            ))
+            .with_line_change(change))
         })
     }
+}
+
+/// Diff only the lines touched by the one replacement, not the whole file.
+fn changed_lines(before: &str, after: &str, old: &str, new: &str) -> LineChange {
+    let start = before
+        .find(old)
+        .expect("the unique old text was just verified");
+    let line_start = before[..start].rfind('\n').map_or(0, |index| index + 1);
+    let old_end = start + old.len();
+    let new_end = start + new.len();
+    let before_end = before[old_end..]
+        .find('\n')
+        .map_or(before.len(), |index| old_end + index + 1);
+    let after_end = after[new_end..]
+        .find('\n')
+        .map_or(after.len(), |index| new_end + index + 1);
+    let mut change = LineChange {
+        added: 0,
+        removed: 0,
+    };
+    for line in similar::TextDiff::from_lines(
+        &before[line_start..before_end],
+        &after[line_start..after_end],
+    )
+    .iter_all_changes()
+    {
+        match line.tag() {
+            similar::ChangeTag::Insert => change.added += 1,
+            similar::ChangeTag::Delete => change.removed += 1,
+            similar::ChangeTag::Equal => {}
+        }
+    }
+    change
 }
 
 impl EditTool {
@@ -172,5 +210,54 @@ impl EditTool {
             return Err(wrong_op(self.name()));
         }
         Ok((path, old_string, new_string))
+    }
+}
+
+#[cfg(test)]
+mod line_change_tests {
+    use super::*;
+
+    #[test]
+    fn counts_only_changed_lines_and_preserves_matching_context() {
+        assert_eq!(
+            changed_lines("a\nb\nz\n", "a\nx\ny\nz\n", "b", "x\ny"),
+            LineChange {
+                added: 2,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            changed_lines("a\nsame\nb\n", "A\nsame\nB\n", "a\nsame\nb", "A\nsame\nB"),
+            LineChange {
+                added: 2,
+                removed: 2
+            }
+        );
+        assert_eq!(
+            changed_lines("a\n", "a", "a\n", "a"),
+            LineChange {
+                added: 1,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            changed_lines(
+                "prefixoldtail\nnext\n",
+                "prefixnewtail\nnext\n",
+                "old",
+                "new"
+            ),
+            LineChange {
+                added: 1,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            changed_lines("a\nb\n", "a\nb\n", "b", "b"),
+            LineChange {
+                added: 0,
+                removed: 0
+            }
+        );
     }
 }

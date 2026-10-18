@@ -303,7 +303,7 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
                 "--thinking",
                 "off",
             ])
-            .run_pty_trusting("yes", "/skills");
+            .run_pty_trusting_screen("yes", "/skills details");
         assert_eq!(result.code, Some(0), "{}", result.stdout);
         assert_eq!(
             result.stdout.contains("Trust project files"),
@@ -313,7 +313,11 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
         );
         assert!(result.stdout.contains("/foo"), "{}", result.stdout);
         assert!(
-            result.stdout.contains(&skill.display().to_string()),
+            result
+                .stdout
+                .split_whitespace()
+                .collect::<String>()
+                .contains(&skill.display().to_string()),
             "{}",
             result.stdout
         );

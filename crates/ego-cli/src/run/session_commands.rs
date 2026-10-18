@@ -18,6 +18,7 @@ use ego_core::event::id::SessionId;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::export::Exporter;
 use ego_core::public::project_public;
+use ego_core::public::transcript::{TranscriptHeader, project_transcript};
 use ego_core::run::{RequestId, RunId, RunTermination};
 use ego_core::session::{ReplaySource, ReplaySourceError};
 use ego_core::session_lifecycle::{
@@ -54,6 +55,9 @@ pub fn ls(args: &crate::cli::LsArgs, out: &Stdout) -> RunTermination {
 
 /// Read and render one session without opening a writer or constructing a run.
 pub fn export(args: &ExportArgs, out: &Stdout) -> RunTermination {
+    if args.follow {
+        return follow_transcript(args, out);
+    }
     match exported(args) {
         Ok(bytes) if args.file.is_none() => {
             out.write(&bytes);
@@ -89,21 +93,19 @@ pub fn export(args: &ExportArgs, out: &Stdout) -> RunTermination {
 }
 
 pub(super) fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
-    let usage = |error: UsageError| RunTermination::UsageError {
-        message: error.to_string(),
-    };
-    let root = workspace(args.directory.as_ref()).map_err(usage)?;
-    let store_root = rooted_path(
-        &root,
-        session::store_root(args.session_dir.as_ref()).map_err(usage)?,
-    );
-    let store = session::jsonl(store_root, root);
+    let store = export_store(args)?;
+
+    if args.format == ExportFormat::Transcript {
+        return transcript_snapshot(&store, args.source, args.after.unwrap_or(0), true)
+            .map(|(bytes, _)| bytes);
+    }
 
     if args.sanitize {
         let canonical = canonical_sanitized_json(&store, args.source)
             .map_err(|message| RunTermination::Failed { message })?;
         return Ok(match args.format {
             ExportFormat::Json | ExportFormat::Jsonl => canonical,
+            ExportFormat::Transcript => unreachable!("handled above"),
             ExportFormat::Md => {
                 format!(
                     "# ego sanitized export\n\n```json\n{}\n```\n",
@@ -128,6 +130,7 @@ pub(super) fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
         })
         .collect::<Vec<_>>();
     match args.format {
+        ExportFormat::Transcript => unreachable!("handled above"),
         ExportFormat::Json => masked_json(&events)
             .map(|rendered| format!("{rendered}\n"))
             .map_err(local_render_error),
@@ -143,6 +146,79 @@ pub(super) fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
         ExportFormat::Md => masked_json(&events)
             .map(|rendered| format!("# ego export\n\n```json\n{rendered}\n```\n"))
             .map_err(local_render_error),
+    }
+}
+
+fn export_store(args: &ExportArgs) -> Result<JsonlStore, RunTermination> {
+    let usage = |error: UsageError| RunTermination::UsageError {
+        message: error.to_string(),
+    };
+    let root = workspace(args.directory.as_ref()).map_err(usage)?;
+    let store_root = rooted_path(
+        &root,
+        session::store_root(args.session_dir.as_ref()).map_err(usage)?,
+    );
+    let store = session::jsonl(store_root, root);
+
+    Ok(store)
+}
+
+/// Read a coherent committed prefix under the adapter's short append read lock.
+fn transcript_snapshot(
+    store: &JsonlStore,
+    session: SessionId,
+    after: u64,
+    header: bool,
+) -> Result<(String, u64), RunTermination> {
+    let entries = ReplaySource::entries(store, &session)
+        .map_err(local_replay_error)?
+        .ok_or_else(|| RunTermination::Failed {
+            message: format!("session {session} is missing"),
+        })?;
+    let mut rendered = String::new();
+    if header {
+        let lineage = ReplaySource::lineage(store, &session).map_err(local_replay_error)?;
+        rendered.push_str(
+            &masked_json(&TranscriptHeader::new(session, lineage)).map_err(local_render_error)?,
+        );
+        rendered.push('\n');
+    }
+    let mut cursor = after;
+    for entry in entries {
+        if let SessionEntry::Event(event) = entry {
+            if event.env.seq.get() <= after {
+                continue;
+            }
+            cursor = cursor.max(event.env.seq.get());
+            if let Some(event) = project_transcript(session, &event) {
+                rendered.push_str(&masked_json(&event).map_err(local_render_error)?);
+                rendered.push('\n');
+            }
+        }
+    }
+    Ok((rendered, cursor))
+}
+
+fn follow_transcript(args: &ExportArgs, out: &Stdout) -> RunTermination {
+    let store = match export_store(args) {
+        Ok(store) => store,
+        Err(error) => return error,
+    };
+    let mut cursor = args.after.unwrap_or(0);
+    let mut header = true;
+    loop {
+        match transcript_snapshot(&store, args.source, cursor, header) {
+            Ok((bytes, next)) => {
+                out.write(&bytes);
+                cursor = next;
+                header = false;
+            }
+            Err(error) => return error,
+        }
+        if let Some(message) = out.broken() {
+            return RunTermination::Failed { message };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
@@ -503,11 +579,16 @@ fn listed(args: &crate::cli::LsArgs, out: &Stdout) -> Result<(), RunTermination>
     // though listing creates none. One constructor, one meaning.
     let store = session::jsonl(store_root, root.clone());
 
-    let metas = crate::catalogue::listing(&store, &root, args.all).map_err(|err| {
-        RunTermination::Failed {
+    let metas =
+        crate::catalogue::saved_sessions(&store, out).map_err(|err| RunTermination::Failed {
             message: format!("the session store could not be listed: {err}"),
-        }
-    })?;
+        })?;
+
+    let metas = if args.all {
+        metas
+    } else {
+        crate::catalogue::in_workspace(metas, &root)
+    };
 
     match args.output {
         // §4.6's single object. Rendered even when there is nothing to list:
@@ -594,7 +675,7 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
             &root,
             session::store_root(args.session_dir.as_ref()).map_err(|error| error.to_string())?,
         );
-        let store = Arc::new(session::jsonl(store_root, root));
+        let store = Arc::new(session::jsonl(store_root, root.clone()));
         let lifecycle = SessionLifecycle::new(store, Arc::new(NoLiveRuns), Arc::new(SystemClock));
         let publication = lifecycle
             .delete_with_force(args.source, args.force)
@@ -606,6 +687,11 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
                 Stderr.note(&diagnostic)
             }
             _ => {}
+        }
+        if let Err(error) = ego_tools::checkpoint::CheckpointFs::close(&root, args.source) {
+            Stderr.note(&format!(
+                "session deleted, but checkpoint cleanup failed: {error}"
+            ));
         }
         out.line(&format!("deleted {}", args.source));
         Ok(())

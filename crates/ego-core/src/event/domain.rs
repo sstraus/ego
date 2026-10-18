@@ -246,7 +246,8 @@ pub struct ToolTiming {
 /// TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
-/// SubagentSettled | SkillCatalogueAdmitted | SkillInstructionAdmitted |
+/// SubagentSettled | BackgroundTaskRequested | SubagentCompletionDelivered |
+/// SkillCatalogueAdmitted | SkillInstructionAdmitted |
 /// SkillResourceAdmitted | Error
 /// ```
 ///
@@ -678,6 +679,16 @@ pub enum EventKind {
         child: Option<RunId>,
         terminal: SubagentTerminal,
     },
+    /// Exact standalone background-task recovery authority, before child admission.
+    BackgroundTaskRequested {
+        invocation: SubagentInvocationId,
+        authority: crate::subagent::BackgroundTaskAuthority,
+    },
+    /// One settled background task entered the parent conversation at a safe boundary.
+    SubagentCompletionDelivered {
+        invocation: SubagentInvocationId,
+        text: String,
+    },
     /// One complete ordered skill catalogue was admitted atomically.
     SkillCatalogueAdmitted {
         generation: SkillCatalogueGeneration,
@@ -869,6 +880,8 @@ impl EventKind {
             EventKind::SubagentRequested { .. } => "subagent_requested",
             EventKind::SubagentSpawned { .. } => "subagent_spawned",
             EventKind::SubagentSettled { .. } => "subagent_settled",
+            EventKind::BackgroundTaskRequested { .. } => "background_task_requested",
+            EventKind::SubagentCompletionDelivered { .. } => "subagent_completion_delivered",
             EventKind::SkillCatalogueAdmitted { .. } => "skill_catalogue_admitted",
             EventKind::SkillInstructionAdmitted { .. } => "skill_instruction_admitted",
             EventKind::SkillResourceAdmitted { .. } => "skill_resource_admitted",

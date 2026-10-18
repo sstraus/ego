@@ -1332,6 +1332,7 @@ pub struct RunExecutionBindings {
     mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
+    delegation_allowed: bool,
     human: Option<Arc<dyn HumanApprover>>,
     cancel: crate::turn::CancelToken,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
@@ -1354,6 +1355,7 @@ impl RunExecutionBindings {
             mcp_runtime: None,
             budget_gate: None,
             effect_tools: None,
+            delegation_allowed: true,
             human: None,
             cancel: crate::turn::CancelToken::new(),
             sandbox_grants: None,
@@ -1487,6 +1489,15 @@ impl RunExecutionBindings {
     pub fn with_effect_tools(mut self, tools: BTreeSet<String>) -> Self {
         self.effect_tools = Some(Arc::new(tools));
         self
+    }
+
+    pub fn without_delegation(mut self) -> Self {
+        self.delegation_allowed = false;
+        self
+    }
+
+    pub fn delegation_allowed(&self) -> bool {
+        self.delegation_allowed
     }
 
     /// The exact shared gate used by generation-boundary executors.

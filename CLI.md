@@ -28,18 +28,21 @@ proposed.
 
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
-ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
-ego continue [ID] [PROMPT]    continue the latest saved session; shares resume options
+ego run [PROMPT]              headless one-shot; PROMPT from argv or stdin; -f FILE loads an agent file
+ego continue [ID] [PROMPT]    alias of resume; same session selection and options
 ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
                               --answer QUESTION_ID=JSON answers pending input;
-                              --name and --goal are metadata-only operations
+                              --name and --goal-operation are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
 ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
                               --force acknowledges an uncertain run
 ego fork <ID> [--at ITEM_ID]   branch after a completed turn
+ego checkpoint [-C DIR] <ID> preview|restore COMMIT|close
+                              inspect or selectively undo builtin file edits
 ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
                               publish one idempotent checkpoint target
-ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
+ego export <ID> [--sanitize] [--format md|json|jsonl|transcript] [--file PATH]
+                [--follow] [--after SEQ]
                 [-C DIR] [--session-dir DIR]
                               render a session; Markdown is the default
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
@@ -56,7 +59,7 @@ ego mcp-server --max-concurrent-runs N --retained-requests N
 ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
 ego hooks  ls [--json]                     read-only admitted hook catalogue
-ego config get|set|unset|ls|edit
+ego config capabilities|snapshot|batch|get|set|unset|ls|edit
 ego roots  add|rm|ls                         user perimeter roots
 ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
@@ -123,6 +126,9 @@ Notes:
   is appended as a delimited context block.
 - `ego export --sanitize` emits the producer-only version-1 structural bundle;
   unsanitized export is an explicit local transcript with no safety claim.
+  `--format transcript` emits [local transcript v1](docs/reference/transcript.md),
+  with stable event identity, lineage, goals, `--follow`, and `--after SEQ` replay.
+  Transcript mode excludes `--sanitize` and `--file`.
   Canonical JSON ends in one newline, JSONL is the same single bundle line, and
   Markdown embeds that same bundle. `--file` suppresses stdout; JSONL with a
   file is a usage error. Relative files resolve from canonical `-C`. Existing
@@ -130,7 +136,7 @@ Notes:
   published-but-durability-uncertain file remains visible and is not retried.
 - Metadata-only session operations reuse `resume` and never start a model turn:
   `ego resume ID --name show|set=TEXT|clear [--output text|json|jsonl]` and
-  `ego resume ID --goal show|set=TEXT|achieve|block=REASON` with optional
+  `ego resume ID --goal-operation show|set=TEXT|achieve|block=REASON` with optional
   `--output text|json|jsonl`. They do not accept a prompt or `--answer` in the
   same invocation.
 
@@ -162,15 +168,28 @@ turn. `ego run --output jsonl` remains one-shot event output, not this input
 protocol. The [integration guide](docs/integrations/acp.md#headless-multi-turn-stdio)
 shows both directions, attachment blocks, and flow control.
 
+`-f` / `--file` loads a strict version-1 agent file, including its invocation
+settings and declared template variables. It is not a plain-text prompt-file
+reader. For example, save this as `reviewer.md`:
+
+```markdown
+---
+version: 1
+---
+Review the current change for defects.
+```
+
+Then run `ego run --file reviewer.md`. Use `ego run -` to read a plain-text
+prompt from stdin. An argv prompt cannot be combined with an agent file.
+
 ### 2.1 Availability — what ships today
 
-The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-seventeen commands; this build implements **fourteen**. The remaining three are
-refused **by name**, each naming the subsystem it waits on, from the `UNBUILT`
-table in `crates/ego-cli/src/cli.rs`. A test binds that table to this section,
-so a command can be refused as documented only while this list still offers it.
-M5 must enable all seventeen from their final owners; this count is current
-availability, not permission to ship a fourteen-command product.
+The current command inventory comes from `BUILT` and `UNBUILT` in
+`crates/ego-cli/src/cli.rs`. All commands in the current `BUILT` table are
+implemented; `UNBUILT` is empty. Tests bind the command set below to those
+tables. If an unavailable command is added, its refusal must name the command
+and the subsystem it waits on. Availability does not remove a required
+capability from the final product.
 
 A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
@@ -218,6 +237,10 @@ milestones remain dependencies of the final product.
 The final root grammar is exact:
 
 ```text
+ego config capabilities
+ego config snapshot [--profile NAME]
+ego config batch [--profile NAME] [--set KEY=TOML_VALUE]...
+                 [--unset KEY]... [--if-revision REVISION]
 ego config get   [--profile NAME] [--json] KEY
 ego config set   [--profile NAME] KEY=TOML_VALUE
 ego config unset [--profile NAME] KEY
@@ -245,20 +268,47 @@ lists empty, `get` reports absence, `set` creates it, and `unset` is unchanged
 success. For `rules`, the selected user contribution is empty but effective
 list/explain still includes applicable system rules.
 
-`config set` accepts one assignment and parses its value as TOML. Its closed
-key set is `model`, `thinking`, `mode`, `sandbox`, `budget`, `bare`,
-`permissions.judge`, and `ui.statusline.segments` at base user scope; profiles
-accept `model`, `thinking`, `mode`, `sandbox`, `budget`, and
-`permissions.judge`, with `session_dir` and `artifact_dir` accepted only for
-explicit profile `ci`. Permission arrays, credentials, MCP, and hooks remain
-owned by their dedicated commands. `unset` is the only null operation and
-prunes empty managed tables. There are no table fragments, list indices,
-aliases, or arbitrary dotted keys.
+`config set` accepts one assignment and parses its value as TOML. The closed
+managed key set and writable scopes are listed below. `PROVIDER` stands for a
+provider-qualified authentication key, not a literal provider name. The table
+is checked against `ManagedConfigKey`; it is not a separate runtime allowlist.
+
+<!-- ego-managed-config-keys:start -->
+| Key | User base | User profile | ci profile |
+|---|---|---|---|
+| `model` | yes | yes | yes |
+| `thinking` | yes | yes | yes |
+| `mode` | yes | yes | yes |
+| `sandbox` | yes | yes | yes |
+| `roots` | yes | yes | yes |
+| `exec_paths` | yes | yes | yes |
+| `exec.env` | yes | yes | yes |
+| `exec.env_allowlist` | yes | yes | yes |
+| `network` | yes | yes | yes |
+| `budget` | yes | yes | yes |
+| `bare` | yes | no | no |
+| `permissions.judge` | yes | yes | yes |
+| `ui.statusline.segments` | yes | no | no |
+| `ui.keybindings` | yes | no | no |
+| `ui.vim` | yes | no | no |
+| `session_dir` | no | no | yes |
+| `artifact_dir` | no | no | yes |
+| `auth.PROVIDER.headers` | yes | no | no |
+| `auth.PROVIDER.credential_command` | yes | no | no |
+<!-- ego-managed-config-keys:end -->
+
+Permission arrays, interactive authentication login, MCP, and hooks retain their
+dedicated commands. `unset` is the only null operation and prunes empty managed
+tables. There are no table fragments, list indices, aliases, or arbitrary dotted
+keys. `config capabilities` reports transaction support; `snapshot` reads a
+managed document revision and `batch` applies its bounded edits atomically,
+optionally conditional on `--if-revision`. These commands do not change which
+authority owns a key.
 
 The standalone runner also accepts `exec_paths = ["/absolute/tools/root"]`
 in `~/.ego/config.toml` (or `$EGO_HOME/config.toml`), selected user/system
-profiles, and explicit `-c` overrides. Edit the TOML with `ego config edit`;
-`config set` does not manage this key. Higher layers replace the whole list;
+profiles, and explicit `-c` overrides. Use `ego config set exec_paths='["/absolute/tools/root"]'`
+for a managed user edit, or edit the TOML with `ego config edit`. Higher layers replace the whole list;
 an explicit empty list clears configured roots. Project and project-local
 configuration cannot add exec roots. Paths must be absolute and must exist;
 the runner canonicalizes symlinks before creating the confinement policy.
@@ -459,8 +509,8 @@ confined execs. The launcher was subsequently fixed.
     --artifact-dir DIR  override the sanitized artifact root; valid only for
                         the explicit `ci` profile
     --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
-    --name OP           resume only; show|set=TEXT|clear, metadata-only
-    --goal OP           resume only; show|set=TEXT|achieve|block=REASON,
+    --name OP           resume/continue only; show|set=TEXT|clear, metadata-only
+    --goal-operation OP resume/continue only; show|set=TEXT|achieve|block=REASON,
                         metadata-only
 ```
 
@@ -518,7 +568,7 @@ accept `--worktree` or create a hidden second checkout.
                         transient failure that was unsent or showed no
                         output retries, with backoff (default 0; ACP 6)
     --fallback P/M      ordered model degradation chain (repeatable)
--f, --file FILE         prompt/agent file (§5)
+-f, --file FILE         strict version-1 agent file with invocation settings (§5)
     --var K=V           template variable for agent files (repeatable)
 -C DIR                  run as if started in DIR (git-style)
 -c, --set K=V           dotted-path config override, value parsed as TOML
@@ -671,7 +721,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--session-dir` | **yes** | |
 | `--artifact-dir` | **yes** | `ego run`/`ego resume` only, and only with the exact selected profile name `ci`; flags override `[profile.ci].artifact_dir` |
 | `--answer` | **yes** | `ego resume --answer QUESTION_ID=JSON` validates and durably settles pending questions before continuing the session |
-| `--name`, `--goal` | **yes** | metadata-only `ego resume ID` operations from §2; they cannot be combined with a prompt, answer, or run-only override |
+| `--name`, `--goal-operation` | **yes** | metadata-only `ego resume ID` / `ego continue ID` operations from §2; they cannot be combined with a prompt, answer, or run-only override |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
@@ -689,6 +739,23 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `-v`, `--verbose` | excluded | the binary refuses this legacy placeholder by name, and the exclusion regression case recorded stands. What it once waited on now exists and is not a flag: `EGO_LOG` (an `EnvFilter` string) installs a subscriber for the `tracing` events this build emits and `EGO_LOG_FILE` collects them to a file, because a diagnostic level is not an argument of a run — see §4.8. regression case was expected to retire the spelling and did not; it stays in the unavailable table rather than the retired one, because retiring a flag requires naming its replacement and there is deliberately no replacement flag to name |
 
 The model can also call `task` with a printable `name` and a `prompt` to run a depth-one, in-process child. The child inherits the parent mode, sandbox, offline posture and workspace ceilings, shares its budget and cancellation scope, and has no `task` tool. Task-only provider batches run concurrently. A batch that mixes `task` with other tool calls is refused with failed tool feedback for every call; no child or sibling tool runs. Child tool rows are nested under their names; permission prompts identify the child through the existing human seat. Only the final answer, bounded to the existing 64 KiB tool-result limit, enters the parent context. Child usage is booked once to the parent; child conversation state is held in memory and is not resumable.
+
+Set `task.background` to `true` to launch a durable standalone child without waiting.
+The tool returns `background agent ID`. The child has its own journal and run lineage,
+shares the parent budget and authority ceilings, cannot delegate, and emits no child
+tool rows in the parent. Parent-turn interruption (including Ctrl+Enter) does not
+cancel this child. `/tasks` lists typed exec and agent entries; `/tasks ID` inspects
+one entry and `/tasks cancel ID` cancels that entry independently.
+A completed child enters parent context once at the next generation boundary, not
+in the middle of another generation. Recovery uses the durable task ID, original
+parent run and captured tool ceiling. An uncertain interrupted child is not rerun.
+Closing a session waits for its admitted children to settle. A new background launch
+refuses if live permission policy differs from the admitted session epoch; start a
+new session to inherit that changed authority. Background tasks do
+not accept `agent` or `plan_step`; use an explicit prompt instead.
+Inside TUIC (`TUIC_SESSION` is set), use `orchestrator_active` for long delegated
+work and `task` for short in-turn work. Managed peer results resume the conversation.
+Live task conversion with Ctrl+B and child transcript navigation are not included.
 
 `task` also accepts `agent`, the filename stem of a named definition. Ego discovers
 `*.md` files in the trusted workspace's `.ego/agents`, then `$EGO_HOME/agents`
@@ -1089,6 +1156,20 @@ exact prefix `ɛ । `. Every payload is stripped of control characters before i
 goes into a sequence: a tool name, an error message and an intent line all come
 from somewhere that is not ego.
 
+On-screen text output also reports prompt-cache hits from provider usage, with
+compact token counts. For Anthropic Messages requests with an explicit cache
+boundary, a hit followed by a miss on the same marked input produces a qualified
+warning: the provider may have expired or changed its cached entries. A changed
+session, provider, model, or marked prefix starts a new comparison. Missing input
+usage is unknown, not a miss. These observations do not change public JSON events
+or durable accounting and are suppressed by `-q`.
+
+When a turn ends, on-screen text output prints elapsed time, completion status,
+and local time. Successful builtin `edit` calls contribute measured added and
+removed lines to a `tracked edits +N -M` receipt. These counts are not a Git diff:
+repeated edits are accumulated, and unmeasured tools do not contribute. Colour
+follows the terminal gate. Quiet and redirected output omit these receipts.
+
 ### 4.8 Diagnostics (`EGO_LOG`, `EGO_LOG_FILE`)
 
 The `tracing` events this build emits reach nobody by default. Two environment
@@ -1202,6 +1283,11 @@ History, completion, multiline editing, bracketed paste, and concurrent output
 use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
+Interactive startup prints the application name and version before configuration,
+trust, provider, or MCP notices. It reports the selected model, effective posture,
+and key hints after admission. Startup notices remain visible; `--quiet` keeps
+its existing announcement policy. The name does not require a resolved model.
+
 The live seat enters raw mode before startup discovery, so lines typed before
 the composer appears retain their Enter boundaries without cooked terminal
 echo. The first starts a turn; further submitted lines enter the busy FIFO.
@@ -1218,9 +1304,10 @@ model call. They use the existing effect permission path and refuse a command
 from a generation that is no longer admitted. ACP announces the same commands
 and their JSON argument schemas when the admitted runtime opens a prompt.
 
-Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
-/name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
+Slash commands: `/help /model /thinking /fast on|off /mode /plan /yolo /permissions /mcp
+/sessions /history QUERY /resume [ID] /continue [ID] /fork [message-id]
+/compact /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
+/name /goal /tasks /tools /expand /skills /hooks /memory /init /retry /version`. These commands and aliases form the
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1233,16 +1320,50 @@ To send literal text that starts with `/` (for example `/tmp/x`), add a leading
 space. Bracketed paste also remains literal prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
-25-command action registry: a typed complete slash is classified as an action,
+action registry: a typed complete slash is classified as an action,
 while bracketed paste and non-command text remain ordinary prompts. Completion,
 menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
 
+### Reviewed persistent memory and project initialization
+
+`/memory [project|user] [list | show ID | set ID TITLE CONTENT | disable ID | delete ID]`
+uses the native MDKB index in the workspace or ego user directory. The selected
+scope must already have a `.mdkb` index; initialize it explicitly with `mdkb init`.
+Quote a title or content that contains spaces. `set` creates or replaces the
+record as an operator-authored `topic` with `user_statement` provenance and the
+`ego-reviewed` tag. `list` and `show` expose native provenance and lifecycle
+metadata. Every mutation requires review of the exact proposed content and
+scope. Disable preserves the record and source provenance, adds `ego-disabled`,
+and sets native TTL to zero so ordinary MDKB retrieval excludes it. Native
+MDKB expiry and archive rules still apply. Delete uses native MDKB removal;
+native archive and history may retain content. It is not secure erasure.
+
+These actions require workspace trust. Plan mode, read-only confinement, root
+limits, and explicit write denies remain effective. No model response, tool
+result, or conversation is automatically saved. Review must exclude secrets and
+untrusted tool instructions. Memory bodies are not automatically promoted to
+system instructions. This surface adds no second memory store.
+
+`/init` builds a deterministic, local `AGENTS.md` proposal and shows the diff
+before confirmation. It creates `CLAUDE.md` only as the relative sibling symlink
+`AGENTS.md`. Existing `AGENTS.md` content is preserved. An independent
+`CLAUDE.md`, an unexpected symlink, denied write, or changed reviewed state is
+refused. No model call is required. This explicit operator control-file workflow
+does not grant general directory-write authority to tools or setup. Partial I/O
+failures are reported and existing files are never overwritten. Use `/refresh`
+after initialization to request the normal trust admission in a new prompt epoch.
+Both commands are refused while a turn is running; a non-human seat cannot
+confirm a mutation.
+
 Arguments that do not belong to a selected local action are usage errors, not
 model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
-configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
-points to that root syntax without consuming a provider turn.
+`/mcp add NAME --http URL` and `/mcp add NAME --stdio -- COMMAND ...` parse
+the same add grammar as `ego mcp add` and persist configuration through the same
+transaction and live-admission service. `/mcp toggle NAME` changes enablement
+only for this session and does not edit stored configuration. Both are local
+commands, not provider prompts; MCP mutations require an idle turn.
 
 Read-only `/tasks [ID]`, `/config`, `/config perimeter`, and `/usage` answer
 while a turn runs. They read the current session journal, admitted configuration,
@@ -1422,7 +1543,7 @@ bounded channels.
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
 | Ctrl+Z | **yes** (Unix) | stops ego as a shell job with the terminal back in cooked mode; `fg` restores raw mode and repaints the composer or the open modal, which stays unanswered. A running `exec` keeps running in its own process group, and its timeout does not count the time ego was stopped. Windows has no job control: the key reports that it is unsupported |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
-| Slash commands | **yes** | one shared 25-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
+| Slash commands | **yes** | one shared action registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
@@ -1608,6 +1729,26 @@ interruption is pending. `trust` renders `trusted` or `untrusted` and counts as
 inactive while trusted, so width pressure drops it from exactly the sessions
 whose posture is not worth reporting.
 
+The compact default reads as:
+
+```text
+gpt-6-sol · medium · yolo ▰▰▱▱▱▱▱▱▱▱ 58k/272k ≈$0.66 ~/G/p/mdkb ⎇ feat/configurable-embedder●
+```
+
+The ten context cells fill in proportion to measured occupancy. The meter is
+green below 60%, yellow from 60%, and red from 85%. Missing occupancy reads
+`▱▱▱▱▱▱▱▱▱▱ ?/272k` when the window is known. Colour is optional; the count
+and window remain visible without it. `≈$` means subscription-equivalent cost
+at standard API prices, not billed spend. `$` means billed cost. `(partial)`
+marks an estimate that excludes mixed or unpriced usage; `unpriced` means no
+complete price is available. `/statusline` explains these symbols in its setup
+selector. Home is `~`, intermediate path components use their first letter,
+and the final component stays complete. `⎇` precedes the branch; `●` means
+uncommitted changes. These symbols are standard single-cell BMP characters,
+not emoji or private font glyphs. Under width pressure, branch, cwd, and cost
+drop in that order before model, reasoning, mode, and context. At widths too
+small for that core, whole fields still drop rather than wrap or truncate.
+
 Configuration stores one final resolved shape rather than a preset plus a
 second override language:
 
@@ -1628,6 +1769,12 @@ whenever the terminal can represent their combined whole segments. If physical
 width cannot represent that critical set, whole segments degrade in the order
 drafts, queue, interrupt; the retained priority is interrupt, then queue, then
 drafts, and the surface emits one overflow diagnostic.
+
+The live Working row also shows an approximate output-token count from model
+text (four characters per token, rounded up), not provider usage. Tool output is
+excluded. Reasoning deltas start a thinking interval; answer text, tool starts,
+and turn completion clear it. A new turn resets progress. The row is bounded to
+the terminal width and omits the interruption hint when it does not fit.
 
 ### 6.6 Prompted compaction starts a clean session
 
@@ -1656,7 +1803,13 @@ or retained-tail item is replayed. The checkpoint is context, not a
 user-authored prompt or higher-authority instruction.
 
 The source session remains complete and resumable. The target records the
-source session and source sequence. A tool-use or truncated response, empty or
+source session and source sequence. Event parents stay within their session:
+`PreCompact` belongs to the source, while `PostCompact` starts a root occurrence
+in the clean target. Both hooks retain the compaction request identity; target
+lineage records the source boundary, not an event-parent edge into its log.
+This also applies after automatic goal continuations. Metadata operations and
+cold resume validate the target without replaying the source conversation.
+A tool-use or truncated response, empty or
 invalid checkpoint, provider/budget/cancellation failure, target-baseline
 capability or encoding failure, or pre-publication target-store failure creates
 no usable target and leaves the operator in the source session. At compaction
@@ -1992,6 +2145,25 @@ kind and an expiry, never a header.
 
 ### 7.2 `models.toml` — hosted model capabilities, in three layers
 
+Per-model execution tier defaults use a separate map in the system or user model
+file. `standard` is the default; `fast` is refused unless the shared catalogue
+has verified support and pricing for that full slug:
+
+```toml
+[service_tier]
+"openai/gpt-6.1-sol" = "fast"
+"openai-codex/gpt-6.1-sol" = "standard"
+```
+
+`/fast on` and `/fast off` override the current model's tier for this session at
+an idle boundary. The receipt names the token-price premium and any distinct
+included-subscription usage multiplier. The status snapshot exposes `fast`, and
+the default status row includes it when enabled. Token quotes and Codex's
+separate API-equivalent estimate use the selected tier; unavailable prices stay
+unknown, not zero. `ego models` lists verified fast support and its multiplier.
+See `ARCHITECTURE.md` for provider evidence and account limits.
+
+
 Hosted providers do not tell ego what their models can do, so those facts are
 *supplied*: stated by an authority rather than guessed. There are three, and
 the weakest is compiled into the binary:
@@ -2310,19 +2482,45 @@ operator prompt. Five consecutive observations of the same normalized condition
 block the goal. A changed condition resets that count. The default allowance is
 20 automatic work turns per goal identity; `--goal-turns N` sets it when
 checks first start. The allowance and consumed count survive resume. Internal
-continuations count toward `--max-turns`. `ego run --goal TEXT`
+continuations count toward `--max-turns`. `ego run --goal TEXT` (also `ego resume ID --goal TEXT` and
+`ego continue ID --goal TEXT`)
 sets an operator-owned objective. The `goal` tool sets or updates a model-authored
-objective, but cannot replace an operator-owned active goal. Provider, permission,
-pause, cancellation and budget stops do not admit automatic work. Invalid checks
-and exhausted allowances emit a visible diagnostic and retain the active goal;
+objective, but cannot replace an operator-owned active goal. Text output shows a
+`Goal (operator|automated): OBJECTIVE` receipt when a goal first appears and when
+the model updates it. Each automatic turn shows `Goal turn n of N: CONDITION`
+before its work output. A goal-check stop shows the objective, turns used, stop
+reason, last unmet condition and next actions: `/goal show`, `/goal achieve`,
+`/goal block`, and `--goal-turns N` (which sets the allowance when checks first
+start, not after it is exhausted). These receipts remain visible with `--quiet`;
+headless text sends them to stderr, not answer stdout. JSON/JSONL and ACP keep
+their existing structured contracts.
+
+The native status row includes `goal n/N` while a goal is active, including when
+a check stop retains that active goal. Until checks configure the durable
+allowance, the denominator is `pending`. The segment uses the existing
+width-bounded renderer; a disabled status row stays disabled. Achieved and
+blocked goals do not retain this active segment.
+
+Provider, permission, pause, cancellation and budget stops do not admit automatic
+work. Invalid checks and exhausted allowances emit a visible diagnostic and retain the active goal;
 they never claim achievement. ACP session objective metadata exposes `goalStatus`,
 `goalStop`, and `goalContinuationTurns` separately from work-turn completion.
 
 `--goal-check-command '["/path/to/check", "arg"]'` selects a command evaluator
 instead of a model. It receives objective and session evidence JSON on stdin
-and returns only `{ "achieved": true|false, "reason": "evidence or unmet condition" }`
-on stdout. Its exact exec authority must be granted by ordinary policy; it uses
-the same confinement and cancellation scope, with a 60-second timeout. Command
+and returns only
+`{ "verdict": "achieved|continue|needs_operator", "reason": "evidence or unmet condition" }`.
+The `verdict` is required and must be exactly one of those three values; the old
+`achieved` boolean is not accepted. `achieved` requires evidence of success.
+`continue` admits automatic work only when the agent can act on the unmet
+condition. `needs_operator` blocks the goal at once, records the reason and
+shows an actionable stop receipt without consuming an automatic work turn.
+Use it for login, approval, decisions or input that requires a person. A blocked
+goal is terminal: after resolving the blocker, `/goal set TEXT` starts a new
+goal. The stop receipt states this; `/goal achieve` and `/goal block` require an
+active goal. Model checks use the same contract and receive these instructions. The command writes
+its verdict on stdout. Its exact exec authority must be granted by ordinary
+policy; it uses the same confinement and cancellation scope, with a 60-second timeout. Command
 checks do not incur model cost. Model checks remain accounted generations.
 Stderr is not part of the verdict. If the command exits unsuccessfully, the
 visible goal-check diagnostic includes at most 4096 UTF-8 bytes from the end of
@@ -2436,6 +2634,33 @@ HTTP 401 triggers refresh without replaying the operation; retry the operation
 when requested. Missing or revoked credentials require a new explicit login.
 Servers that advertise only confidential-client authentication are not supported.
 
+
+### Session-owned file checkpoints
+
+Builtin `write` and `edit` save pre-edit bytes in private Git commit objects before
+changing files. This works in Git worktrees, including dirty and untracked files,
+without changing HEAD or the user's index. Outside Git, builtin results explicitly
+state that no checkpoint is available.
+
+```text
+ego checkpoint [-C DIR] SESSION_ID preview
+ego checkpoint [-C DIR] SESSION_ID restore CHECKPOINT_COMMIT
+ego checkpoint [-C DIR] SESSION_ID close
+```
+
+Preview emits JSON with each checkpoint's path, restore effect, and conflict state.
+Restore selects exactly one checkpoint and refuses external changes, missing edited
+files, external atomic replacements, symlinks, and permission changes. There is no force flag: preserve or resolve
+an external edit before retrying. Restore successive edits to a file newest first.
+A created file is deleted when its creation checkpoint is restored. Repeating a
+completed restore is safe. Binary preimages are preserved byte-for-byte.
+
+Refs live at `refs/ego/checkpoints/SESSION_ID`; normal exit keeps them for recovery.
+Explicit checkpoint close or `ego rm` removes the selected repository's session
+ref, without changing files. Git GC later removes unreachable objects. Child
+sessions own separate refs. With multiple repositories, close each with `-C`.
+Exec commands, MCP effects, arbitrary deletes, and external editors are not captured.
+Checkpoint objects contain original file bytes; do not push private checkpoint refs.
 ### Named output styles
 
 `--output-style NAME` selects a response-style overlay for a CLI session or a
@@ -2502,3 +2727,22 @@ Reference contracts captured 2026-10-16:
   schema recorded from
   <https://raw.githubusercontent.com/jupyter/nbformat/main/nbformat/v4/nbformat.v4.schema.json>.
   The upstream BSD license is stored beside it as `nbformat.LICENSE`.
+### External status producers
+
+Only system/user configuration or explicit flags can install
+`ui.statusline.providers.NAME = { argv = ["program", "arg"], timeout_ms = 250 }`.
+Project, local and agent-file configuration cannot install executable providers.
+A trusted interactive session runs each provider once when its session epoch
+opens, through the current exec policy and confinement. Rendering, resize and
+Git-status refresh never execute providers. Permission requests that do not
+settle under current policy omit the value and emit a diagnostic; no hidden
+human or model approval is requested.
+
+There are at most four providers, each with a timeout from 1 to 1000 ms (default
+250), at most 32 argv items and 4096 total argument bytes. The command must exit
+successfully, emit no stderr, and return one UTF-8 stdout line of at most 1024
+bytes, including an optional final newline. Binary, truncated, multiline and
+oversized output is omitted. Terminal controls are sanitized and known secrets
+are masked. Values are cached in the live seat, not persisted or admitted as
+instructions. Providers inherit the normal admitted exec environment; there is
+no shell expansion unless the operator explicitly selects a shell executable.

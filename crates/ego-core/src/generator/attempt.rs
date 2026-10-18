@@ -444,6 +444,17 @@ pub struct Settlement {
     pub reconciled: Reconciled,
 }
 
+/// Transient identity of the request through its last marked cache boundary.
+/// Never journaled or sent to a public event stream. A provider may report a
+/// hit at an earlier breakpoint; this identity does not attribute that hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachePrefix {
+    pub session: crate::event::id::SessionId,
+    pub provider: String,
+    pub model: String,
+    pub digest: String,
+}
+
 /// A provider's stream with the authorisation riding inside it.
 ///
 /// The reason for the wrapper rather than two independently owned values:
@@ -459,6 +470,7 @@ pub struct Settlement {
 pub struct AttemptStream {
     attempt: GenerationAttempt,
     inner: BoxStream<'static, AiEvent>,
+    cache_prefix: Option<CachePrefix>,
     delivery: DeliveryCertainty,
     usage: UsageReport,
     /// What the provider said this request will cost, when it says so at all.
@@ -484,11 +496,21 @@ impl AttemptStream {
         Self {
             attempt,
             inner,
+            cache_prefix: None,
             delivery: DeliveryCertainty::default(),
             usage: UsageReport::Missing,
             provider_cost: None,
             terminal: None,
         }
+    }
+
+    pub fn with_cache_prefix(mut self, prefix: CachePrefix) -> Self {
+        self.cache_prefix = Some(prefix);
+        self
+    }
+
+    pub fn cache_prefix(&self) -> Option<&CachePrefix> {
+        self.cache_prefix.as_ref()
     }
 
     /// Which generation is streaming, and which attempt at it.

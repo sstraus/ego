@@ -122,7 +122,6 @@ enum EpochStart {
     Compact {
         diagnostic: Option<String>,
         request: RequestId,
-        parent: Option<EventId>,
     },
 }
 
@@ -146,7 +145,6 @@ enum EpochTransition<'store> {
         diagnostic: Option<String>,
         runtime: Option<CompactionRuntime>,
         request: RequestId,
-        parent: Option<EventId>,
     },
 }
 
@@ -534,6 +532,39 @@ pub(super) async fn drive_execution<S: EventSink>(
                             .current()
                             .map_err(|message| RunTermination::Failed { message })?,
                     };
+                    if let Some(status) = status
+                        .as_ref()
+                        .filter(|status| status.human && status.native)
+                        && skill_trust == Trust::Trusted
+                        && let Some(providers) = effective
+                            .ui
+                            .statusline
+                            .as_ref()
+                            .and_then(|line| line.providers.as_ref())
+                    {
+                        let effects = ToolEffectPorts::new(
+                            &fs,
+                            session_hook_ports.process(),
+                            active.evidence(),
+                            session_hook_ports.resolver_handle(),
+                            session_hook_ports.one_hop_handle(),
+                            session_hook_ports.duplex_handle(),
+                        )
+                        .with_cancel(cancel.clone());
+                        let (values, errors) = crate::status_provider::collect(
+                            providers,
+                            &cwd,
+                            exec_environment.clone(),
+                            &session_policy,
+                            effects,
+                            session_hook_ports.process(),
+                        )
+                        .await;
+                        status.seat.set_status_providers(values);
+                        for error in errors {
+                            diagnostics.note(&error);
+                        }
+                    }
                     let (leased_session_journal, session_journal, session_hooks) = open_session_hooks!(
                         active,
                         active.state().clone(),
@@ -552,22 +583,35 @@ pub(super) async fn drive_execution<S: EventSink>(
                             Arc::clone(&mcp_runtime) as Arc<dyn McpRuntimeBinding>,
                         );
                     }
+                    let mut family_executor = (*child_executor).clone();
+                    family_executor.token_family = Some(active.id());
                     let child_service = compose_child_service(ChildComposition {
                         parent_run: RunId::new(active.id(), invocation.uuid()),
                         parent_session: active.id(),
                         root: child_root.clone(),
                         store: Arc::clone(jsonl_store),
-                        executor: Arc::clone(&child_executor),
+                        executor: Arc::new(family_executor),
                         gate: gate.clone(),
                         bindings: child_bindings,
                         blobs: active.evidence().clone(),
                     });
-                    let skill_owner = Arc::new(CliSkillInvocationOwner::new(
-                        child_service,
-                        session_hooks.runtime.clone(),
-                        cancel.clone(),
-                        skill_trust,
-                    ));
+                    let skill_owner = Arc::new(
+                        CliSkillInvocationOwner::new(
+                            child_service,
+                            session_hooks.runtime.clone(),
+                            cancel.clone(),
+                            skill_trust,
+                        )
+                        .with_token_family(Arc::clone(jsonl_store), active.id())
+                        .with_task_blobs(active.evidence().clone())
+                        .with_task_policy(
+                            policy_source
+                                .capture()
+                                .map_err(|message| RunTermination::Failed { message })?
+                                .snapshot()
+                                .digest(),
+                        ),
+                    );
                     let model_switch_owner;
                     install_model_switch_owner!(session_hooks, model_switch_owner, status);
                     dispatch_post_compact_hook(&epoch_start, &session_hooks, diagnostics).await;
@@ -683,6 +727,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         policy_application: &policy_application,
                                         text_output,
                                         session_hook_ports: &session_hook_ports,
+                                        task_owner: &skill_owner,
                                         skill_profile_layers: &skill_profile_layers,
                                         perimeter: &perimeter,
                                         mcp_registry,
@@ -851,13 +896,12 @@ pub(super) async fn drive_execution<S: EventSink>(
                         diagnostic,
                         runtime,
                         request,
-                        parent,
                     } => {
                         epoch_start = activate_compaction_transition(
                             &mut active,
                             source_state,
                             session_end,
-                            (target, publication, diagnostic, runtime, request, parent),
+                            (target, publication, diagnostic, runtime, request),
                             CompactionActivation {
                                 evidence: &evidence,
                                 run_context: &run_context,
@@ -993,12 +1037,45 @@ async fn stage_image_path(
     seat.set_image_chips(paste_chips(staged_images));
 }
 
+fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String {
+    let label = match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_string(),
+        Some(relative) => format!("~/{}", relative.display()),
+        None => path.display().to_string(),
+    };
+    let label = ego_core::permit::terminal_safe(&label);
+    if crate::render::line::Line::plain(&label).width() <= width {
+        return label;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    // Keep complete words/path segments, even when a single segment is wider
+    // than the row. The full path remains in the setup report.
+    let boundary = label
+        .char_indices()
+        .filter(|(_, ch)| ch.is_whitespace() || *ch == '/' || *ch == '\\')
+        .map(|(index, ch)| index + ch.len_utf8())
+        .take_while(|end| crate::render::line::Line::plain(&label[..*end]).width() < width)
+        .last()
+        .unwrap_or(0);
+    format!("{}…", label[..boundary].trim_end())
+}
+
 async fn run_interactive_setup(
     prompt: String,
+    selection: &model::GenerationSelection,
     root: &Path,
     status: Option<&InteractiveStatus>,
     diagnostics: &dyn Diagnostics,
 ) {
+    match selection.snapshot() {
+        Ok(selected) => diagnostics.note(&format!(
+            "Session model: {}. Setup interpreter uses persistent user/profile configuration, not this session selection.",
+            selected.identity.0
+        )),
+        Err(error) => diagnostics.note(&format!("Session model unavailable: {error}. Setup interpreter uses persistent user/profile configuration.")),
+    }
     let setup_args = crate::cli::SetupArgs {
         items: None,
         judge: None,
@@ -1022,17 +1099,16 @@ async fn run_interactive_setup(
             QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
         };
         let status = status.as_ref().filter(|status| status.human)?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        // The selector owns the ordinal. Reserve its widest prefix and one
+        // terminal cell so the terminal never wraps an item itself.
+        let label_width = status.seat.width().saturating_sub(10);
         let options = findings
             .iter()
             .map(|finding| {
                 QuestionOption::new(
                     finding.id.to_string(),
-                    ego_core::permit::terminal_safe(&format!(
-                        "{}: {} — {}",
-                        finding.id,
-                        finding.requested.display(),
-                        finding.evidence
-                    )),
+                    setup_picker_label(&finding.requested, home.as_deref(), label_width),
                 )
             })
             .collect::<Vec<_>>();
@@ -1040,7 +1116,7 @@ async fn run_interactive_setup(
             return Some(Vec::new());
         }
         let request = QuestionRequest::new(
-            "Select setup proposal items; only selected items enter the preview. Final confirmation still required.",
+            "Select setup proposal items; only selected items enter the preview.\nFinal confirmation still required; Esc cancels without changes.",
             QuestionMode::Multiple,
             options,
             false,
@@ -1125,7 +1201,7 @@ async fn select_session_transition<'store>(
 ) -> Option<EpochTransition<'store>> {
     let (clock, diagnostics) = journal_ports;
     if !seat.has_human() {
-        match crate::catalogue::listing(store.as_ref(), root, true) {
+        match crate::catalogue::saved_sessions(store.as_ref(), diagnostics) {
             Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
             Err(error) => {
                 diagnostics.note(&format!("the session catalogue could not be read: {error}"))
@@ -1137,7 +1213,7 @@ async fn select_session_transition<'store>(
         diagnostics.note("a session cannot be selected while source work is pending");
         return None;
     }
-    let mut metas: Vec<_> = match crate::catalogue::saved_sessions(store.as_ref()) {
+    let mut metas: Vec<_> = match crate::catalogue::saved_sessions(store.as_ref(), diagnostics) {
         Ok(metas) => metas
             .into_iter()
             .filter(|meta| meta.id != session_id)
@@ -1604,6 +1680,7 @@ fn handle_interactive_policy(
 fn render_skill_catalogue(
     catalogue: Option<&crate::skill::SkillCatalogue>,
     diagnose: bool,
+    details: bool,
     diagnostics: &dyn Diagnostics,
 ) {
     let Some(catalogue) = catalogue else {
@@ -1613,8 +1690,10 @@ fn render_skill_catalogue(
     match catalogue.capture() {
         Ok(capture) => diagnostics.note(&if diagnose {
             capture.render_diagnostics()
-        } else {
+        } else if details {
             capture.render_list()
+        } else {
+            capture.render_summary()
         }),
         Err(error) => diagnostics.note(&format!(
             "the skill catalogue could not be captured: {error}"
@@ -1695,9 +1774,12 @@ async fn report_session_usage(
     session_id: SessionId,
     clock: &SystemClock,
     context: ego_core::state::ContextWindow,
+    width: usize,
     diagnostics: &dyn Diagnostics,
 ) {
-    let metadata = match crate::catalogue::listing(store, root, false) {
+    let metadata = match crate::catalogue::saved_sessions(store, diagnostics)
+        .map(|metas| crate::catalogue::in_workspace(metas, root))
+    {
         Ok(metadata) => metadata,
         Err(error) => {
             diagnostics.note(&format!("the session catalogue could not be read: {error}"));
@@ -1715,7 +1797,7 @@ async fn report_session_usage(
         Ok(report) => {
             // `/usage` has no flags, so it
             // gets the compact default.
-            let rendered = crate::usage::render_text(&report, false, Some(context));
+            let rendered = crate::usage::render_interactive(&report, context, width);
             diagnostics.note(rendered.trim_end());
         }
         Err(error) => diagnostics.note(&format!("the usage report could not be built: {error}")),
@@ -1744,7 +1826,7 @@ struct InteractiveTurnBuild<'a, 'session> {
     active: &'session ActiveSession<'session>,
     hooks: &'a SessionHookComposition<'session>,
     journal: &'a SharedJournal<'session>,
-    skill_owner: Arc<dyn SkillInvocationPort + 'session>,
+    skill_owner: Arc<CliSkillInvocationOwner<'session>>,
 }
 
 fn build_interactive_turn<'session: 'turn, 'turn>(
@@ -1792,7 +1874,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         retry_pause: Arc::new(TokioRetryPause),
     };
     let effect_ports = ToolEffectPorts::new(
-        &OsFs,
+        &active.checkpoint_fs,
         ports.process(),
         active.evidence(),
         ports.resolver_handle(),
@@ -1853,7 +1935,9 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
             args.provider_recovery
                 .then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
         )
-        .with_skill_invocation_port(skill_owner);
+        .with_skill_invocation_port(skill_owner.clone())
+        .with_background_task_port(skill_owner)
+        .with_delegation_host(std::env::var_os("TUIC_SESSION").is_some());
     let loop_ = match active.replayed() {
         Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
@@ -1946,7 +2030,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         model_compaction,
         prepared_runtime,
     } = input;
-    let fs = OsFs;
+    let fs = &active.checkpoint_fs;
 
     let target_system = instructions(effective, args, root, cwd, diagnostics)
         .map_err(|error| CompactionError::Internal(error.to_string()))?;
@@ -2006,7 +2090,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         retry_pause: Arc::new(TokioRetryPause),
     };
     let effect_ports = ToolEffectPorts::new(
-        &fs,
+        fs,
         ports.process(),
         active.evidence(),
         ports.resolver_handle(),
@@ -2297,6 +2381,7 @@ struct InteractiveCommand<'a, 'session, 'store> {
     policy_application: &'a Option<Arc<PolicyApplicationOwner>>,
     text_output: Option<&'a dyn TextOutput>,
     session_hook_ports: &'a Arc<RunEffectPorts>,
+    task_owner: &'a CliSkillInvocationOwner<'session>,
     skill_profile_layers: &'a Option<Vec<Sourced<ConfigLayer>>>,
     perimeter: &'a crate::perimeter::Perimeter,
     mcp_registry: &'a Arc<McpRegistryController>,
@@ -2355,6 +2440,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         policy_application,
         text_output,
         session_hook_ports,
+        task_owner,
         skill_profile_layers,
         perimeter,
         mcp_registry,
@@ -2475,13 +2561,19 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::List,
         )) => {
-            render_skill_catalogue(skills.as_deref(), false, diagnostics);
+            render_skill_catalogue(skills.as_deref(), false, false, diagnostics);
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Skills(
+            repl::actions::SkillSurfaceAction::Details,
+        )) => {
+            render_skill_catalogue(skills.as_deref(), false, true, diagnostics);
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
             repl::actions::SkillSurfaceAction::Diagnose,
         )) => {
-            render_skill_catalogue(skills.as_deref(), true, diagnostics);
+            render_skill_catalogue(skills.as_deref(), true, false, diagnostics);
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Skills(
@@ -2505,6 +2597,21 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
         }
         repl::Line::HostCommand(repl::HostCommand::Hooks) => {
             render_session_hooks(&session_hooks.state, diagnostics);
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Fast(enabled)) => {
+            match selection.set_fast(enabled) {
+                Ok(receipt) => {
+                    diagnostics.note(&receipt);
+                    if let Some(status) = status.as_ref()
+                        && status.human
+                        && let Ok(selected) = selection.snapshot()
+                    {
+                        status.seat.refresh_status(state, selected);
+                    }
+                }
+                Err(error) => diagnostics.note(&error.to_string()),
+            }
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
@@ -2533,11 +2640,23 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Tasks(arguments)) => {
-            diagnostics.note(&background_tasks(
-                &arguments,
-                state,
-                session_hook_ports.process(),
-            ));
+            ego_core::turn::BackgroundTaskPort::refresh_tasks(
+                task_owner,
+                session_hooks.state.state(),
+            )
+            .await
+            .map_err(|message| RunTermination::Failed { message })?;
+            let current = session_hooks.state.state();
+            diagnostics.note(
+                &task_listing(
+                    &arguments,
+                    &current,
+                    session_hook_ports.process(),
+                    task_owner,
+                )
+                .await,
+            );
+            *state = current;
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Help)) => {
@@ -2562,9 +2681,17 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 let result =
                     crate::mcp::session_command(&arguments, controller, session_mcp, disabled_mcp)
                         .await;
+                if let Some(status) = status.as_ref() {
+                    status.seat.set_mcp_session_servers(
+                        session_mcp
+                            .iter()
+                            .map(|(name, _, _)| (name.clone(), disabled_mcp.contains(name)))
+                            .collect(),
+                    );
+                }
                 match result {
                     Ok(receipt) => diagnostics.note(&receipt),
-                    Err(error) => diagnostics.note(&format!("MCP control failed: {error:?}")),
+                    Err(error) => diagnostics.note(&crate::mcp::session_error(&error)),
                 }
             }
             Ok(CommandOutcome::Continue)
@@ -2580,19 +2707,101 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             .await;
             Ok(CommandOutcome::Continue)
         }
+        repl::Line::HostCommand(repl::HostCommand::Memory(arguments)) => {
+            let confirm = |preview: String| {
+                status
+                    .as_ref()
+                    .filter(|status| status.human)
+                    .is_some_and(|status| {
+                        matches!(
+                            status.seat.confirm_setup(preview),
+                            repl::Confirmation::Confirmed
+                        )
+                    })
+            };
+            let user = crate::config::ego_home();
+            match crate::memory::command(
+                &arguments,
+                root,
+                user.as_deref(),
+                effective,
+                skill_trust,
+                &confirm,
+            )
+            .await
+            {
+                Ok(report) => diagnostics.note(&ego_core::permit::terminal_safe(&report)),
+                Err(error) => diagnostics.note(&format!("Memory: {error}")),
+            }
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Init(arguments)) => {
+            if !arguments.is_empty() {
+                diagnostics
+                    .note("usage: /init (review a deterministic project instruction proposal)");
+            } else {
+                let admitted = crate::memory::init_admitted(effective, root, skill_trust);
+                let confirm = |preview: String| {
+                    status
+                        .as_ref()
+                        .filter(|status| status.human)
+                        .is_some_and(|status| {
+                            matches!(
+                                status.seat.confirm_setup(preview),
+                                repl::Confirmation::Confirmed
+                            )
+                        })
+                };
+                let result = if admitted {
+                    crate::memory::InitProposal::prepare(root)
+                        .and_then(|proposal| proposal.apply(admitted, &confirm))
+                } else {
+                    Err("instruction initialization denied by effective write policy or workspace trust".into())
+                };
+                match result {
+                    Ok(report) => diagnostics.note(&report),
+                    Err(error) => diagnostics.note(&format!("Init: {error}")),
+                }
+            }
+            Ok(CommandOutcome::Continue)
+        }
         repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-            run_interactive_setup(prompt, root, status.as_ref(), diagnostics).await;
+            run_interactive_setup(prompt, selection, root, status.as_ref(), diagnostics).await;
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Tools)
+            | repl::HostCommand::Details(repl::actions::ActionId::Tools)),
+        ) => {
+            let details = matches!(command, repl::HostCommand::Details(_));
+            let tools = registry
+                .iter()
+                .map(|tool| tool.descriptor().name.to_string())
+                .collect::<Vec<_>>();
+            diagnostics.note(&format!(
+                "tools: {} admitted; /tools details for the full list",
+                tools.len()
+            ));
+            if details {
+                for name in &tools {
+                    diagnostics.note(name);
+                }
+            }
             Ok(CommandOutcome::Continue)
         }
         // The same snapshot `ego doctor` prints,
         // built by the same probes. Two renderings
         // of one value is the whole contract; two
         // implementations would be two diagnoses.
-        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Doctor)) => {
-            diagnostics.note(&crate::doctor::observed_session(
+        repl::Line::HostCommand(
+            command @ (repl::HostCommand::Action(repl::actions::ActionId::Doctor)
+            | repl::HostCommand::Details(repl::actions::ActionId::Doctor)),
+        ) => {
+            diagnostics.note(&crate::doctor::observed_session_view(
                 root.to_path_buf(),
                 seat.width(),
                 perimeter,
+                matches!(command, repl::HostCommand::Details(_)),
             ));
             Ok(CommandOutcome::Continue)
         }
@@ -2612,12 +2821,25 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 source: active.id(),
                 sanitize: selection.sanitize,
                 format: selection.format,
+                follow: false,
+                after: None,
                 file: None,
                 session_dir: args.session_dir.clone(),
                 directory: args.directory.clone(),
             };
             match exported(&args) {
-                Ok(rendered) => diagnostics.note(&rendered),
+                Ok(rendered) => {
+                    diagnostics.note(&rendered);
+                    diagnostics.note(&format!(
+                        "Exported {} as {} to this transcript; no file written.",
+                        if selection.sanitize {
+                            "sanitized evidence bundle"
+                        } else {
+                            "local session"
+                        },
+                        selection.format
+                    ));
+                }
                 Err(termination) => diagnostics.note(&format!(
                     "the session could not be exported: {}",
                     termination.exit_reason()
@@ -2652,6 +2874,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 active.id(),
                 clock,
                 state.context,
+                seat.width(),
                 diagnostics,
             )
             .await;
@@ -2733,6 +2956,7 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                     policy_application,
                     text_output,
                     session_hook_ports,
+                    task_owner,
                     skill_profile_layers,
                     perimeter,
                     mcp_registry,
@@ -2889,7 +3113,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     let prepared_runtime = Arc::clone(&target_runtime);
     let source_id = active.id();
     let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
-    let pre_compact = match dispatch_request_hook(
+    if let Err(error) = dispatch_request_hook(
         &session_hooks.runtime,
         request_id,
         session_hooks.turn,
@@ -2898,15 +3122,12 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     )
     .await
     {
-        Ok(result) => result,
-        Err(error) => {
-            diagnostics.note(&format!(
-                "compaction was blocked before preparation: {}",
-                error.exit_reason()
-            ));
-            return Ok(CommandOutcome::Continue);
-        }
-    };
+        diagnostics.note(&format!(
+            "compaction was blocked before preparation: {}",
+            error.exit_reason()
+        ));
+        return Ok(CommandOutcome::Continue);
+    }
     let compaction_cancel = CancelToken::new();
     let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
         Box::pin(prepare_interactive_compaction(InteractiveCompaction {
@@ -3023,7 +3244,6 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
             diagnostic,
             runtime,
             request: request_id,
-            parent: pre_compact.closure_event(),
         },
     )))
 }
@@ -3035,7 +3255,8 @@ async fn end_session_epoch(
     policy_source: &dyn GenerationPolicySource,
     session_id: SessionId,
 ) -> Result<(), RunTermination> {
-    match skill_owner.drain().await {
+    let drained = skill_owner.drain_tasks().await;
+    match drained.and(skill_owner.drain().await) {
         Ok(()) => {
             let runtime = match recovered_epoch_policy {
                 Some(policy) => session_hooks.bind_policy(policy),
@@ -3236,14 +3457,15 @@ async fn dispatch_post_compact_hook(
     session_hooks: &SessionHookComposition<'_>,
     diagnostics: &dyn Diagnostics,
 ) {
-    if let EpochStart::Compact {
-        request, parent, ..
-    } = epoch_start
+    if let EpochStart::Compact { request, .. } = epoch_start
         && let Err(error) = dispatch_request_hook(
             &session_hooks.runtime,
             *request,
             session_hooks.turn,
-            *parent,
+            // Compaction starts a clean event stream. The source PreCompact
+            // closure is not a parent in this session; lineage retains the
+            // source boundary and the request identifies this lifecycle.
+            None,
             HookLifecycle::PostCompact,
         )
         .await
@@ -3332,11 +3554,10 @@ fn activate_compaction_transition<'store>(
         Option<String>,
         Option<CompactionRuntime>,
         RequestId,
-        Option<EventId>,
     ),
     input: CompactionActivation<'_>,
 ) -> Result<EpochStart, RunTermination> {
-    let (target, publication, diagnostic, runtime, request, parent) = target;
+    let (target, publication, diagnostic, runtime, request) = target;
     let CompactionActivation {
         evidence,
         run_context,
@@ -3372,7 +3593,6 @@ fn activate_compaction_transition<'store>(
     Ok(EpochStart::Compact {
         diagnostic,
         request,
-        parent,
     })
 }
 
@@ -3407,7 +3627,7 @@ struct InteractiveTurnPhase<'a, 'session, 'store> {
     skill_trust: Trust,
     session_hooks: &'a SessionHookComposition<'session>,
     session_journal: &'a SharedJournal<'session>,
-    skill_owner: Arc<dyn SkillInvocationPort + 'session>,
+    skill_owner: Arc<CliSkillInvocationOwner<'session>>,
     refresh_prompt: &'a mut bool,
     control: &'a mut InteractiveControl,
     turns: &'a Turns<'a>,
@@ -3540,7 +3760,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
             active,
             hooks: session_hooks,
             journal: session_journal,
-            skill_owner,
+            skill_owner: skill_owner.clone(),
         },
         (&ports, &turn_cancel, observation, probe_evidence),
     )?;
@@ -3586,11 +3806,15 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
                     let current = session_hooks.state.state();
                     match command {
                         repl::HostCommand::Tasks(arguments) => {
-                            diagnostics.note(&background_tasks(
-                                &arguments,
-                                &current,
-                                session_hook_ports.process(),
-                            ));
+                            diagnostics.note(
+                                &task_listing(
+                                    &arguments,
+                                    &current,
+                                    session_hook_ports.process(),
+                                    skill_owner.as_ref(),
+                                )
+                                .await,
+                            );
                         }
                         repl::HostCommand::Action(repl::actions::ActionId::Config) => {
                             diagnostics.note(&crate::config::repl_text(
@@ -3609,6 +3833,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
                                 active.id(),
                                 clock,
                                 current.context,
+                                seat.width(),
                                 diagnostics,
                             )
                             .await;
@@ -3712,4 +3937,28 @@ fn activate_new_session<'store>(
     *active = target;
     admit_successor_context(evidence, active, run_context)?;
     Ok(EpochStart::New)
+}
+
+#[cfg(test)]
+mod setup_picker_label_tests {
+    use super::*;
+
+    /// Catches: shortening a home path hides a sibling prefix or breaks a segment.
+    #[test]
+    fn home_labels_preserve_path_boundaries_and_terminal_cells() {
+        let home = Some(Path::new("/home/operator"));
+        for (path, width, expected) in [
+            ("/home/operator/.cargo/registry", 70, "~/.cargo/registry"),
+            ("/home/operator", 70, "~"),
+            ("/home/operator-other/file", 70, "/home/operator-other/file"),
+            ("/home/operator/.cargo/registry", 12, "~/.cargo/…"),
+            ("/home/operator/indivisiblesegment", 8, "~/…"),
+            ("/workspace/日本語/segment", 19, "/workspace/日本語/…"),
+            ("indivisiblesegment", 8, "…"),
+        ] {
+            let label = setup_picker_label(Path::new(path), home, width);
+            assert_eq!(label, expected);
+            assert!(crate::render::line::Line::plain(label).width() <= width);
+        }
+    }
 }

@@ -4,6 +4,8 @@
 //! See `ARCHITECTURE.md` §1 (four serialisations, one semantic model) and
 //! `CLI.md` §4.2. A new internal event never becomes public automatically.
 
+pub mod transcript;
+
 use serde::{Deserialize, Serialize};
 
 use crate::budget::{Ledger, Metering};
@@ -733,6 +735,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::HookLifecycleReached { .. }
         | EventKind::HookInvocationStarted { .. }
         | EventKind::HookInvocationSettled { .. }
+        | EventKind::BackgroundTaskRequested { .. }
+        | EventKind::SubagentCompletionDelivered { .. }
         | EventKind::SubagentRequested { .. }
         | EventKind::SkillCatalogueAdmitted { .. }
         | EventKind::SkillInstructionAdmitted { .. }

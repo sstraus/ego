@@ -21,7 +21,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
-            cand --var 'Supply one declared agent-file template variable'
+            cand --var 'Supply one declared agent-file template variable. Requires --file'
             cand --attach 'Add exact image bytes as ordered context before the prompt text'
             cand -m 'provider/model slug, e.g. ollama/qwen3'
             cand --model 'provider/model slug, e.g. ollama/qwen3'
@@ -77,8 +77,8 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand -V 'Print version'
             cand --version 'Print version'
             cand run 'Run an agent from a prompt, headless.'
-            cand resume 'Continue a session; no ID = latest in this workspace.'
-            cand continue 'Continue a session; no ID = latest in this workspace.'
+            cand resume 'Continue a stored session.'
+            cand continue 'Continue a stored session.'
             cand fork 'Fork a session at its tip or after the completed turn containing a message.'
             cand rm 'Delete a stored session (history is retained for descendants).'
             cand compact 'Compact a session into its deterministic successor.'
@@ -88,6 +88,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand models 'List the shared model catalogue.'
             cand hooks 'Inspect the admitted system and user hook catalogue.'
             cand doctor 'Report a read-only redacted health snapshot of this installation.'
+            cand checkpoint 'Preview or selectively restore session-owned Git file checkpoints.'
             cand setup 'Inspect expected work without running effects.'
             cand acp 'Serve the Agent Client Protocol on stdio or an endpoint.'
             cand a2a 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
@@ -104,7 +105,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
-            cand --var 'Supply one declared agent-file template variable'
+            cand --var 'Supply one declared agent-file template variable. Requires --file'
             cand --attach 'Add exact image bytes as ordered context before the prompt text'
             cand -m 'provider/model slug, e.g. ollama/qwen3'
             cand --model 'provider/model slug, e.g. ollama/qwen3'
@@ -160,10 +161,11 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;resume'= {
             cand --answer 'Settle a pending question. Repeat for multiple sibling questions'
-            cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
+            cand --name 'Read or change the session title without starting a turn: show, set=TEXT, clear'
+            cand --goal-operation 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
-            cand --var 'Supply one declared agent-file template variable'
+            cand --var 'Supply one declared agent-file template variable. Requires --file'
             cand --attach 'Add exact image bytes as ordered context before the prompt text'
             cand -m 'provider/model slug, e.g. ollama/qwen3'
             cand --model 'provider/model slug, e.g. ollama/qwen3'
@@ -178,8 +180,6 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --allow 'Allow rule, e.g. ''read(src/**)''. Repeatable'
             cand --deny 'Deny rule, e.g. ''write(**)''. Repeatable'
             cand --profile 'Layer [profile.NAME] from config'
-            cand --session 'Named session: created or attached'
-            cand --session-id 'A session id supplied by the caller'
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
             cand --output 'text|json|jsonl'
@@ -200,6 +200,9 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --mode 'Permission mode: plan|default|auto|edits|yolo'
             cand -c 'Dotted-path config override, value parsed as TOML'
             cand --set 'Dotted-path config override, value parsed as TOML'
+            cand --session 'Named session: created or attached'
+            cand --session-id 'A session id supplied by the caller'
+            cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
             cand --offline 'No non-loopback egress from ego''s own HTTP transport'
             cand --bare 'No ambient discovery, even in a trusted workspace'
             cand --no-tools 'Offer no tools at all'
@@ -219,10 +222,11 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;continue'= {
             cand --answer 'Settle a pending question. Repeat for multiple sibling questions'
-            cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
+            cand --name 'Read or change the session title without starting a turn: show, set=TEXT, clear'
+            cand --goal-operation 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
-            cand --var 'Supply one declared agent-file template variable'
+            cand --var 'Supply one declared agent-file template variable. Requires --file'
             cand --attach 'Add exact image bytes as ordered context before the prompt text'
             cand -m 'provider/model slug, e.g. ollama/qwen3'
             cand --model 'provider/model slug, e.g. ollama/qwen3'
@@ -237,8 +241,6 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --allow 'Allow rule, e.g. ''read(src/**)''. Repeatable'
             cand --deny 'Deny rule, e.g. ''write(**)''. Repeatable'
             cand --profile 'Layer [profile.NAME] from config'
-            cand --session 'Named session: created or attached'
-            cand --session-id 'A session id supplied by the caller'
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
             cand --output 'text|json|jsonl'
@@ -259,6 +261,9 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --mode 'Permission mode: plan|default|auto|edits|yolo'
             cand -c 'Dotted-path config override, value parsed as TOML'
             cand --set 'Dotted-path config override, value parsed as TOML'
+            cand --session 'Named session: created or attached'
+            cand --session-id 'A session id supplied by the caller'
+            cand --worktree 'Create a retained managed worktree on this explicitly approved new branch'
             cand --offline 'No non-loopback egress from ego''s own HTTP transport'
             cand --bare 'No ambient discovery, even in a trusted workspace'
             cand --no-tools 'Offer no tools at all'
@@ -304,10 +309,12 @@ set edit:completion:arg-completer[ego] = {|@words|
         }
         &'ego;export'= {
             cand --format 'Transcript format; JSONL is stdout-only and cannot be combined with --file'
+            cand --after 'Only emit transcript events after this session-local sequence'
             cand --file 'Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted'
             cand --session-dir 'Override the store location'
             cand -C 'Run as if started in DIR'
             cand --sanitize 'Remove private content structurally; exports are unsanitized by default'
+            cand --follow 'Follow committed local transcript events until stopped'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -350,8 +357,29 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand -h 'Print help'
             cand --help 'Print help'
         }
+        &'ego;checkpoint'= {
+            cand -C 'C'
+            cand --directory 'directory'
+            cand -h 'Print help'
+            cand --help 'Print help'
+            cand preview 'List checkpoint IDs, paths, effects, and external-change conflicts as JSON'
+            cand restore 'Restore one selected checkpoint; external changes are never forced'
+            cand close 'Close checkpoint ownership and delete the session''s private Git ref'
+        }
+        &'ego;checkpoint;preview'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;checkpoint;restore'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'ego;checkpoint;close'= {
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
         &'ego;setup'= {
-            cand --items 'Limit proposals to these report item IDs (comma-separated)'
+            cand --items 'Select proposal item IDs as one comma-separated list; repeat to add IDs'
             cand --judge 'Offer a validated judge for unresolved policy; never authorizes an action'
             cand --profile 'profile'
             cand --directory 'directory'

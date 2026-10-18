@@ -298,7 +298,7 @@ fn background_tasks(
             }
             Err(error) => return error.to_string(),
         };
-        rows.push(snapshot.model_text());
+        rows.push(format!("exec {}", snapshot.model_text()));
         if cancel && snapshot.outcome.is_none() {
             rows.push("cancellation requested".into());
         }
@@ -307,5 +307,23 @@ fn background_tasks(
         "background tasks: none".into()
     } else {
         rows.join("\n")
+    }
+}
+
+/// Both idle and busy inspection use the same typed task surface.
+async fn task_listing(
+    arguments: &str,
+    state: &SessionState,
+    process: &dyn ego_core::permit::ProcessExecutor,
+    owner: &CliSkillInvocationOwner<'_>,
+) -> String {
+    let agents = owner.inspect_tasks(arguments, state).await;
+    let execs = background_tasks(arguments, state, process);
+    match agents {
+        Some(agents) if arguments.trim().is_empty() && !state.detached_execs.is_empty() => {
+            format!("{execs}\n{agents}")
+        }
+        Some(agents) => agents,
+        None => execs,
     }
 }

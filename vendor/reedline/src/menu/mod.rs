@@ -98,6 +98,11 @@ pub trait Menu: Send {
     /// Checks if the menu is active
     fn is_active(&self) -> bool;
 
+    /// Whether accepting a selection also submits the completed buffer.
+    fn submit_on_accept(&self) -> bool {
+        false
+    }
+
     /// Set active state
     fn set_active(&mut self, active: bool);
 
@@ -542,6 +547,10 @@ impl Menu for ReedlineMenu {
 
     fn is_active(&self) -> bool {
         self.as_ref().is_active()
+    }
+
+    fn submit_on_accept(&self) -> bool {
+        self.as_ref().submit_on_accept()
     }
 
     fn set_active(&mut self, active: bool) {

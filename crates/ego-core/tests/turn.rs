@@ -1973,13 +1973,13 @@ mod turn {
         }
         for (bytes, limit, achieved, diagnostic) in [
             (
-                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                br#"{"verdict":"achieved","reason":"verification passed"}"#.to_vec(),
                 1024,
                 true,
                 "",
             ),
             (
-                br#"{"achieved":true,"reason":"verification passed"}"#.to_vec(),
+                br#"{"verdict":"achieved","reason":"verification passed"}"#.to_vec(),
                 4,
                 false,
                 "truncated",
@@ -2584,10 +2584,255 @@ mod turn {
         )
     }
 
+    struct RecordedProgressTool {
+        name: &'static str,
+        server: &'static str,
+        fail: bool,
+    }
+
+    impl TypedTool for RecordedProgressTool {
+        type Params = serde_json::Value;
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "Recorded TUIC progress boundary"
+        }
+        fn prepare_typed(
+            &self,
+            _params: Self::Params,
+            _ctx: &PrepareCtx<'_>,
+        ) -> Result<PreparedCall, ToolError> {
+            Ok(PreparedCall::new(
+                self.name(),
+                Op::Read {
+                    path: CanonPath::new("/ws/progress"),
+                },
+            ))
+        }
+        fn execute<'a, 'io>(
+            &'a self,
+            _call: PreparedCall,
+            _io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+        where
+            'io: 'a,
+        {
+            Box::pin(async {
+                if self.fail {
+                    return Err(ToolError::InvalidParams("progress rejected".into()));
+                }
+                let recorded = if self.name == "call_tool" {
+                    include_str!("fixtures/tuic-wrapped-progress-2026-10-17.json")
+                } else {
+                    include_str!("fixtures/tuic-blocked-progress-2026-10-17.json")
+                };
+                let mut captured: serde_json::Value = serde_json::from_str(recorded).unwrap();
+                captured["provenance"]["result"]["server"] = json!(self.server);
+                Ok(serde_json::from_value(captured).unwrap())
+            })
+        }
+    }
+
+    fn progress_round(kind: &str, id: usize) -> Vec<AiEvent> {
+        vec![
+            AiEvent::TextDelta {
+                text: format!("May I proceed with choice {id}?"),
+            },
+            AiEvent::ToolCall {
+                call_id: format!("progress-{id}"),
+                name: "progress".into(),
+                args: json!({"type":kind}).to_string(),
+            },
+            AiEvent::Stop(StopReason::ToolUse),
+        ]
+    }
+
+    fn run_progress_turn(
+        scripts: Vec<Vec<AiEvent>>,
+        goal: bool,
+    ) -> (SessionState, Vec<DomainEvent>, Vec<GenRequest>) {
+        run_progress_fixture(scripts, goal, "progress", "tuic", false)
+    }
+
+    fn run_progress_fixture(
+        scripts: Vec<Vec<AiEvent>>,
+        goal: bool,
+        name: &'static str,
+        server: &'static str,
+        fail: bool,
+    ) -> (SessionState, Vec<DomainEvent>, Vec<GenRequest>) {
+        let mut fx = Fixture::new(scripts);
+        fx.registry = vec![Arc::new(Typed(RecordedProgressTool { name, server, fail }))];
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let mut loop_ = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        )
+        .with_goal(goal.then(|| "produce a verified artifact".into()), 20);
+        assert_eq!(
+            block_on(loop_.run("work")).unwrap().exit_reason,
+            ExitReason::Completed
+        );
+        (
+            loop_.into_state().unwrap(),
+            fx.store.events(),
+            fx.generator.calls(),
+        )
+    }
+
+    #[test]
+    fn blocked_progress_ends_turn_before_another_generation() {
+        // Catches: successful blocked progress reopens main generation or goal continuation.
+        for goal in [false, true] {
+            let (state, events, calls) = run_progress_turn(
+                (0..7).map(|id| progress_round("blocked", id)).collect(),
+                goal,
+            );
+            assert_eq!(
+                calls.len(),
+                1,
+                "blocked progress must return control, not ask again"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.kind, EventKind::ToolCallCompleted { ok: true, .. }))
+                    .count(),
+                1
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e.kind, EventKind::GoalContinuation { .. }))
+            );
+            if goal {
+                assert_eq!(
+                    state.goal.as_ref().unwrap().state,
+                    ego_core::goal::GoalState::Active
+                );
+                assert!(events.iter().any(|e| matches!(&e.kind, EventKind::GoalCheckStopped { reason, .. } if reason == "waiting for user after blocked progress")));
+            }
+            assert_eq!(SessionState::replay(events).goal, state.goal);
+        }
+    }
+
+    #[test]
+    fn blocked_progress_wrapper_closes_unstarted_siblings() {
+        // Catches: call_tool wrapping hides the wait declaration or executes sibling effects after it.
+        let (_, events, calls) = run_progress_fixture(
+            vec![vec![
+                AiEvent::TextDelta {
+                    text: "May I proceed?".into(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "wrapped".into(),
+                    name: "call_tool".into(),
+                    args: json!({"tool_name":"progress","arguments":{"type":"blocked"}})
+                        .to_string(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "sibling".into(),
+                    name: "call_tool".into(),
+                    args: json!({"tool_name":"progress","arguments":{"type":"done"}}).to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ]],
+            true,
+            "call_tool",
+            "tuic",
+            false,
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::ToolCallCompleted { ok: true, .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::ToolCallCompleted { ok: false, .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn done_progress_keeps_long_tool_chains_and_final_answers_working() {
+        // Catches: a progress notification is treated as terminal regardless of its type.
+        let mut scripts: Vec<_> = (0..12).map(|id| progress_round("done", id)).collect();
+        scripts.push(vec![
+            AiEvent::TextDelta {
+                text: "Finished".into(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]);
+        let (_, events, calls) = run_progress_turn(scripts, false);
+        assert_eq!(calls.len(), 13);
+        assert!(events.iter().any(
+            |e| matches!(&e.kind, EventKind::AssistantMessage { text } if text == "Finished")
+        ));
+    }
+
+    #[test]
+    fn failed_or_unrelated_progress_does_not_claim_a_user_wait() {
+        // Catches: a failed report or another server's tool takes TUIC's turn-ending authority.
+        for (server, fail) in [("unrelated", false), ("tuic", true)] {
+            let (_, _, calls) = run_progress_fixture(
+                vec![
+                    progress_round("blocked", 0),
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ],
+                false,
+                "progress",
+                server,
+                fail,
+            );
+            assert_eq!(calls.len(), 2);
+        }
+    }
+
+    #[test]
+    fn question_without_tools_returns_without_another_generation() {
+        // Catches: ordinary assistant questions are retried without new user input.
+        let (_, _, calls) = run_progress_turn(
+            vec![vec![
+                AiEvent::TextDelta {
+                    text: "May I proceed?".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ]],
+            false,
+        );
+        assert_eq!(calls.len(), 1);
+    }
+
     fn goal_reply(achieved: bool, reason: &str) -> Vec<AiEvent> {
         vec![
             AiEvent::TextDelta {
-                text: json!({"achieved": achieved, "reason": reason}).to_string(),
+                text: json!({"verdict": if achieved { "achieved" } else { "continue" }, "reason": reason}).to_string(),
             },
             AiEvent::Usage(Usage {
                 uncached_input_tokens: 2,
@@ -2609,7 +2854,10 @@ mod turn {
                     },
                     AiEvent::Stop(StopReason::Stop),
                 ],
-                goal_reply(false, "artifact is not verified"),
+                goal_reply(
+                    false,
+                    "operator login is complete; artifact is not verified",
+                ),
                 vec![
                     AiEvent::TextDelta {
                         text: "artifact verified".into(),
@@ -2658,7 +2906,90 @@ mod turn {
                 |m| m["role"] == "system" && m.to_string().contains("artifact is not verified")
             )
         );
+        // Operator-related words alone do not override an explicit continue verdict.
+        assert!(continuation.as_array().unwrap().iter().any(|m| {
+            m["role"] == "system"
+                && m.to_string()
+                    .contains("operator login is complete; artifact is not verified")
+        }));
         assert_eq!(SessionState::replay(events).goal, Some(goal));
+    }
+
+    #[test]
+    fn goal_check_needs_operator_blocks_even_with_zero_allowance_and_no_keywords() {
+        // Catches: a typed human wait is treated as ordinary unmet work or budget exhaustion.
+        for allowance in [0, 20] {
+            let (state, events, calls) = run_checked_goal(
+                vec![
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    vec![
+                        AiEvent::TextDelta {
+                            text: json!({"verdict":"needs_operator", "reason":"condition unavailable"}).to_string(),
+                        },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                ],
+                allowance,
+            );
+            let goal = state.goal.as_ref().unwrap();
+            assert_eq!(goal.state, ego_core::goal::GoalState::Blocked);
+            assert_eq!(
+                goal.blocker_reason.as_deref(),
+                Some("condition unavailable")
+            );
+            assert_eq!(goal.continuation_turns, 0);
+            assert_eq!(goal.blocker_observations, 0);
+            assert_eq!(calls.len(), 2);
+            assert!(calls[1].tools.is_empty());
+            let instruction = serde_json::to_string(&calls[1].messages).unwrap();
+            for expected in ["needs_operator", "human action", "login", "approval"] {
+                assert!(instruction.contains(expected), "{instruction}");
+            }
+            assert!(events.iter().any(|event| matches!(&event.kind,
+                EventKind::GoalCheckStopped { reason, .. } if reason == "goal needs operator: condition unavailable")));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, EventKind::GoalContinuation { .. }))
+            );
+            assert_eq!(SessionState::replay(events).goal, state.goal);
+        }
+    }
+
+    #[test]
+    fn goal_check_rejects_retired_boolean_and_open_ended_verdicts() {
+        // Catches: an old boolean alias or unknown verdict bypasses the closed checker contract.
+        for raw in [
+            r#"{"achieved":true,"reason":"verified"}"#,
+            r#"{"verdict":"unknown","reason":"verified"}"#,
+            r#"{"reason":"verified"}"#,
+            r#"{"verdict":"achieved","reason":"verified","achieved":true}"#,
+            r#"{"verdict":"achieved","reason":" "}"#,
+        ] {
+            let (state, events, calls) = run_checked_goal(
+                vec![
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                    vec![
+                        AiEvent::TextDelta { text: raw.into() },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                ],
+                20,
+            );
+            let goal = state.goal.unwrap();
+            assert_eq!(goal.state, ego_core::goal::GoalState::Active, "{raw}");
+            assert_eq!(
+                goal.check_stop.as_deref(),
+                Some("goal check returned an invalid verdict"),
+                "{raw}"
+            );
+            assert_eq!(calls.len(), 2);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, EventKind::GoalContinuation { .. }))
+            );
+        }
     }
 
     #[test]
@@ -2933,7 +3264,7 @@ mod turn {
             ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
                 *self.input.lock().unwrap() = input.to_vec();
                 Box::pin(async {
-                    let bytes = br#"{"achieved":true,"reason":"artifact verified"}"#;
+                    let bytes = br#"{"verdict":"achieved","reason":"artifact verified"}"#;
                     Ok(ToolResult::new(vec![
                         ego_core::permit::ToolContentBlock::process(
                             ego_core::permit::StreamProvenance::Stdout,
@@ -12862,6 +13193,34 @@ mod turn {
             agents: Vec<ego_core::turn::NamedAgent>,
             roots: Vec<ego_core::permit::ProfileRoot>,
         ) -> (ExitReason, SessionState) {
+            run_task_host_case(
+                fx,
+                generator,
+                cancel,
+                ceiling,
+                agents,
+                roots,
+                TaskHost::default(),
+            )
+        }
+
+        #[derive(Default)]
+        struct TaskHost {
+            tuic: bool,
+            background: Option<Arc<dyn ego_core::turn::BackgroundTaskPort>>,
+            prior_snapshot: Option<ego_core::session::PromptSnapshot>,
+            refresh: bool,
+        }
+
+        fn run_task_host_case<G: Generator + 'static>(
+            fx: &Fixture,
+            generator: &Arc<G>,
+            cancel: CancelToken,
+            ceiling: Option<u64>,
+            agents: Vec<ego_core::turn::NamedAgent>,
+            roots: Vec<ego_core::permit::ProfileRoot>,
+            host: TaskHost,
+        ) -> (ExitReason, SessionState) {
             let mut registry: Vec<_> = fx
                 .registry
                 .iter()
@@ -12907,20 +13266,183 @@ mod turn {
                 offline: true,
                 host: None,
             });
+            let mut initial = SessionState::default();
+            initial.prompt_snapshot = host.prior_snapshot;
             let mut loop_ = CoreTurnLoop::new(
-                session(
-                    SessionState::default(),
-                    &fx.store,
-                    &fx.clock,
-                    &fx.sink,
-                    cancel,
-                ),
+                session(initial, &fx.store, &fx.clock, &fx.sink, cancel),
                 runtime,
                 tools,
             )
             .unwrap();
+            loop_ = loop_.with_delegation_host(host.tuic);
+            if host.refresh {
+                loop_ = loop_.with_prompt_refresh();
+            }
+            if let Some(port) = host.background {
+                loop_ = loop_.with_background_task_port(port);
+            }
             let outcome = block_on(loop_.run("parent")).unwrap();
             (outcome.exit_reason, loop_.into_state().unwrap())
+        }
+
+        #[derive(Default)]
+        struct RecordingBackgroundPort(Mutex<Vec<ego_core::turn::BackgroundTaskLaunch>>);
+        impl ego_core::turn::BackgroundTaskPort for RecordingBackgroundPort {
+            fn launch_task(
+                &self,
+                task: ego_core::turn::BackgroundTaskLaunch,
+            ) -> BoxFuture<'_, Result<(), String>> {
+                self.0.lock().unwrap().push(task);
+                Box::pin(std::future::ready(Ok(())))
+            }
+            fn refresh_tasks(&self, _: SessionState) -> BoxFuture<'_, Result<(), String>> {
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+
+        #[test]
+        fn background_task_launch_returns_id_without_running_an_ephemeral_child() {
+            // Catches: background=true falling through to the foreground child wait path.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "bg",
+                        "task",
+                        json!({"name":"long check", "prompt":"Inspect", "background":true}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let port = Arc::new(RecordingBackgroundPort::default());
+            let (exit, state) = run_task_host_case(
+                &fx,
+                &generator,
+                CancelToken::new(),
+                None,
+                vec![],
+                vec![],
+                TaskHost {
+                    tuic: false,
+                    background: Some(port.clone()),
+                    ..TaskHost::default()
+                },
+            );
+            assert_eq!(exit, ExitReason::Completed);
+            assert_eq!(generator.calls().len(), 2, "no ephemeral child generation");
+            let launches = port.0.lock().unwrap();
+            assert_eq!(launches.len(), 1);
+            let task = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(true));
+            assert!(tool_result_text(task).contains(&launches[0].invocation.to_string()));
+        }
+
+        #[test]
+        fn background_task_without_owner_is_refused_instead_of_running_foreground() {
+            // Catches: an unsupported host silently blocking on a background task.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "bg",
+                        "task",
+                        json!({"name":"long check", "prompt":"Inspect", "background":true}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            assert_eq!(generator.calls().len(), 2);
+            let task = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(false));
+            assert!(tool_result_text(task).contains("unavailable"));
+        }
+
+        #[test]
+        fn task_guidance_under_tuic_does_not_send_long_work_to_in_turn_children() {
+            // Catches: TUIC agents receiving standalone task-first guidance in prompt or tool schema.
+            for tuic in [false, true] {
+                let fx = Fixture::new(vec![]);
+                let generator =
+                    Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+                run_task_host_case(
+                    &fx,
+                    &generator,
+                    CancelToken::new(),
+                    None,
+                    vec![],
+                    vec![],
+                    TaskHost {
+                        tuic,
+                        background: None,
+                        refresh: true,
+                        ..TaskHost::default()
+                    },
+                );
+                let calls = generator.calls();
+                let request = &calls[0];
+                let expected = if tuic {
+                    "prefer orchestrator_active for long delegated work"
+                } else {
+                    "For standalone delegation, use task"
+                };
+                let task = request
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == "task")
+                    .unwrap();
+                assert!(task.description.contains(expected), "{}", task.description);
+                assert!(request.messages.messages().iter().any(|message| message.role == Role::System && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(expected)))));
+            }
+        }
+
+        #[test]
+        fn task_guidance_host_change_replaces_stale_prompt_authority_once() {
+            // Catches: resuming standalone history inside TUIC retaining task-first system guidance.
+            let prior = ego_core::session::PromptSnapshot {
+                epoch: EventId::new(),
+                identity: Some(format!(
+                    "ego test\n\n{}",
+                    ego_core::turn::delegation_guidance(false)
+                )),
+                system: None,
+            };
+            let mut snapshot = prior.clone();
+            for changed in [true, false] {
+                let fx = Fixture::new(vec![]);
+                let generator =
+                    Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+                let (_, state) = run_task_host_case(
+                    &fx,
+                    &generator,
+                    CancelToken::new(),
+                    None,
+                    vec![],
+                    vec![],
+                    TaskHost {
+                        tuic: true,
+                        prior_snapshot: Some(snapshot.clone()),
+                        ..TaskHost::default()
+                    },
+                );
+                let next = state.prompt_snapshot.unwrap();
+                assert_eq!(next.epoch != snapshot.epoch, changed);
+                let text = next.identity.as_ref().unwrap();
+                assert!(text.contains("prefer orchestrator_active"));
+                assert!(!text.contains("For standalone delegation"));
+                assert_eq!(text.matches("Inside TUIC").count(), 1);
+                snapshot = next;
+            }
         }
 
         #[test]

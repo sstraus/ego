@@ -73,7 +73,7 @@ fn unknown_slash_is_local_and_leading_space_sends_a_literal_path() {
     input.flush().unwrap();
     until_post_trust_prompt(&reader, &mut output, 0);
     let start = output.len();
-    input.write_all(b"/histor\r").unwrap();
+    input.write_all(b"/histor-no-such-command\r").unwrap();
     input.flush().unwrap();
     until_normalized_without_new_generation(
         &reader,
@@ -83,7 +83,7 @@ fn unknown_slash_is_local_and_leading_space_sends_a_literal_path() {
         &stub,
         0,
     );
-    until_normalized(&reader, &mut output, start, "/history");
+    until_normalized(&reader, &mut output, start, "/help");
     drain_until_quiet(&reader, &mut output);
     let start = output.len();
     input.write_all(b" /tmp/x\r").unwrap();
@@ -196,5 +196,10 @@ fn busy_config_write_reports_pending_before_the_turn_finishes() {
     assert!(
         held.contains("config write pending until the active turn finishes"),
         "the user needs an acceptance receipt before completion: {held}"
+    );
+    assert_eq!(
+        held.matches("pending until").count(),
+        1,
+        "the generic host handoff must not duplicate the config receipt: {held}"
     );
 }

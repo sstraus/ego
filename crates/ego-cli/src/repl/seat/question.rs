@@ -1,5 +1,6 @@
 use super::edit_mode::PICKER_KEYS;
 use super::permission_modal::{compact_prompt, details_prompt, settled_receipt};
+use super::picker_surface::{PickerRole, picker_capabilities, picker_row};
 use super::*;
 use crate::render::osc::State;
 
@@ -234,7 +235,10 @@ pub(super) fn answer_control(
             reply,
         } => {
             let prompt = Question::new(
-                format!("{context}\nTrust project files in {workspace}? [y/N] "),
+                crate::output::wrap_notice(
+                    &format!("{context}\nTrust project files in {workspace}? [y/N] "),
+                    Some(picker_capabilities(surface.status).width.saturating_sub(1)),
+                ),
                 Arc::clone(surface.status),
             );
             let trust = loop {
@@ -256,9 +260,12 @@ pub(super) fn answer_control(
         }
         Control::WindowsUnconfined { workspace, reply } => {
             let prompt = Question::new(
-                format!(
-                    "Windows execution is unconfined in {workspace}; filesystem and network \
-                     isolation are not enforced. Continue? [y/N] "
+                crate::output::wrap_notice(
+                    &format!(
+                        "Windows execution is unconfined in {workspace}; filesystem and network \
+                         isolation are not enforced. Continue? [y/N] "
+                    ),
+                    Some(picker_capabilities(surface.status).width.saturating_sub(1)),
                 ),
                 Arc::clone(surface.status),
             );
@@ -576,11 +583,11 @@ fn answer_question_selector(
 
     let outcome = loop {
         let prompt = Question::new(
-            question_selector_prompt(request, &selector),
+            question_selector_prompt(request, &selector, surface.status),
             Arc::clone(surface.status),
         );
         let queued = queued_selector_line(surface.status);
-        match queued.unwrap_or_else(|| modal_line(editor, surface, &prompt)) {
+        match queued.unwrap_or_else(|| permission_line(editor, surface, &prompt)) {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
                 let Some(key) = next_selector_key(surface.status, &command) else {
                     continue;
@@ -749,14 +756,23 @@ pub(super) fn next_selector_key(status: &SharedStatus, _command: &str) -> Option
 pub(super) fn question_selector_prompt(
     request: &QuestionRequest,
     selector: &Arc<Mutex<Selector>>,
+    status: &SharedStatus,
 ) -> String {
+    let caps = picker_capabilities(status);
+    let width = caps.width.saturating_sub(1).max(1);
+    let wrapped = |text: &str, role| {
+        text.lines()
+            .flat_map(|line| crate::render::Line::plain(line).wrap(width))
+            .map(|row| picker_row(row.text(), role, caps.depth))
+            .collect::<Vec<_>>()
+    };
     let selector = selector.lock().expect("question selector lock");
     let current = selector.current_id();
     let selected = selector.selected_ids();
     let multiple = request.mode == QuestionMode::Multiple;
     let other = offers_other(request)
         .then(|| QuestionOption::new(OTHER_ID, OTHER_LABEL).with_description(OTHER_DESCRIPTION));
-    let mut rows = vec![request.prompt.clone()];
+    let mut rows = wrapped(&request.prompt, PickerRole::Question);
     for (index, option) in request.options.iter().chain(other.as_ref()).enumerate() {
         let marker = if current == Some(option.id.as_str()) {
             ">"
@@ -774,20 +790,51 @@ pub(super) fn question_selector_prompt(
             format!("{marker} {}. ", index + 1)
         };
         let indent = " ".repeat(lead.chars().count());
-        rows.push(format!("{lead}{}", option.label));
+        let role = if current == Some(option.id.as_str()) {
+            PickerRole::Selected
+        } else {
+            PickerRole::Label
+        };
+        rows.extend(
+            crate::render::Line::plain(&option.label)
+                .wrap(width.saturating_sub(indent.len()).max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    picker_row(
+                        format!("{}{}", if index == 0 { &lead } else { &indent }, row.text()),
+                        role,
+                        caps.depth,
+                    )
+                }),
+        );
         if let Some(description) = option
             .description
             .as_deref()
             .filter(|text| !text.trim().is_empty())
         {
-            rows.push(format!("{indent}{description}"));
+            rows.extend(
+                crate::render::Line::plain(description)
+                    .wrap(width.saturating_sub(indent.len()).max(1))
+                    .into_iter()
+                    .map(|row| {
+                        picker_row(
+                            format!("{indent}{}", row.text()),
+                            PickerRole::Description,
+                            caps.depth,
+                        )
+                    }),
+            );
         }
     }
-    rows.push(if request.mode == QuestionMode::Multiple {
-        "Up/Down moves; Space or number toggles; Enter answers; Esc cancels. ".to_string()
-    } else {
-        "Up/Down or number selects; Enter answers; Esc cancels. ".to_string()
-    });
+    rows.extend(wrapped(
+        if request.mode == QuestionMode::Multiple {
+            "Up/Down moves; Space or number toggles; Enter answers; Esc cancels."
+        } else {
+            "Up/Down or number selects; Enter answers; Esc cancels."
+        },
+        PickerRole::Hint,
+    ));
     rows.join("\n")
 }
 
@@ -881,8 +928,8 @@ fn parse_question_answer(
     Ok(answer)
 }
 
-/// One read of the approval modal, whose prompt is retired as soon as it
-/// returns: an answered approval must not keep showing answer keys, and the
+/// One read of a transient modal, whose prompt is retired as soon as it
+/// returns: navigation must replace a picker even at the bottom row, and the
 /// next prompt (a follow-up question, the next approval or the composer)
 /// starts on the same row. Its outcome is committed as one receipt row.
 ///
@@ -1430,7 +1477,7 @@ fn remember_permission(
 /// Called only from the terminal owner, between reads, so nothing else is
 /// painting. It does not go through the row output: that holds text until a
 /// newline, and a wait has no more rows coming.
-fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
+pub(super) fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
     let signals = status.lock().expect("surface status lock").signals;
     let Some((osc, quiet)) = signals else {
         return;
@@ -1506,6 +1553,7 @@ pub(super) fn commit_to_transcript(status: &SharedStatus, row: &str) {
         .expect("surface status lock")
         .transcript
         .clone();
+    let row = crate::output::wrap_notice(row, Some(picker_capabilities(status).width));
     if let Some(transcript) = transcript
         && transcript
             .send(SurfaceMessage::Row(format!("{row}\n")))
@@ -1599,16 +1647,37 @@ fn status_row(status: &SurfaceStatus) -> String {
             .activity_since
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        return format!(
-            "{} Working {} \x1b[2m· Esc to interrupt\x1b[22m\n",
+        let tokens = if status.activity_output_chars > 0 {
+            format!(" · ↓ ~{} tokens", status.activity_output_chars.div_ceil(4))
+        } else {
+            String::new()
+        };
+        let thinking = status
+            .thinking_since
+            .map(|started| format!(" · thinking started {}s ago", started.elapsed().as_secs()))
+            .unwrap_or_default();
+        let activity = format!(
+            "{} Working {}{tokens}{thinking} ",
             ACTIVITY_FRAMES[(elapsed.as_secs() as usize) % ACTIVITY_FRAMES.len()],
             crate::render::duration(elapsed)
         );
+        let width = if status.width == 0 {
+            status.permission_capabilities.width
+        } else {
+            status.width
+        }
+        .saturating_sub(1);
+        let hint = "· Esc to interrupt";
+        let line = crate::render::line::Line::plain(&activity);
+        if line.width() + hint.len() <= width {
+            return format!("{activity}\x1b[2m{hint}\x1b[22m\n");
+        }
+        return format!("{}\n", line.truncate_to(width).text());
     }
     let text = status
         .painter
         .current_status()
-        .map(|line| line.text().to_string())
+        .map(|line| line.terminal_text(&status.permission_capabilities))
         .unwrap_or_default();
     if text.is_empty() {
         String::new()
@@ -1623,7 +1692,10 @@ impl Prompt for Waiting {
         if let Some(receipt) = background_notice::row(buffer, width) {
             return Some(receipt);
         }
-        let (receipt, detail) = crate::render::prompt_echo::collapsed(buffer, width)?;
+        let Some((receipt, detail)) = crate::render::prompt_echo::collapsed(buffer, width) else {
+            // A short submission still retires the live status and notices.
+            return Some(format!("> {}", buffer.replace('\n', "\n… ")));
+        };
         self.status
             .lock()
             .expect("surface status lock")
@@ -1681,6 +1753,10 @@ impl Question {
 }
 
 impl Prompt for Question {
+    fn get_indicator_color(&self) -> reedline::Color {
+        reedline::Color::Default
+    }
+
     fn render_prompt_left(&self) -> Cow<'_, str> {
         Cow::Borrowed("")
     }

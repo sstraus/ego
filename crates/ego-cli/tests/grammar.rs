@@ -70,6 +70,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         }
         Invocation::Setup(_) => panic!("setup does not construct a run"),
         Invocation::Doctor(_) => panic!("`doctor` takes no Args: use the doctor tests for it"),
+        Invocation::Checkpoint(_) => panic!("checkpoint does not construct a run"),
     }
 }
 
@@ -1378,38 +1379,16 @@ fn doctor_takes_only_json_and_names_anything_else() {
     );
 }
 
-/// The two documents that say which `--allow`/`--deny` heads enforce are held
-/// to the parser's own table, not to each other.
+/// CLI.md names every `--allow`/`--deny` head published by the parser.
 ///
-/// This is the [`BUILT`](cli::BUILT)/[`UNBUILT`](cli::UNBUILT) binding pointed
-/// at prose. `parse.rs`'s `OPERATIONS` table is the only thing that decides
-/// whether a rule with a given head can match anything, and `Rule::load`
-/// refuses one that cannot — so a document naming a smaller set than the table
-/// does is telling an operator that a boundary they can actually have is
-/// unavailable. That is the *safe* direction of the lie and it is still a lie:
-/// someone who reads `docs/18` and concludes `exec` heads do not enforce does
-/// not write `deny exec(**)`, and does not get the boundary they would have
-/// got by trying.
-///
-/// Both documents had drifted, in opposite directions and by different
-/// amounts, which is exactly what happens to two hand-maintained copies of one
-/// fact: `docs/18` named four heads, `CLI.md` named five, and the table has
-/// said all seven since `net` gained `Op::Connect` and `tool` gained
-/// `Op::Opaque`.
+/// The parser's `OPERATIONS` table decides whether each head can match an
+/// operation. Catches public documentation omitting an enforceable head or
+/// describing it as unavailable, which can prevent an operator from using it.
 #[test]
 fn the_documents_name_the_rule_heads_the_parser_actually_enforces() {
-    // The rows are found by their flag pair rather than by line number: these
-    // are living tables and a fixed offset would make an ordinary edit look
-    // like a regression.
-    let rows = [
-        ("CLI.md", row(include_str!("../../../CLI.md"))),
-        (
-            "ARCHITECTURE.md",
-            row(include_str!(
-                "../../../ARCHITECTURE.md"
-            )),
-        ),
-    ];
+    // Find the CLI.md row by its flag pair rather than by line number, so an
+    // ordinary table edit does not look like a regression.
+    let rows = [("CLI.md", row(include_str!("../../../CLI.md")))];
 
     let awaiting: Vec<&str> = Head::ALL
         .iter()
@@ -1429,8 +1408,8 @@ fn the_documents_name_the_rule_heads_the_parser_actually_enforces() {
         }
 
         // The heads are all named; the remaining way to be wrong is to name
-        // one and then take it back. Every refusal word below appeared in one
-        // of these two rows while the table said nothing was awaiting.
+        // one and then take it back. CLI.md must not retract a head while the
+        // parser reports that every head is enforceable.
         if awaiting.is_empty() {
             for retraction in ["refused", "unsupported", "cannot be enforced", "no tool"] {
                 assert!(

@@ -115,7 +115,8 @@ fn notice_contract(notice: &str, width: u16, busy: bool) {
         "notice fits in terminal cells: {capture}"
     );
     assert!(
-        capture.contains("ego "),
+        capture.contains("model ollama/qwen3")
+            && capture.contains("mode yolo (flags) · sandbox off (flags)"),
         "notice did not flood prior transcript: {capture}"
     );
     assert!(

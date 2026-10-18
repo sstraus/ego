@@ -385,10 +385,16 @@ async fn one_turn(
         StubHttp::replaying(transcript),
         0,
         Arc::new(NoRetryPause),
-        Vec::new(),
+        TurnFixture::default(),
     )
     .await;
     (outcome.exit_reason, state)
+}
+
+#[derive(Default)]
+struct TurnFixture {
+    registry: Vec<Arc<dyn Tool>>,
+    tier: Option<ego_ai::service_tier::ServiceTier>,
 }
 
 async fn turn_over_http(
@@ -398,8 +404,9 @@ async fn turn_over_http(
     http: Arc<dyn Http>,
     retry: u32,
     retry_pause: Arc<dyn ego_core::turn::RetryPause>,
-    registry: Vec<Arc<dyn Tool>>,
+    fixture: TurnFixture,
 ) -> (ego_core::turn::TurnOutcome, SessionState) {
+    let TurnFixture { registry, tier } = fixture;
     turn_over_http_with_question(
         slug,
         row,
@@ -413,6 +420,7 @@ async fn turn_over_http(
                 .map(ego_core::turn::RegisteredTool::Effect)
                 .collect(),
             None,
+            tier,
         ),
     )
     .await
@@ -428,29 +436,42 @@ async fn turn_over_http_with_question(
     question: (
         Vec<ego_core::turn::RegisteredTool>,
         Option<Arc<dyn ego_core::question::Elicitor>>,
+        Option<ego_ai::service_tier::ServiceTier>,
     ),
 ) -> (ego_core::turn::TurnOutcome, SessionState) {
-    let (registry, elicitor) = question;
+    let (registry, elicitor, tier) = question;
     let slug = ModelSlug::parse(slug).expect("a constant this file controls");
     // Through the catalogue rather than around it: "configuration" is the
     // claim, and a row handed straight to the generator would prove only that
     // the generator is generic.
     let catalogue = Catalogue::new([row]).with_hosted(&slug.to_string(), hosted());
-    let resolved = catalogue
+    let mut resolved = catalogue
         .resolve_hosted(&slug, wire)
         .expect("the row and its model were both configured above");
+    if tier.is_some() {
+        // Recorded GPT-6.1 Sol USD tariff, not a value computed by the policy under test.
+        let rates = resolved.rates.as_mut().unwrap();
+        rates.quote.uncached_input = Some("0.000002".parse().unwrap());
+        rates.quote.cache_read = Some("0.0000001".parse().unwrap());
+        rates.quote.cache_write = Some("0.0000025".parse().unwrap());
+        rates.quote.output = Some("0.00001".parse().unwrap());
+    }
+    let tier = tier.unwrap_or_default();
+    if tier == ego_ai::service_tier::ServiceTier::Fast {
+        let support = ego_ai::service_tier::fast_support(&slug.to_string()).unwrap();
+        let rates = resolved.rates.as_mut().unwrap();
+        rates.quote = ego_ai::service_tier::fast_quote(&rates.quote, &support).unwrap();
+    }
     let credential = resolved
         .row
         .credential
         .resolve(&FakeCredentials::holding(KEY))
         .expect("every variable is set on this fake machine");
 
-    let generator = Arc::new(WireGenerator::new(
-        resolved.row.clone(),
-        resolved.wire,
-        http,
-        credential,
-    ));
+    let generator = Arc::new(
+        WireGenerator::new(resolved.row.clone(), resolved.wire, http, credential)
+            .with_service_tier(tier),
+    );
     let store = MemStore::default();
     let clock = FixedClock;
     let fs = FakeFs::default();
@@ -1033,7 +1054,10 @@ async fn dropped_codex_turn(
         http,
         retry,
         pause.clone(),
-        vec![Arc::new(NeverRunTool)],
+        TurnFixture {
+            registry: vec![Arc::new(NeverRunTool)],
+            ..Default::default()
+        },
     )
     .await;
     server.abort();
@@ -1147,6 +1171,90 @@ impl Tool for NeverRunTool {
     }
 }
 
+#[tokio::test]
+async fn fast_contract_catches_missing_wire_tier_and_unmultiplied_turn_cost() {
+    use ego_ai::service_tier::ServiceTier;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Real loopback HTTP, no model calls. The tariff is captured in
+    // ARCHITECTURE.md
+    for (tier, expected) in [
+        (ServiceTier::Standard, "0.0000453"),
+        (ServiceTier::Fast, "0.0000906"),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            let body = loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                request.extend_from_slice(&buf[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let size: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_owned)
+                        })
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + size {
+                        break serde_json::from_slice::<serde_json::Value>(
+                            &request[end + 4..end + 4 + size],
+                        )
+                        .unwrap();
+                    }
+                }
+            };
+            let transcript = include_str!("goldens/profile/openai/stream/text.sse");
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", transcript.len()).as_bytes()).await.unwrap();
+            socket.write_all(transcript.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+            body
+        });
+        let http = Arc::new(SocketHttp {
+            base,
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        });
+        let (outcome, state) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            turn_over_http(
+                "openai/gpt-6.1-sol",
+                ProviderRow::openai(),
+                &ego_ai::wire::openai_responses::OpenAiResponses,
+                http,
+                0,
+                Arc::new(NoRetryPause),
+                TurnFixture {
+                    tier: Some(tier),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("loopback turn must finish");
+        let body = server.await.unwrap();
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        assert_eq!(answer(&state), "ok");
+        if tier == ServiceTier::Fast {
+            assert_eq!(body["service_tier"], "fast");
+        } else {
+            assert_eq!(body["service_tier"], "default");
+        }
+        assert_eq!(
+            state.cost,
+            CumulativeCost::Known {
+                total: usd(expected)
+            }
+        );
+    }
+}
 // regression case: completed Codex sockets must not survive a human wait.
 #[derive(Default)]
 struct QuestionSocketState {
@@ -1291,6 +1399,7 @@ async fn question_wait_turn(fail_after_answer: bool, available: bool) {
                 live_during_wait: live.clone(),
                 available,
             })),
+            None,
         ),
     )
     .await;

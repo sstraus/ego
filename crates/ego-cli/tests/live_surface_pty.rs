@@ -1,5 +1,11 @@
+#[path = "live_surface_pty/answer_wrap.rs"]
+mod answer_wrap;
 #[path = "live_surface_pty/background_notice.rs"]
 mod background_notice;
+#[path = "live_surface_pty/blank_prompt.rs"]
+mod blank_prompt;
+#[path = "live_surface_pty/busy_commands.rs"]
+mod busy_commands;
 #[path = "live_surface_pty/busy_notice.rs"]
 mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
@@ -8,29 +14,55 @@ mod exec_risk_reason;
 mod finish_queue;
 #[path = "live_surface_pty/foreign_judge_reason.rs"]
 mod foreign_judge_reason;
+#[path = "live_surface_pty/goal_ancestry.rs"]
+mod goal_ancestry;
+#[path = "live_surface_pty/goal_visibility.rs"]
+mod goal_visibility;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
+#[path = "live_surface_pty/mcp_inventory.rs"]
+mod mcp_inventory;
+#[path = "live_surface_pty/metadata_refusal.rs"]
+mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
 #[path = "live_surface_pty/mode_picker.rs"]
 mod mode_picker;
+#[path = "live_surface_pty/notice_wrap.rs"]
+mod notice_wrap;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
+#[path = "live_surface_pty/picker_roles.rs"]
+mod picker_roles;
 #[path = "live_surface_pty/plan_denial.rs"]
 mod plan_denial;
 #[path = "live_surface_pty/prompt_echo.rs"]
 mod prompt_echo;
+#[path = "live_surface_pty/prompt_readiness.rs"]
+mod prompt_readiness;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/slash_completion.rs"]
+mod slash_completion;
 #[path = "live_surface_pty/slash_inspections.rs"]
 mod slash_inspections;
+#[path = "live_surface_pty/startup_order.rs"]
+mod startup_order;
 #[path = "live_surface_pty/startup_provenance.rs"]
 mod startup_provenance;
+#[path = "live_surface_pty/status_compact.rs"]
+mod status_compact;
+#[path = "live_surface_pty/status_history.rs"]
+mod status_history;
+#[path = "live_surface_pty/status_providers.rs"]
+mod status_providers;
 mod support;
+#[path = "live_surface_pty/task_rows.rs"]
+mod task_rows;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
 #[path = "live_surface_pty/workspace_trust.rs"]
@@ -160,43 +192,16 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     input.write_all(b"start the detached command\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
-    let start = output.len();
-    until_prompt_from(&reader, &mut output, start);
-    drain_until_quiet(&reader, &mut output);
+    until_mcp_composer_is_idle(&reader, &mut output);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    // Catches the completion-file race: the shell writes the file before its
-    // exit and output evidence settle. Observe delivery at a turn boundary
-    // instead of treating that file as a process-settlement barrier.
-    loop {
-        let start = output.len();
-        input.write_all(b"inspect the completed command\r").unwrap();
-        input.flush().unwrap();
-        while !normalized(&output[start..]).contains("DETACHED-NEXT-TURN") {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            output.extend(
-                reader
-                    .recv_timeout(remaining)
-                    .expect("settlement reply deadline"),
-            );
-        }
-        let start = output.len();
-        until_prompt_from_with_context(
-            &reader,
-            &mut output,
-            start,
-            deadline.saturating_duration_since(Instant::now()),
-            "detached settlement composer",
-        );
-        let generations = stub.generations();
-        let history = generations.last().expect("next generation")["messages"].to_string();
-        if (history.contains("exited code 0") && history.contains("DETACHED-DONE"))
-            || Instant::now() >= deadline
-        {
-            break;
-        }
-    }
+    let id = background_exec_id(&output);
+    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
+    let start = output.len();
+    input.write_all(b"inspect the completed command\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
+    until_mcp_composer_is_idle(&reader, &mut output);
     let completion = std::fs::read_to_string(&completed).ok();
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
@@ -213,6 +218,51 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
         history.contains("exited code 0") && history.contains("DETACHED-DONE"),
         "next turn lost detached settlement: {history}"
     );
+}
+
+/// Parse the admitted process identity, not a later status or another task.
+fn background_exec_id(output: &[u8]) -> String {
+    let transcript = normalized(output);
+    let prefix = "background exec id: ";
+    let offset = transcript.rfind(prefix).expect("background handle") + prefix.len();
+    let id = &transcript[offset..offset + 36];
+    assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
+    id.to_owned()
+}
+
+/// A shell completion file precedes pipe draining and waitpid. Inspect the
+/// executor's terminal snapshot before starting the generation that consumes it.
+/// Every inspection must finish its editor cycle before the next input is sent.
+fn until_background_exec_settled(
+    reader: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    input: &mut impl Write,
+    id: &str,
+    outcome: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let expected = format!("background exec {id}: {outcome}");
+    loop {
+        let start = output.len();
+        input
+            .write_all(format!("/tasks {id}\r").as_bytes())
+            .unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(
+            reader,
+            output,
+            start,
+            "tasks",
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        if normalized(&output[start..]).contains(&expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "process did not settle: {expected}"
+        );
+    }
 }
 
 // Catches: Ctrl+B kills/restarts the child, loses its handle, or duplicates its settlement.
@@ -261,9 +311,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "background exec id:");
     until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
-    let start = output.len();
-    until_prompt_from(&reader, &mut output, start);
-    drain_until_quiet(&reader, &mut output);
+    until_mcp_composer_is_idle(&reader, &mut output);
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
     input.flush().unwrap();
@@ -272,50 +320,28 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
         !places.workspace_path().join("completed").exists(),
         "Ctrl+B restarted or waited for the command"
     );
+    until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    // Catches the completion-file race: the shell writes the file before its
-    // exit and output evidence settle. Observe delivery at a turn boundary
-    // instead of treating that file as a process-settlement barrier.
-    loop {
-        let start = output.len();
-        input.write_all(b"inspect the completed command\r").unwrap();
-        input.flush().unwrap();
-        while !normalized(&output[start..]).contains("DETACHED-NEXT-TURN") {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            output.extend(
-                reader
-                    .recv_timeout(remaining)
-                    .expect("settlement reply deadline"),
-            );
-        }
-        let start = output.len();
-        until_prompt_from_with_context(
-            &reader,
-            &mut output,
-            start,
-            deadline.saturating_duration_since(Instant::now()),
-            "detached settlement composer",
-        );
-        let generations = stub.generations();
-        let history = generations.last().expect("next generation")["messages"].to_string();
-        if (history.contains("exited code 0") && history.contains("DETACHED-DONE"))
-            || Instant::now() >= deadline
-        {
-            break;
-        }
-    }
+    let id = background_exec_id(&output);
+    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
+    let start = output.len();
+    input.write_all(b"inspect the completed command\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
+    until_mcp_composer_is_idle(&reader, &mut output);
     let completion = std::fs::read_to_string(&completed).ok();
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, mark, "exited code 0");
+    until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
     let mark = output.len();
     input.write_all(b"/help\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, mark, "/tasks");
     until_normalized(&reader, &mut output, mark, "Ctrl+B");
+    until_local_action_completed(&reader, &mut output, mark, "help", PROGRESS_DEADLINE);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = session.quit(input);
@@ -1141,7 +1167,7 @@ fn successor_accepts_next_turn(action: &str) {
         "--sandbox",
         "off",
     ]);
-    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, Some((24, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -1210,10 +1236,12 @@ fn successor_accepts_next_turn(action: &str) {
         );
         let start = output.len();
         until_prompt_from(&reader, &mut output, start);
-        let shown = normalized(&output);
+        // Redraws may occur between wrapped notice rows; inspect the actual
+        // terminal, not the interleaved live-frame bytes in the write stream.
+        let shown = screen_rows(&output, 24, 100).join("\n");
         assert!(
             shown.contains("the session log could not be written")
-                && shown.contains("Is a directory"),
+                && support::notice_prose(&shown).contains("Is a directory"),
             "wrong failure: {shown}"
         );
         assert_eq!(
@@ -1736,7 +1764,7 @@ fn image_paste_refuses_unsupported_model_before_reading_image() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let rendered = normalized(&output[paste_start..]);
-        if rendered.contains("does not support image input")
+        if support::notice_prose(&rendered).contains("does not support image input")
             || rendered.contains("[image: unreadable.png]")
         {
             break;
@@ -1753,7 +1781,7 @@ fn image_paste_refuses_unsupported_model_before_reading_image() {
         .expect("restore image permissions");
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
-        result.contains("does not support image input"),
+        support::notice_prose(&result).contains("does not support image input"),
         "no capability refusal: {result:?}"
     );
     assert!(
@@ -2752,8 +2780,9 @@ fn until_local_action_completed(
     budget: Duration,
 ) {
     let marker = format!("/{command}");
-    // Reedline toggles bracketed paste around an accepted line; a redraw
-    // prompt before that cycle does not mean the command has completed.
+    // A fresh editor cycle must follow acceptance; an earlier redraw is not
+    // command completion. A host-intercepted Enter suspends the editor before
+    // accept_buffer echoes the line, while native acceptance echoes it first.
     let completed = |bytes: &[u8]| {
         let find_after = |bytes: &[u8], marker: &[u8]| {
             bytes
@@ -2762,8 +2791,9 @@ fn until_local_action_completed(
                 .map(|position| position + marker.len())
         };
         let echoed = find_after(bytes, marker.as_bytes())?;
-        let stopped = echoed + find_after(&bytes[echoed..], b"\x1b[?2004l")?;
-        let resumed = stopped + find_after(&bytes[stopped..], b"\x1b[?2004h")?;
+        let stopped = find_after(bytes, b"\x1b[?2004l")?;
+        let accepted = echoed.max(stopped);
+        let resumed = accepted + find_after(&bytes[accepted..], b"\x1b[?2004h")?;
         (rendered_prompt_count(&bytes[resumed..]) > 0).then_some(resumed)
     };
     let deadline = Instant::now() + budget;
@@ -2850,6 +2880,51 @@ fn normalized(bytes: &[u8]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// Read the complete semantic notice, independent of physical terminal wraps.
+fn until_notice_prose(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !support::notice_prose(&normalized(&output[start..])).contains(needle) {
+        output.extend(
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "notice wait failed for {needle:?}: {error}; {}",
+                        normalized(&output[start..])
+                    )
+                }),
+        );
+    }
+}
+
+// Observe retained terminal prose, not live redraws between wrapped rows.
+fn until_screen_prose(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    rows: u16,
+    cols: u16,
+    needle: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !support::notice_prose(&screen_rows(output, rows, cols).join("\n")).contains(needle) {
+        output.extend(
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "screen wait failed for {needle:?}: {error}; {:?}",
+                        screen_rows(output, rows, cols)
+                    )
+                }),
+        );
+    }
 }
 
 fn until_normalized(
@@ -3111,7 +3186,9 @@ fn count_notes_write_results(value: &serde_json::Value) -> usize {
     match value {
         serde_json::Value::String(value) => usize::from(
             value
-                .strip_prefix("wrote 10 bytes to ")
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("wrote 10 bytes to "))
                 .is_some_and(|path| {
                     Path::new(path)
                         .file_name()
@@ -3167,6 +3244,18 @@ fn find(output: &[u8], needle: &[u8]) -> usize {
         .windows(needle.len())
         .position(|window| window == needle)
         .unwrap_or_else(|| panic!("missing PTY marker {:?}", String::from_utf8_lossy(needle)))
+}
+
+// Cancellation receipts precede the driver's idle transition. Require the
+// completed status frame before follow-up input can enter a cursor query.
+fn until_idle_status_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    until_normalized(receiver, output, start, "qwen3 · ");
+    let idle_row = start + find(&output[start..], "qwen3 · ".as_bytes());
+    let idle_frame = output[..idle_row]
+        .windows(b"\x1b[?25l".len())
+        .rposition(|bytes| bytes == b"\x1b[?25l")
+        .expect("idle status belongs to a painter frame");
+    until_draft_ready(receiver, output, idle_frame);
 }
 
 fn until_draft_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
@@ -3527,6 +3616,117 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
             .contains("WIZ-RUN-FROM-LOCAL-PATH"),
         "the executable found on effective PATH did not run: {}",
         generations[1]
+    );
+}
+
+// Catches: Meta-o being queued as composer input or refused while a turn runs.
+#[test]
+fn busy_expand_shortcut_shows_hidden_output_without_submitting_draft() {
+    busy_expand_shortcut_transcript(false);
+}
+
+// Catches: a truncated row advertising only /expand, hiding the live shortcut.
+#[test]
+fn busy_expand_hint_names_the_live_shortcut() {
+    busy_expand_shortcut_transcript(true);
+}
+
+fn busy_expand_shortcut_transcript(check_hint: bool) {
+    // Screen markdown emits complete paragraphs, not a single trailing newline.
+    // Finish this paragraph before gating the response tail.
+    let (sampling, gate) = gated_paced_line("EXPAND-TURN-STILL-RUNNING\n");
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "expand-exec",
+                "exec",
+                r#"{"argv":["printf","HIDDEN-FIRST\nHIDDEN-SECOND\nTAIL-ONE\nTAIL-TWO\nTAIL-THREE\n"],"cwd":null,"timeout_ms":1000}"#,
+            )),
+            sampling,
+        ],
+        ..Plan::default()
+    });
+    // Release the fixture worker even when an assertion fails.
+    struct ReleaseOnDrop(Arc<ReleaseGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"show five output lines\r")
+        .expect("submit turn");
+    input.flush().expect("submit turn flush");
+    until_normalized(&reader, &mut output, 0, "EXPAND-TURN-STILL-RUNNING");
+    let collapsed = normalized(&output);
+    assert!(collapsed.contains("2 more lines"), "{collapsed}");
+    if check_hint {
+        // Assert before exercising the shortcut so each regression has its own oracle.
+        assert!(
+            collapsed.contains("2 more lines · Option+O or /expand"),
+            "the truncated row must advertise the running-turn shortcut: {collapsed}"
+        );
+    }
+    // Only match a standalone output line: the exec header also names its argv.
+    assert!(!collapsed.contains("  HIDDEN-FIRST\n"), "{collapsed}");
+
+    let draft_start = output.len();
+    input.write_all(b"unsent expand draft").expect("busy draft");
+    input.flush().expect("busy draft flush");
+    until_from(&reader, &mut output, draft_start, b"unsent expand draft");
+    // Text appears before the repaint finishes its cursor query. Sending Meta-o
+    // during that query lets the terminal-position reader consume the key.
+    until_from(&reader, &mut output, draft_start, b"\x1b[?25h");
+    drain_until_quiet(&reader, &mut output);
+    let expand_start = output.len();
+    input.write_all(b"\x1bo").expect("Meta-o");
+    input.flush().expect("Meta-o flush");
+    until_normalized(&reader, &mut output, expand_start, "  HIDDEN-FIRST\n");
+    until_normalized(&reader, &mut output, expand_start, "  HIDDEN-SECOND\n");
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "shortcut must not submit a turn"
+    );
+
+    gate.release();
+    until_normalized(&reader, &mut output, expand_start, "qwen3 · ");
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear preserved draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from(&reader, &mut output, clear_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert_eq!(stub.generations().len(), 2, "draft must not queue a turn");
+    assert!(
+        !stub
+            .generations()
+            .iter()
+            .any(|request| request.to_string().contains("unsent expand draft")),
+        "the unsent draft must never reach the provider"
     );
 }
 
@@ -4406,8 +4606,8 @@ fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
     );
     assert_eq!(
         visible.matches("qwen3 · ").count(),
-        1,
-        "status must occur once before the user turn: {visible:?}"
+        0,
+        "the submitted status must not remain above the user turn: {visible:?}"
     );
 
     gate.release();
@@ -4626,7 +4826,7 @@ fn cancelling_before_reply_clears_the_thinking_row() {
     let cancel_start = output.len();
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
-    until_normalized(&reader, &mut output, cancel_start, "qwen3 · ");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(24, 80, 0);
     screen.process(&output);
@@ -4692,6 +4892,7 @@ fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
     until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
@@ -4805,7 +5006,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     drain_until_quiet(&reader, &mut output);
     let usage = normalized(&output[usage_start..]);
     assert!(
-        usage.contains("unpriced subscription-equivalent (standard API)"),
+        usage.contains("unpriced nonmonetary usage (no API equivalent)"),
         "nonmonetary usage cost: {usage:?}"
     );
     assert!(
@@ -4900,6 +5101,7 @@ fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
     input.write_all(b"\x1b").expect("escape");
     input.flush().expect("escape flush");
     until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(40, 100, 0);
     screen.process(&output);
@@ -5725,7 +5927,7 @@ fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, co
     drain_until_quiet(&reader, &mut output);
     let after_pickers = normalized(&output[reasoning_start..]);
     let banner = after_pickers
-        .find("εgo: ego")
+        .find("εgo: model")
         .unwrap_or_else(|| panic!("no banner after the pickers: {after_pickers:?}"));
     assert!(
         after_pickers[..banner].ends_with('\n') || banner == 0,
@@ -5776,26 +5978,37 @@ fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
     // the first prompt was painted before the command echo and Enter cycle.
     let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
     let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
-    let (sender, receiver) = mpsc::channel();
-    let (done, result) = mpsc::channel();
-    sender.send(redraw.to_vec()).expect("first PTY frame");
-    let waiter = thread::spawn(move || {
-        let mut output = Vec::new();
-        until_local_action_completed(&receiver, &mut output, 0, "clear", Duration::from_secs(2));
-        done.send(output).expect("completion result");
-    });
-    assert!(
-        result.recv_timeout(Duration::from_millis(100)).is_err(),
-        "a redraw prompt was mistaken for /clear completion"
-    );
-    sender
-        .send(completion.to_vec())
-        .expect("completion PTY frame");
-    let output = result
-        .recv_timeout(Duration::from_secs(2))
-        .expect("real command completion");
-    assert!(output.ends_with(completion));
-    waiter.join().expect("waiter thread");
+    // Host acceptance suspends before echoing the accepted buffer; both
+    // orderings still require a fresh resumed editor after acceptance.
+    let host_completion = b"\x1b[?2004l\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
+    for completion in [completion.as_slice(), host_completion.as_slice()] {
+        let (sender, receiver) = mpsc::channel();
+        let (done, result) = mpsc::channel();
+        sender.send(redraw.to_vec()).expect("first PTY frame");
+        let waiter = thread::spawn(move || {
+            let mut output = Vec::new();
+            until_local_action_completed(
+                &receiver,
+                &mut output,
+                0,
+                "clear",
+                Duration::from_secs(2),
+            );
+            done.send(output).expect("completion result");
+        });
+        assert!(
+            result.recv_timeout(Duration::from_millis(100)).is_err(),
+            "a redraw prompt was mistaken for /clear completion"
+        );
+        sender
+            .send(completion.to_vec())
+            .expect("completion PTY frame");
+        let output = result
+            .recv_timeout(Duration::from_secs(2))
+            .expect("real command completion");
+        assert!(output.ends_with(completion));
+        waiter.join().expect("waiter thread");
+    }
 }
 
 #[test]
@@ -5848,10 +6061,11 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 30] = [
+    const COMMANDS: [&str; 33] = [
         "help",
         "model",
         "thinking",
+        "fast",
         "mode",
         "plan",
         "yolo",
@@ -5877,6 +6091,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "expand",
         "skills",
         "hooks",
+        "memory",
+        "init",
         "retry",
         "version",
     ];
@@ -5936,6 +6152,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     submit_local_action(&reader, &mut output, &mut input, &stub, "yolo", None);
 
     for (command, expected) in [
+        ("fast off", Some("standard (this session only)")),
         ("mcp", Some("mcp:")),
         ("fork", None),
         // The inherited model permits a checkpoint request; its empty reply must fail.
@@ -5944,7 +6161,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("usage", Some("usage as of")),
         ("export", None),
         ("config perimeter", Some("capabilities")),
-        ("doctor", Some("acp.extension:hold")),
+        ("doctor", Some("acp: ok")),
+        ("doctor details", Some("acp.extension:hold")),
         ("new", None),
         ("name", None),
         ("goal", None),
@@ -5960,7 +6178,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
             let start = output.len();
             input.write_all(b"/compact\r").expect("compact command");
             input.flush().expect("compact command flush");
-            until_normalized(
+            until_notice_prose(
                 &reader,
                 &mut output,
                 start,
@@ -5979,7 +6197,11 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
                 "compact must send one checkpoint and one malformed-output correction"
             );
         } else {
+            let start = output.len();
             submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+            if command == "doctor" {
+                assert_doctor_summary(&output[start..]);
+            }
         }
     }
 
@@ -6133,8 +6355,16 @@ fn fork_after_a_turn() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
+    until_notice_prose(
+        &reader,
+        &mut output,
+        fork_start,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
     drain_until_quiet(&reader, &mut output);
-    let receipt = normalized(&output[fork_start..]);
+    // Read the terminal's retained receipt, excluding transient status redraws
+    // interleaved between its explicitly wrapped rows in the byte stream.
+    let receipt = support::notice_prose(&screen_rows(&output, ROWS, COLS).join("\n"));
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
     assert!(session.quit(input).success());
@@ -6235,6 +6465,12 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
+    until_notice_prose(
+        &reader,
+        &mut output,
+        fork_start,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
     drain_until_quiet(&reader, &mut output);
     let after = screen_rows(&output, ROWS, COLS);
     input.write_all(b"/quit\r").expect("quit");
@@ -6242,12 +6478,12 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     assert!(session.quit(input).success());
     let status = |rows: &[String]| {
         rows.iter()
-            .find(|row| row.contains("ctx"))
+            .find(|row| row.contains("▱") || row.contains("▰"))
             .cloned()
             .unwrap_or_else(|| panic!("no status row on screen: {rows:?}"))
     };
     assert!(
-        !status(&before).contains("ctx ?"),
+        !status(&before).contains(" ?/"),
         "precondition: the resumed source shows its context reading: {before:?}"
     );
     status(&after)
@@ -6258,7 +6494,7 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
 fn the_forked_session_keeps_the_context_reading_in_its_status_row() {
     let status = status_row_after_forking_a_session_with_a_context_reading();
     assert!(
-        status.contains("ctx 9.2%"),
+        status.contains("3k/32.8k"),
         "the fork lost or changed the measured context reading: {status:?}"
     );
 }
@@ -6286,6 +6522,27 @@ fn quitting_without_any_turn_prints_no_resume_hint() {
         !after_quit.contains("ego resume"),
         "hint for a session that cannot be resumed: {after_quit:?}"
     );
+}
+
+// Catches: the concise doctor view omits section health or leaks detailed evidence.
+fn assert_doctor_summary(output: &[u8]) {
+    let prose = support::notice_prose(&normalized(output));
+    for marker in [
+        "doctor: not_checked",
+        "/doctor details for evidence and remediation",
+        "configuration: ok",
+        "credentials: not_checked",
+        "session_store: ok",
+        "sandbox: not_checked",
+        "catalogue: not_checked",
+        "mcp: ok",
+        "skills: not_checked",
+        "hooks: ok",
+        "acp: ok",
+    ] {
+        assert!(prose.contains(marker), "missing {marker}: {prose}");
+    }
+    assert!(!prose.contains("acp.extension:hold"), "{prose}");
 }
 
 #[test]
@@ -6358,6 +6615,23 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
             &reader,
             &mut output,
             doctor_start,
+            "acp: ok",
+            &stub,
+            0,
+        );
+        until_prompt_after(&reader, &mut output, prompt_count);
+        assert_doctor_summary(&output[doctor_start..]);
+
+        let details_start = output.len();
+        let prompt_count = support::ready_prompt_count(&output);
+        input
+            .write_all(b"/doctor details\r")
+            .expect("doctor details");
+        input.flush().expect("doctor details flush");
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            details_start,
             "acp.extension:hold",
             &stub,
             0,
@@ -7002,6 +7276,15 @@ fn tool_turn_with_completions(
 
     let mut after_expand = Vec::new();
     if expand {
+        // A busy composer also ends in `>`: wait for a completed idle frame
+        // after the answer, not just the transient screen shape above.
+        let answer_end = start
+            + output[start..]
+                .windows(TOOL_TURN_DONE.len())
+                .position(|window| window == TOOL_TURN_DONE.as_bytes())
+                .expect("the completed answer was observed")
+            + TOOL_TURN_DONE.len();
+        until_prompt_from(&reader, &mut output, answer_end);
         let start = output.len();
         input.write_all(b"\x1bo").expect("Meta-o");
         input.flush().expect("expand flush");
@@ -8566,7 +8849,7 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
         "--sandbox",
         "off",
     ]);
-    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, Some((24, 100)));
     let mut output = Vec::new();
     until(&reader, &mut output, b"Trust project files");
     let start = output.len();
@@ -8583,7 +8866,15 @@ fn critic_successor_model_before_generation(action: &str) -> (String, String) {
     input.write_all(format!("/{action}\r").as_bytes()).unwrap();
     input.flush().unwrap();
     until_successor_receipt_ready(&reader, &mut output, start, action, &stub);
-    let receipt = normalized(&output[start..]);
+    until_screen_prose(
+        &reader,
+        &mut output,
+        24,
+        100,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
+    drain_until_quiet(&reader, &mut output);
+    let receipt = support::notice_prose(&screen_rows(&output, 24, 100).join("\n"));
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     let status = session.quit(input);
@@ -8662,7 +8953,7 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("↳ one ›") && line.contains("read calc.py"))
+            .filter(|line| line.trim() == "↳ task one")
             .count(),
         1,
         "{lines:?}"
@@ -8670,7 +8961,7 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("↳ two ›") && line.contains("read calc.py"))
+            .filter(|line| line.trim() == "↳ task two")
             .count(),
         1,
         "{lines:?}"
@@ -8678,7 +8969,7 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("task one"))
+            .filter(|line| line.trim_start().starts_with("✓ task one"))
             .count(),
         1,
         "{lines:?}"
@@ -8686,11 +8977,21 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     assert_eq!(
         lines
             .iter()
-            .filter(|line| line.contains("task two"))
+            .filter(|line| line.trim_start().starts_with("✓ task two"))
             .count(),
         1,
         "{lines:?}"
     );
+    for task in ["one", "two"] {
+        let header = lines
+            .iter()
+            .position(|line| line.trim() == format!("↳ task {task}"))
+            .unwrap();
+        assert!(
+            lines[header + 1].trim_start().starts_with("✓ read calc.py"),
+            "{lines:?}"
+        );
+    }
     assert!(
         lines.last().is_some_and(|line| line.starts_with('>')),
         "{lines:?}"
@@ -8756,24 +9057,34 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     }
     session.press(b"\x02");
     session.wait(TOOL_TURN_DONE);
-    let transcript = normalized(&session.output);
-    let prefix = "background exec id: ";
-    let offset = transcript.rfind(prefix).expect("background handle") + prefix.len();
-    let id = &transcript[offset..offset + 36];
-    assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
+    until_mcp_composer_is_idle(&session.reader, &mut session.output);
+    let id = background_exec_id(&session.output);
     session.press(b"/tasks\r");
     session.wait("running");
     session.wait("REGRESSION-MARKER-OUTPUT");
+    until_local_action_completed(
+        &session.reader,
+        &mut session.output,
+        session.mark,
+        "tasks",
+        PROGRESS_DEADLINE,
+    );
     session.press(format!("/tasks cancel {id}\r").as_bytes());
     session.wait("background exec ");
-    loop {
-        session.press(format!("/tasks {id}\r").as_bytes());
-        drain_until_quiet(&session.reader, &mut session.output);
-        if normalized(&session.output[session.mark..]).contains("cancelled") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "cancel did not settle");
-    }
+    until_local_action_completed(
+        &session.reader,
+        &mut session.output,
+        session.mark,
+        "tasks",
+        PROGRESS_DEADLINE,
+    );
+    until_background_exec_settled(
+        &session.reader,
+        &mut session.output,
+        &mut session.input,
+        &id,
+        "cancelled",
+    );
     assert!(!session.ego.workspace_path().join("survived").exists());
     session.finish();
 }
@@ -9216,7 +9527,7 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         completions.push(Reply::Sse(text("REGRESSION-MARKER-CONTINUED")));
         // The successor keeps the independent goal check; success must still be verified.
         completions.push(Reply::Sse(text(
-            r#"{"achieved":true,"reason":"next sub-task verified"}"#,
+            r#"{"verdict":"achieved","reason":"next sub-task verified"}"#,
         )));
         let stub = Stub::start(Plan {
             completions,
@@ -9267,5 +9578,189 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
             "{successor}"
         );
         assert!(successor.contains("Finish both sub-tasks"), "{successor}");
+    }
+}
+
+fn record_slash_capture(output: &[u8], rows: u16, cols: u16) {
+    if let Some(directory) = std::env::var_os("EGO_SLASH_RECORD_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("record directory");
+        std::fs::write(directory.join(format!("{cols}x{rows}.ansi")), output).expect("raw capture");
+        std::fs::write(
+            directory.join(format!("{cols}x{rows}.json")),
+            format!("{{\"cols\":{cols},\"rows\":{rows}}}\n"),
+        )
+        .expect("geometry");
+    }
+}
+
+/// Catches: a UUID-width usage table wraps cost onto detached continuation rows.
+#[test]
+fn interactive_usage_keeps_cost_with_its_session_row_at_80_columns() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+            ])
+            .env("TERM", "xterm-256color");
+        ego.file("AGENTS.md", "# usage layout fixture\n");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until(&reader, &mut output, b"Trust project files");
+        input.write_all(b"yes\r").expect("trust");
+        input.flush().expect("trust flush");
+        until_post_trust_prompt(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/usage\r").expect("usage");
+        input.flush().expect("usage flush");
+        until_normalized(&reader, &mut output, start, "workspace");
+        until_local_action_completed(&reader, &mut output, start, "usage", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).expect("capture directory");
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).expect("raw capture");
+            std::fs::write(format!("{root}/{columns}x{rows}.txt"), &visible)
+                .expect("screen capture");
+        }
+        input.write_all(b"/quit\r").expect("quit");
+        input.flush().expect("quit flush");
+        session.quit(input);
+        let header = visible
+            .lines()
+            .find(|line| line.contains("cache_hit") && line.contains("cost"))
+            .expect("accounting header");
+        assert!(
+            header.rsplit('\r').next().unwrap_or(header).chars().count() <= usize::from(columns),
+            "accounting labels must fit without terminal wrapping: {header:?}"
+        );
+        assert!(
+            visible
+                .lines()
+                .any(|line| line.contains("total") && line.contains("unknown")),
+            "cost must stay beside its role and tokens: {visible:?}"
+        );
+    }
+}
+
+/// Catches: typed clear silently leaves the transcript and export omits format/destination receipts.
+#[test]
+fn typed_clear_reports_its_scope() {
+    let mut captures = Vec::new();
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/clear\r").unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(&reader, &mut output, start, "clear", SLASH_ACTION_DEADLINE);
+        submit_local_action(
+            &reader,
+            &mut output,
+            &mut input,
+            &stub,
+            "help",
+            Some(HELP_END),
+        );
+        submit_local_action(&reader, &mut output, &mut input, &stub, "export", None);
+        drain_until_quiet(&reader, &mut output);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).unwrap();
+        }
+        captures.push(normalized(&output[start..]));
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        assert!(stub.generations().is_empty());
+    }
+    for capture in captures {
+        assert!(
+            capture.contains("Composer cleared; transcript, context and history unchanged"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("Exported sanitized evidence bundle as md to this transcript"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("# ego sanitized export"),
+            "export bytes unchanged: {capture}"
+        );
+    }
+}
+
+/// Catches: the default tools summary is followed by per-tool diagnostic notices.
+#[test]
+fn followup_tools_default_has_no_per_tool_notices() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let places = support::Places::new();
+        places.file("AGENTS.md", "# tools fixture\n");
+        let ego = places
+            .ego(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--yolo",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/tools\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "/tools details for the full list",
+        );
+        until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        let notices = visible
+            .lines()
+            .filter(|line| line.contains("εgo: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.len(),
+            1,
+            "only the summary notice is allowed: {visible}"
+        );
+        assert!(
+            notices[0].contains("/tools details for the full list"),
+            "{visible}"
+        );
+        assert!(stub.generations().is_empty());
     }
 }

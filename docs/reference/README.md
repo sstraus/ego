@@ -12,7 +12,7 @@ name does not prove a provider credential or confinement backend is available.
 | `ego ls` | List this workspace's sessions; `--all` spans the store |
 | `ego fork SOURCE` | Branch at the tip or after a completed message with `--at ITEM_ID` |
 | `ego compact SOURCE` | Create a checkpoint successor; `--request-id UUID` provides retry identity |
-| `ego export SOURCE` | Write local or structurally sanitized `md`, `json`, or `jsonl` |
+| `ego export SOURCE` | Write local `md`, `json`, `jsonl`, or [followable transcript](transcript.md); `--sanitize` writes a structural bundle |
 | `ego usage` | Report context, tokens, roles, and monetary state |
 | `ego models` | Inspect model facts, source, freshness, and availability |
 | `ego auth login\|logout\|status` | Manage a provider's subscription credential |
@@ -26,9 +26,9 @@ name does not prove a provider credential or confinement backend is available.
 | `ego mcp-server` | Serve rooted runs on MCP stdio |
 | `ego a2a --listen ENDPOINT` | Serve local/loopback A2A discovery; operational methods are refused |
 
-`ego resume ID --name ...` and `--goal ...` manage metadata outside the REPL;
+`ego resume ID --name ...` and `--goal-operation ...` manage metadata outside the REPL;
 these accept `--name show|set=TEXT|clear` and
-`--goal show|set=TEXT|achieve|block=REASON`. They are covered in
+`--goal-operation show|set=TEXT|achieve|block=REASON`. They are covered in
 [sessions](../guides/sessions.md) and captured binary help.
 
 ## Flags and defaults

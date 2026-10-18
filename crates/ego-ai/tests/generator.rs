@@ -6,8 +6,8 @@
 //! Steps 8, 9 and 10 shipped the `Http` seam, the openai-completions wire
 //! format and the turn loop, each green in isolation and none of them joined
 //! to the others. This file is about the join, so it tests exactly the join:
-//! that the bytes the wire format would send are the bytes the transport is
-//! handed, that the events the wire format would decode are the events the
+//! that the transport receives the wire payload with the selected service tier,
+//! that the events the wire format would decode are the events the
 //! caller gets, and — the part with no other owner — that a request refused
 //! *before* a socket exists still ends the generation instead of returning
 //! an empty stream that settles as if the provider went silent.
@@ -294,8 +294,7 @@ impl HttpCall for StubCall {
 
 // --- what the transport is handed ---
 
-/// The join, in the only direction a test can see it: what the wire format
-/// would have sent is what the transport is handed, byte for byte.
+/// Catches the binding dropping wire fields while adding the explicit Standard tier.
 #[tokio::test]
 async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
@@ -315,14 +314,18 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
             .join(ego_ai::wire::openai_completions::PATH)
             .expect("a path")
     );
+    let mut expected: serde_json::Value =
+        serde_json::from_slice(&request_body(&request()).expect("this request is expressible"))
+            .expect("the wire format builds JSON");
+    expected["service_tier"] = "default".into();
     assert_eq!(
         sent.body.as_deref(),
         Some(
-            request_body(&request())
-                .expect("this request is expressible")
+            serde_json::to_vec(&expected)
+                .expect("valid JSON")
                 .as_slice()
         ),
-        "the binding composes the wire format's bytes; it does not build its own"
+        "the binding preserves every wire field and explicitly selects Standard"
     );
     assert!(
         sent.headers
@@ -765,7 +768,7 @@ impl ego_ai::wire::WireFormat for MarkerFormat {
             url: Url::parse(MARKER_PATH).expect("a constant this file controls"),
             method: Method::Post,
             headers: target.headers().to_vec(),
-            body: None,
+            body: Some(br#"{"marker":"request built by the marker format"}"#.to_vec()),
         })
     }
 
@@ -812,7 +815,17 @@ async fn the_request_sent_is_the_one_the_rows_mapping_built() {
     );
     // The row's endpoint is still the openai one, so this also proves the
     // mapping — not the row's address — decided where the bytes went.
-    assert!(sent.body.is_none(), "{sent:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(sent.body.as_deref().expect("the marker body is preserved"))
+            .expect("the request body is JSON");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "marker": "request built by the marker format",
+            "service_tier": "default",
+        }),
+        "the binding preserves the marker payload and explicitly selects Standard"
+    );
 }
 
 #[tokio::test]
@@ -1056,4 +1069,117 @@ fn request_diagnostics_include_wire_tool_names_without_private_request_data() {
     }];
     generator.ensure_expressible(&req).unwrap();
     assert_eq!(*captured.lock().unwrap(), ["[Some(String(\"read_file\"))]"]);
+}
+
+#[tokio::test]
+async fn fast_contract_catches_provider_field_drift_and_silent_unsupported_tiers() {
+    use ego_ai::service_tier::ServiceTier;
+    for (row, wire, model, field, beta) in [
+        (
+            ProviderRow::openai(),
+            &ego_ai::wire::openai_responses::OpenAiResponses as &'static dyn WireFormat,
+            "gpt-6.1-sol",
+            "service_tier",
+            false,
+        ),
+        (
+            ProviderRow::anthropic_default(),
+            &ego_ai::wire::anthropic_messages::AnthropicMessages as &'static dyn WireFormat,
+            "claude-opus-5-5",
+            "speed",
+            false,
+        ),
+        (
+            ProviderRow::anthropic_default(),
+            &ego_ai::wire::anthropic_messages::AnthropicMessages as &'static dyn WireFormat,
+            "claude-opus-4-8",
+            "speed",
+            true,
+        ),
+        (
+            ProviderRow::openrouter_default(),
+            &ego_ai::wire::openai_completions::OpenAiCompletions as &'static dyn WireFormat,
+            "openai/gpt-6.1-sol",
+            "service_tier",
+            false,
+        ),
+    ] {
+        for tier in [ServiceTier::Standard, ServiceTier::Fast] {
+            let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+            let credential = row
+                .credential
+                .resolve(&FakeCredentials::holding(KEY))
+                .unwrap();
+            let generator = WireGenerator::new(row.clone(), wire, http.clone(), credential)
+                .with_service_tier(tier);
+            let mut req = request();
+            req.model = model.into();
+            let mut gate = BudgetGate::new(usd("10"));
+            let attempt = attempt_for(&mut gate, &req);
+            let _: Vec<_> = generator.generate(req, attempt).collect().await;
+            let seen = http.seen.lock().unwrap();
+            let sent = seen.first().unwrap();
+            let body: serde_json::Value =
+                serde_json::from_slice(sent.body.as_deref().unwrap()).unwrap();
+            if tier == ServiceTier::Fast {
+                assert_eq!(
+                    body[field],
+                    if row.id() == "openrouter" {
+                        "priority"
+                    } else {
+                        "fast"
+                    }
+                );
+                if beta {
+                    assert!(sent.headers.iter().any(|header| {
+                        header.name() == "anthropic-beta"
+                            && String::from_utf8_lossy(header.value())
+                                .contains("fast-mode-2026-02-01")
+                    }));
+                }
+            } else {
+                assert_ne!(body[field], "fast");
+                assert_ne!(body[field], "priority");
+            }
+        }
+    }
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = generator(http.clone()).with_service_tier(ServiceTier::Fast);
+    let mut req = request();
+    req.model = "unknown".into();
+    assert!(
+        generator
+            .ensure_expressible(&req)
+            .unwrap_err()
+            .to_string()
+            .contains("no verified fast tier")
+    );
+    assert_eq!(http.calls(), 0);
+}
+
+#[tokio::test]
+async fn standard_tier_catches_fast_project_default_surviving_fast_off() {
+    // Captured OpenAI fast-mode documentation says omitted service_tier inherits
+    // the project's tier. Standard must override a Fast project explicitly, or
+    // /fast off can still incur Fast charges while ego quotes Standard prices.
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = WireGenerator::new(
+        row(),
+        &ego_ai::wire::openai_responses::OpenAiResponses,
+        http.clone(),
+        credential(&FakeCredentials::holding(KEY)),
+    )
+    .with_service_tier(ego_ai::service_tier::ServiceTier::Standard);
+    let mut req = request();
+    req.model = "gpt-6.1-sol".into();
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let _: Vec<_> = generator.generate(req, attempt).collect().await;
+    let seen = http.seen.lock().unwrap();
+    let sent = seen.first().expect("standard generation reaches transport");
+    let body: serde_json::Value = serde_json::from_slice(sent.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body["service_tier"], "default",
+        "Standard must override OpenAI project Fast defaults, not inherit them"
+    );
 }

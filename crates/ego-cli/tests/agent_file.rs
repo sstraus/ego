@@ -147,7 +147,7 @@ fn agent_file_and_argv_prompt_refuse_before_stdin_or_provider() {
         .run();
     assert_eq!(finished.code, Some(2));
     assert!(
-        finished.stderr.contains("agent file") || finished.stderr.contains("competing"),
+        finished.stderr.contains("--file") && finished.stderr.contains("PROMPT"),
         "missing input conflict: {}",
         finished.stderr
     );

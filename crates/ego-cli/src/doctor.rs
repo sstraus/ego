@@ -61,12 +61,45 @@ pub fn observed_session(
     width: usize,
     perimeter: &crate::perimeter::Perimeter,
 ) -> String {
+    observed_session_view(workspace, width, perimeter, true)
+}
+
+pub(crate) fn observed_session_view(
+    workspace: PathBuf,
+    width: usize,
+    perimeter: &crate::perimeter::Perimeter,
+    details: bool,
+) -> String {
     let home = config::ego_home();
     let roots = visible_roots(&workspace, home.as_ref());
-    text_with_width(
-        &snapshot_with_perimeter(workspace, home, &roots, Some(perimeter)),
-        width,
-    )
+    let snapshot = snapshot_with_perimeter(workspace, home, &roots, Some(perimeter));
+    if details {
+        text_with_width(&snapshot, width)
+    } else {
+        let mut rows = vec![format!(
+            "doctor: {} — /doctor details for evidence and remediation",
+            status_word(snapshot.status())
+        )];
+        for report in &snapshot.sections {
+            rows.push(format!(
+                "{}: {}",
+                report.section.label(),
+                status_word(report.status())
+            ));
+            for item in report
+                .items
+                .iter()
+                .filter(|item| matches!(item.status, HealthStatus::Warning | HealthStatus::Error))
+            {
+                rows.push(format!(
+                    "  {}: {} — /doctor details",
+                    item.id,
+                    status_word(item.status)
+                ));
+            }
+        }
+        rows.join("\n")
+    }
 }
 
 fn snapshot_with_perimeter(

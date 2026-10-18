@@ -24,7 +24,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
-            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable')
+            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
@@ -80,8 +80,8 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Run an agent from a prompt, headless.')
-            [CompletionResult]::new('resume', 'resume', [CompletionResultType]::ParameterValue, 'Continue a session; no ID = latest in this workspace.')
-            [CompletionResult]::new('continue', 'continue', [CompletionResultType]::ParameterValue, 'Continue a session; no ID = latest in this workspace.')
+            [CompletionResult]::new('resume', 'resume', [CompletionResultType]::ParameterValue, 'Continue a stored session.')
+            [CompletionResult]::new('continue', 'continue', [CompletionResultType]::ParameterValue, 'Continue a stored session.')
             [CompletionResult]::new('fork', 'fork', [CompletionResultType]::ParameterValue, 'Fork a session at its tip or after the completed turn containing a message.')
             [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Delete a stored session (history is retained for descendants).')
             [CompletionResult]::new('compact', 'compact', [CompletionResultType]::ParameterValue, 'Compact a session into its deterministic successor.')
@@ -91,6 +91,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('models', 'models', [CompletionResultType]::ParameterValue, 'List the shared model catalogue.')
             [CompletionResult]::new('hooks', 'hooks', [CompletionResultType]::ParameterValue, 'Inspect the admitted system and user hook catalogue.')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Report a read-only redacted health snapshot of this installation.')
+            [CompletionResult]::new('checkpoint', 'checkpoint', [CompletionResultType]::ParameterValue, 'Preview or selectively restore session-owned Git file checkpoints.')
             [CompletionResult]::new('setup', 'setup', [CompletionResultType]::ParameterValue, 'Inspect expected work without running effects.')
             [CompletionResult]::new('acp', 'acp', [CompletionResultType]::ParameterValue, 'Serve the Agent Client Protocol on stdio or an endpoint.')
             [CompletionResult]::new('a2a', 'a2a', [CompletionResultType]::ParameterValue, 'Serve the Agent2Agent protocol on a local or loopback endpoint.')
@@ -108,7 +109,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
-            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable')
+            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
@@ -165,10 +166,11 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;resume' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
-            [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
+            [CompletionResult]::new('--name', '--name', [CompletionResultType]::ParameterName, 'Read or change the session title without starting a turn: show, set=TEXT, clear')
+            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
-            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable')
+            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
@@ -183,8 +185,6 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--allow', '--allow', [CompletionResultType]::ParameterName, 'Allow rule, e.g. ''read(src/**)''. Repeatable')
             [CompletionResult]::new('--deny', '--deny', [CompletionResultType]::ParameterName, 'Deny rule, e.g. ''write(**)''. Repeatable')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Layer [profile.NAME] from config')
-            [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Named session: created or attached')
-            [CompletionResult]::new('--session-id', '--session-id', [CompletionResultType]::ParameterName, 'A session id supplied by the caller')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'text|json|jsonl')
@@ -205,6 +205,9 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Permission mode: plan|default|auto|edits|yolo')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
+            [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Named session: created or attached')
+            [CompletionResult]::new('--session-id', '--session-id', [CompletionResultType]::ParameterName, 'A session id supplied by the caller')
+            [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'No non-loopback egress from ego''s own HTTP transport')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
             [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
@@ -225,10 +228,11 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;continue' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
-            [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
+            [CompletionResult]::new('--name', '--name', [CompletionResultType]::ParameterName, 'Read or change the session title without starting a turn: show, set=TEXT, clear')
+            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
-            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable')
+            [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
@@ -243,8 +247,6 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--allow', '--allow', [CompletionResultType]::ParameterName, 'Allow rule, e.g. ''read(src/**)''. Repeatable')
             [CompletionResult]::new('--deny', '--deny', [CompletionResultType]::ParameterName, 'Deny rule, e.g. ''write(**)''. Repeatable')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Layer [profile.NAME] from config')
-            [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Named session: created or attached')
-            [CompletionResult]::new('--session-id', '--session-id', [CompletionResultType]::ParameterName, 'A session id supplied by the caller')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'text|json|jsonl')
@@ -265,6 +267,9 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Permission mode: plan|default|auto|edits|yolo')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
+            [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Named session: created or attached')
+            [CompletionResult]::new('--session-id', '--session-id', [CompletionResultType]::ParameterName, 'A session id supplied by the caller')
+            [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'No non-loopback egress from ego''s own HTTP transport')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
             [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
@@ -314,10 +319,12 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;export' {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Transcript format; JSONL is stdout-only and cannot be combined with --file')
+            [CompletionResult]::new('--after', '--after', [CompletionResultType]::ParameterName, 'Only emit transcript events after this session-local sequence')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--sanitize', '--sanitize', [CompletionResultType]::ParameterName, 'Remove private content structurally; exports are unsanitized by default')
+            [CompletionResult]::new('--follow', '--follow', [CompletionResultType]::ParameterName, 'Follow committed local transcript events until stopped')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -367,8 +374,33 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
+        'ego;checkpoint' {
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'C')
+            [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'directory')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('preview', 'preview', [CompletionResultType]::ParameterValue, 'List checkpoint IDs, paths, effects, and external-change conflicts as JSON')
+            [CompletionResult]::new('restore', 'restore', [CompletionResultType]::ParameterValue, 'Restore one selected checkpoint; external changes are never forced')
+            [CompletionResult]::new('close', 'close', [CompletionResultType]::ParameterValue, 'Close checkpoint ownership and delete the session''s private Git ref')
+            break
+        }
+        'ego;checkpoint;preview' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;checkpoint;restore' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;checkpoint;close' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
         'ego;setup' {
-            [CompletionResult]::new('--items', '--items', [CompletionResultType]::ParameterName, 'Limit proposals to these report item IDs (comma-separated)')
+            [CompletionResult]::new('--items', '--items', [CompletionResultType]::ParameterName, 'Select proposal item IDs as one comma-separated list; repeat to add IDs')
             [CompletionResult]::new('--judge', '--judge', [CompletionResultType]::ParameterName, 'Offer a validated judge for unresolved policy; never authorizes an action')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
             [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'directory')

@@ -172,6 +172,63 @@ fn busy_surface_names_work_and_its_escape_cancellation_affordance() {
     assert!(indicator.ends_with("\n> "));
 }
 
+/// Catches: tool output being counted as model tokens, or thinking staying
+/// active once the answer starts. Reasoning starts with a delta, not a start event.
+#[test]
+fn working_progress_tracks_only_model_text_and_current_reasoning() {
+    use ego_core::public::{ItemKind, PublicEvent};
+    let turn = ego_core::event::id::TurnId::new();
+    let item = ego_core::event::id::ItemId::new();
+    let mut status = SurfaceStatus::default();
+    status.begin_activity();
+    status.observe_generation_progress(&PublicEvent::ItemDelta {
+        turn,
+        item,
+        kind: ItemKind::Reasoning,
+        text: "thought".into(),
+    });
+    assert!(status.thinking_since.is_some());
+    status.observe_generation_progress(&PublicEvent::ItemDelta {
+        turn,
+        item,
+        kind: ItemKind::Tool,
+        text: "tool output".into(),
+    });
+    assert_eq!(status.activity_output_chars, 7);
+    status.observe_generation_progress(&PublicEvent::ItemDelta {
+        turn,
+        item,
+        kind: ItemKind::AgentMessage,
+        text: "answer".into(),
+    });
+    assert_eq!(status.activity_output_chars, 13);
+    assert!(status.thinking_since.is_none());
+    status.begin_activity();
+    assert_eq!(
+        status.activity_output_chars, 13,
+        "same busy turn retains progress"
+    );
+    status.activity = false;
+    status.begin_activity();
+    assert_eq!(status.activity_output_chars, 0, "next turn starts fresh");
+}
+
+/// Catches: estimated output tokens being presented as an exact provider
+/// count, or a live reasoning interval disappearing from the working row.
+#[test]
+fn busy_surface_labels_estimated_tokens_and_active_thinking() {
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        activity: true,
+        activity_output_chars: 1_752,
+        thinking_since: Some(Instant::now() - Duration::from_secs(1)),
+        ..SurfaceStatus::default()
+    }));
+    let waiting = Waiting::new(status);
+    let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+    assert!(indicator.contains("↓ ~438 tokens"), "{indicator}");
+    assert!(indicator.contains("thinking started 1s ago"), "{indicator}");
+}
+
 // Catches: long turns shown as raw seconds, or losing the smaller unit at a boundary.
 #[test]
 fn working_indicator_formats_long_elapsed_time() {
@@ -291,13 +348,24 @@ fn help_routes_to_scrollback_instead_of_becoming_a_multiline_prompt() {
     assert_eq!(status.lock().unwrap().notice, None);
 }
 
+// Catches: expansion waiting in the host input queue until a running turn ends.
 #[test]
-fn expand_reaches_the_host_and_leaves_no_status_notice() {
+fn expand_writes_scrollback_without_waiting_for_the_host() {
     let mut editor = Reedline::create();
     let phase = SurfacePhase::new(EditPhase::Idle);
     let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::new(
         ActionRegistry::final_surface(),
     ))));
+
+    let (sender, rows) = crossbeam::channel::unbounded();
+    let output = Arc::new(crate::output::InteractiveOutput::new(SurfaceOutput::new(
+        sender,
+        CancelToken::new(),
+    )));
+    let diagnostics: Arc<dyn crate::output::Diagnostics> = output.clone();
+    diagnostics.tool_row("compact row", "full output".to_owned());
+    rows.try_iter().for_each(drop);
+    status.lock().unwrap().diagnostics = Some(Arc::downgrade(&diagnostics));
 
     let line = apply_surface_effect(
         &mut editor,
@@ -307,10 +375,8 @@ fn expand_reaches_the_host_and_leaves_no_status_notice() {
         false,
     );
 
-    assert_eq!(
-        line,
-        Some(Line::HostCommand(HostCommand::Action(ActionId::Expand)))
-    );
+    assert_eq!(line, None);
+    assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["\n", "full output\n"]);
     assert_eq!(status.lock().unwrap().notice, None);
 }
 
@@ -441,6 +507,7 @@ fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
         vec![
             Segment::Model,
             Segment::Effort,
+            Segment::Fast,
             Segment::Mode,
             Segment::Context,
             Segment::Cost,
@@ -454,6 +521,7 @@ fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
     );
     assert!(
         effective_statusline_segments(Some(&StatuslineLayer {
+            providers: None,
             segments: Some(Vec::new()),
         }))
         .is_empty()
@@ -1069,6 +1137,40 @@ fn disconnected_receipt_pump_leaves_an_operator_notice() {
     );
 }
 
+// Catches: progress using the startup width after a terminal resize.
+#[test]
+fn working_row_stays_within_live_terminal_width_after_resize() {
+    let mut initial = SurfaceStatus {
+        activity: true,
+        activity_output_chars: 123_456,
+        thinking_since: Some(Instant::now() - Duration::from_secs(12)),
+        width: 120,
+        ..SurfaceStatus::default()
+    };
+    initial.permission_capabilities.width = 120;
+    let status = Arc::new(Mutex::new(initial));
+    let mut mode = SurfaceEditMode::with_status(
+        Emacs::default(),
+        SurfacePhase::new(EditPhase::Idle),
+        Arc::clone(&status),
+    );
+    let waiting = Waiting::new(status);
+    for width in [20_u16, 40, 80, 120, 1] {
+        assert!(matches!(
+            mode.parse_event(ReedlineRawEvent::try_from(Event::Resize(width, 24)).unwrap()),
+            ReedlineEvent::Resize(w, 24) if w == width
+        ));
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        let row = indicator.lines().next().unwrap();
+        let visible = row.replace("\x1b[2m", "").replace("\x1b[22m", "");
+        assert!(
+            crate::render::line::cells(&visible) <= usize::from(width).saturating_sub(1),
+            "{width}: {row:?}"
+        );
+        assert!(indicator.ends_with("\n> "), "{indicator:?}");
+    }
+}
+
 // Catches: a long retry cause wraps onto the composer, or an elapsed delay underflows.
 #[test]
 fn retry_row_is_bounded_and_expired_countdown_saturates() {
@@ -1105,6 +1207,83 @@ fn retry_row_is_bounded_and_expired_countdown_saturates() {
             .render_prompt_indicator(PromptEditMode::Emacs)
             .contains("retrying in 0.0s")
     );
+}
+
+#[test]
+fn persistent_instruction_actions_487_route_menus_and_refuse_busy_ingress() {
+    // Catches: menu actions lack an owner or busy slash input mutates persistent state.
+    let pending = Arc::new(Mutex::new(None));
+    let mut sink = SurfaceActionSink {
+        pending: Arc::clone(&pending),
+    };
+    let mut editor = Reedline::create();
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    for (id, effect, dispatch, expected) in [
+        (
+            ActionId::Memory,
+            SurfaceActionEffect::Memory,
+            Dispatch::Memory(String::new()),
+            HostCommand::Memory(String::new()),
+        ),
+        (
+            ActionId::Init,
+            SurfaceActionEffect::Init,
+            Dispatch::Init(String::new()),
+            HostCommand::Init(String::new()),
+        ),
+    ] {
+        assert_eq!(
+            sink.invoke(LocalAction { id, busy: false }),
+            LocalActionOutcome::Completed
+        );
+        assert_eq!(
+            pending
+                .lock()
+                .unwrap()
+                .take()
+                .map(|value| std::mem::discriminant(&value)),
+            Some(std::mem::discriminant(&effect))
+        );
+        assert!(super::action_execution::busy_dispatch_refusal(&dispatch).is_some());
+        assert!(
+            matches!(apply_surface_effect(&mut editor, &phase, &status, effect, false), Some(Line::HostCommand(command)) if command == expected)
+        );
+    }
+}
+/// Catches: discovery descriptions omit the grammar of argument-bearing commands.
+#[test]
+fn slash_help_shows_name_goal_and_mcp_grammar() {
+    let registry = ActionRegistry::final_surface();
+    let help = render_action_help(&registry, 120);
+    for grammar in [
+        "/name [show|set TEXT|clear]",
+        "/goal [show|set TEXT|achieve|block REASON]",
+        "/mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
+    ] {
+        assert!(help.contains(grammar), "missing {grammar}: {help}");
+        assert!(
+            registry
+                .iter()
+                .any(|action| action.description_text().contains(grammar)),
+            "menu must use the same grammar: {grammar}"
+        );
+    }
+}
+
+/// Catches: alias spellings cannot be discovered without accidentally submitting a prompt.
+#[test]
+fn slash_aliases_complete_without_changing_unknown_prompt_policy() {
+    let registry = Arc::new(ActionRegistry::final_surface());
+    let mut completer = ActionCompleter { registry };
+    for (prefix, alias) in [
+        ("/resu", "/resume"),
+        ("/cont", "/continue"),
+        ("/hist", "/history"),
+    ] {
+        let result = completer.complete(prefix, prefix.len());
+        assert!(result.suggestions().iter().any(|item| item.value == alias));
+    }
 }
 
 fn vim_surface(phase: SurfacePhase, status: SharedStatus) -> SurfaceEditMode {
@@ -1320,7 +1499,7 @@ fn long_prompt_echo_is_collapsed() {
         .expect("long submissions need a compact receipt");
     assert_eq!(
         receipt,
-        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · /expand shows all"
+        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · Option+O or /expand"
     );
 }
 
@@ -1345,7 +1524,15 @@ fn collapsed_prompt_and_tool_output_share_expansion_history() {
             .contains("> one\n… two\n… three\n… four")
     );
     // A short submission, including /expand itself, must not replace the detail.
-    assert!(waiting.render_prompt_submission("/expand", 80).is_none());
+    assert_eq!(
+        waiting.render_prompt_submission("/expand", 80).as_deref(),
+        Some("> /expand")
+    );
+    output.expand_last_tool();
+    assert_eq!(
+        rows.try_iter().collect::<String>(),
+        "\n> one\n… two\n… three\n… four\n"
+    );
     output.tool_row("new tool", "new detail".into());
     let _ = rows.try_iter().collect::<Vec<_>>();
     output.expand_last_tool();

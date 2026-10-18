@@ -188,6 +188,17 @@ impl Capabilities {
         }
     }
 
+    /// Refresh layout geometry without renegotiating the output protocol.
+    /// A long-lived interactive sink must not retain the startup pane width.
+    pub fn with_current_width(mut self) -> Self {
+        if self.on_screen()
+            && let Some((width, _)) = terminal_size::terminal_size()
+        {
+            self.width = usize::from(width.0).max(1);
+        }
+        self
+    }
+
     /// Whether OSC 8 is safe here.
     ///
     /// A screen is necessary and not sufficient. §4 of the ADR rests on "an

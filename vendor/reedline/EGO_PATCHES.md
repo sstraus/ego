@@ -14,6 +14,10 @@ The permitted local delta is intentionally narrow:
 
 - position external output from the painter's tracked prompt anchor instead of
   estimating rows from buffer bytes or display-width division;
+- erase the complete prompt footprint from that anchor before external output
+  can wrap over its rows (regression case). Clearing only the first row leaves stale
+  prompt suffixes after a wrapped message, which repaint can scroll above the
+  new prompt anchor;
 - add regression coverage for narrow, combining, wide, and zero-width cases;
 - reuse a suspended prompt's rows on resume unless the cursor is on the bottom
   row (regression case). Upstream nushell/reedline#1130 makes a new prompt whenever

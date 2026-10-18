@@ -340,12 +340,14 @@ fn select_permission_value(
     repaint_status(status);
     let result = loop {
         let question = Question::new(
-            question_selector_prompt(&request, &selector),
+            question_selector_prompt(&request, &selector, status),
             Arc::clone(status),
         );
-        match queued_selector_line(status)
-            .unwrap_or_else(|| answer(false, editor.read_line(&question)))
-        {
+        match queued_selector_line(status).unwrap_or_else(|| {
+            let line = answer(false, editor.read_line(&question));
+            let _ = editor.erase_last_prompt();
+            line
+        }) {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
                 let Some(key) = next_selector_key(status, &command) else {
                     if cancel_missing_key {
@@ -525,7 +527,7 @@ pub(super) const STATUSLINE_PRESETS: [(&str, &str, &[ego_core::config::StatusSeg
         ),
         (
             "default",
-            "Default — model, effort, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
+            "Default — model, effort, fast, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
             DEFAULT_STATUSLINE_SEGMENTS,
         ),
         (
@@ -563,7 +565,7 @@ pub(super) fn choose_statusline_preset(
         phase,
         status,
         busy,
-        "Choose status-line setup",
+        "Choose status-line setup\n▰/▱: context used/window; green <60%, yellow ≥60%, red ≥85%.\n≈$: subscription-equivalent (standard API), not billed; $: billed.\n(partial): mixed/unpriced usage; ?: context unmeasured.\n⎇: branch; ●: uncommitted changes; path: abbreviated cwd.",
         &choices,
         (false, true, None),
     ) {

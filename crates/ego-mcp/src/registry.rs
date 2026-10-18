@@ -1851,7 +1851,15 @@ impl McpRegistryController {
                 "tool schema targets a non-collapsed MCP server".to_owned(),
             )
         })?;
-        let lookup_name = bootstrap.lookup_name();
+        let source_operation = command.admission_fingerprint.operation();
+        let lookup_name = source_operation
+            .strip_prefix(&format!("{name}/"))
+            .filter(|operation| bootstrap.admits_schema_from(operation))
+            .ok_or_else(|| {
+                McpRegistryError::InvalidCandidate(
+                    "collapsed schema source is not a discovery operation".to_owned(),
+                )
+            })?;
         let lookup = server
             .tools
             .iter()
@@ -3029,6 +3037,45 @@ mod collapsed_mcp_red {
             catalogue.tool_names().collect::<Vec<_>>(),
             vec!["call_tool", "calendar", "weather"]
         );
+    }
+
+    /// Catches: a tools/list_changed successor admits an inline schema from an old search capture.
+    #[tokio::test(flavor = "current_thread")]
+    async fn collapsed_search_schema_is_stale_after_tools_list_changed() {
+        let (controller, _admission, first) = bootstrap().await;
+        let descriptor = management()
+            .into_iter()
+            .find(|tool| tool.name == "search_tools")
+            .unwrap();
+        let source = McpAdmissionFingerprint::new(
+            first.capture().stable_fingerprint(),
+            format!("{SERVER}/search_tools"),
+            crate::dynamic::schema_fingerprint(&descriptor.parameters).unwrap(),
+        )
+        .unwrap();
+        let search_command = || {
+            McpToolSchemaCommand::new(
+                first.capture().servers()[0].clone(),
+                first.generation().to_owned(),
+                source.clone(),
+                "weather".to_owned(),
+                schema_definition("weather", weather_schema()),
+            )
+        };
+        // Schema publication uses the same ToolsListChanged refresh and replaces the generation.
+        let next = controller
+            .reconcile_tool_schema(search_command())
+            .await
+            .expect("inline search publication");
+        assert_ne!(first.generation(), next.generation());
+        assert!(next.admitted_tools().iter().any(|name| name == "call_tool"));
+        assert!(
+            controller
+                .reconcile_tool_schema(search_command())
+                .await
+                .is_err()
+        );
+        assert_eq!(controller.publication().generation(), next.generation());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -113,7 +113,7 @@ pub struct CostBreakdown {
     pub unknown: Vec<UnknownCost>,
     /// Display-only standard API equivalents, never monetary charges.
     pub subscription_equivalent: Vec<Money>,
-    /// Missing or overflowing subscription estimates, not monetary unknowns.
+    /// Missing or overflowing policy estimates (including unmetered usage), not monetary unknowns.
     pub subscription_unknown: Vec<UnknownCost>,
 }
 

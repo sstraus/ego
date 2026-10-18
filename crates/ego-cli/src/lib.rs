@@ -41,6 +41,7 @@ pub mod hooks;
 pub mod host_ports;
 pub mod mcp;
 pub mod mcp_server;
+pub mod memory;
 pub mod metadata;
 pub mod model;
 pub mod model_picker;
@@ -65,6 +66,7 @@ pub mod setup;
 mod setup_proposals;
 #[allow(dead_code)] // Connected to the turn service by M4 S6 after admission is green.
 pub(crate) mod skill;
+pub mod status_provider;
 pub mod trust;
 pub mod usage;
 pub mod worktree;
@@ -87,3 +89,5 @@ fn __ego_internal_network_probe_v1() {
     }
     assert!(ego_tools::exec::dispatch_network_probe(std::env::args_os()).expect("probe envelope"));
 }
+
+pub mod checkpoint;

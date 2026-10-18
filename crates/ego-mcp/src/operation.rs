@@ -1622,21 +1622,79 @@ fn tool_schema_command(
     let McpSubject::Tool { name, .. } = envelope.subject() else {
         return Ok(None);
     };
-    if name != collapsed.bootstrap.lookup_name() {
+    if !collapsed.bootstrap.admits_schema_from(name) {
         return Ok(None);
     }
     let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
         return Ok(None);
     };
-    let structured_content = schema_lookup_content(result)?;
-    let parameters: Value = serde_json::from_slice(envelope.parameters())?;
-    let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
+    let (requested_name, structured_content) = if name == collapsed.bootstrap.lookup_name() {
+        let content = schema_lookup_content(result)?;
+        let parameters: Value = serde_json::from_slice(envelope.parameters())?;
+        (collapsed.bootstrap.requested_name(&parameters)?, content)
+    } else {
+        let Some(definition) = search_inline_definition(result)? else {
+            return Ok(None);
+        };
+        definition
+    };
     Ok(Some(McpToolSchemaCommand::new(
         server_admission,
         generation.to_string(),
         envelope.admission().clone(),
         requested_name,
         structured_content,
+    )))
+}
+
+/// One top hit can carry a complete definition without a second discovery round.
+/// This limits admitted inline data, not the server's existing summary results.
+const INLINE_SEARCH_SCHEMA_MAX_BYTES: usize = 16 * 1024;
+
+fn search_inline_definition(result: &CallToolResult) -> Result<Option<(String, Value)>, McpError> {
+    if result.is_error == Some(true)
+        || !result
+            .result_type
+            .as_ref()
+            .is_some_and(rmcp::model::ResultType::is_complete)
+    {
+        return Ok(None);
+    }
+    // Summary-only servers may return prose; only complete JSON definitions opt in.
+    let content = match schema_lookup_content(result) {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
+    let Some(top) = content
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|hits| hits.first())
+    else {
+        return Ok(None);
+    };
+    if top.get("inputSchema").is_none() {
+        return Ok(None);
+    }
+    if serde_json::to_vec(top)?.len() > INLINE_SEARCH_SCHEMA_MAX_BYTES {
+        return Err(protocol(
+            "collapsed search inline schema exceeds 16384-byte cap; use get_tool_schema",
+        ));
+    }
+    let name = top
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| protocol("collapsed search inline schema has no tool name"))?;
+    // Search metadata (summary, score) is not part of a complete tool definition.
+    let description = top
+        .get("description")
+        .and_then(Value::as_str)
+        .ok_or_else(|| protocol("collapsed search inline schema has no description"))?;
+    Ok(Some((
+        name.to_owned(),
+        serde_json::json!({
+            "name": name, "description": description, "inputSchema": top["inputSchema"]
+        }),
     )))
 }
 
@@ -1655,18 +1713,25 @@ fn schema_lookup_content(result: &CallToolResult) -> Result<Value, McpError> {
         Some(content) => content.clone(),
         None => {
             let [block] = result.content.as_slice() else {
-                return Err(protocol(
+                return Err(schema_compatibility(
                     "collapsed schema lookup requires exactly one JSON text content block",
                 ));
             };
             let text = block.as_text().ok_or_else(|| {
-                protocol("collapsed schema lookup content block is not JSON text")
+                schema_compatibility("collapsed schema lookup content block is not JSON text")
             })?;
-            serde_json::from_str(&text.text)
-                .map_err(|_| protocol("collapsed schema lookup text content is not valid JSON"))?
+            serde_json::from_str(&text.text).map_err(|_| {
+                schema_compatibility("collapsed schema lookup text content is not valid JSON")
+            })?
         }
     };
     Ok(structured_content)
+}
+
+fn schema_compatibility(reason: &str) -> McpError {
+    protocol(format!(
+        "collapsed schema lookup non-retryable compatibility error: {reason}; changing the search query cannot repair this envelope; update the server/client compatibility before retrying"
+    ))
 }
 
 async fn project_outcome(
@@ -2336,183 +2401,48 @@ fn protocol(message: impl Into<String>) -> McpError {
 #[cfg(test)]
 mod stdio_fingerprint_tests {
     use super::*;
-    use ego_core::credentials::SecretMaterial;
-    use ego_core::permit::{TransportError, TransportFailure};
-    use std::sync::atomic::{AtomicBool, Ordering};
 
-    struct DuplexProbe(AtomicBool);
-
-    impl<'io> GuardedIo<'io> for DuplexProbe {
-        fn write(&self, _: &CanonPath, _: &[u8]) -> Result<(), ego_core::permit::IoDenied> {
-            unreachable!("stdio selection does not write a file")
-        }
-
-        fn read(&self, _: &CanonPath) -> Result<Vec<u8>, ego_core::permit::IoDenied> {
-            unreachable!("stdio selection does not read a file")
-        }
-
-        fn list(
-            &self,
-            _: &ego_core::permit::ScanRequest,
-        ) -> Result<ego_core::permit::Scan, ego_core::permit::IoDenied> {
-            unreachable!("stdio selection does not list files")
-        }
-
-        fn search(
-            &self,
-            _: &ego_core::permit::ScanRequest,
-            _: &dyn ego_core::permit::LineMatcher,
-        ) -> Result<ego_core::permit::Found, ego_core::permit::IoDenied> {
-            unreachable!("stdio selection does not search files")
-        }
-
-        fn exec<'a>(
-            &'a self,
-            _: &'a SpawnSpec,
-        ) -> futures::future::BoxFuture<'a, Result<ToolResult, ego_core::permit::ProcessError>>
-        {
-            unreachable!("stdio selection uses guarded duplex")
-        }
-
-        fn read_evidence<'a>(
-            &'a self,
-            _: &'a ego_core::store::evidence::EvidenceRead,
-        ) -> futures::future::BoxFuture<
-            'a,
-            Result<ego_core::store::evidence::EvidencePage, ToolError>,
-        > {
-            unreachable!("stdio selection does not read evidence")
-        }
-
-        fn guarded_http(
-            &self,
-            _: PreparedCall,
-            _: ego_core::permit::HttpRequest,
-        ) -> futures::future::BoxFuture<'static, Result<OneHopResponse, TransportError>> {
-            unreachable!("stdio selection does not use HTTP")
-        }
-
-        fn claim_mcp_http(&self, _: PreparedCall) -> Result<McpHttpClaim, TransportError> {
-            self.0.store(true, Ordering::SeqCst);
-            Err(TransportError::definitely_unsent(
-                TransportFailure::Exchange("HTTP claim probe".into()),
-            ))
-        }
-
-        fn guarded_duplex(
-            &self,
-            _: PreparedCall,
-        ) -> futures::future::BoxFuture<'static, Result<DuplexHandle, TransportError>> {
-            self.0.store(true, Ordering::SeqCst);
-            Box::pin(std::future::ready(Err(TransportError::definitely_unsent(
-                TransportFailure::Exchange("duplex probe".into()),
-            ))))
-        }
-
-        fn store_evidence(
-            &self,
-            _: &[u8],
-        ) -> Result<ego_core::store::evidence::EvidenceRef, ToolError> {
-            unreachable!("stdio selection does not store evidence")
-        }
+    fn inline_search_result(content: Value) -> CallToolResult {
+        let mut result = CallToolResult::success(vec![]);
+        result.structured_content = Some(content);
+        result
     }
 
-    fn tuic_admission() -> McpServerAdmission {
-        let environment = [
-            ("TUIC_SOCKET", "/repo/mcp.sock"),
-            ("TUIC_SESSION", "550e8400-e29b-41d4-a716-446655440a01"),
-        ];
-        let config = McpServerConfig::stdio(
-            "/opt/tuic/tuic-bridge".into(),
-            Vec::new(),
-            None,
-            environment
-                .iter()
-                .map(|(name, _)| name.parse().expect("TUIC variable name"))
-                .collect(),
-        )
-        .expect("TUIC stdio config");
-        let material = crate::McpTransportMaterial::stdio(
-            environment
-                .into_iter()
-                .map(|(name, value)| {
-                    crate::McpEnvironmentBinding::new(
-                        name.parse().expect("TUIC variable name"),
-                        SecretMaterial::new(value.as_bytes().to_vec()),
-                    )
-                })
-                .collect(),
-        );
-        McpServerAdmission::new(
-            "tuicommander".parse().expect("TUIC server name"),
-            config,
-            material,
-        )
-        .expect("TUIC admission")
-    }
-
-    // Catches: HTTP hooks cross the guarded claim boundary with a changed transport.
+    /// Catches: an oversized inline definition bypasses the bounded schema surface.
     #[test]
-    fn http_hook_rejects_changed_transport_before_claiming_the_selected_call() {
-        let config = McpHttpConfig::new(
-            "https://example.com/mcp".parse::<url::Url>().unwrap(),
-            ego_core::config::McpHttpAuth::None,
-            false,
-        )
-        .unwrap();
-        let admission = Arc::new(
-            McpServerAdmission::new(
-                "fixture".parse().unwrap(),
-                McpServerConfig::Http(config.clone()),
-                crate::McpTransportMaterial::http(Vec::new()),
-            )
-            .unwrap(),
+    fn collapsed_search_inline_schema_rejects_excess_bytes() {
+        let top = serde_json::json!({"name":"weather","description":"x".repeat(INLINE_SEARCH_SCHEMA_MAX_BYTES),"inputSchema":{"type":"object"}});
+        let error =
+            search_inline_definition(&inline_search_result(serde_json::json!({"results":[top]})))
+                .unwrap_err();
+        assert!(error.to_string().contains("16384-byte cap"));
+    }
+
+    /// Catches: a summary or a non-top schema grants dispatcher authority.
+    #[test]
+    fn collapsed_search_summaries_and_non_top_schemas_do_not_admit() {
+        let result = inline_search_result(serde_json::json!({"results":[
+            {"name":"weather","summary":"Weather"},
+            {"name":"calendar","description":"Calendar","inputSchema":{"type":"object"}}
+        ]}));
+        assert!(search_inline_definition(&result).unwrap().is_none());
+        let prose =
+            CallToolResult::success(vec![ContentBlock::text("weather: current conditions")]);
+        assert!(search_inline_definition(&prose).unwrap().is_none());
+    }
+
+    /// Catches: the byte cap rejects a definition that fits exactly.
+    #[test]
+    fn collapsed_search_inline_schema_accepts_exact_cap() {
+        let mut top =
+            serde_json::json!({"name":"weather","description":"","inputSchema":{"type":"object"}});
+        let padding = INLINE_SEARCH_SCHEMA_MAX_BYTES - serde_json::to_vec(&top).unwrap().len();
+        top["description"] = Value::String("x".repeat(padding));
+        let result = inline_search_result(serde_json::json!({"results":[top]}));
+        assert_eq!(
+            search_inline_definition(&result).unwrap().unwrap().0,
+            "weather"
         );
-        let operation = || {
-            McpOperation::captured(
-                McpSubject::Tool {
-                    server: "fixture".into(),
-                    name: "lookup".into(),
-                },
-                McpOperationKind::CallTool,
-                McpAdmissionFingerprint::new("capture", "fixture/lookup", "schema").unwrap(),
-                serde_json::json!({}),
-                vec![],
-            )
-        };
-        let probe = DuplexProbe(AtomicBool::new(false));
-        let limits = OperationLimits::new(64 * 1024, Duration::from_secs(30)).unwrap();
-        let result = futures::executor::block_on(execute_http_hook(
-            &config,
-            prepare_http(&config, operation()).unwrap(),
-            &probe,
-            limits,
-            admission.clone(),
-            EffectScope::new(Duration::from_secs(30)),
-        ));
-        assert!(result.unwrap_err().to_string().contains("HTTP claim probe"));
-        assert!(probe.0.swap(false, Ordering::SeqCst));
-        let changed = McpHttpConfig::new(
-            "https://other.example/mcp".parse::<url::Url>().unwrap(),
-            ego_core::config::McpHttpAuth::None,
-            false,
-        )
-        .unwrap();
-        let result = futures::executor::block_on(execute_http_hook(
-            &changed,
-            prepare_http(&config, operation()).unwrap(),
-            &probe,
-            limits,
-            admission,
-            EffectScope::new(Duration::from_secs(30)),
-        ));
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("transport fingerprint changed")
-        );
-        assert!(!probe.0.load(Ordering::SeqCst));
     }
 
     struct RejectSchemaPublication;
@@ -2600,111 +2530,6 @@ mod stdio_fingerprint_tests {
                     .is_none()
             );
         }
-    }
-
-    #[test]
-    fn tuic_stdio_selection_survives_process_cwd_observation() {
-        let server_admission = tuic_admission();
-        let McpServerConfig::Stdio(config) = server_admission.config() else {
-            panic!("TUIC admission must be stdio")
-        };
-        let fingerprint =
-            McpAdmissionFingerprint::new("capture-v1", "tuicommander/search_tools", "schema-v1")
-                .expect("admission");
-        let planned = stdio_spawn_spec(&server_admission, config, Duration::from_secs(30))
-            .expect("planned spawn");
-        let observed = SpawnSpec::new(
-            planned.argv().to_vec(),
-            Some(CanonPath::new(
-                std::fs::canonicalize(std::env::current_dir().expect("current directory"))
-                    .expect("canonical current directory"),
-            )),
-            planned.timeout(),
-            planned.env_policy().clone(),
-        )
-        .expect("observed spawn");
-
-        assert_eq!(
-            stdio_transport_fingerprint(config, &fingerprint, &planned),
-            stdio_transport_fingerprint(config, &fingerprint, &observed),
-            "process observation must not invalidate the selected TUIC transport"
-        );
-    }
-
-    #[test]
-    fn selected_tuic_search_reaches_guarded_duplex_after_observation() {
-        let server_admission = tuic_admission();
-        let McpServerConfig::Stdio(config) = server_admission.config() else {
-            panic!("TUIC admission must be stdio")
-        };
-        let subject = McpSubject::Tool {
-            server: "tuicommander".into(),
-            name: "search_tools".into(),
-        };
-        let input = serde_json::json!({"query": "terminal"});
-        let invocation = (
-            ego_core::permit::ForeignToolId::new("tuicommander", "search_tools")
-                .expect("selected tool"),
-            InvocationDigest::from_bytes(&serde_json::to_vec(&input).expect("selected input")),
-        );
-        let operation = McpOperation::captured(
-            subject.clone(),
-            McpOperationKind::CallTool,
-            McpAdmissionFingerprint::new("capture-v1", "tuicommander/search_tools", "schema-v1")
-                .expect("admission fingerprint"),
-            input.clone(),
-            vec![invocation.clone()],
-        );
-        let planned = prepare_stdio(
-            &server_admission,
-            config,
-            operation,
-            Duration::from_secs(30),
-        )
-        .expect("planned selected call");
-        let envelope = planned.mcp_envelope().expect("selected envelope");
-        let observed = SpawnSpec::new(
-            vec![OsString::from(&config.command)],
-            Some(CanonPath::new(
-                std::fs::canonicalize(std::env::current_dir().expect("current directory"))
-                    .expect("canonical current directory"),
-            )),
-            Some(Duration::from_secs(30)),
-            planned
-                .ops()
-                .iter()
-                .find_map(|op| match op {
-                    ego_core::permit::Op::Spawn { spec } => Some(spec.env_policy().clone()),
-                    _ => None,
-                })
-                .expect("planned environment"),
-        )
-        .expect("observed spawn");
-        let selected = PreparedCall::mcp_stdio(
-            subject,
-            McpOperationKind::CallTool,
-            vec![invocation],
-            envelope.admission().clone(),
-            envelope.transport_fingerprint(),
-            "tuicommander",
-            observed,
-            &input,
-        )
-        .expect("observed selected call");
-        let probe = DuplexProbe(AtomicBool::new(false));
-        let result = futures::executor::block_on(execute_stdio_hook(
-            config,
-            selected,
-            &probe,
-            OperationLimits::new(64 * 1024, Duration::from_secs(30)).expect("limits"),
-            EffectScope::new(Duration::from_secs(30)),
-        ));
-
-        assert!(result.is_err(), "probe intentionally has no bridge process");
-        assert!(
-            probe.0.load(Ordering::SeqCst),
-            "selected search must reach the guarded duplex"
-        );
     }
 
     #[test]

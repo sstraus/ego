@@ -87,6 +87,12 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused>;
 
+    /// Digest only a cache-marked prefix that this mapping can identify in
+    /// its actual request bytes. Unsupported mappings report no continuity.
+    fn cache_prefix(&self, _body: &[u8]) -> Option<String> {
+        None
+    }
+
     /// One provider response, decoded into the generation's events.
     ///
     /// Takes the `Result` rather than the response so a request that never got

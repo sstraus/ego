@@ -187,6 +187,7 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    pub reverse: bool,
 }
 
 impl Style {
@@ -198,6 +199,7 @@ impl Style {
         italic: false,
         underline: false,
         strike: false,
+        reverse: false,
     };
 
     pub fn fg(colour: Rgb) -> Self {
@@ -249,6 +251,11 @@ impl Style {
         self
     }
 
+    pub fn reverse(mut self) -> Self {
+        self.reverse = true;
+        self
+    }
+
     fn is_plain(&self) -> bool {
         *self == Style::PLAIN
     }
@@ -275,6 +282,9 @@ impl Style {
         }
         if self.underline {
             parameters.push("4".to_string());
+        }
+        if self.reverse {
+            parameters.push("7".to_string());
         }
         if self.strike {
             parameters.push("9".to_string());
@@ -399,6 +409,7 @@ impl Palette {
     // --- diagnostics ------------------------------------------------------
     pub const TOOL: Rgb = Rgb(137, 221, 255);
     pub const ERROR: Rgb = Rgb(255, 107, 128);
+    pub const WARNING: Rgb = Rgb(229, 192, 80);
     pub const NOTE: Rgb = Rgb(153, 153, 153);
 }
 

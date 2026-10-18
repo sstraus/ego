@@ -311,4 +311,13 @@ pub trait SessionStore: Send + Sync {
 
     /// List every session this store knows about, from its manifests.
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError>;
+
+    /// List resumable entries independently and report each unreadable session.
+    /// Stores without a separate manifest cache already provide their listing authority.
+    fn list_readable(
+        &self,
+        _unreadable: &mut dyn FnMut(SessionId, StoreError),
+    ) -> Result<Vec<SessionMeta>, StoreError> {
+        self.list()
+    }
 }

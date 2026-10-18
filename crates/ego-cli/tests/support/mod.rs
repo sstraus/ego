@@ -1197,7 +1197,7 @@ impl Ego {
     /// so a startup admission can be tested without teaching every caller
     /// about PTY cursor handshakes.
     pub fn run_pty_responding(self, prompt: &str, answer: &str, input: &str) -> Finished {
-        self.run_pty_script(prompt, answer, Some(input))
+        self.run_pty_script(prompt, answer, Some(input), false)
     }
 
     /// Run a conversation whose first turn is already present in argv, then
@@ -1209,10 +1209,22 @@ impl Ego {
     /// Answer one startup modal for an argv-seeded conversation, then close
     /// the terminal at the first idle prompt.
     pub fn run_pty_responding_seeded(self, prompt: &str, answer: &str) -> Finished {
-        self.run_pty_script(prompt, answer, None)
+        self.run_pty_script(prompt, answer, None, false)
     }
 
-    fn run_pty_script(self, prompt: &str, answer: &str, input: Option<&str>) -> Finished {
+    /// Use real cursor coordinates and return retained terminal history rather
+    /// than interleaved redraw bytes for wrapped notice assertions.
+    pub fn run_pty_trusting_screen(self, trust_answer: &str, input: &str) -> Finished {
+        self.run_pty_script("Trust project files", trust_answer, Some(input), true)
+    }
+
+    fn run_pty_script(
+        self,
+        prompt: &str,
+        answer: &str,
+        input: Option<&str>,
+        screen_backed: bool,
+    ) -> Finished {
         assert!(
             input.is_none_or(|line| !line.contains('\r') && !line.contains('\n')),
             "PTY script must be one unterminated line; the helper submits it"
@@ -1234,23 +1246,25 @@ impl Ego {
         let responder = Arc::clone(&writer);
         let reader = std::thread::spawn(move || {
             const DSR_QUERY: &[u8] = b"\x1b[6n";
-            const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
             let mut reader = reader;
             let mut output = Vec::new();
             let mut chunk = [0; 1024];
             let mut responses = 0;
+            let mut screen = vt100::Parser::new(24, 80, 10_000);
             loop {
                 match reader.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(length) => {
                         output.extend_from_slice(&chunk[..length]);
+                        screen.process(&chunk[..length]);
                         let queries = output
                             .windows(DSR_QUERY.len())
                             .filter(|window| *window == DSR_QUERY)
                             .count();
                         while responses < queries {
                             let mut writer = responder.lock().expect("pty writer lock");
-                            writer.write_all(DSR_RESPONSE).expect("DSR response");
+                            let (row, col) = screen.screen().cursor_position();
+                            write!(writer, "\x1b[{};{}R", row + 1, col + 1).expect("DSR response");
                             writer.flush().expect("DSR response flush");
                             responses += 1;
                         }
@@ -1338,9 +1352,14 @@ impl Ego {
             .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
         drop(master);
         let output = reader.join().expect("pty reader thread");
+        let stdout = if screen_backed {
+            terminal_transcript(&output, 24, 80)
+        } else {
+            String::from_utf8_lossy(&output).into_owned()
+        };
         Finished {
             code: Some(status.exit_code() as i32),
-            stdout: String::from_utf8_lossy(&output).into_owned(),
+            stdout,
             stderr: String::new(),
             _keep: self.keep,
         }
@@ -1758,4 +1777,27 @@ pub fn permission_host(places: &Places, stub: &Stub) -> AcpHost {
             .args(["--profile", "acp"])
             .spawn_conversing(),
     )
+}
+
+/// Reconstruct notice prose after the terminal adds physical word-wrap rows.
+/// This does not remove words, punctuation, or duplicate receipts.
+pub fn notice_prose(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Read each retained PTY row once, excluding transient prompt repaint bytes.
+pub fn terminal_transcript(bytes: &[u8], rows: u16, cols: u16) -> String {
+    let mut terminal = vt100::Parser::new(rows, cols, 10_000);
+    terminal.process(bytes);
+    let live = terminal.screen().contents();
+    terminal.screen_mut().set_scrollback(usize::MAX);
+    let depth = terminal.screen().scrollback();
+    let mut transcript = String::new();
+    for offset in (1..=depth).rev() {
+        terminal.screen_mut().set_scrollback(offset);
+        transcript.push_str(&terminal.screen().rows(0, cols).next().unwrap());
+        transcript.push('\n');
+    }
+    transcript.push_str(&live);
+    transcript
 }

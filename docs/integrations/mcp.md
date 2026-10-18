@@ -44,7 +44,18 @@ HTTP connection and tool calls use the guarded transport and captured generation
 catalogue. Reload changes a future boundary, not an active call's authority.
 
 The collapsed model surface starts with vendor-neutral bootstrap operations for
-catalogue inspection and call selection. Discovery is a snapshot, not permission
+catalogue inspection and call selection. A `search_tools` response can include a
+complete MCP definition (`name`, `description`, `inputSchema`) in `results[0]`.
+Ego admits that top hit before the next generation, so the model can call
+`call_tool` without a separate `get_tool_schema` round. The complete inline hit
+must fit within 16 KiB of serialized JSON. Other hits and summary-only responses
+still need an exact schema lookup. Servers own ranking and inline publication;
+ego does not issue hidden lookup calls or pin server-specific tools.
+
+Inline admission uses the captured search fingerprint and the same live-server
+and current-generation checks as an exact lookup. Tool-list changes invalidate
+stale search results. Both outer dispatch arguments and inner tool arguments
+remain validated before effects. Discovery is a snapshot, not permission
 to execute. A foreign call needs both connection authority and the exact opaque
 operation/envelope authority. DNS evidence and continuations cannot widen a
 captured policy or generation identity.
@@ -82,3 +93,10 @@ Sources: [CLI MCP management](../../crates/ego-cli/src/mcp.rs),
 [protocol crate](../../crates/ego-mcp/src/),
 [guarded registry](../../crates/ego-tools/src/mcp_registry.rs), and
 [historical contract analysis](../internals/19-current-mcp-and-collapsed-tools.md).
+
+## Turn time
+
+The live runtime context includes the current local date-time and UTC offset on
+each generation. The system-clock adapter reads the host timezone. This line is
+volatile context, not part of the stable system-prompt prefix. The model does not
+need to execute a shell command to learn the current time.

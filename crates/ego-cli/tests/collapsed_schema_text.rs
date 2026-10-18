@@ -8,6 +8,7 @@ use support::{Ego, Plan, Reply, Stub, text, tool_call};
 const SERVER: &str = r#"
 import json
 import sys
+from datetime import datetime
 
 mode = sys.argv[1]
 definition = {
@@ -20,6 +21,13 @@ definition = {
         "additionalProperties": False,
     },
 }
+if mode.startswith("captured"):
+    with open(sys.argv[2]) as fixture:
+        captured = json.load(fixture)["result"]
+    definition = json.loads(captured["content"][0]["text"])
+if mode.startswith("schedule"):
+    with open(sys.argv[2]) as fixture:
+        definition = json.load(fixture)
 management = [
     {
         "name": "search_tools",
@@ -80,12 +88,31 @@ for line in sys.stdin:
         }
     elif method == "tools/call":
         operation = request["params"]["name"]
-        assert request["params"]["arguments"]["tool_name"] == "repo"
+        if operation != "search_tools":
+            assert request["params"]["arguments"]["tool_name"] == definition["name"]
         result = {"resultType": "complete", "isError": False}
-        if operation == "call_tool":
-            assert request["params"]["arguments"]["arguments"] == {"action": "list"}
-            result["content"] = [{"type": "text", "text": "fixture-repository"}]
-        elif operation == "get_tool_schema" and mode == "text":
+        if operation == "search_tools":
+            hit = {"name": definition["name"], "summary": definition["description"]} if mode in ("schedule-baseline", "malformed", "multiple", "empty", "nontext") else definition
+            result["content"] = [{"type": "text", "text": json.dumps({"results": [hit], "count": 1})}]
+        elif operation == "call_tool":
+            arguments = request["params"]["arguments"]["arguments"]
+            if mode.startswith("schedule"):
+                assert arguments["action"] == "create"
+                scheduled = arguments["definition"]
+                assert scheduled["cron"] == ""
+                assert scheduled["enabled"] is True
+                delta = (datetime.fromisoformat(scheduled["once_local"]) - datetime.now()).total_seconds()
+                assert 3500 < delta <= 3600, delta
+                result["content"] = [{"type": "text", "text": "fixture-scheduled-one-time-check"}]
+            elif mode.startswith("captured"):
+                assert arguments == {"type": "done", "text": "capture replay"}
+                result["content"] = [{"type": "text", "text": "fixture-progress-recorded"}]
+            else:
+                assert arguments == {"action": "list"}
+                result["content"] = [{"type": "text", "text": "fixture-repository"}]
+        elif operation == "get_tool_schema" and mode == "captured":
+            result.update(captured)
+        elif operation == "get_tool_schema" and mode in ("text", "schedule-baseline"):
             result["content"] = [{"type": "text", "text": json.dumps(definition)}]
         elif operation == "get_tool_schema" and mode == "both":
             result["structuredContent"] = definition
@@ -111,17 +138,46 @@ for line in sys.stdin:
 fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
     let mut completions = vec![Reply::Sse(tool_call(
         "schema-call",
-        "get_tool_schema",
-        r#"{"tool_name":"repo"}"#,
+        if mode.starts_with("search") {
+            "search_tools"
+        } else {
+            "get_tool_schema"
+        },
+        if mode.starts_with("search") {
+            r#"{"query":"list repositories"}"#
+        } else if mode == "captured" {
+            r#"{"tool_name":"progress"}"#
+        } else {
+            r#"{"tool_name":"repo"}"#
+        },
     ))];
-    if matches!(mode, "text" | "both") {
+    if matches!(
+        mode,
+        "text" | "both" | "search" | "search-invalid" | "captured"
+    ) {
         completions.push(Reply::Sse(tool_call(
             "repo-call",
             "call_tool",
-            r#"{"tool_name":"repo","arguments":{"action":"list"}}"#,
+            if mode == "captured" {
+                r#"{"tool_name":"progress","arguments":{"type":"done","text":"capture replay"}}"#
+            } else if mode == "search-invalid" {
+                r#"{"tool_name":"repo","arguments":{"action":7}}"#
+            } else {
+                r#"{"tool_name":"repo","arguments":{"action":"list"}}"#
+            },
         )));
         completions.push(Reply::Sse(text("REPO-LIST-COMPLETE")));
     } else {
+        completions.push(Reply::Sse(tool_call(
+            "changed-query",
+            "search_tools",
+            r#"{"query":"a different repository query"}"#,
+        )));
+        completions.push(Reply::Sse(tool_call(
+            "schema-retry",
+            "get_tool_schema",
+            r#"{"tool_name":"repo"}"#,
+        )));
         completions.push(Reply::Sse(text("LOOKUP-REFUSED-COMPLETE")));
     }
     let stub = Stub::start(Plan {
@@ -141,13 +197,17 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         "jsonl",
     ]);
     let server = ego.file("collapsed-server.py", SERVER);
+    let captured = ego.file(
+        "captured-schema.json",
+        include_str!("fixtures/tuic-1.8.0-progress-schema-response.json"),
+    );
     let selector = ego.file(
         "mcp.json",
         &serde_json::json!({
             "name": "fixture",
             "transport": "stdio",
             "command": "/usr/bin/python3",
-            "args": [server, mode],
+            "args": [server, mode, captured],
             "inherit_env": []
         })
         .to_string(),
@@ -234,6 +294,200 @@ fn malformed_or_multiple_text_blocks_refuse_schema_publication() {
                     _ => "exactly one JSON text content block",
                 }),
             "{mode} did not report a named protocol error: {report}"
+        );
+    }
+}
+
+/// Catches: a complete inline search schema still needs a second discovery call.
+#[test]
+fn collapsed_search_inline_schema_removes_the_lookup_hop() {
+    let (finished, generations) = run_lookup("search");
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    assert!(
+        offers_tool(&generations[1], "call_tool"),
+        "inline search did not admit dispatcher: {generations:?}; {finished:?}"
+    );
+    assert!(
+        format!("{generations:?}").contains("fixture-repository"),
+        "{finished:?}"
+    );
+    assert_eq!(
+        generations.len(),
+        3,
+        "search, call, answer: {generations:?}"
+    );
+}
+
+/// Catches: inline admission bypasses call_tool inner argument validation.
+#[test]
+fn collapsed_search_inline_schema_still_validates_dispatch_arguments() {
+    let (finished, generations) = run_lookup("search-invalid");
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    let report = format!("{generations:?}");
+    assert!(report.contains("collapsed inner arguments"), "{report}");
+    assert!(
+        !report.contains("fixture-repository"),
+        "invalid call reached server: {report}"
+    );
+}
+
+/// Catches: one-time scheduling still requires a schema lookup after inline discovery.
+#[test]
+fn collapsed_schedule_one_hour_needs_one_discovery_hop() {
+    for (mode, inline) in [("schedule-baseline", false), ("schedule-inline", true)] {
+        let mut replies = vec![Reply::Sse(tool_call(
+            "search",
+            "search_tools",
+            r#"{"query":"schedule one-time check in one hour"}"#,
+        ))];
+        if !inline {
+            replies.push(Reply::Sse(tool_call(
+                "lookup",
+                "get_tool_schema",
+                r#"{"tool_name":"automations"}"#,
+            )));
+        }
+        let once_local = (chrono::Local::now() + chrono::Duration::hours(1))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        let arguments = serde_json::json!({
+            "tool_name":"automations", "arguments": {"action":"create", "definition": {
+                "id":"fixture-check", "name":"One-hour check", "prompt":"Check once", "run_config":"fixture",
+                "repository":"/fixture", "workspace":{"mode":"existing"}, "once_local":once_local,
+                "cron":"", "enabled":true, "grace_secs":60, "overlap":"skip", "max_duration_secs":60
+            }}
+        });
+        replies.push(Reply::Sse(tool_call(
+            "schedule",
+            "call_tool",
+            &arguments.to_string(),
+        )));
+        replies.push(Reply::Sse(text("SCHEDULED")));
+        let stub = Stub::start(Plan {
+            completions: replies,
+            ..Plan::default()
+        });
+        let ego = Ego::against(&stub).args([
+            "--model",
+            "ollama/qwen3",
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+            "--output",
+            "jsonl",
+        ]);
+        let server = ego.file("schedule-server.py", SERVER);
+        // Captured from the live TUIC get_tool_schema(automations) response on 2026-10-17.
+        let schema = ego.file(
+            "automations-tool.json",
+            include_str!("fixtures/tuic-automations-tool.json"),
+        );
+        let selector = ego.file("mcp.json", &serde_json::json!({"name":"fixture","transport":"stdio","command":"/usr/bin/python3","args":[server,mode,schema],"inherit_env":[]}).to_string());
+        let finished = ego
+            .arg("--mcp")
+            .arg(&format!("@{}", selector.display()))
+            .arg("Schedule a one-time check in one hour")
+            .run();
+        assert_eq!(finished.code, Some(0), "{finished:?}");
+        let generations = stub.generations();
+        assert_eq!(generations.len(), if inline { 3 } else { 4 });
+        assert!(
+            format!("{generations:?}").contains("fixture-scheduled-one-time-check"),
+            "{finished:?}"
+        );
+        for request in &generations {
+            let messages = request["messages"].as_array().expect("messages");
+            let timestamp = messages
+                .iter()
+                .filter_map(|message| message["content"].as_str())
+                .flat_map(str::lines)
+                .find_map(|line| line.strip_prefix("- Current local date-time: "))
+                .expect("current time on each generation");
+            let observed = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .expect("local date-time has an explicit UTC offset");
+            assert!(
+                (chrono::Local::now().signed_duration_since(observed))
+                    .num_seconds()
+                    .abs()
+                    < 100
+            );
+        }
+        assert!(offers_tool(
+            &generations[if inline { 1 } else { 2 }],
+            "call_tool"
+        ));
+    }
+}
+
+/// Catches standard Tool metadata or the captured JSON text envelope losing dispatch authority.
+#[test]
+fn captured_tuic_metadata_and_text_envelope_admit_valid_dispatch() {
+    let (finished, generations) = run_lookup("captured");
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    assert!(!offers_tool(&generations[0], "call_tool"));
+    assert!(
+        generations
+            .iter()
+            .skip(1)
+            .any(|next| offers_tool(next, "call_tool"))
+    );
+    assert!(
+        generations.iter().any(
+            |request| request["messages"]
+                .as_array()
+                .is_some_and(
+                    |messages| messages.iter().any(|message| message["role"] == "tool"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.contains("fixture-progress-recorded")))
+                )
+        ),
+        "{generations:?}; {finished:?}"
+    );
+}
+
+/// Catches deterministic envelope incompatibility being mistaken for a retryable query failure.
+#[test]
+fn unsupported_collapsed_envelope_has_terminal_compatibility_diagnostic() {
+    for mode in ["malformed", "multiple", "empty", "nontext"] {
+        let (finished, generations) = run_lookup(mode);
+        assert!(
+            generations
+                .iter()
+                .all(|request| !offers_tool(request, "call_tool")),
+            "{mode}: {finished:?}"
+        );
+        let report = format!("{generations:?}");
+        assert!(
+            report.contains("non-retryable compatibility error"),
+            "{mode}: {report}"
+        );
+        assert!(
+            report.contains("changing the search query cannot repair"),
+            "{mode}: {report}"
+        );
+        let messages = generations.last().unwrap()["messages"].as_array().unwrap();
+        let lookup_errors: Vec<_> = messages
+            .iter()
+            .filter(|message| {
+                message["role"] == "tool"
+                    && matches!(
+                        message["tool_call_id"].as_str(),
+                        Some("schema-call" | "schema-retry")
+                    )
+            })
+            .map(|message| message["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(lookup_errors.len(), 2, "{mode}: {lookup_errors:?}");
+        assert_eq!(
+            lookup_errors[0], lookup_errors[1],
+            "query changed the compatibility failure"
+        );
+        assert!(
+            lookup_errors
+                .iter()
+                .all(|error| error.contains("non-retryable compatibility error"))
         );
     }
 }
