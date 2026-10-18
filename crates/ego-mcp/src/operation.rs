@@ -2601,6 +2601,16 @@ mod stdio_fingerprint_tests {
             second["_meta"]["tuic/call_id"]
         );
         assert_eq!(first["arguments"], serde_json::json!({"action":"inbox"}));
+        let recorded: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/tuic-call-correlation-request.json"
+        ))
+        .unwrap();
+        let mut recorded_params = recorded["request"]["params"].clone();
+        recorded_params["_meta"]["tuic/call_id"] = Value::String(first_id.to_owned());
+        assert_eq!(
+            first, recorded_params,
+            "preserve the real TUIC request shape"
+        );
         assert!(
             first["_meta"].get("tuic/parent_operation_id").is_none(),
             "do not invent an intent"
