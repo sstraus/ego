@@ -86,7 +86,8 @@ fn output(result: &ToolResult) -> Result<String, &'static str> {
             _ => return Err("invalid or oversized output"),
         }
     }
-    let text = stdout.ok_or("missing stdout")?.trim_end_matches('\n');
+    let stdout = stdout.ok_or("missing stdout")?;
+    let text = stdout.strip_suffix('\n').unwrap_or(stdout);
     if text.contains(['\r', '\n']) {
         return Err("output must be one line");
     }
@@ -125,7 +126,12 @@ mod tests {
         let safe = output(&result("branch\u{1b}[2J\u{7}end\n", "")).unwrap();
         assert!(!safe.contains('\u{1b}'));
         assert!(!safe.contains('\u{7}'));
-        for (out, err) in [("one\ntwo", ""), ("one\rtwo", ""), ("value", "warning")] {
+        for (out, err) in [
+            ("one\ntwo", ""),
+            ("one\rtwo", ""),
+            ("value", "warning"),
+            ("value\n\n", ""),
+        ] {
             assert!(output(&result(out, err)).is_err());
         }
         assert_eq!(output(&result("value\n", "")).unwrap(), "value");
