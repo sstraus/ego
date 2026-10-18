@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::generator::types::ThinkingLevel;
 use crate::permit::rule::{Rule, RuleId};
 
-use super::layer::{McpLayerEntry, McpServerConfig, McpServerName, validate_status_segment_names};
+use super::layer::{McpLayerEntry, McpServerConfig, McpServerName};
 use super::vocabulary::{ManagedConfigKey, ManagedConfigValue, UserConfigTarget};
 
 /// One complete, atomic change to the user configuration authority.
@@ -39,8 +39,8 @@ pub enum UserConfigMutation {
         model: String,
         thinking: ThinkingLevel,
     },
-    /// Replace the final ordered status-line segment list.
-    Statusline { segments: Vec<String> },
+    /// Replace the complete status-line template.
+    Statusline { template: String },
     /// Set one complete server in the exact base or profile slot.
     McpSet {
         target: UserConfigTarget,
@@ -74,9 +74,7 @@ pub enum UserConfigMutation {
 impl UserConfigMutation {
     /// Reject a mutation whose policy cannot be represented in config.
     ///
-    /// This runs before the adapter acquires a lock or reads the file. A
-    /// duplicate status segment is not an ordering instruction: it is an
-    /// ambiguous configuration and therefore fails as a whole.
+    /// This runs before the adapter acquires a lock or reads the file.
     pub fn validate(&self) -> Result<(), UserConfigError> {
         match self {
             Self::Root { .. } => Ok(()),
@@ -101,9 +99,7 @@ impl UserConfigMutation {
                 Ok(())
             }
             Self::ManagedUnset { target, key } => validate_managed_target_key(target, key.clone()),
-            Self::Statusline { segments } => {
-                validate_status_segment_names(segments).map_err(UserConfigError::new)
-            }
+            Self::Statusline { .. } => Ok(()),
             Self::McpSet {
                 expected_user_entry,
                 server,
@@ -183,8 +179,8 @@ impl UserConfigMutation {
                     thinking: *thinking,
                 }
             }
-            Self::Statusline { segments } => UserConfigMutationFacts::Statusline {
-                segments: segments.clone(),
+            Self::Statusline { template } => UserConfigMutationFacts::Statusline {
+                template: template.clone(),
             },
             Self::McpSet { name, server, .. } => UserConfigMutationFacts::McpSet {
                 name: name.clone(),
@@ -263,8 +259,8 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
                 ManagedConfigValue::PermissionsJudge(_)
             )
             | (
-                ManagedConfigKey::StatuslineSegments,
-                ManagedConfigValue::StatuslineSegments(_)
+                ManagedConfigKey::StatuslineTemplate,
+                ManagedConfigValue::StatuslineTemplate(_)
             )
             | (
                 ManagedConfigKey::SessionDir | ManagedConfigKey::ArtifactDir,
@@ -292,7 +288,7 @@ pub enum UserConfigMutationFacts {
         thinking: ThinkingLevel,
     },
     Statusline {
-        segments: Vec<String>,
+        template: String,
     },
     McpSet {
         name: McpServerName,

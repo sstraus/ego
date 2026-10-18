@@ -838,7 +838,7 @@ fn activate_session_phase<'store, S: EventSink>(
                 mode: materialized.mode,
                 cwd: materialized.cwd.clone(),
                 trust: materialized.skill_trust,
-                segments: repl::effective_statusline_segments(
+                template: repl::effective_statusline_template(
                     materialized.effective.ui.statusline.as_ref(),
                 ),
                 width: status.width,

@@ -62,7 +62,7 @@ pub trait TextOutput: Diagnostics {
     /// Replace a live retry row; ordinary outputs remain append-only.
     fn retry_status(&self, _message: Option<(&str, u64)>) {}
     /// Refresh the active goal counter without writing a transcript row.
-    fn goal_status(&self, _goal: Option<(u32, Option<u32>)>) {}
+    fn goal_status(&self, _goal: Option<(String, u32, Option<u32>)>) {}
     fn begin_block(&self) {}
     fn finish(&self) {}
 }
@@ -288,7 +288,7 @@ impl TextOutput for InteractiveOutput {
             .retry_status(message);
     }
 
-    fn goal_status(&self, goal: Option<(u32, Option<u32>)>) {
+    fn goal_status(&self, goal: Option<(String, u32, Option<u32>)>) {
         self.inner
             .lock()
             .expect("surface output lock")
@@ -481,7 +481,13 @@ impl<'a> TextSink<'a> {
         self.out.goal_status(
             current
                 .filter(|goal| goal.state == GoalState::Active)
-                .map(|goal| (goal.continuation_turns, goal.continuation_budget)),
+                .map(|goal| {
+                    (
+                        goal.objective.clone(),
+                        goal.continuation_turns,
+                        goal.continuation_budget,
+                    )
+                }),
         );
         if let Some(goal) = current {
             let prior = previous.as_ref().filter(|prior| prior.id == goal.id);

@@ -41,6 +41,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+minijinja = { version = "=2.12.0", default-features = false, features = ["builtins", "debug", "multi_template", "fuel", "serde"] }
 ego-core = { path = "crates/ego-core" }
 ego-listen = { path = "crates/ego-listen" }
 ego-mcp = { path = "crates/ego-mcp" }

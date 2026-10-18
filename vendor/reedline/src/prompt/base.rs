@@ -270,6 +270,11 @@ pub trait Prompt: Send {
         None
     }
 
+    /// Content below the editable buffer. It is measured and retired with the prompt.
+    fn render_prompt_footer(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
     /// Provide content of the left full prompt
     fn render_prompt_left(&self) -> Cow<'_, str>;
     /// Provide content of the right full prompt
@@ -369,8 +374,8 @@ mod test {
     #[cfg(feature = "helix")]
     #[test]
     fn helix_discriminants_round_trip_through_their_names() {
-        use std::str::FromStr;
         use PromptEditModeDiscriminants as D;
+        use std::str::FromStr;
         for (name, expected) in [
             ("helix_normal", D::HelixNormal),
             ("helix_insert", D::HelixInsert),

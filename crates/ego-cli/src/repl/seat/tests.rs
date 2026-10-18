@@ -90,30 +90,92 @@ fn trust_accepts_only_an_explicit_yes_or_no() {
 }
 
 #[test]
-fn every_populated_statusline_preset_states_the_workspace_posture() {
-    use ego_core::config::StatusSegmentName as Segment;
-
-    for (id, label, segments) in STATUSLINE_PRESETS {
-        let named = segments
-            .iter()
-            .map(|segment| segment.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        assert!(
-            label == "Off" || label.ends_with(&named),
-            "the `{id}` label promises something other than what it writes: {label}"
+fn statusline_presets_store_templates_with_one_prompt_slot() {
+    // Catches presets losing the composer or failing to display their offered fields.
+    use ego_core::cost::{Amount, CumulativeCost, CurrencyCode, Money};
+    let mut state = SessionState::default();
+    state.context.used_tokens = Some(58_000);
+    state.context.window = Some(272_000);
+    state.cost = CumulativeCost::Known {
+        total: Money::new(
+            "0.661".parse::<Amount>().unwrap(),
+            CurrencyCode::new("USD").unwrap(),
+        ),
+    };
+    let snapshot = SurfaceSnapshot::from_state_with_git(
+        SessionId::new(),
+        &state,
+        SelectionFacts::new(
+            ego_core::config::ModelRef("provider/model".into()),
+            ego_core::generator::types::ThinkingLevel::Medium,
+            Mode::Yolo,
+        )
+        .with_fast(true),
+        SeatFacts::new(
+            QueueStatus {
+                pending_steers: 1,
+                queued: 2,
+                interrupt_pending: true,
+            },
+            3,
+            "/workspace/ego",
+            Trust::Untrusted,
+        ),
+        Some(GitFacts::new("feat/preset", true)),
+    );
+    for (id, _, template) in STATUSLINE_PRESETS {
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            native_status: true,
+            width: 300,
+            snapshot: Some(snapshot.clone()),
+            template: super::super::status::StatusTemplate::new(template.into()),
+            ..SurfaceStatus::default()
+        }));
+        repaint_status(&status);
+        let waiting = Waiting::new(status);
+        let output = format!(
+            "{}preset-probe",
+            waiting.render_prompt_indicator(PromptEditMode::Emacs)
         );
-    }
-
-    for preset in ["default", "full"] {
-        let (_, _, segments) = STATUSLINE_PRESETS
-            .iter()
-            .find(|(id, _, _)| *id == preset)
-            .expect("a preset the picker offers");
-        assert!(
-            segments.contains(&Segment::Trust),
-            "a session that starts untrusted in silence needs `{preset}` to say so"
+        let mut terminal = vt100::Parser::new(12, 300, 0);
+        terminal.process(output.replace('\n', "\r\n").as_bytes());
+        let visible = terminal.screen().contents();
+        assert_eq!(
+            visible.matches("> preset-probe").count(),
+            1,
+            "{id}: {visible}"
         );
+        assert!(!visible.contains("statusline:"), "{id}: {visible}");
+        for critical in ["queue=1/2", "drafts=3", "interrupt=yes"] {
+            assert!(visible.contains(critical), "{id}: {visible}");
+        }
+        match id {
+            "off" => assert_eq!(
+                visible,
+                "queue=1/2\ndrafts=3\ninterrupt=yes\n> preset-probe"
+            ),
+            "minimal" => assert!(
+                visible.starts_with("provider/model · medium · yolo\n"),
+                "{visible}"
+            ),
+            "default" | "full" => {
+                for field in [
+                    "model",
+                    "medium",
+                    "fast",
+                    "yolo",
+                    "58k/272k",
+                    "$0.66",
+                    "/w/ego",
+                    "feat/preset",
+                    "untrusted",
+                ] {
+                    assert!(visible.contains(field), "{id} omitted {field}: {visible}");
+                }
+            }
+            _ => panic!("preset {id} needs a visible-output contract"),
+        }
+        assert_eq!(terminal.screen().cursor_position().1, 14, "{id}: {visible}");
     }
 }
 
@@ -499,32 +561,18 @@ fn permission_modal_decisions_are_immediate_and_only_explicit_keys_can_approve()
 }
 
 #[test]
-fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
-    use ego_core::config::{StatusSegmentName as Segment, StatuslineLayer};
-
+fn absent_statusline_uses_default_but_prompt_only_is_preserved() {
+    use ego_core::config::StatuslineLayer;
     assert_eq!(
-        effective_statusline_segments(None),
-        vec![
-            Segment::Model,
-            Segment::Effort,
-            Segment::Fast,
-            Segment::Mode,
-            Segment::Context,
-            Segment::Cost,
-            Segment::Queue,
-            Segment::Drafts,
-            Segment::Interrupt,
-            Segment::Cwd,
-            Segment::Git,
-            Segment::Trust,
-        ]
+        effective_statusline_template(None),
+        super::super::status::DEFAULT_TEMPLATE
     );
-    assert!(
-        effective_statusline_segments(Some(&StatuslineLayer {
+    assert_eq!(
+        effective_statusline_template(Some(&StatuslineLayer {
             providers: None,
-            segments: Some(Vec::new()),
-        }))
-        .is_empty()
+            template: Some("{{ prompt }}".into()),
+        })),
+        "{{ prompt }}"
     );
 }
 
@@ -1537,4 +1585,41 @@ fn collapsed_prompt_and_tool_output_share_expansion_history() {
     let _ = rows.try_iter().collect::<Vec<_>>();
     output.expand_last_tool();
     assert!(rows.try_iter().collect::<String>().contains("new detail"));
+}
+
+// Catches an invalid template repeating its diagnostic on each background repaint.
+#[test]
+fn template_diagnostic_is_emitted_only_once_per_configuration() {
+    let snapshot = SurfaceSnapshot::from_state(
+        SessionId::new(),
+        &SessionState::default(),
+        SelectionFacts::new(
+            ego_core::config::ModelRef("provider/model".into()),
+            ego_core::generator::types::ThinkingLevel::Medium,
+            Mode::Yolo,
+        ),
+        SeatFacts::new(QueueStatus::default(), 0, "/workspace", Trust::Trusted),
+        None,
+    );
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        native_status: true,
+        width: 120,
+        snapshot: Some(snapshot),
+        template: super::super::status::StatusTemplate::new("{{ unknown }}\n{{ prompt }}".into()),
+        ..SurfaceStatus::default()
+    }));
+    let waiting = Waiting::new(Arc::clone(&status));
+    for _ in 0..3 {
+        repaint_status(&status);
+        let output = format!(
+            "{}diagnostic-probe",
+            waiting.render_prompt_indicator(PromptEditMode::Emacs)
+        );
+        let mut terminal = vt100::Parser::new(12, 120, 0);
+        terminal.process(output.replace('\n', "\r\n").as_bytes());
+        let visible = terminal.screen().contents();
+        assert_eq!(visible.matches("statusline:").count(), 1, "{visible}");
+        assert!(visible.contains("(line 1)"), "{visible}");
+        assert!(visible.ends_with("> diagnostic-probe"), "{visible}");
+    }
 }
