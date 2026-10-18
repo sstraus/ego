@@ -145,23 +145,19 @@ impl EventSource for UnixInternalEventSource {
                 Ok(_) => (),
             };
             if fds[0].revents & POLLIN != 0 {
-                loop {
-                    let read_count = read_complete(&self.tty, &mut self.tty_buffer)?;
-                    if read_count > 0 {
-                        self.parser.advance(
-                            &self.tty_buffer[..read_count],
-                            read_count == TTY_BUFFER_SIZE,
-                        );
-                    }
-
-                    if let Some(event) = self.parser.next() {
-                        return Ok(Some(event));
-                    }
-
-                    if read_count == 0 {
-                        break;
-                    }
+                let read_count = read_complete(&self.tty, &mut self.tty_buffer)?;
+                if read_count == 0 {
+                    return Ok(None);
                 }
+                self.parser.advance(
+                    &self.tty_buffer[..read_count],
+                    read_count == TTY_BUFFER_SIZE,
+                );
+                if let Some(event) = self.parser.next() {
+                    return Ok(Some(event));
+                }
+                // Preserve a partial sequence and poll again before reading;
+                // the descriptor is blocking even when the timeout is zero.
             }
             if fds[1].revents & POLLIN != 0 {
                 #[cfg(feature = "libc")]

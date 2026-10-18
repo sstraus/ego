@@ -233,6 +233,35 @@ mod tests {
         );
     }
 
+    // Catches: re-polling an edge-triggered source loses unread paste bytes
+    // beyond the first read buffer when no new bytes arrive afterward.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn partial_paste_rechecks_already_ready_bytes() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        let text = "x".repeat(2048);
+        sender.write_all(format!("\x1b[200~{text}\x1b[201~").as_bytes()).unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        assert!(reader.poll(Some(Duration::from_millis(100)), &InternalEventFilter).unwrap());
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(text)));
+    }
+
     #[test]
     fn test_poll_fails_without_event_source() {
         let mut reader = InternalEventReader {

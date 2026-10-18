@@ -92,32 +92,32 @@ impl EventSource for UnixInternalEventSource {
             for token in self.events.iter().map(|x| x.token()) {
                 match token {
                     TTY_TOKEN => {
-                        loop {
-                            match self.tty_fd.read(&mut self.tty_buffer) {
-                                Ok(read_count) => {
-                                    if read_count > 0 {
-                                        self.parser.advance(
-                                            &self.tty_buffer[..read_count],
-                                            read_count == TTY_BUFFER_SIZE,
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    // No more data to read at the moment. We will receive another event
-                                    if e.kind() == io::ErrorKind::WouldBlock {
-                                        break;
-                                    }
-                                    // once more data is available to read.
-                                    else if e.kind() == io::ErrorKind::Interrupted {
-                                        continue;
-                                    }
-                                }
-                            };
-
-                            if let Some(event) = self.parser.next() {
-                                return Ok(Some(event));
-                            }
+                        match self.tty_fd.read(&mut self.tty_buffer) {
+                            Ok(0) => return Ok(None),
+                            Ok(read_count) => self.parser.advance(
+                                &self.tty_buffer[..read_count],
+                                read_count == TTY_BUFFER_SIZE,
+                            ),
+                            Err(e) if matches!(
+                                e.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                            ) => {},
+                            Err(e) => return Err(e),
                         }
+
+                        if let Some(event) = self.parser.next() {
+                            return Ok(Some(event));
+                        }
+                        // An incomplete sequence stays in the parser. A blocking
+                        // tty must be polled again before reading its suffix.
+                        // Re-arm edge-triggered readiness for unread bytes that
+                        // were already available beyond this buffer.
+                        let fd = self.tty_fd.raw_fd();
+                        self.poll.registry().reregister(
+                            &mut SourceFd(&fd),
+                            TTY_TOKEN,
+                            Interest::READABLE,
+                        )?;
                     }
                     SIGNAL_TOKEN => {
                         if self.signals.pending().next() == Some(signal_hook::consts::SIGWINCH) {
