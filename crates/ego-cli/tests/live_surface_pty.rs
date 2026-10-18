@@ -2146,7 +2146,8 @@ fn image_paste_clipboard_png_stages_and_reaches_next_turn() {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         let rendered = normalized(&output[paste_start..]);
-        if rendered.contains("[image: clipboard]") || rendered.contains("non-text content block") {
+        if rendered.contains("[image: clipboard 1]") || rendered.contains("non-text content block")
+        {
             break;
         }
         if let Ok(chunk) = reader.recv_timeout(Duration::from_millis(100)) {
@@ -2166,7 +2167,7 @@ fn image_paste_clipboard_png_stages_and_reaches_next_turn() {
     let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
-        staged.contains("[image: clipboard]"),
+        staged.contains("[image: clipboard 1]"),
         "no clipboard image chip: {staged:?}"
     );
     let generations = stub.generations();
@@ -2268,7 +2269,8 @@ fn image_paste_clipboard_tiff_stages_and_reaches_next_turn() {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         let rendered = normalized(&output[paste_start..]);
-        if rendered.contains("[image: clipboard]") || rendered.contains("non-text content block") {
+        if rendered.contains("[image: clipboard 1]") || rendered.contains("non-text content block")
+        {
             break;
         }
         if let Ok(chunk) = reader.recv_timeout(Duration::from_millis(100)) {
@@ -2288,7 +2290,7 @@ fn image_paste_clipboard_tiff_stages_and_reaches_next_turn() {
     let status = session.quit(input);
     assert!(status.success(), "interactive process failed: {status:?}");
     assert!(
-        staged.contains("[image: clipboard]"),
+        staged.contains("[image: clipboard 1]"),
         "no clipboard image chip: {staged:?}"
     );
     let generations = stub.generations();

@@ -3924,7 +3924,8 @@ mod turn {
             tools,
         )
         .with_interactive_control(&mut control);
-        let mut submit = Box::pin(ingress.submit("deliver this after the final".to_owned()));
+        let mut submit =
+            Box::pin(ingress.submit("deliver this after the final".to_owned(), Vec::new()));
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         assert!(matches!(submit.as_mut().poll(&mut cx), Poll::Pending));
@@ -4070,7 +4071,7 @@ mod turn {
             })
             .await;
             let accepted = ingress
-                .submit("ordinary sibling follow-up".to_owned())
+                .submit("ordinary sibling follow-up".to_owned(), Vec::new())
                 .await
                 .expect("the ordinary steer is durably accepted while the first sibling runs");
             assert_eq!(accepted.pending_steers, 1);
@@ -4209,7 +4210,8 @@ mod turn {
                 ..
             } if id == second
         )));
-        let mut closed_submit = Box::pin(ingress.submit("after partial failure".to_owned()));
+        let mut closed_submit =
+            Box::pin(ingress.submit("after partial failure".to_owned(), Vec::new()));
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         assert!(matches!(
@@ -4255,7 +4257,8 @@ mod turn {
         let _state = turn.into_state().expect("unique turn journal state");
         drop(budget);
 
-        let mut closed_submit = Box::pin(ingress.submit("after empty queue run".to_owned()));
+        let mut closed_submit =
+            Box::pin(ingress.submit("after empty queue run".to_owned(), Vec::new()));
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         assert!(matches!(
@@ -4293,7 +4296,8 @@ mod turn {
                 AiEvent::Stop(StopReason::Stop),
             ],
         ]);
-        let mut submit_before = Box::pin(ingress.submit("before completion".to_owned()));
+        let mut submit_before =
+            Box::pin(ingress.submit("before completion".to_owned(), Vec::new()));
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         assert!(matches!(
@@ -4346,7 +4350,7 @@ mod turn {
             state
         };
 
-        let mut closed_submit = Box::pin(ingress.submit("after close".to_owned()));
+        let mut closed_submit = Box::pin(ingress.submit("after close".to_owned(), Vec::new()));
         assert!(matches!(
             closed_submit.as_mut().poll(&mut cx),
             Poll::Ready(Err(ControlError::Closed))
@@ -4371,7 +4375,8 @@ mod turn {
                 tools,
             )
             .with_interactive_control(&mut control);
-            let mut reopened_submit = Box::pin(ingress.submit("after reopen".to_owned()));
+            let mut reopened_submit =
+                Box::pin(ingress.submit("after reopen".to_owned(), Vec::new()));
             assert!(matches!(
                 reopened_submit.as_mut().poll(&mut cx),
                 Poll::Pending
@@ -4480,7 +4485,7 @@ mod turn {
         let active = turn.run("run both reads");
         let drive = async {
             let accepted = ingress
-                .submit("after both siblings".to_owned())
+                .submit("after both siblings".to_owned(), Vec::new())
                 .await
                 .expect("sibling follow-up acceptance is durable before acknowledgement");
             assert_eq!(accepted.pending_steers, 1);
@@ -4586,7 +4591,7 @@ mod turn {
     }
 
     #[test]
-    fn busy_ingress_is_durable_before_ack_and_projects_pending_steer() {
+    fn busy_ingress_preserves_images_through_durable_ack_recall_and_resubmit() {
         let (ingress, mut control) = ego_core::turn::interactive_control();
         let fx = Fixture::new(vec![]);
         let generator = Arc::new(StallingGenerator {
@@ -4618,15 +4623,54 @@ mod turn {
         )
         .with_interactive_control(&mut control);
 
+        // The ingress accepts published metadata; image acquisition is owned by
+        // its caller and is not exercised by this queue-envelope regression.
+        let reference = ego_core::store::blob::BlobRef::new(
+            ego_core::store::blob::BlobId::parse(ego_core::digest::sha256_hex(
+                b"already published image",
+            ))
+            .unwrap(),
+            b"already published image".len() as u64,
+        );
+        let image = ego_core::generator::types::ImageRef::new(
+            reference,
+            ego_core::generator::types::ImageMediaType::Png,
+            1,
+            1,
+        )
+        .unwrap();
         let active = turn.run("initial prompt");
         let drive = async {
             let accepted = ingress
-                .submit("durably accepted while the model is busy".to_owned())
+                .submit(
+                    "durably accepted while the model is busy".to_owned(),
+                    vec![image.clone()],
+                )
                 .await
                 .expect("acknowledgement follows PromptQueued durability");
             assert_eq!(accepted.pending_steers, 1);
             assert_eq!(accepted.queued, 0);
             assert!(!accepted.interrupt_pending);
+            let events = fx.store.events();
+            assert!(
+                events.iter().any(|event| matches!(
+                    &event.kind,
+                    EventKind::PromptQueued { text, images, .. }
+                        if text == "durably accepted while the model is busy"
+                            && images == &vec![image.clone()]
+                )),
+                "the acknowledged queue event must contain the image envelope"
+            );
+            let (recalled, queue) = ingress.recall().await.unwrap().unwrap();
+            assert_eq!(recalled.text(), "durably accepted while the model is busy");
+            assert_eq!(recalled.images(), &[image.clone()]);
+            assert_eq!(queue.pending_steers, 0);
+            assert_eq!(queue.queued, 0);
+            let accepted = ingress
+                .submit(recalled.text().to_owned(), recalled.images().to_vec())
+                .await
+                .unwrap();
+            assert_eq!(accepted.pending_steers, 1);
             let expedited = ingress
                 .interrupt()
                 .await
@@ -4674,7 +4718,7 @@ mod turn {
         )
         .with_interactive_control(&mut control);
 
-        let mut submit = Box::pin(ingress.submit("ready-stream steer".to_owned()));
+        let mut submit = Box::pin(ingress.submit("ready-stream steer".to_owned(), Vec::new()));
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         assert!(matches!(submit.as_mut().poll(&mut cx), Poll::Pending));
@@ -4706,8 +4750,10 @@ mod turn {
         let (ingress, mut control) = ego_core::turn::interactive_control();
         let first_ingress = ingress.clone();
         let second_ingress = ingress.clone();
-        let mut first = Box::pin(first_ingress.submit("first concurrent steer".to_owned()));
-        let mut second = Box::pin(second_ingress.submit("second concurrent steer".to_owned()));
+        let mut first =
+            Box::pin(first_ingress.submit("first concurrent steer".to_owned(), Vec::new()));
+        let mut second =
+            Box::pin(second_ingress.submit("second concurrent steer".to_owned(), Vec::new()));
         let waker = futures::task::noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         assert!(matches!(first.as_mut().poll(&mut cx), Poll::Pending));
@@ -4904,7 +4950,7 @@ mod turn {
         .with_interactive_control(&mut control);
 
         let active = turn.run("initial prompt");
-        let submit = ingress.submit("must not be acknowledged".to_owned());
+        let submit = ingress.submit("must not be acknowledged".to_owned(), Vec::new());
         let (outcome, result) = block_on(async { futures::join!(active, submit) });
         let abandoned = outcome.expect_err("a failed queue append abandons the turn");
         assert_eq!(abandoned.state.queue_status().pending_steers, 0);
@@ -4976,7 +5022,7 @@ mod turn {
         let active = turn.run("write it");
         let drive = async {
             let accepted = ingress
-                .submit("permission follow-up".to_owned())
+                .submit("permission follow-up".to_owned(), Vec::new())
                 .await
                 .expect("the permission-phase prompt is durable before acknowledgement");
             assert_eq!(accepted.pending_steers, 1);
@@ -5106,7 +5152,7 @@ mod turn {
         let active = turn.run("run it");
         let drive = async {
             let accepted = ingress
-                .submit("process follow-up".to_owned())
+                .submit("process follow-up".to_owned(), Vec::new())
                 .await
                 .expect("process-phase acceptance is durable before acknowledgement");
             assert_eq!(accepted.pending_steers, 1);
@@ -5219,7 +5265,7 @@ mod turn {
         let active = turn.run("read it");
         let drive = async {
             let accepted = ingress
-                .submit("builtin follow-up".to_owned())
+                .submit("builtin follow-up".to_owned(), Vec::new())
                 .await
                 .expect("builtin-phase acceptance is durable before acknowledgement");
             assert_eq!(accepted.pending_steers, 1);
@@ -5360,7 +5406,7 @@ mod turn {
         let active = turn.run("run siblings");
         let drive = async {
             let accepted = ingress
-                .submit("sibling follow-up".to_owned())
+                .submit("sibling follow-up".to_owned(), Vec::new())
                 .await
                 .expect("sibling-batch acceptance is durable before acknowledgement");
             assert_eq!(accepted.pending_steers, 1);

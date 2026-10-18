@@ -246,7 +246,7 @@ mod phase_boundary_tests;
 
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
-mod test_support;
+pub(crate) mod test_support;
 
 /// Inspect only IDs admitted in the current session's durable journal.
 fn background_tasks(

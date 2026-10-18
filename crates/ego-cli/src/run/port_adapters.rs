@@ -147,12 +147,6 @@ pub(super) struct Attachments<'a> {
     pub(super) specs: &'a [String],
 }
 
-impl Attachments<'_> {
-    pub(super) fn is_empty(&self) -> bool {
-        self.inline.is_empty() && self.specs.is_empty()
-    }
-}
-
 pub(super) async fn acquire_attachments(
     attachments: Attachments<'_>,
     source: &Arc<model::CliGenerationModelSource>,
@@ -162,7 +156,32 @@ pub(super) async fn acquire_attachments(
     cwd: &Path,
     blobs: &dyn ego_core::store::blob::BlobStore,
 ) -> Result<Vec<ImageRef>, RunTermination> {
-    if attachments.is_empty() {
+    let inputs = attachments
+        .inline
+        .iter()
+        .cloned()
+        .map(attachment::AttachmentInput::Inline)
+        .chain(
+            attachments
+                .specs
+                .iter()
+                .cloned()
+                .map(attachment::AttachmentInput::Spec),
+        )
+        .collect::<Vec<_>>();
+    acquire_image_inputs(&inputs, source, ports, cancel, run_deadline, cwd, blobs).await
+}
+
+pub(super) async fn acquire_image_inputs(
+    inputs: &[attachment::AttachmentInput],
+    source: &Arc<model::CliGenerationModelSource>,
+    ports: &Arc<RunEffectPorts>,
+    cancel: &CancelToken,
+    run_deadline: Option<std::time::Instant>,
+    cwd: &Path,
+    blobs: &dyn ego_core::store::blob::BlobStore,
+) -> Result<Vec<ImageRef>, RunTermination> {
+    if inputs.is_empty() {
         return Ok(Vec::new());
     }
     // Resolving the profile is what makes the refusal truthful rather than
@@ -177,30 +196,17 @@ pub(super) async fn acquire_attachments(
     let usage = |error: crate::cli::UsageError| RunTermination::UsageError {
         message: error.to_string(),
     };
-    // Images that came inside the request come first, because they came with
-    // the prompt itself; `--attach` values follow in the order they were given.
-    let mut images = attachment::publish(
-        attachments.inline,
+    attachment::acquire_ordered(
+        inputs,
         &profile.capabilities,
         profile.identity.0.as_str(),
         &profile.request_model,
+        cwd,
+        ports.as_ref(),
         blobs,
     )
-    .map_err(usage)?;
-    images.extend(
-        attachment::acquire(
-            attachments.specs,
-            &profile.capabilities,
-            profile.identity.0.as_str(),
-            &profile.request_model,
-            cwd,
-            ports.as_ref(),
-            blobs,
-        )
-        .await
-        .map_err(usage)?,
-    );
-    Ok(images)
+    .await
+    .map_err(usage)
 }
 
 /// Map the first latched cancellation cause to the CLI termination contract.

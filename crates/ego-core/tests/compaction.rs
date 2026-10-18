@@ -940,7 +940,7 @@ fn compaction_drains_raced_prompt_before_capturing_source_history() {
     let mut turn = turn.with_interactive_control(&mut control);
     let (accepted, prepared) = futures::executor::block_on(async {
         futures::join!(
-            ingress.submit("REGRESSION-MARKER".to_owned()),
+            ingress.submit("REGRESSION-MARKER".to_owned(), Vec::new()),
             turn.prepare_compaction(None, Vec::new()),
         )
     });
@@ -969,7 +969,7 @@ fn compaction_drains_raced_prompt_before_capturing_source_history() {
     assert!(acknowledged.env.seq <= prepared.source_seq());
     assert!(
         matches!(
-            futures::executor::block_on(ingress.submit("LATE-WORK".into())),
+            futures::executor::block_on(ingress.submit("LATE-WORK".into(), Vec::new())),
             Err(ego_core::turn::ControlError::Closed)
         ),
         "later input must stay owned by the terminal for the successor"
