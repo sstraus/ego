@@ -208,7 +208,7 @@ fn transcript_contract_preserves_chat_goals_lineage_and_follow_cursor() {
             .subcommand("resume")
             .args([
                 FIXTURE_SESSION_ID,
-                "--goal",
+                "--goal-operation",
                 "set=Updated local objective",
                 "--output",
                 "json",
