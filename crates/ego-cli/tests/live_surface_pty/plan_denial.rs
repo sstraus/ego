@@ -23,7 +23,14 @@ fn plan_denial_explains_the_stopped_turn_without_running_the_effect() {
         let mut session = modal_session_on(ego, stub);
         session.resize(MODAL_ROWS, cols);
         session.press(b"run the requested tool\r");
-        session.wait("✗");
+        // The tool result arrives before the driver settles the denial, and
+        // /version also runs while Busy. Neither proves the final idle frame.
+        let receipt = "stopped: permission refused";
+        session.wait(receipt);
+        let completed = session.mark
+            + find(&session.output[session.mark..], receipt.as_bytes())
+            + receipt.len();
+        until_prompt_from(&session.reader, &mut session.output, completed);
         session.press(b"/version\r");
         session.wait("ACP protocol");
         let screen = session.screen();
