@@ -246,7 +246,8 @@ pub struct ToolTiming {
 /// TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
-/// SubagentSettled | SkillCatalogueAdmitted | SkillInstructionAdmitted |
+/// SubagentSettled | BackgroundTaskRequested | SubagentCompletionDelivered |
+/// SkillCatalogueAdmitted | SkillInstructionAdmitted |
 /// SkillResourceAdmitted | Error
 /// ```
 ///
