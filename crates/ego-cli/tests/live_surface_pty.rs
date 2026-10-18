@@ -8012,7 +8012,15 @@ impl ModalSession {
     fn quit(mut self) -> Quit {
         self.input.write_all(b"/quit\r").expect("quit");
         self.input.flush().expect("quit flush");
-        let status = bounded_exit(self.child);
+        let status =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bounded_exit(self.child)))
+                .unwrap_or_else(|error| {
+                    for chunk in self.reader.try_iter() {
+                        self.output.extend(chunk);
+                    }
+                    eprintln!("quit transcript: {}", normalized(&self.output));
+                    std::panic::resume_unwind(error)
+                });
         drop(self.input);
         drop(self.pair);
         for join in self.joins {
