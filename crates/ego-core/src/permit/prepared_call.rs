@@ -521,8 +521,12 @@ impl PreparedCall {
         &self.ops
     }
 
-    /// Acquisition changes only the spawn observation, not delegation provenance.
-    pub(crate) fn observe_processes(
+    /// Bind spawn operations to the selected process backend before policy authorization.
+    ///
+    /// Composition roots preparing operator-owned calls use the same observation path as
+    /// `Tools::prepare`. Acquisition changes only executable observations, never authority
+    /// or delegation provenance; callers must still authorize and execute through guarded effects.
+    pub fn observe_processes(
         mut self,
         process: &dyn super::ProcessExecutor,
     ) -> Result<Self, super::ProcessError> {

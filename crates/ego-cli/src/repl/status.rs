@@ -674,6 +674,7 @@ impl StatusSegmentName {
         matches!(
             self,
             Self::Model
+                | Self::Fast
                 | Self::Effort
                 | Self::Mode
                 | Self::Context
@@ -681,7 +682,6 @@ impl StatusSegmentName {
                 | Self::Cwd
                 | Self::Git
                 | Self::Goal
-                | Self::Fast
         )
     }
 

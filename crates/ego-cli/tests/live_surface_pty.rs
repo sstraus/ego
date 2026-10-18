@@ -58,6 +58,7 @@ mod startup_provenance;
 mod status_compact;
 #[path = "live_surface_pty/status_history.rs"]
 mod status_history;
+mod status_providers;
 mod support;
 #[path = "live_surface_pty/task_rows.rs"]
 mod task_rows;
