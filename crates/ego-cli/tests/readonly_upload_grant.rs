@@ -71,8 +71,10 @@ fn grant_is_read_only() {
     let exec_result = generations[3]["messages"]
         .as_array()
         .unwrap()
-        .last()
-        .unwrap()
+        .iter()
+        // A refreshed runtime context message can follow the tool result.
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == "exec_upload")
+        .expect("the uploaded executable refusal reaches the next generation")
         .to_string();
     let refusal = if cfg!(target_os = "macos") {
         "sandbox denied exec"

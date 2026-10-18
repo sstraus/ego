@@ -1,0 +1,27 @@
+{
+  "data": {
+    "id": "openai/gpt-6.1-sol",
+    "endpoints": [
+      {
+        "tag": "openai",
+        "service_tier": null,
+        "pricing": {
+          "prompt": "0.000002",
+          "completion": "0.00001",
+          "input_cache_read": "0.0000001",
+          "input_cache_write": "0.0000025"
+        }
+      },
+      {
+        "tag": "openai/fast",
+        "service_tier": "priority",
+        "pricing": {
+          "prompt": "0.000004",
+          "completion": "0.00002",
+          "input_cache_read": "0.0000002",
+          "input_cache_write": "0.000005"
+        }
+      }
+    ]
+  }
+}
