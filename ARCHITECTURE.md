@@ -36,14 +36,15 @@ UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
 CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
 HookLifecycleReached | HookInvocationStarted | HookInvocationSettled |
 SubagentRequested | SubagentSpawned | SubagentSettled |
+BackgroundTaskRequested | SubagentCompletionDelivered |
 SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-65 variants in the current schema, and this list is exhaustive by contract.
+67 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-65, including the session-metadata, pause and goal, question, detached-exec,
-hook, subagent, skill, and clean-session compaction lifecycles.
+67, including the session-metadata, pause and goal, question, detached-exec,
+hook, subagent, background-task, skill, and clean-session compaction lifecycles.
 `ExecutionObserved` records an admitted execution authority.
 `ExecutionMeasured` records a capability measurement as evidence only (§3.4).
 The enum and this list are compared by hand at each milestone close.
