@@ -7,6 +7,15 @@ fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
     let (reply, gate) = gated_paced_line("BUSY-IMAGE-ACTIVE\n");
     let stub = Stub::start(Plan {
         completions: vec![reply, Reply::Sse(text("QUEUED-IMAGE-ANSWER"))],
+        // Ollama takes capabilities from daemon discovery, not models.toml.
+        // The existing status/body override also serves successful tag responses.
+        tags_refusal: Some((
+            200,
+            serde_json::json!({
+                "models": [{ "name": "qwen3", "capabilities": ["completion", "tools", "vision"] }]
+            })
+            .to_string(),
+        )),
         ..Plan::default()
     });
     let ego = Ego::against(&stub)
@@ -21,11 +30,6 @@ fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
             "--trust-workspace",
         ])
         .env("TERM", "xterm-256color");
-    ego.home_file(
-        "models.toml",
-        &support::vision_model_facts(support::READS_PICTURES)
-            .replace("anthropic/fixture-vision", "ollama/qwen3"),
-    );
     ego.file("AGENTS.md", "# busy image draft fixture\n");
     let path = ego.file("queued-image.png", "");
     std::fs::write(&path, support::PNG_1X1).unwrap();
@@ -119,11 +123,6 @@ fn busy_image_capability_refusal_is_one_transcript_line_and_enter_stays_a_key() 
         ])
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# paste refusal fixture\n");
-    ego.home_file(
-        "models.toml",
-        &support::vision_model_facts(r#"image_input = "unknown""#)
-            .replace("anthropic/fixture-vision", "ollama/qwen3"),
-    );
     let path = ego.file("refused-image.png", "");
     std::fs::write(&path, support::PNG_1X1).unwrap();
     let (session, mut input, reader) = PtySession::start(&ego, 32, 160, Some((32, 160)));
@@ -137,7 +136,7 @@ fn busy_image_capability_refusal_is_one_transcript_line_and_enter_stays_a_key() 
         .write_all(format!("\x1b[200~{}\x1b[201~", path.display()).as_bytes())
         .unwrap();
     input.flush().unwrap();
-    let refusal = "image-input capability is unknown; no attachment was fetched";
+    let refusal = "does not support image input";
     until_normalized(&reader, &mut output, start, refusal);
     // Two real activity ticks must not republish the outcome.
     let deadline = Instant::now() + Duration::from_millis(2200);
