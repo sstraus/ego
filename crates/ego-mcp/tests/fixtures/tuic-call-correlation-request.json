@@ -1,0 +1,19 @@
+{
+  "captured_at": "2000-01-28T00:39:04.198416+00:00",
+  "provenance": "Real read-only headerless tools/call to running TUIC Unix HTTP socket. Runtime /api/version previously reports 0000000006. The request records the correlation wire slot, not server audit support: that runtime has no /mcp/audit. Not an ego-generated live call or new identity-contract response.",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "agent",
+      "arguments": {
+        "action": "inbox"
+      },
+      "_meta": {
+        "tuic/call_id": "00000000-0000-4000-8000-00000001008f"
+      }
+    }
+  },
+  "response": "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nvary: origin\r\naccess-control-allow-credentials: true\r\ncontent-length: 193\r\nconnection: close\r\ndate: Fri, 28 Jan 2000 00:39:04 GMT\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"error\\\":\\\"You are not registered. Register first with agent action=register\\\"}\"}],\"isError\":true,\"resultType\":\"complete\"}}"
+}
