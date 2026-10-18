@@ -39,6 +39,22 @@ impl InternalEventReader {
         self.source.as_ref().expect("reader source not set").waker()
     }
 
+    /// Discard matching events already available, without waiting or losing input.
+    #[cfg(unix)]
+    pub(crate) fn discard_pending<F: Filter>(&mut self, filter: &F) -> io::Result<()> {
+        self.events.extend(self.skipped_events.drain(..));
+        self.events.retain(|event| !filter.eval(event));
+        let source = self.source.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Failed to initialize input reader")
+        })?;
+        while let Some(event) = source.try_read(Some(Duration::ZERO))? {
+            if !filter.eval(&event) {
+                self.events.push_back(event);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn poll<F>(&mut self, timeout: Option<Duration>, filter: &F) -> io::Result<bool>
     where
         F: Filter,
@@ -141,6 +157,35 @@ mod tests {
         fn eval(&self, _: &InternalEvent) -> bool {
             true
         }
+    }
+
+    // Catches: a timed-out cursor report is reused by the next query, or
+    // removing it consumes keyboard/resize events queued on either side.
+    #[test]
+    #[cfg(unix)]
+    fn discard_pending_cursor_reports_preserves_input_order() {
+        use super::super::{KeyCode, KeyEvent, KeyModifiers};
+        let key = InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        let resize = InternalEvent::Event(Event::Resize(80, 24));
+        let mut reader = InternalEventReader {
+            events: vec![InternalEvent::CursorPosition(0, 18), key.clone()].into(),
+            source: Some(Box::new(FakeSource::with_events(&[
+                resize.clone(),
+                InternalEvent::CursorPosition(79, 18),
+                key.clone(),
+            ]))),
+            skipped_events: Vec::new(),
+        };
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), key);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), resize);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), key);
+        assert!(!reader
+            .poll(Some(Duration::ZERO), &InternalEventFilter)
+            .unwrap());
     }
 
     #[test]

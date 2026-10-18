@@ -123,7 +123,7 @@ impl EventSource for UnixInternalEventSource {
             make_pollfd(&self.wake_pipe.receiver),
         ];
 
-        while timeout.leftover().map_or(true, |t| !t.is_zero()) {
+        loop {
             // check if there are buffered events from the last read
             if let Some(event) = self.parser.next() {
                 return Ok(Some(event));
@@ -197,8 +197,10 @@ impl EventSource for UnixInternalEventSource {
                     "Poll operation was woken up by `Waker::wake`",
                 ));
             }
+            if timeout.elapsed() {
+                return Ok(None);
+            }
         }
-        Ok(None)
     }
 
     #[cfg(feature = "event-stream")]
