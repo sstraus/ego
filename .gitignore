@@ -1,12 +1,9 @@
-.codex/**
-!.codex/hooks.json
-.mdkb/**
-.claude/**
-.wiz/**
+.codex/
+.mdkb/
+.claude/
+.wiz/
 /target
-# Clippy and test runs must not share one target directory: they compile with
-# different flags, so alternating between them rebuilds the whole workspace
-# every time. `CARGO_TARGET_DIR=target-clippy` keeps the two caches apart.
+# Legacy local build output; shared development builds use mbx target views.
 /target-clippy
 
 # cargo-mutants scratch output: a run leaves a full copy of the tree behind.
@@ -16,3 +13,4 @@ mutants.out.old/
 
 # Local source installation prefix from the quick start.
 /.ego-bin
+
