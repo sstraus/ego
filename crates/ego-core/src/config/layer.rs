@@ -879,8 +879,8 @@ where
 {
     let providers =
         Option::<std::collections::BTreeMap<String, StatusProvider>>::deserialize(deserializer)?;
-    if let Some(providers) = &providers {
-        if providers.len() > 4
+    if let Some(providers) = &providers
+        && (providers.len() > 4
             || providers.iter().any(|(name, provider)| {
                 name.is_empty()
                     || name.len() > 40
@@ -890,12 +890,11 @@ where
                     || provider.argv.iter().any(|arg| arg.contains('\0'))
                     || provider.argv.iter().map(String::len).sum::<usize>() > 4096
                     || !(1..=1000).contains(&provider.timeout_ms)
-            })
-        {
-            return Err(serde::de::Error::custom(
-                "status providers require at most four named argv commands, each at most 4096 bytes and 1..1000ms",
-            ));
-        }
+            }))
+    {
+        return Err(serde::de::Error::custom(
+            "status providers require at most four named argv commands, each at most 4096 bytes and 1..1000ms",
+        ));
     }
     Ok(providers)
 }
