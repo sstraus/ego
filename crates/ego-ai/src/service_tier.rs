@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn fast_contract_catches_openrouter_slug_or_tariff_drift_from_captured_endpoints() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../ARCHITECTURE.md");
+            .join("tests/fixtures/service-tier");
         for model in [
             "openai-gpt-6-astra",
             "openai-gpt-6.1-sol",
