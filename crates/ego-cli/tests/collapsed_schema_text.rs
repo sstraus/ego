@@ -6,11 +6,14 @@ use serde_json::Value;
 use support::{Ego, Plan, Reply, Stub, text, tool_call};
 
 const SERVER: &str = r#"
+import hashlib
 import json
 import sys
 from datetime import datetime
 
 mode = sys.argv[1]
+with open(sys.argv[3]) as fixture:
+    search_response = json.load(fixture)
 definition = {
     "name": "repo",
     "description": "List repositories",
@@ -92,8 +95,17 @@ for line in sys.stdin:
             assert request["params"]["arguments"]["tool_name"] == definition["name"]
         result = {"resultType": "complete", "isError": False}
         if operation == "search_tools":
-            hit = {"name": definition["name"], "summary": definition["description"]} if mode in ("schedule-baseline", "malformed", "multiple", "empty", "nontext") else definition
-            result["content"] = [{"type": "text", "text": json.dumps({"results": [hit], "count": 1})}]
+            # Source-derived TUIC response: summaries and a sibling complete top_schema.
+            response = dict(search_response)
+            response["results"] = [{"name": definition["name"], "summary": definition["description"]}]
+            response["catalogue_generation"] = hashlib.sha256(json.dumps(
+                [definition], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()).hexdigest()
+            if mode in ("schedule-baseline", "malformed", "multiple", "empty", "nontext"):
+                response.pop("top_schema")
+            else:
+                response["top_schema"] = definition
+            result["content"] = [{"type": "text", "text": json.dumps(response)}]
         elif operation == "call_tool":
             arguments = request["params"]["arguments"]["arguments"]
             if mode.startswith("schedule"):
@@ -201,13 +213,18 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         "captured-schema.json",
         include_str!("fixtures/tuic-1.8.0-progress-schema-response.json"),
     );
+    // TUIC 49f31508b1 search producer and needle regression; see fixture provenance.
+    let search_response = ego.file(
+        "search-response.json",
+        include_str!("../../ego-mcp/tests/fixtures/tuic-search-top-schema.json"),
+    );
     let selector = ego.file(
         "mcp.json",
         &serde_json::json!({
             "name": "fixture",
             "transport": "stdio",
             "command": "/usr/bin/python3",
-            "args": [server, mode, captured],
+            "args": [server, mode, captured, search_response],
             "inherit_env": []
         })
         .to_string(),
@@ -383,7 +400,11 @@ fn collapsed_schedule_one_hour_needs_one_discovery_hop() {
             "automations-tool.json",
             include_str!("fixtures/tuic-automations-tool.json"),
         );
-        let selector = ego.file("mcp.json", &serde_json::json!({"name":"fixture","transport":"stdio","command":"/usr/bin/python3","args":[server,mode,schema],"inherit_env":[]}).to_string());
+        let search_response = ego.file(
+            "search-response.json",
+            include_str!("../../ego-mcp/tests/fixtures/tuic-search-top-schema.json"),
+        );
+        let selector = ego.file("mcp.json", &serde_json::json!({"name":"fixture","transport":"stdio","command":"/usr/bin/python3","args":[server,mode,schema,search_response],"inherit_env":[]}).to_string());
         let finished = ego
             .arg("--mcp")
             .arg(&format!("@{}", selector.display()))
