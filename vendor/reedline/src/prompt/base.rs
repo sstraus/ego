@@ -374,8 +374,8 @@ mod test {
     #[cfg(feature = "helix")]
     #[test]
     fn helix_discriminants_round_trip_through_their_names() {
-        use PromptEditModeDiscriminants as D;
         use std::str::FromStr;
+        use PromptEditModeDiscriminants as D;
         for (name, expected) in [
             ("helix_normal", D::HelixNormal),
             ("helix_insert", D::HelixInsert),

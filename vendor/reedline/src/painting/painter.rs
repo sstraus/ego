@@ -1,6 +1,6 @@
+use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
 #[cfg(feature = "helix")]
 use crate::PromptHelixMode;
-use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
 use crate::{CursorConfig, PromptEditMode, PromptViMode};
 
 #[cfg(feature = "external_printer")]
@@ -8,15 +8,15 @@ use crate::LineBuffer;
 use {
     super::utils::{coerce_crlf, deferred_wrap_row, estimate_required_lines, line_width},
     crate::{
-        Prompt,
         menu::{Menu, ReedlineMenu},
         painting::PromptLines,
+        Prompt,
     },
     crossterm::{
-        QueueableCommand,
         cursor::{self, MoveTo, RestorePosition, SavePosition},
         style::{Attribute, Print, ResetColor, SetAttribute},
         terminal::{self, Clear, ClearType},
+        QueueableCommand,
     },
     std::io::{Result, Write},
     std::ops::RangeInclusive,
@@ -552,7 +552,11 @@ impl Painter {
             let size = terminal::size()?;
             // if reported size is 0, 0 -
             // use a default size to avoid divide by 0 panics
-            if size == (0, 0) { (80, 24) } else { size }
+            if size == (0, 0) {
+                (80, 24)
+            } else {
+                size
+            }
         };
         let prompt_selector = select_prompt_row(suspended_state, cursor::position()?);
         let new_row = match prompt_selector {
@@ -2509,8 +2513,8 @@ mod tests {
     #[test]
     fn crossterm_defaults_were_the_bright_palette_entries() {
         use crossterm::{
-            Command,
             style::{Color as CtColor, SetForegroundColor},
+            Command,
         };
 
         fn crossterm_sgr(color: CtColor) -> String {
