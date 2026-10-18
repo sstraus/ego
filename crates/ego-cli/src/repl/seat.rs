@@ -227,7 +227,7 @@ impl Completer for ActionCompleter {
                     Availability::Disabled { owner } => {
                         format!("{} — unavailable: {owner}", registration.description_text())
                     }
-                    Availability::Busy => {
+                    Availability::Busy | Availability::BusyWithReason { .. } => {
                         format!("{} — busy", registration.description_text())
                     }
                     Availability::Enabled => registration.description_text().to_string(),
@@ -2065,8 +2065,12 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn busy(&self) {
-        self.registry
-            .set_availability(ActionId::Compact, Availability::Busy);
+        self.registry.set_availability(
+            ActionId::Compact,
+            Availability::BusyWithReason {
+                reason: "ego is busy; a turn is running",
+            },
+        );
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Busy);
             let mut status = live.status.lock().expect("surface status lock");

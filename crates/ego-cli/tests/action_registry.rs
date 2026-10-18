@@ -131,6 +131,49 @@ fn menu_display_is_not_authorization_and_dispatch_rechecks_current_snapshot() {
 }
 
 #[test]
+fn busy_compact_refusal_is_not_reported_as_a_stale_action() {
+    // Catches: typing /compact during active work reports a removed menu action.
+    let registry =
+        ActionRegistry::final_surface().with_availability(ActionId::Compact, Availability::Busy);
+    let displayed = registry.snapshot();
+    assert_eq!(
+        registry.dispatch(ActionId::Compact, &displayed),
+        Dispatch::Refused {
+            reason: "ego is busy; wait for the current work to finish"
+        }
+    );
+    let selection = registry.select(ActionId::Compact, &displayed).unwrap();
+    let mut sink = RecordingSink { calls: Vec::new() };
+    assert_eq!(
+        registry.dispatch_to(selection, &displayed, true, &mut sink),
+        ActionDispatch::Refused {
+            reason: "ego is busy; wait for the current work to finish"
+        }
+    );
+    assert!(sink.calls.is_empty());
+}
+
+#[test]
+fn busy_compact_refusal_preserves_the_coordinator_reason() {
+    // Catches: a known compaction is reduced to an unhelpful generic busy notice.
+    let reason = "ego is busy; compaction already running";
+    let registry = ActionRegistry::final_surface()
+        .with_availability(ActionId::Compact, Availability::BusyWithReason { reason });
+    let displayed = registry.snapshot();
+    assert_eq!(
+        registry.dispatch(ActionId::Compact, &displayed),
+        Dispatch::Refused { reason }
+    );
+    let selection = registry.select(ActionId::Compact, &displayed).unwrap();
+    let mut sink = RecordingSink { calls: Vec::new() };
+    assert_eq!(
+        registry.dispatch_to(selection, &displayed, true, &mut sink),
+        ActionDispatch::Refused { reason }
+    );
+    assert!(sink.calls.is_empty());
+}
+
+#[test]
 fn busy_routing_keeps_local_controls_immediate_and_prompt_actions_on_ingress() {
     let registry = ActionRegistry::final_surface();
     assert_eq!(registry.kind(ActionId::Model), ActionKind::Local);

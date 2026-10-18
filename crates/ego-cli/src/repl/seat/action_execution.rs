@@ -79,7 +79,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 action.name(),
                 action.description_text()
             ),
-            Availability::Busy => format!(
+            Availability::Busy | Availability::BusyWithReason { .. } => format!(
                 "/{}{shortcut} — {} [busy]",
                 action.name(),
                 action.description_text()
