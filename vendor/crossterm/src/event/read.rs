@@ -42,12 +42,13 @@ impl InternalEventReader {
     /// Discard matching events already available, without waiting or losing input.
     #[cfg(unix)]
     pub(crate) fn discard_pending<F: Filter>(&mut self, filter: &F) -> io::Result<()> {
-        self.events.extend(self.skipped_events.drain(..));
-        self.events.retain(|event| !filter.eval(event));
         let source = self.source.as_mut().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "Failed to initialize input reader")
         })?;
-        while let Some(event) = source.try_read(Some(Duration::ZERO))? {
+        let pending = source.pending_events()?;
+        self.events.extend(self.skipped_events.drain(..));
+        self.events.retain(|event| !filter.eval(event));
+        for event in pending {
             if !filter.eval(&event) {
                 self.events.push_back(event);
             }
@@ -609,6 +610,11 @@ mod tests {
     }
 
     impl EventSource for FakeSource {
+        #[cfg(unix)]
+        fn pending_events(&mut self) -> io::Result<Vec<InternalEvent>> {
+            Ok(self.events.drain(..).collect())
+        }
+
         fn try_read(&mut self, _timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
             // Return error if set in case there's just one remaining event
             if self.events.len() == 1 {

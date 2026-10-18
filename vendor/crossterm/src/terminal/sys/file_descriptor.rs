@@ -89,6 +89,43 @@ impl FileDesc<'_> {
     }
 }
 
+impl FileDesc<'_> {
+    /// Read only the bytes pending at entry. The caller owns the sole reader.
+    pub(crate) fn read_pending(&self) -> io::Result<Vec<u8>> {
+        #[cfg(feature = "libc")]
+        let count = {
+            let mut count: libc::c_int = 0;
+            if unsafe { libc::ioctl(self.raw_fd(), libc::FIONREAD, &mut count) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            count
+        };
+        #[cfg(not(feature = "libc"))]
+        let count = i32::try_from(rustix::io::ioctl_fionread(self)?).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid pending input byte count")
+        })?;
+        let mut remaining = usize::try_from(count).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "negative pending input byte count")
+        })?;
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 1024];
+        while remaining > 0 {
+            let limit = remaining.min(buffer.len());
+            match self.read(&mut buffer[..limit]) {
+                Ok(0) => break,
+                Ok(count) => {
+                    bytes.extend_from_slice(&buffer[..count]);
+                    remaining -= count;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(bytes)
+    }
+}
+
 #[cfg(feature = "libc")]
 impl Drop for FileDesc<'_> {
     fn drop(&mut self) {

@@ -65,12 +65,23 @@ impl UnixInternalEventSource {
 }
 
 impl EventSource for UnixInternalEventSource {
+    fn pending_events(&mut self) -> io::Result<Vec<InternalEvent>> {
+        let bytes = self.tty_fd.read_pending()?;
+        self.parser.advance(&bytes, false);
+        let fd = self.tty_fd.raw_fd();
+        self.poll.registry().reregister(
+            &mut SourceFd(&fd),
+            TTY_TOKEN,
+            Interest::READABLE,
+        )?;
+        Ok(self.parser.by_ref().collect())
+    }
+
     fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
         if let Some(event) = self.parser.next() {
             return Ok(Some(event));
         }
 
-        let drain_ready = timeout == Some(Duration::ZERO);
         let timeout = PollTimeout::new(timeout);
 
         loop {
@@ -146,9 +157,7 @@ impl EventSource for UnixInternalEventSource {
             }
 
             // Processing above can take some time, check if timeout expired
-            // A zero timeout drains immediately readable bytes without waiting;
-            // incomplete parsing alone does not mean the source is empty.
-            if !drain_ready && timeout.elapsed() {
+            if timeout.elapsed() {
                 return Ok(None);
             }
         }
