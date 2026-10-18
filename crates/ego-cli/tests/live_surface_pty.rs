@@ -22,6 +22,8 @@ mod goal_visibility;
 mod help_latency;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
+#[path = "live_surface_pty/live_width.rs"]
+mod live_width;
 #[path = "live_surface_pty/mcp_inventory.rs"]
 mod mcp_inventory;
 #[path = "live_surface_pty/metadata_refusal.rs"]
