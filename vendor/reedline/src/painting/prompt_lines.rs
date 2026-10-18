@@ -1,8 +1,8 @@
 use super::utils::{coerce_crlf, estimate_required_lines, line_width};
 use crate::{
+    Prompt, PromptHistorySearch,
     menu::{Menu, ReedlineMenu},
     prompt::PromptEditMode,
-    Prompt, PromptHistorySearch,
 };
 use std::borrow::Cow;
 
@@ -14,6 +14,7 @@ pub(crate) struct PromptLines<'prompt> {
     pub(crate) prompt_indicator: Cow<'prompt, str>,
     pub(crate) before_cursor: Cow<'prompt, str>,
     pub(crate) after_cursor: Cow<'prompt, str>,
+    pub(crate) footer: Cow<'prompt, str>,
     pub(crate) hint: Cow<'prompt, str>,
     pub(crate) right_prompt_on_last_line: bool,
 }
@@ -50,6 +51,9 @@ impl<'prompt> PromptLines<'prompt> {
             before_cursor,
             after_cursor,
             hint,
+            footer: coerce_crlf(&prompt.render_prompt_footer())
+                .into_owned()
+                .into(),
             right_prompt_on_last_line,
         }
     }
@@ -73,12 +77,25 @@ impl<'prompt> PromptLines<'prompt> {
             }
         }
 
+        if !before_cursor && !self.footer.is_empty() {
+            input.push('\n');
+            input += &self.footer;
+        }
         let lines = estimate_required_lines(&input, terminal_columns);
 
         if let Some(menu) = menu {
             lines as u16 + menu.menu_required_lines(terminal_columns)
         } else {
             lines as u16
+        }
+    }
+
+    /// Rows reserved below the buffer, excluding the buffer's own final row.
+    pub(crate) fn footer_rows(&self, terminal_columns: u16) -> u16 {
+        if self.footer.is_empty() {
+            0
+        } else {
+            estimate_required_lines(&self.footer, terminal_columns) as u16
         }
     }
 
@@ -247,6 +264,7 @@ mod tests {
             before_cursor: Cow::Borrowed(before_cursor),
             after_cursor: Cow::Borrowed(""),
             hint: Cow::Borrowed(""),
+            footer: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
         };
 

@@ -90,30 +90,17 @@ fn trust_accepts_only_an_explicit_yes_or_no() {
 }
 
 #[test]
-fn every_populated_statusline_preset_states_the_workspace_posture() {
-    use ego_core::config::StatusSegmentName as Segment;
-
-    for (id, label, segments) in STATUSLINE_PRESETS {
-        let named = segments
-            .iter()
-            .map(|segment| segment.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        assert!(
-            label == "Off" || label.ends_with(&named),
-            "the `{id}` label promises something other than what it writes: {label}"
-        );
+fn statusline_presets_store_templates_with_one_prompt_slot() {
+    // Catches presets writing the removed segment grammar or losing the composer.
+    for (_, _, template) in STATUSLINE_PRESETS {
+        assert_eq!(template.matches("{{ prompt }}").count(), 1);
     }
-
-    for preset in ["default", "full"] {
-        let (_, _, segments) = STATUSLINE_PRESETS
+    for id in ["default", "full"] {
+        let (_, _, template) = STATUSLINE_PRESETS
             .iter()
-            .find(|(id, _, _)| *id == preset)
-            .expect("a preset the picker offers");
-        assert!(
-            segments.contains(&Segment::Trust),
-            "a session that starts untrusted in silence needs `{preset}` to say so"
-        );
+            .find(|(name, _, _)| *name == id)
+            .unwrap();
+        assert_eq!(*template, super::super::status::DEFAULT_TEMPLATE);
     }
 }
 
@@ -499,32 +486,18 @@ fn permission_modal_decisions_are_immediate_and_only_explicit_keys_can_approve()
 }
 
 #[test]
-fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
-    use ego_core::config::{StatusSegmentName as Segment, StatuslineLayer};
-
+fn absent_statusline_uses_default_but_prompt_only_is_preserved() {
+    use ego_core::config::StatuslineLayer;
     assert_eq!(
-        effective_statusline_segments(None),
-        vec![
-            Segment::Model,
-            Segment::Effort,
-            Segment::Fast,
-            Segment::Mode,
-            Segment::Context,
-            Segment::Cost,
-            Segment::Queue,
-            Segment::Drafts,
-            Segment::Interrupt,
-            Segment::Cwd,
-            Segment::Git,
-            Segment::Trust,
-        ]
+        effective_statusline_template(None),
+        super::super::status::DEFAULT_TEMPLATE
     );
-    assert!(
-        effective_statusline_segments(Some(&StatuslineLayer {
+    assert_eq!(
+        effective_statusline_template(Some(&StatuslineLayer {
             providers: None,
-            segments: Some(Vec::new()),
-        }))
-        .is_empty()
+            template: Some("{{ prompt }}".into()),
+        })),
+        "{{ prompt }}"
     );
 }
 
@@ -1537,4 +1510,39 @@ fn collapsed_prompt_and_tool_output_share_expansion_history() {
     let _ = rows.try_iter().collect::<Vec<_>>();
     output.expand_last_tool();
     assert!(rows.try_iter().collect::<String>().contains("new detail"));
+}
+
+// Catches an invalid template repeating its diagnostic on each background repaint.
+#[test]
+fn template_diagnostic_is_emitted_only_once_per_configuration() {
+    let snapshot = SurfaceSnapshot::from_state(
+        SessionId::new(),
+        &SessionState::default(),
+        SelectionFacts::new(
+            ego_core::config::ModelRef("provider/model".into()),
+            ego_core::generator::types::ThinkingLevel::Medium,
+            Mode::Yolo,
+        ),
+        SeatFacts::new(QueueStatus::default(), 0, "/workspace", Trust::Trusted),
+        None,
+    );
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        native_status: true,
+        width: 120,
+        snapshot: Some(snapshot),
+        template: super::super::status::StatusTemplate::new("{{ unknown }}\n{{ prompt }}".into()),
+        ..SurfaceStatus::default()
+    }));
+    repaint_status(&status);
+    assert!(
+        status
+            .lock()
+            .unwrap()
+            .notice
+            .take()
+            .unwrap()
+            .contains("statusline:")
+    );
+    repaint_status(&status);
+    assert!(status.lock().unwrap().notice.is_none());
 }

@@ -766,33 +766,6 @@ impl<'de> Deserialize<'de> for StatusSegmentName {
     }
 }
 
-pub(super) fn validate_status_segment_names(names: &[String]) -> Result<(), String> {
-    let segments = names
-        .iter()
-        .map(|name| {
-            StatusSegmentName::from_name(name)
-                .ok_or_else(|| format!("unknown status-line segment `{name}`"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    validate_unique_status_segments(&segments)
-}
-
-pub(super) fn validate_unique_status_segments(
-    segments: &[StatusSegmentName],
-) -> Result<(), String> {
-    let mut unique = Vec::with_capacity(segments.len());
-    for segment in segments {
-        if unique.contains(segment) {
-            return Err(format!(
-                "duplicate status-line segment `{}`",
-                segment.as_str()
-            ));
-        }
-        unique.push(*segment);
-    }
-    Ok(())
-}
-
 impl StatusSegmentName {
     /// Every accepted persisted spelling.
     pub const NAMES: &[&str] = &[
@@ -852,8 +825,7 @@ impl StatusSegmentName {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatuslineLayer {
-    #[serde(default, deserialize_with = "status_segments")]
-    pub segments: Option<Vec<StatusSegmentName>>,
+    pub template: Option<String>,
     #[serde(default, deserialize_with = "status_providers")]
     pub providers: Option<std::collections::BTreeMap<String, StatusProvider>>,
 }
@@ -897,17 +869,6 @@ where
         ));
     }
     Ok(providers)
-}
-
-fn status_segments<'de, D>(deserializer: D) -> Result<Option<Vec<StatusSegmentName>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let segments = Option::<Vec<StatusSegmentName>>::deserialize(deserializer)?;
-    if let Some(segments) = &segments {
-        validate_unique_status_segments(segments).map_err(serde::de::Error::custom)?;
-    }
-    Ok(segments)
 }
 
 /// The strict `[ui]` schema.

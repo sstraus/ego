@@ -31,8 +31,7 @@ use super::policy_controls::{
 };
 use super::selector::{Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue};
 use super::status::{
-    GitFacts, GitFactsSource, SeatFacts, SelectionFacts, StatusLine, StatusSegmentName,
-    SurfaceSnapshot,
+    GitFacts, GitFactsSource, SeatFacts, SelectionFacts, StatusSegmentName, SurfaceSnapshot,
 };
 use super::surface::InteractivePainter;
 use super::{
@@ -412,22 +411,26 @@ fn rebuild_snapshot(
 
 fn repaint_status(status: &SharedStatus) {
     let (painter, line) = {
-        let status = status.lock().expect("surface status lock");
+        let mut status = status.lock().expect("surface status lock");
         let painter = Arc::clone(&status.painter);
-        let line = status
+        let rendered = status
             .native_status
             .then(|| status.snapshot.as_ref())
             .flatten()
             .map(|snapshot| {
-                let mut configured = status.configured.clone();
-                configured.extend(status.provider_values.iter().map(|(name, _)| name.clone()));
-                StatusLine::render_with_values(
-                    snapshot,
-                    &configured,
-                    &status.provider_values,
-                    status.width,
-                )
+                status
+                    .template
+                    .render(snapshot, &status.provider_values, status.width)
             });
+        let line = rendered.map(|(line, diagnostic)| {
+            if let Some(diagnostic) = diagnostic
+                && status.template_diagnostic.is_none()
+            {
+                status.notice = Some(diagnostic.clone());
+                status.template_diagnostic = Some(diagnostic);
+            }
+            line
+        });
         (painter, line)
     };
     if let Some(line) = line {
@@ -457,7 +460,8 @@ struct SurfaceStatus {
     origin: InputOrigin,
     native_status: bool,
     width: usize,
-    configured: Vec<StatusSegmentName>,
+    template: super::status::StatusTemplate,
+    template_diagnostic: Option<String>,
     provider_values: Vec<(StatusSegmentName, super::status::SegmentValue)>,
     config_store: Option<Arc<dyn UserConfigStore>>,
     snapshot: Option<SurfaceSnapshot>,
@@ -557,7 +561,8 @@ impl Default for SurfaceStatus {
             origin: InputOrigin::Typed,
             native_status: false,
             width: 0,
-            configured: Vec::new(),
+            template: super::status::StatusTemplate::new(super::status::DEFAULT_TEMPLATE.into()),
+            template_diagnostic: None,
             provider_values: Vec::new(),
             config_store: None,
             snapshot: None,
@@ -716,7 +721,7 @@ pub struct StatusSetup {
     pub mode: Mode,
     pub cwd: PathBuf,
     pub trust: Trust,
-    pub segments: Vec<ego_core::config::StatusSegmentName>,
+    pub template: String,
     pub width: usize,
     pub native: bool,
     pub git: Option<Arc<dyn GitFactsSource>>,
@@ -737,12 +742,12 @@ pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentN
     ego_core::config::StatusSegmentName::Trust,
 ];
 
-pub(crate) fn effective_statusline_segments(
+pub(crate) fn effective_statusline_template(
     configured: Option<&ego_core::config::StatuslineLayer>,
-) -> Vec<ego_core::config::StatusSegmentName> {
+) -> String {
     configured
-        .and_then(|statusline| statusline.segments.clone())
-        .unwrap_or_else(|| DEFAULT_STATUSLINE_SEGMENTS.to_vec())
+        .and_then(|statusline| statusline.template.clone())
+        .unwrap_or_else(|| super::status::DEFAULT_TEMPLATE.to_owned())
 }
 
 /// Local and durable input that still exists when the session exits.
@@ -873,7 +878,7 @@ impl SurfaceOutput {
         )
     }
 
-    pub(crate) fn goal_status(&self, goal: Option<(u32, Option<u32>)>) {
+    pub(crate) fn goal_status(&self, goal: Option<(String, u32, Option<u32>)>) {
         if let Some(status) = &self.status {
             if let Some(snapshot) = status
                 .lock()
@@ -1747,16 +1752,17 @@ impl Seat {
             mode,
             cwd,
             trust,
-            segments,
+            template,
             width,
             native,
             git,
         } = setup;
         {
             let mut status = live.status.lock().expect("surface status lock");
-            status.native_status = native && !segments.is_empty();
+            status.native_status = native;
             status.width = width;
-            status.configured = segments.into_iter().map(StatusSegmentName::from).collect();
+            status.template = super::status::StatusTemplate::new(template);
+            status.template_diagnostic = None;
             status.status_base = Some(StatusBase {
                 session,
                 mode,
@@ -1775,7 +1781,7 @@ impl Seat {
 
         let git_enabled = {
             let status = live.status.lock().expect("surface status lock");
-            status.native_status && status.configured.contains(&StatusSegmentName::Git)
+            status.native_status
         };
         if !git_enabled || git.is_none() {
             return;
