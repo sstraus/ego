@@ -1077,3 +1077,91 @@ async fn acp_cancellation_drops_the_host_request_before_connection_settlement() 
     client.settle().await.expect("ACP settlement");
     assert!(effects.disconnected.load(Ordering::SeqCst));
 }
+
+// Source-contract fixture, not a live recording: TUIC bc1fa723,
+// mcp_transport_peer.rs::missing_identity_context. Its server boundary regression
+// managed_reconnect_missing_context_is_bounded_and_never_guesses_a_peer checks
+// this code, effect, retryable flag and repair bound. Parent authorized this
+// contract fixture while the running TUIC remains on an older build.
+struct IdentityAcpEffects {
+    calls: Mutex<Vec<serde_json::Value>>,
+    repaired: AtomicBool,
+}
+
+impl ego_mcp::McpAcpEffects for IdentityAcpEffects {
+    fn connect(&self, _: String) -> McpFuture<'static, Result<String, McpError>> {
+        unreachable!("already connected")
+    }
+    fn request(&self, _: String, method: String, params: Option<serde_json::Map<String, serde_json::Value>>) -> McpFuture<'static, Result<serde_json::Value, McpError>> {
+        let result = match method.as_str() {
+            "server/discover" => serde_json::json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":false}},"ttlMs":0,"cacheScope":"private"}),
+            "tools/call" => {
+                let params = serde_json::Value::Object(params.expect("call params"));
+                self.calls.lock().unwrap().push(params.clone());
+                let args = if params["name"] == "call_tool" { &params["arguments"]["arguments"] } else { &params["arguments"] };
+                if args["action"] == "register" { self.repaired.store(true, Ordering::SeqCst); }
+                let result = if self.repaired.load(Ordering::SeqCst) {
+                    serde_json::json!({"ok":true})
+                } else {
+                    serde_json::json!({
+                        "error":"You are not registered. Managed callers must reconnect with their host-issued identity; external callers must initialize then register with that protocol session.",
+                        "code":"identity_context_required","effect":"not_started","retryable":false,
+                        "context":{"protocol_session_present":false},
+                        "repair":{"retry_after_context_change":true,"max_attempts":1,
+                            "managed":"Reconnect with the host-issued x-tuic-session; do not invent an identity or project.",
+                            "external":"Initialize, then register on that protocol session; supply an authoritative path only when known."}
+                    })
+                };
+                serde_json::json!({"resultType":"complete","content":[{"type":"text","text":result.to_string()}],"isError":!self.repaired.load(Ordering::SeqCst)})
+            }
+            other => panic!("unexpected method {other}"),
+        };
+        Box::pin(async move { Ok(result) })
+    }
+    fn notify(&self, _: String, _: String, _: Option<serde_json::Map<String, serde_json::Value>>) -> Result<(), McpError> { Ok(()) }
+    fn disconnect(&self, _: String) -> McpFuture<'static, Result<(), McpError>> { Box::pin(async { Ok(()) }) }
+    fn publish_resource(&self, _: &str, _: String) { unreachable!("no resources") }
+}
+
+fn identity_inbox(collapsed: bool, budget: usize) -> CallToolRequestParams {
+    let args = serde_json::json!({"action":"inbox","byte_budget":budget});
+    if collapsed {
+        CallToolRequestParams::new("call_tool").with_arguments(serde_json::json!({"tool_name":"agent","arguments":args}).as_object().unwrap().clone())
+    } else {
+        CallToolRequestParams::new("agent").with_arguments(args.as_object().unwrap().clone())
+    }
+}
+
+// Catches: model-driven inbox retries ignore a non-retryable identity failure,
+// including retries disguised by collapsed dispatch or a changed byte budget.
+#[tokio::test(flavor = "current_thread")]
+async fn identity_failure_blocks_model_driven_inbox_retries_before_transport() {
+    let effects = Arc::new(IdentityAcpEffects { calls: Mutex::new(Vec::new()), repaired: AtomicBool::new(false) });
+    let mut client = McpClient::connect_acp("tuic".parse().unwrap(), options(), "identity-fixture".into(), effects.clone()).unwrap();
+    client.discover().await.unwrap();
+    let first = client.call_tool_once(identity_inbox(false, 4096)).await.unwrap();
+    assert!(matches!(first, ego_mcp::McpManualOutcome::Complete(result) if result.is_error == Some(true)));
+    for (collapsed, budget) in [(false,4096), (true,4096), (false,8192)] {
+        client.begin_acp_operation(options()).unwrap();
+        let result = client.call_tool_once(identity_inbox(collapsed,budget)).await;
+        assert!(result.is_err(), "unchanged identity must refuse retry before transport");
+    }
+    assert_eq!(effects.calls.lock().unwrap().len(), 1);
+    client.settle().await.unwrap();
+}
+
+// Catches: stopping inbox retries also prevents an explicit successful identity repair.
+#[tokio::test(flavor = "current_thread")]
+async fn successful_registration_allows_inbox_after_identity_failure() {
+    let effects = Arc::new(IdentityAcpEffects { calls: Mutex::new(Vec::new()), repaired: AtomicBool::new(false) });
+    let mut client = McpClient::connect_acp("tuic".parse().unwrap(), options(), "identity-fixture".into(), effects.clone()).unwrap();
+    client.discover().await.unwrap();
+    client.call_tool_once(identity_inbox(false,4096)).await.unwrap();
+    client.begin_acp_operation(options()).unwrap();
+    client.call_tool_once(CallToolRequestParams::new("agent").with_arguments(serde_json::json!({"action":"register"}).as_object().unwrap().clone())).await.unwrap();
+    client.begin_acp_operation(options()).unwrap();
+    let repaired = client.call_tool_once(identity_inbox(true,4096)).await.unwrap();
+    assert!(matches!(repaired, ego_mcp::McpManualOutcome::Complete(result) if result.is_error == Some(false)));
+    assert_eq!(effects.calls.lock().unwrap().len(), 3);
+    client.settle().await.unwrap();
+}
