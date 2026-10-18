@@ -570,16 +570,19 @@ fn apply_intent(
                     state
                         .unacknowledged_prompts()
                         .last()
-                        .filter(|prompt| prompt.images().is_empty())
-                        .map(|prompt| (prompt.id(), prompt.text().to_owned()))
+                        .map(|prompt| (**prompt).clone())
                 })
                 .map_err(StoreError::from)?;
-            let Some((id, text)) = prompt else {
+            let Some(prompt) = prompt else {
                 let _ = reply.send(Ok(None));
                 return Ok(false);
             };
-            if let Err(cause) = journal.append(turn, None, None, EventKind::PromptRetracted { id })
-            {
+            if let Err(cause) = journal.append(
+                turn,
+                None,
+                None,
+                EventKind::PromptRetracted { id: prompt.id() },
+            ) {
                 let _ = reply.send(Err(ControlError::Store(cause.to_string())));
                 return Err(cause.into());
             }
@@ -588,20 +591,20 @@ fn apply_intent(
                     .inspect(SessionState::queue_status)
                     .map_err(StoreError::from)?,
             );
-            let _ = reply.send(Ok(Some((text, control.status()))));
+            let _ = reply.send(Ok(Some((prompt, control.status()))));
             Ok(false)
         }
-        ControlIntent::Submit { text, reply } => {
+        ControlIntent::Submit {
+            text,
+            images,
+            reply,
+        } => {
             let id = QueuedPromptId::new();
             match journal.append(
                 turn,
                 None,
                 None,
-                EventKind::PromptQueued {
-                    id,
-                    text,
-                    images: Vec::new(),
-                },
+                EventKind::PromptQueued { id, text, images },
             ) {
                 Ok(_) => {
                     control.refresh(

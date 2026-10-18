@@ -276,7 +276,7 @@ fn submit_busy_line(
         | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
         Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
     }
-    match futures::executor::block_on(ingress.submit(buffer.clone())) {
+    match futures::executor::block_on(ingress.submit(buffer.clone(), Vec::new())) {
         Ok(queue) => {
             if editor.accept_buffer(prompt).is_err() {
                 return Some((Line::Ended, true));
@@ -304,7 +304,13 @@ fn submit_busy_line(
             editor.run_edit_commands(&[EditCommand::Clear]);
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             restore_latest_draft(editor, status, drafts);
-            return Some((Line::Submitted(buffer), false));
+            return Some((
+                Line::HostCommand(HostCommand::SubmittedDraft {
+                    text: buffer,
+                    images: Vec::new(),
+                }),
+                false,
+            ));
         }
         Err(error) => {
             status.lock().expect("surface status lock").notice = Some(error.to_string());
@@ -353,10 +359,27 @@ pub(super) fn surface_line(
         ) {
             editor.accept_menu_selection();
             let buffer = editor.current_buffer_contents().to_string();
-            if buffer.trim().is_empty() {
+            if buffer.trim().is_empty()
+                && status
+                    .lock()
+                    .expect("surface status lock")
+                    .images
+                    .is_empty()
+            {
                 continue;
             }
-            if phase.get() == EditPhase::Idle {
+            let is_prompt = {
+                let current = status.lock().expect("surface status lock");
+                current.actions.as_ref().is_none_or(|actions| {
+                    matches!(
+                        actions
+                            .registry
+                            .classify(actions.registry.submit(buffer.clone(), current.origin)),
+                        Dispatch::Prompt
+                    )
+                })
+            };
+            if phase.get() == EditPhase::Idle && !is_prompt {
                 editor
                     .accept_buffer(prompt)
                     .map(|()| reedline::Signal::Success(buffer))
@@ -496,9 +519,19 @@ pub(super) fn surface_line(
                     continue;
                 }
                 Dispatch::Prompt => {
-                    editor.run_edit_commands(&[EditCommand::Clear]);
-                    restore_latest_draft(editor, status, drafts);
-                    return (line, failed);
+                    // Native submission is admitted before this draft is cleared
+                    // or a different stashed draft is restored.
+                    editor.run_edit_commands(&[
+                        EditCommand::Clear,
+                        EditCommand::InsertString(text.clone()),
+                    ]);
+                    return (
+                        Line::HostCommand(HostCommand::AdmitPrompt {
+                            text: text.clone(),
+                            steer: false,
+                        }),
+                        failed,
+                    );
                 }
                 Dispatch::Immediate | Dispatch::InteractiveIngress => return (line, failed),
             }
@@ -547,14 +580,6 @@ pub(super) fn surface_line(
         }
 
         match command {
-            HostCommand::ClipboardPaste | HostCommand::PastePath(_)
-                if phase.get() == EditPhase::Busy =>
-            {
-                commit_to_transcript(
-                    status,
-                    "image paste is unavailable while source work is pending",
-                );
-            }
             HostCommand::Background => {
                 let notice = if phase.get() == EditPhase::Busy {
                     match futures::executor::block_on(ingress.background()) {
@@ -569,13 +594,24 @@ pub(super) fn surface_line(
             }
             HostCommand::Draft => {
                 let buffer = editor.current_buffer_contents().to_string();
-                if buffer.is_empty() {
+                if buffer.is_empty()
+                    && status
+                        .lock()
+                        .expect("surface status lock")
+                        .images
+                        .is_empty()
+                {
                     if restore_latest_draft(editor, status, drafts) {
                         continue;
                     }
                 } else {
-                    let origin = status.lock().expect("surface status lock").origin;
+                    let mut current = status.lock().expect("surface status lock");
+                    let origin = current.origin;
+                    let images = std::mem::take(&mut current.images);
+                    current.image_chips.clear();
+                    drop(current);
                     drafts.push_active(ComposerDraft {
+                        images,
                         text: buffer,
                         cursor: editor.current_insertion_point(),
                         origin,
@@ -594,10 +630,22 @@ pub(super) fn surface_line(
                 repaint_status(status);
             }
             HostCommand::BusyRecall => {
+                if !status
+                    .lock()
+                    .expect("surface status lock")
+                    .images
+                    .is_empty()
+                {
+                    continue;
+                }
                 match futures::executor::block_on(ingress.recall()) {
-                    Ok(Some((text, queue))) => {
-                        editor.run_edit_commands(&[EditCommand::InsertString(text)]);
+                    Ok(Some((recalled, queue))) => {
+                        editor.run_edit_commands(&[EditCommand::InsertString(
+                            recalled.text().to_owned(),
+                        )]);
                         let mut current = status.lock().expect("surface status lock");
+                        current.images = super::super::ImageDraft::recalled(recalled.images());
+                        current.image_chips = current.images.labels();
                         current.queue = queue;
                         current.origin = InputOrigin::BracketedPaste;
                         current.notice = None;
@@ -614,6 +662,40 @@ pub(super) fn surface_line(
                 repaint_status(status);
             }
             HostCommand::BusySubmit | HostCommand::BusySteer => {
+                if phase.get() == EditPhase::Idle
+                    || !status
+                        .lock()
+                        .expect("surface status lock")
+                        .images
+                        .is_empty()
+                {
+                    let text = editor.current_buffer_contents().to_owned();
+                    let dispatch = {
+                        let current = status.lock().expect("surface status lock");
+                        current
+                            .actions
+                            .as_ref()
+                            .map_or(Dispatch::Prompt, |actions| {
+                                actions
+                                    .registry
+                                    .classify(actions.registry.submit(text.clone(), current.origin))
+                            })
+                    };
+                    if matches!(dispatch, Dispatch::Prompt) {
+                        return (
+                            Line::HostCommand(HostCommand::AdmitPrompt {
+                                text,
+                                steer: command == HostCommand::BusySteer,
+                            }),
+                            false,
+                        );
+                    }
+                    // Local slash actions still use the normal classification path.
+                    if phase.get() == EditPhase::Idle {
+                        let _ = editor.accept_buffer(prompt);
+                        return (Line::Submitted(text), false);
+                    }
+                }
                 if let Some(outcome) = submit_busy_line(
                     editor,
                     prompt,
@@ -641,7 +723,7 @@ pub(super) fn surface_line(
 
 /// Ask the coordinator to expedite the queue and cancel the running turn.
 /// Returns whether it was accepted; a refusal is shown as the notice.
-fn request_interrupt(status: &SharedStatus, ingress: &InteractiveIngress) -> bool {
+pub(super) fn request_interrupt(status: &SharedStatus, ingress: &InteractiveIngress) -> bool {
     match futures::executor::block_on(ingress.interrupt()) {
         Ok(queue) => {
             let mut current = status.lock().expect("surface status lock");
@@ -661,12 +743,18 @@ fn request_interrupt(status: &SharedStatus, ingress: &InteractiveIngress) -> boo
     }
 }
 
-fn restore_latest_draft(
+pub(super) fn restore_latest_draft(
     editor: &mut Reedline,
     status: &SharedStatus,
     drafts: &mut DraftStash,
 ) -> bool {
-    if !editor.current_buffer_contents().is_empty() {
+    if !editor.current_buffer_contents().is_empty()
+        || !status
+            .lock()
+            .expect("surface status lock")
+            .images
+            .is_empty()
+    {
         return false;
     }
     let Some(saved) = drafts.pop_active() else {
@@ -682,6 +770,8 @@ fn restore_latest_draft(
     {
         let mut current = status.lock().expect("surface status lock");
         current.origin = saved.origin;
+        current.images = saved.images;
+        current.image_chips = current.images.labels();
         current.drafts = drafts.active_count();
         let draft_count = current.drafts;
         if let Some(snapshot) = current.snapshot.as_mut() {
@@ -735,7 +825,7 @@ fn execute_action(
         | ActionDispatch::Refused { reason } => (false, false, Some(reason.to_string())),
         ActionDispatch::Prompt(payload) => {
             let canonical = format!("/{}", actions.registry.help(payload.id).name());
-            match futures::executor::block_on(ingress.submit(canonical)) {
+            match futures::executor::block_on(ingress.submit(canonical, Vec::new())) {
                 Ok(queue) => {
                     let mut current = status.lock().expect("surface status lock");
                     current.queue = queue;
@@ -916,7 +1006,13 @@ pub(super) fn apply_surface_effect(
         }
         SurfaceActionEffect::Clear => {
             let buffer = editor.current_buffer_contents().to_string();
-            if !buffer.trim().is_empty() && buffer.trim() != "/clear" {
+            if (!buffer.trim().is_empty() && buffer.trim() != "/clear")
+                || !status
+                    .lock()
+                    .expect("surface status lock")
+                    .images
+                    .is_empty()
+            {
                 match confirm_surface_action(
                     editor,
                     phase,
@@ -935,7 +1031,10 @@ pub(super) fn apply_surface_effect(
                 }
             }
             editor.run_edit_commands(&[EditCommand::Clear]);
-            status.lock().expect("surface status lock").notice =
+            let mut current = status.lock().expect("surface status lock");
+            current.images.clear();
+            current.image_chips.clear();
+            current.notice =
                 Some("Composer cleared; transcript, context and history unchanged".to_owned());
         }
         SurfaceActionEffect::Statusline => {

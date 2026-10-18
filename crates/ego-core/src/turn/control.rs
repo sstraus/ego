@@ -8,7 +8,9 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use futures::{SinkExt, StreamExt};
 
+use crate::generator::types::ImageRef;
 pub use crate::state::QueueStatus;
+use crate::state::QueuedPrompt;
 
 // futures-channel reserves one slot per live Sender in addition to this
 // buffer. Ingress clones therefore share one Sender, and a zero buffer gives
@@ -40,13 +42,14 @@ pub(crate) enum ControlIntent {
         reply: oneshot::Sender<Result<(), ControlError>>,
     },
     Recall {
-        reply: oneshot::Sender<Result<Option<(String, QueueStatus)>, ControlError>>,
+        reply: oneshot::Sender<Result<Option<(QueuedPrompt, QueueStatus)>, ControlError>>,
     },
     Background {
         reply: oneshot::Sender<Result<crate::event::id::DetachedExecId, ControlError>>,
     },
     Submit {
         text: String,
+        images: Vec<ImageRef>,
         reply: oneshot::Sender<Result<QueueStatus, ControlError>>,
     },
     Interrupt {
@@ -100,7 +103,7 @@ impl InteractiveIngress {
     }
 
     /// Durably withdraw the latest input still owned by the queue.
-    pub async fn recall(&self) -> Result<Option<(String, QueueStatus)>, ControlError> {
+    pub async fn recall(&self) -> Result<Option<(QueuedPrompt, QueueStatus)>, ControlError> {
         let (reply, answer) = oneshot::channel();
         let mut sender = self.sender.lock().await;
         if !self.admission.open.load(Ordering::Acquire) {
@@ -114,14 +117,23 @@ impl InteractiveIngress {
         answer.await.map_err(|_| ControlError::Closed)?
     }
 
-    pub async fn submit(&self, text: String) -> Result<QueueStatus, ControlError> {
+    /// Accept text and already-admitted session images as one durable prompt.
+    pub async fn submit(
+        &self,
+        text: String,
+        images: Vec<ImageRef>,
+    ) -> Result<QueueStatus, ControlError> {
         let (reply, answer) = oneshot::channel();
         let mut sender = self.sender.lock().await;
         if !self.admission.open.load(Ordering::Acquire) {
             return Err(ControlError::Closed);
         }
         sender
-            .send(ControlIntent::Submit { text, reply })
+            .send(ControlIntent::Submit {
+                text,
+                images,
+                reply,
+            })
             .await
             .map_err(|_| ControlError::Closed)?;
         drop(sender);
