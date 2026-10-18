@@ -188,6 +188,51 @@ mod tests {
             .unwrap());
     }
 
+    // Catches: a partial terminal key sequence makes cursor-query draining
+    // block until the user sends more input, despite its zero timeout.
+    #[test]
+    #[cfg(unix)]
+    fn discard_pending_does_not_wait_for_partial_key_sequence() {
+        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
+
+        use super::super::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        sender.write_all(b"\x1b[").unwrap();
+        let completion = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            sender.write_all(b"A").unwrap();
+            sender
+        });
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        let start = Instant::now();
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        let elapsed = start.elapsed();
+        let _sender = completion.join().unwrap();
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
+        );
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "zero-timeout cursor drain waited for partial key input: {elapsed:?}"
+        );
+    }
+
     #[test]
     fn test_poll_fails_without_event_source() {
         let mut reader = InternalEventReader {
