@@ -1998,9 +1998,8 @@ fn image_paste_oversize_path_is_refused_with_its_size() {
     );
 }
 
-/// catches: a per-turn attachment refusal (two images that each fit the
-/// per-image cap but together exceed the aggregate cap) propagating out of the
-/// turn loop and ending the whole interactive session.
+/// Catches: aggregate staging refusal erases the existing image/text draft,
+/// submits a partial prompt, or ends the interactive session.
 #[cfg(not(windows))]
 #[test]
 fn image_paste_aggregate_over_cap_refuses_the_turn_and_keeps_the_session() {
@@ -2037,23 +2036,40 @@ fn image_paste_aggregate_over_cap_refuses_the_turn_and_keeps_the_session() {
     input.flush().expect("trust flush");
     let prompt_start = output.len();
     until_post_trust_prompt(&reader, &mut output, prompt_start);
+    input.write_all(b"describe these").expect("draft text");
+    input.flush().expect("draft flush");
     let paste_start = output.len();
-    for (path, chip) in [
-        (&first, "[image: first.png]"),
-        (&second, "[image: second.png]"),
-    ] {
-        input
-            .write_all(format!("\x1b[200~{}\x1b[201~", path.display()).as_bytes())
-            .expect("bracketed image path");
-        input.flush().expect("paste flush");
-        until_normalized(&reader, &mut output, paste_start, chip);
-    }
-    input.write_all(b"describe these\r").expect("turn");
-    input.flush().expect("turn flush");
-    until_normalized(&reader, &mut output, paste_start, "aggregate image limit");
-    let refused_at = output.len();
-    until_prompt_from(&reader, &mut output, refused_at);
-    input.write_all(b"/quit\r").expect("quit");
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", first.display()).as_bytes())
+        .expect("first image path");
+    input.flush().expect("first paste flush");
+    until_normalized(&reader, &mut output, paste_start, "[image: first.png]");
+    let refusal_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", second.display()).as_bytes())
+        .expect("second image path");
+    input.flush().expect("second paste flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        refusal_start,
+        "65536-byte aggregate limit",
+    );
+    drain_until_quiet(&reader, &mut output);
+    let refused = normalized(&output[refusal_start..]);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let retained = screen.screen().contents();
+    assert!(retained.contains("describe these"), "{retained:?}");
+    assert!(retained.contains("[image: first.png]"), "{retained:?}");
+    assert!(!refused.contains("[image: second.png]"), "{refused:?}");
+    assert!(
+        stub.generations().is_empty(),
+        "staging must not submit a partial turn"
+    );
+    input
+        .write_all(b"\x15/quit\r")
+        .expect("clear text and quit");
     input.flush().expect("quit flush");
     let status = session.quit(input);
     assert!(

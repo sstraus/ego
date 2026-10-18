@@ -3390,11 +3390,11 @@ async fn acquire_interactive_images(
         acquired.splice(0..0, images.iter().cloned());
     }
     pending_attachments.clear();
-    if images.is_none() {
-        if let Some(draft) = draft {
-            draft.clear();
-            seat.set_image_chips(Vec::new());
-        }
+    if images.is_none()
+        && let Some(draft) = draft
+    {
+        draft.clear();
+        seat.set_image_chips(Vec::new());
     }
     Ok(Some(acquired))
 }

@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
     let (reply, gate) = gated_paced_line("BUSY-IMAGE-ACTIVE\n");
-    let stub = Stub::start(Plan {
+    let stub = Stub::start_concurrent(Plan {
         completions: vec![reply, Reply::Sse(text("QUEUED-IMAGE-ANSWER"))],
         // Ollama takes capabilities from daemon discovery, not models.toml.
         // The existing status/body override also serves successful tag responses.
@@ -64,9 +64,42 @@ fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
     screen.process(&output);
     let draft_after_paste = screen.screen().contents();
     let active_requests = stub.generations();
+    // Force a real submission-boundary acquisition failure after staging.
+    // The owner must retain the exact draft without queueing any partial turn.
+    std::fs::remove_file(&path).unwrap();
+    let refusal_start = output.len();
     input.write_all(b"\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, paste_start, "queue=1/0");
+    until_normalized(&reader, &mut output, refusal_start, "could not open");
+    drain_until_quiet(&reader, &mut output);
+    let mut refused_screen = vt100::Parser::new(32, 160, 0);
+    refused_screen.process(&output);
+    let retained = refused_screen.screen().contents();
+    assert!(retained.contains("describe queued image"), "{retained:?}");
+    assert!(
+        retained.contains("[image: queued-image.png]"),
+        "{retained:?}"
+    );
+    assert_eq!(stub.generations().len(), 1, "refusal must not submit");
+    let journal = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        !journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| event["payload"]["event"]["kind"]["kind"] == "PromptQueued"),
+        "refusal must not durably queue a partial prompt"
+    );
+    // Repair only the external file, then resubmit without retyping or repasting.
+    std::fs::write(&path, support::PNG_1X1).unwrap();
+    input.write_all(b"\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, refusal_start, "queue=1/0");
     gate.release();
     until_normalized(&reader, &mut output, paste_start, "QUEUED-IMAGE-ANSWER");
     let quit_start = output.len();
@@ -91,16 +124,39 @@ fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
     );
     let generations = stub.generations();
     assert_eq!(generations.len(), 2, "queued draft must be delivered once");
-    let queued = generations[1]["messages"]
+    // Host context is also sent with the user role; select the actual image
+    // envelope rather than relying on which role appears last on this host.
+    let image_prompts = generations[1]["messages"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|message| message["role"] == "user")
-        .last()
-        .unwrap();
-    let queued = queued.to_string();
-    assert!(queued.contains("describe queued image"), "{queued}");
-    assert!(queued.contains("data:image/png"), "{queued}");
+        .filter_map(|message| message["content"].as_array())
+        .filter(|content| content.iter().any(|block| block["type"] == "image_url"))
+        .collect::<Vec<_>>();
+    assert_eq!(image_prompts.len(), 1, "one queued image envelope");
+    let content = image_prompts[0];
+    let text = content
+        .iter()
+        .filter(|block| block["type"] == "text")
+        .map(|block| block["text"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        text,
+        ["describe queued image"],
+        "exact draft must survive refusal"
+    );
+    let images = content
+        .iter()
+        .filter(|block| block["type"] == "image_url")
+        .collect::<Vec<_>>();
+    assert_eq!(images.len(), 1, "the retained image must be sent once");
+    assert!(
+        images[0]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
 }
 
 // Catches: a busy image capability refusal is repainted on each activity tick, glued to the
@@ -108,7 +164,7 @@ fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
 #[test]
 fn busy_image_capability_refusal_is_one_transcript_line_and_enter_stays_a_key() {
     let (reply, gate) = gated_paced_line("PASTE-REFUSAL-WORKING\n");
-    let stub = Stub::start(Plan {
+    let stub = Stub::start_concurrent(Plan {
         completions: vec![reply, Reply::Sse(text("AFTER-PASTE-ANSWER"))],
         ..Plan::default()
     });

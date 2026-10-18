@@ -4663,7 +4663,7 @@ mod turn {
             );
             let (recalled, queue) = ingress.recall().await.unwrap().unwrap();
             assert_eq!(recalled.text(), "durably accepted while the model is busy");
-            assert_eq!(recalled.images(), &[image.clone()]);
+            assert_eq!(recalled.images(), std::slice::from_ref(&image));
             assert_eq!(queue.pending_steers, 0);
             assert_eq!(queue.queued, 0);
             let accepted = ingress

@@ -2222,6 +2222,48 @@ mod image_admission_tests {
         assert_eq!(status.lock().unwrap().images.labels(), before);
     }
 
+    // Catches: a ready admission reply is starved by continuously ready output.
+    #[test]
+    fn ready_image_admission_is_not_starved_by_sustained_output() {
+        let mut editor = Reedline::create();
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let asked = AtomicBool::new(false);
+        let (ingress, _control) = interactive_control();
+        let mut drafts = DraftStash::new(SessionId::new());
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        let (_control, controls) = crossbeam::channel::unbounded();
+        let (printer, output) = crossbeam::channel::bounded(128);
+        // Empty messages keep the printer ready without emitting test noise.
+        // Disconnect after this finite backlog so a broken priority fails rather
+        // than hanging forever on an actual unbounded producer.
+        for _ in 0..128 {
+            printer.send(String::new()).unwrap();
+        }
+        drop(printer);
+        let (_signal, signals) = crossbeam::channel::unbounded();
+        let (reply, answer) = crossbeam::channel::bounded(1);
+        reply.send(Ok(Vec::new())).unwrap();
+        let result = wait_image_reply(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            &output,
+            &signals,
+            &answer,
+        );
+        assert!(matches!(result, Some(Ok(_))), "ready admission must finish");
+        assert_eq!(output.len(), 128, "output must not precede a ready reply");
+    }
+
     fn rendezvous(fail: bool) {
         let mut editor = Reedline::create();
         editor.run_edit_commands(&[EditCommand::InsertString("unsent text".into())]);
