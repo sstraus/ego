@@ -854,6 +854,50 @@ impl StatusSegmentName {
 pub struct StatuslineLayer {
     #[serde(default, deserialize_with = "status_segments")]
     pub segments: Option<Vec<StatusSegmentName>>,
+    #[serde(default, deserialize_with = "status_providers")]
+    pub providers: Option<std::collections::BTreeMap<String, StatusProvider>>,
+}
+
+/// One opt-in argv-native status producer; never evaluated while painting.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusProvider {
+    pub argv: Vec<String>,
+    #[serde(default = "status_provider_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn status_provider_timeout() -> u64 {
+    250
+}
+
+fn status_providers<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::collections::BTreeMap<String, StatusProvider>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let providers =
+        Option::<std::collections::BTreeMap<String, StatusProvider>>::deserialize(deserializer)?;
+    if let Some(providers) = &providers {
+        if providers.len() > 4
+            || providers.iter().any(|(name, provider)| {
+                name.is_empty()
+                    || name.len() > 40
+                    || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    || provider.argv.is_empty()
+                    || provider.argv.len() > 32
+                    || provider.argv.iter().any(|arg| arg.contains('\0'))
+                    || provider.argv.iter().map(String::len).sum::<usize>() > 4096
+                    || !(1..=1000).contains(&provider.timeout_ms)
+            })
+        {
+            return Err(serde::de::Error::custom(
+                "status providers require at most four named argv commands, each at most 4096 bytes and 1..1000ms",
+            ));
+        }
+    }
+    Ok(providers)
 }
 
 fn status_segments<'de, D>(deserializer: D) -> Result<Option<Vec<StatusSegmentName>>, D::Error>

@@ -534,6 +534,39 @@ pub(super) async fn drive_execution<S: EventSink>(
                             .current()
                             .map_err(|message| RunTermination::Failed { message })?,
                     };
+                    if let Some(status) = status
+                        .as_ref()
+                        .filter(|status| status.human && status.native)
+                        && skill_trust == Trust::Trusted
+                        && let Some(providers) = effective
+                            .ui
+                            .statusline
+                            .as_ref()
+                            .and_then(|line| line.providers.as_ref())
+                    {
+                        let effects = ToolEffectPorts::new(
+                            &fs,
+                            session_hook_ports.process(),
+                            active.evidence(),
+                            session_hook_ports.resolver_handle(),
+                            session_hook_ports.one_hop_handle(),
+                            session_hook_ports.duplex_handle(),
+                        )
+                        .with_cancel(cancel.clone());
+                        let (values, errors) = crate::status_provider::collect(
+                            providers,
+                            &cwd,
+                            exec_environment.clone(),
+                            &session_policy,
+                            effects,
+                            session_hook_ports.process(),
+                        )
+                        .await;
+                        status.seat.set_status_providers(values);
+                        for error in errors {
+                            diagnostics.note(&error);
+                        }
+                    }
                     let (leased_session_journal, session_journal, session_hooks) = open_session_hooks!(
                         active,
                         active.state().clone(),

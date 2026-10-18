@@ -497,6 +497,19 @@ fn resolve_inner(
         {
             ui.statusline.get_or_insert_default().segments = Some(segments);
         }
+        // Installing executable status producers is operator authority, not project content.
+        if matches!(
+            sourced.source,
+            Source::System | Source::User | Source::Flags
+        ) && let Some(providers) = sourced
+            .value
+            .ui
+            .as_ref()
+            .and_then(|ui| ui.statusline.as_ref())
+            .and_then(|line| line.providers.clone())
+        {
+            ui.statusline.get_or_insert_default().providers = Some(providers);
+        }
     }
 
     // The ceiling is gathered independently of the ordinary merge above, so

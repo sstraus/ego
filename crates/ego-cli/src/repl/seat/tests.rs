@@ -454,6 +454,7 @@ fn absent_statusline_uses_the_default_but_explicit_off_stays_off() {
     );
     assert!(
         effective_statusline_segments(Some(&StatuslineLayer {
+            providers: None,
             segments: Some(Vec::new()),
         }))
         .is_empty()

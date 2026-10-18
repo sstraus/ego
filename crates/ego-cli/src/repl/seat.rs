@@ -392,7 +392,16 @@ fn repaint_status(status: &SharedStatus) {
             .native_status
             .then(|| status.snapshot.as_ref())
             .flatten()
-            .map(|snapshot| StatusLine::render(snapshot, &status.configured, status.width));
+            .map(|snapshot| {
+                let mut configured = status.configured.clone();
+                configured.extend(status.provider_values.iter().map(|(name, _)| name.clone()));
+                StatusLine::render_with_values(
+                    snapshot,
+                    &configured,
+                    &status.provider_values,
+                    status.width,
+                )
+            });
         (painter, line)
     };
     if let Some(line) = line {
@@ -421,6 +430,7 @@ struct SurfaceStatus {
     native_status: bool,
     width: usize,
     configured: Vec<StatusSegmentName>,
+    provider_values: Vec<(StatusSegmentName, super::status::SegmentValue)>,
     config_store: Option<Arc<dyn UserConfigStore>>,
     snapshot: Option<SurfaceSnapshot>,
     status_base: Option<StatusBase>,
@@ -478,6 +488,7 @@ impl Default for SurfaceStatus {
             native_status: false,
             width: 0,
             configured: Vec::new(),
+            provider_values: Vec::new(),
             config_store: None,
             snapshot: None,
             status_base: None,
@@ -1586,6 +1597,26 @@ impl Seat {
         if live.control.send(Control::InsertPasteText { text }).is_ok() {
             live.wake_owner();
         }
+    }
+
+    /// Publish cached results from the epoch-owned guarded status producers.
+    pub(crate) fn set_status_providers(&self, values: Vec<(String, String)>) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        live.status
+            .lock()
+            .expect("surface status lock")
+            .provider_values = values
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    StatusSegmentName::custom(name),
+                    super::status::SegmentValue::text(value),
+                )
+            })
+            .collect();
+        repaint_status(&live.status);
     }
 
     /// Activate native status after session, selection and config are known.

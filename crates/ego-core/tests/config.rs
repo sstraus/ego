@@ -1904,3 +1904,49 @@ fn output_caps_follow_trust_precedence_and_system_clamping() {
     );
     assert!(ConfigLayer::parse(Source::User, "max_output_tokens = 0").is_err());
 }
+
+#[test]
+fn status_providers_are_bounded_and_only_operator_sources_can_install_them() {
+    // Catches: workspace content installing executable providers or widening their resource limits.
+    use ego_core::config::{ConfigLayer, Source, Trust, resolve};
+    let user = ConfigLayer::parse(
+        Source::User,
+        "[ui.statusline.providers.build]\nargv=['operator']\ntimeout_ms=20",
+    )
+    .unwrap();
+    let project = ConfigLayer::parse(
+        Source::Project,
+        "[ui.statusline.providers.build]\nargv=['workspace']",
+    )
+    .unwrap();
+    let config = resolve(&[project, user], Trust::Trusted, None).unwrap();
+    assert_eq!(
+        config.ui.statusline.unwrap().providers.unwrap()["build"].argv,
+        ["operator"]
+    );
+    for input in [
+        "[ui.statusline.providers.bad]\nargv=[]",
+        "[ui.statusline.providers.bad]\nargv=['cmd']\ntimeout_ms=0",
+        "[ui.statusline.providers.bad]\nargv=['cmd']\ntimeout_ms=1001",
+        "[ui.statusline.providers.'bad-name']\nargv=['cmd']",
+    ] {
+        assert!(ConfigLayer::parse(Source::User, input).is_err(), "{input}");
+    }
+    let mut source = String::new();
+    for i in 0..5 {
+        source.push_str(&format!("[ui.statusline.providers.p{i}]\nargv=['cmd']\n"));
+    }
+    assert!(ConfigLayer::parse(Source::User, &source).is_err());
+    let project = ConfigLayer::parse(
+        Source::Project,
+        "[ui.statusline.providers.build]\nargv=['workspace']",
+    )
+    .unwrap();
+    assert!(
+        resolve(&[project], Trust::Trusted, None)
+            .unwrap()
+            .ui
+            .statusline
+            .is_none()
+    );
+}

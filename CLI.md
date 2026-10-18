@@ -2627,3 +2627,23 @@ ref, without changing files. Git GC later removes unreachable objects. Child
 sessions own separate refs. With multiple repositories, close each with `-C`.
 Exec commands, MCP effects, arbitrary deletes, and external editors are not captured.
 Checkpoint objects contain original file bytes; do not push private checkpoint refs.
+
+### External status producers
+
+Only system/user configuration or explicit flags can install
+`ui.statusline.providers.NAME = { argv = ["program", "arg"], timeout_ms = 250 }`.
+Project, local and agent-file configuration cannot install executable providers.
+A trusted interactive session runs each provider once when its session epoch
+opens, through the current exec policy and confinement. Rendering, resize and
+Git-status refresh never execute providers. Permission requests that do not
+settle under current policy omit the value and emit a diagnostic; no hidden
+human or model approval is requested.
+
+There are at most four providers, each with a timeout from 1 to 1000 ms (default
+250), at most 32 argv items and 4096 total argument bytes. The command must exit
+successfully, emit no stderr, and return one UTF-8 stdout line of at most 1024
+bytes, including an optional final newline. Binary, truncated, multiline and
+oversized output is omitted. Terminal controls are sanitized and known secrets
+are masked. Values are cached in the live seat, not persisted or admitted as
+instructions. Providers inherit the normal admitted exec environment; there is
+no shell expansion unless the operator explicitly selects a shell executable.
