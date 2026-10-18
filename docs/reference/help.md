@@ -1,13 +1,14 @@
 # CLI help from the verified build
 
-Captured from a fresh `ego-cli 0.1.0` source installation on 2026-10-05.
-This supplements the generator-owned [command reference](cli.md) with complete
+Captured from a fresh `ego-cli` source installation on 2026-10-05.
+The build version is normalized to `<version>` below. This supplements the
+generator-owned [command reference](cli.md) with complete
 nested help, required arguments, parser defaults, and metadata-only resume help.
 
 ## `ego --help`
 
 ```text
-ego 0.1.0 — an agent you run from a terminal.
+ego <version> — an agent you run from a terminal.
 
 Usage:
   ego [OPTIONS] [PROMPT]

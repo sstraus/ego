@@ -49,10 +49,11 @@ fn a_declared_header_reaches_the_copilot_token_exchange() {
     let request = flow
         .copilot_exchange_request("gho_github")
         .expect("the exchange builds");
-    let request = declared(&[("editor-version", "ego/0.1.0")]).apply(request);
+    let request =
+        declared(&[("editor-version", concat!("ego/", env!("CARGO_PKG_VERSION")))]).apply(request);
     assert_eq!(
         value(&request, "editor-version"),
-        Some(b"ego/0.1.0".as_ref())
+        Some(concat!("ego/", env!("CARGO_PKG_VERSION")).as_bytes())
     );
 }
 
@@ -64,7 +65,8 @@ fn ego_still_names_itself_when_an_operator_adds_headers() {
     let request = flow
         .copilot_exchange_request("gho_github")
         .expect("the exchange builds");
-    let request = declared(&[("editor-version", "ego/0.1.0")]).apply(request);
+    let request =
+        declared(&[("editor-version", concat!("ego/", env!("CARGO_PKG_VERSION")))]).apply(request);
     let agent = value(&request, "user-agent").expect("ego names itself");
     assert!(
         agent.starts_with(b"ego/"),
@@ -87,7 +89,7 @@ fn a_credential_header_is_refused_even_when_handed_in_directly() {
     let request = declared(&[
         ("authorization", "Bearer stolen"),
         ("x-api-key", "stolen"),
-        ("editor-version", "ego/0.1.0"),
+        ("editor-version", concat!("ego/", env!("CARGO_PKG_VERSION"))),
     ])
     .apply(original);
     assert_eq!(
@@ -107,7 +109,7 @@ fn a_credential_header_is_refused_even_when_handed_in_directly() {
     assert_eq!(count(&request, "x-api-key"), 0);
     assert_eq!(
         value(&request, "editor-version"),
-        Some(b"ego/0.1.0".as_ref())
+        Some(concat!("ego/", env!("CARGO_PKG_VERSION")).as_bytes())
     );
 }
 
