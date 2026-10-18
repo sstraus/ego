@@ -98,6 +98,7 @@ impl OperationLimits {
 
 /// An effect-free recipe for a fresh HTTP lifecycle.
 pub struct McpHttpOperationFactory {
+    identity_retry: Arc<tokio::sync::Mutex<bool>>,
     continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
@@ -718,6 +719,7 @@ impl McpHttpOperationFactory {
         timeout: Duration,
     ) -> Result<Self, McpError> {
         Ok(Self {
+            identity_retry: Arc::default(),
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: None,
@@ -732,6 +734,7 @@ impl McpHttpOperationFactory {
         admission: Arc<dyn McpToolSchemaAdmission>,
     ) -> Result<Self, McpError> {
         Ok(Self {
+            identity_retry: Arc::default(),
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: bootstrap.map(|bootstrap| CollapsedSchemaAdmission {
@@ -804,6 +807,7 @@ type SessionStdioBinding = (
 );
 
 pub struct McpStdioOperationFactory {
+    identity_retry: Arc<tokio::sync::Mutex<bool>>,
     continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
@@ -817,6 +821,7 @@ impl McpStdioOperationFactory {
         timeout: Duration,
     ) -> Result<Self, McpError> {
         Ok(Self {
+            identity_retry: Arc::default(),
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: None,
@@ -832,6 +837,7 @@ impl McpStdioOperationFactory {
         admission: Arc<dyn McpToolSchemaAdmission>,
     ) -> Result<Self, McpError> {
         Ok(Self {
+            identity_retry: Arc::default(),
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             session: None,
@@ -1220,7 +1226,8 @@ async fn execute_http(
     ));
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
     let mut client =
-        McpClient::connect_http(server, config.clone(), factory.limits.options()?, effects)?;
+        McpClient::connect_http(server, config.clone(), factory.limits.options()?, effects)?
+            .with_identity_retry(Arc::clone(&factory.identity_retry));
     if let Err(error) = client.discover().await {
         let _ = client.settle().await;
         return Err(error);
@@ -1289,7 +1296,8 @@ async fn execute_stdio(
         server: server.clone(),
         duplex: Some(duplex),
     });
-    let mut client = McpClient::connect_stdio(server, factory.limits.options()?, effects)?;
+    let mut client = McpClient::connect_stdio(server, factory.limits.options()?, effects)?
+        .with_identity_retry(Arc::clone(&factory.identity_retry));
     if let Err(error) = client.discover().await {
         let _ = client.settle().await;
         return Err(error);
@@ -1563,9 +1571,16 @@ fn operation_request(
         )
     })?;
     match (envelope.operation(), envelope.subject()) {
-        (McpOperationKind::CallTool, McpSubject::Tool { name, .. }) => Ok(OperationRequest::Tool(
-            CallToolRequestParams::new(name.clone()).with_arguments(arguments),
-        )),
+        (McpOperationKind::CallTool, McpSubject::Tool { name, .. }) => {
+            // Generate once before guarded HTTP validation. The client traces
+            // this body-free UUID; TUIC retains it as client_call_id. No parent
+            // intent is invented when the caller supplied no such authority.
+            let mut params = serde_json::to_value(
+                CallToolRequestParams::new(name.clone()).with_arguments(arguments),
+            )?;
+            params["_meta"] = serde_json::json!({"tuic/call_id": uuid::Uuid::now_v7().to_string()});
+            Ok(OperationRequest::Tool(serde_json::from_value(params)?))
+        }
         (McpOperationKind::ReadResource, McpSubject::Resource { uri, .. }) => {
             if !arguments.is_empty() {
                 return Err(McpError::new(
@@ -2089,7 +2104,7 @@ fn selected_wire_params_match(mut actual: Value, expected: &Value) -> bool {
     let Ok(capabilities) = serde_json::to_value(current_client_capabilities()) else {
         return false;
     };
-    let expected_metadata = serde_json::json!({
+    let mut expected_metadata = serde_json::json!({
         "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_REVISION,
         "io.modelcontextprotocol/clientInfo": {
             "name": "ego",
@@ -2097,7 +2112,20 @@ fn selected_wire_params_match(mut actual: Value, expected: &Value) -> bool {
         },
         "io.modelcontextprotocol/clientCapabilities": capabilities
     });
-    Value::Object(metadata) == expected_metadata && &actual == expected
+    let mut expected_params = expected.clone();
+    let Some(expected_object) = expected_params.as_object_mut() else {
+        return false;
+    };
+    if let Some(correlation) = expected_object.remove("_meta") {
+        let Some(correlation) = correlation.as_object() else {
+            return false;
+        };
+        expected_metadata
+            .as_object_mut()
+            .expect("metadata object")
+            .extend(correlation.clone());
+    }
+    Value::Object(metadata) == expected_metadata && actual == expected_params
 }
 
 impl McpHttpEffects for SplitMcpHttpEffects {
@@ -2530,6 +2558,67 @@ mod stdio_fingerprint_tests {
                     .is_none()
             );
         }
+    }
+
+    // Catches: selected MCP calls omit correlation, reuse an attempt UUID, or
+    // allow a forged correlation UUID to cross the guarded HTTP boundary.
+    #[test]
+    fn selected_tool_correlation_is_fresh_and_bound_to_guarded_wire_params() {
+        let config = McpHttpConfig::new(
+            "https://example.com/mcp".parse::<url::Url>().unwrap(),
+            ego_core::config::McpHttpAuth::None,
+            false,
+        )
+        .unwrap();
+        let call = prepare_http(
+            &config,
+            McpOperation::captured(
+                McpSubject::Tool {
+                    server: "fixture".into(),
+                    name: "agent".into(),
+                },
+                McpOperationKind::CallTool,
+                McpAdmissionFingerprint::new("capture", "fixture/agent", "schema").unwrap(),
+                serde_json::json!({"action":"inbox"}),
+                vec![],
+            ),
+        )
+        .unwrap();
+        let first = operation_request(call.mcp_envelope().unwrap())
+            .unwrap()
+            .wire_params()
+            .unwrap();
+        let second = operation_request(call.mcp_envelope().unwrap())
+            .unwrap()
+            .wire_params()
+            .unwrap();
+        let first_id = first["_meta"]["tuic/call_id"]
+            .as_str()
+            .expect("client correlation");
+        assert!(uuid::Uuid::parse_str(first_id).is_ok());
+        assert_ne!(
+            first["_meta"]["tuic/call_id"],
+            second["_meta"]["tuic/call_id"]
+        );
+        assert_eq!(first["arguments"], serde_json::json!({"action":"inbox"}));
+        assert!(
+            first["_meta"].get("tuic/parent_operation_id").is_none(),
+            "do not invent an intent"
+        );
+        // Request shape from TUIC bc1fa723 mcp_call_audit::Call::start and
+        // mcp_outcome_record_groups_parent_but_preserves_targets_and_utf8_cost:
+        // correlation belongs to params._meta, never tool arguments.
+        let mut actual = first.clone();
+        actual["_meta"]["io.modelcontextprotocol/protocolVersion"] =
+            serde_json::json!("2026-07-28");
+        actual["_meta"]["io.modelcontextprotocol/clientInfo"] =
+            serde_json::json!({"name":"ego","version":env!("CARGO_PKG_VERSION")});
+        actual["_meta"]["io.modelcontextprotocol/clientCapabilities"] =
+            serde_json::to_value(current_client_capabilities()).unwrap();
+        actual["_meta"]["progressToken"] = serde_json::json!(7);
+        assert!(selected_wire_params_match(actual.clone(), &first));
+        actual["_meta"]["tuic/call_id"] = second["_meta"]["tuic/call_id"].clone();
+        assert!(!selected_wire_params_match(actual, &first));
     }
 
     #[test]

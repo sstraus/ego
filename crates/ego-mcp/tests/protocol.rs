@@ -1083,7 +1083,10 @@ async fn acp_cancellation_drops_the_host_request_before_connection_settlement() 
 // managed_reconnect_missing_context_is_bounded_and_never_guesses_a_peer checks
 // this code, effect, retryable flag and repair bound. Parent authorized this
 // contract fixture while the running TUIC remains on an older build.
+#[derive(Default)]
 struct IdentityAcpEffects {
+    failure: Option<serde_json::Value>,
+    structured: bool,
     calls: Mutex<Vec<serde_json::Value>>,
     repaired: AtomicBool,
 }
@@ -1092,14 +1095,27 @@ impl ego_mcp::McpAcpEffects for IdentityAcpEffects {
     fn connect(&self, _: String) -> McpFuture<'static, Result<String, McpError>> {
         unreachable!("already connected")
     }
-    fn request(&self, _: String, method: String, params: Option<serde_json::Map<String, serde_json::Value>>) -> McpFuture<'static, Result<serde_json::Value, McpError>> {
+    fn request(
+        &self,
+        _: String,
+        method: String,
+        params: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> McpFuture<'static, Result<serde_json::Value, McpError>> {
         let result = match method.as_str() {
-            "server/discover" => serde_json::json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":false}},"ttlMs":0,"cacheScope":"private"}),
+            "server/discover" => {
+                serde_json::json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":false}},"ttlMs":0,"cacheScope":"private"})
+            }
             "tools/call" => {
                 let params = serde_json::Value::Object(params.expect("call params"));
                 self.calls.lock().unwrap().push(params.clone());
-                let args = if params["name"] == "call_tool" { &params["arguments"]["arguments"] } else { &params["arguments"] };
-                if args["action"] == "register" { self.repaired.store(true, Ordering::SeqCst); }
+                let args = if params["name"] == "call_tool" {
+                    &params["arguments"]["arguments"]
+                } else {
+                    &params["arguments"]
+                };
+                if args["action"] == "register" {
+                    self.repaired.store(true, Ordering::SeqCst);
+                }
                 let result = if self.repaired.load(Ordering::SeqCst) {
                     serde_json::json!({"ok":true})
                 } else {
@@ -1112,21 +1128,42 @@ impl ego_mcp::McpAcpEffects for IdentityAcpEffects {
                             "external":"Initialize, then register on that protocol session; supply an authoritative path only when known."}
                     })
                 };
-                serde_json::json!({"resultType":"complete","content":[{"type":"text","text":result.to_string()}],"isError":!self.repaired.load(Ordering::SeqCst)})
+                let result = self.failure.clone().unwrap_or(result);
+                let mut envelope = serde_json::json!({"resultType":"complete","content":[{"type":"text","text":result.to_string()}],"isError":!self.repaired.load(Ordering::SeqCst)});
+                if self.structured {
+                    envelope["structuredContent"] = result;
+                }
+                envelope
             }
             other => panic!("unexpected method {other}"),
         };
         Box::pin(async move { Ok(result) })
     }
-    fn notify(&self, _: String, _: String, _: Option<serde_json::Map<String, serde_json::Value>>) -> Result<(), McpError> { Ok(()) }
-    fn disconnect(&self, _: String) -> McpFuture<'static, Result<(), McpError>> { Box::pin(async { Ok(()) }) }
-    fn publish_resource(&self, _: &str, _: String) { unreachable!("no resources") }
+    fn notify(
+        &self,
+        _: String,
+        _: String,
+        _: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(), McpError> {
+        Ok(())
+    }
+    fn disconnect(&self, _: String) -> McpFuture<'static, Result<(), McpError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn publish_resource(&self, _: &str, _: String) {
+        unreachable!("no resources")
+    }
 }
 
 fn identity_inbox(collapsed: bool, budget: usize) -> CallToolRequestParams {
     let args = serde_json::json!({"action":"inbox","byte_budget":budget});
     if collapsed {
-        CallToolRequestParams::new("call_tool").with_arguments(serde_json::json!({"tool_name":"agent","arguments":args}).as_object().unwrap().clone())
+        CallToolRequestParams::new("call_tool").with_arguments(
+            serde_json::json!({"tool_name":"agent","arguments":args})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
     } else {
         CallToolRequestParams::new("agent").with_arguments(args.as_object().unwrap().clone())
     }
@@ -1136,15 +1173,31 @@ fn identity_inbox(collapsed: bool, budget: usize) -> CallToolRequestParams {
 // including retries disguised by collapsed dispatch or a changed byte budget.
 #[tokio::test(flavor = "current_thread")]
 async fn identity_failure_blocks_model_driven_inbox_retries_before_transport() {
-    let effects = Arc::new(IdentityAcpEffects { calls: Mutex::new(Vec::new()), repaired: AtomicBool::new(false) });
-    let mut client = McpClient::connect_acp("tuic".parse().unwrap(), options(), "identity-fixture".into(), effects.clone()).unwrap();
+    let effects = Arc::new(IdentityAcpEffects::default());
+    let mut client = McpClient::connect_acp(
+        "tuic".parse().unwrap(),
+        options(),
+        "identity-fixture".into(),
+        effects.clone(),
+    )
+    .unwrap();
     client.discover().await.unwrap();
-    let first = client.call_tool_once(identity_inbox(false, 4096)).await.unwrap();
-    assert!(matches!(first, ego_mcp::McpManualOutcome::Complete(result) if result.is_error == Some(true)));
-    for (collapsed, budget) in [(false,4096), (true,4096), (false,8192)] {
+    let first = client
+        .call_tool_once(identity_inbox(false, 4096))
+        .await
+        .unwrap();
+    assert!(
+        matches!(first, ego_mcp::McpManualOutcome::Complete(result) if result.is_error == Some(true))
+    );
+    for (collapsed, budget) in [(false, 4096), (true, 4096), (false, 8192)] {
         client.begin_acp_operation(options()).unwrap();
-        let result = client.call_tool_once(identity_inbox(collapsed,budget)).await;
-        assert!(result.is_err(), "unchanged identity must refuse retry before transport");
+        let result = client
+            .call_tool_once(identity_inbox(collapsed, budget))
+            .await;
+        assert!(
+            result.is_err(),
+            "unchanged identity must refuse retry before transport"
+        );
     }
     assert_eq!(effects.calls.lock().unwrap().len(), 1);
     client.settle().await.unwrap();
@@ -1153,15 +1206,127 @@ async fn identity_failure_blocks_model_driven_inbox_retries_before_transport() {
 // Catches: stopping inbox retries also prevents an explicit successful identity repair.
 #[tokio::test(flavor = "current_thread")]
 async fn successful_registration_allows_inbox_after_identity_failure() {
-    let effects = Arc::new(IdentityAcpEffects { calls: Mutex::new(Vec::new()), repaired: AtomicBool::new(false) });
-    let mut client = McpClient::connect_acp("tuic".parse().unwrap(), options(), "identity-fixture".into(), effects.clone()).unwrap();
+    let effects = Arc::new(IdentityAcpEffects::default());
+    let mut client = McpClient::connect_acp(
+        "tuic".parse().unwrap(),
+        options(),
+        "identity-fixture".into(),
+        effects.clone(),
+    )
+    .unwrap();
     client.discover().await.unwrap();
-    client.call_tool_once(identity_inbox(false,4096)).await.unwrap();
+    client
+        .call_tool_once(identity_inbox(false, 4096))
+        .await
+        .unwrap();
     client.begin_acp_operation(options()).unwrap();
-    client.call_tool_once(CallToolRequestParams::new("agent").with_arguments(serde_json::json!({"action":"register"}).as_object().unwrap().clone())).await.unwrap();
+    client
+        .call_tool_once(
+            CallToolRequestParams::new("agent").with_arguments(
+                serde_json::json!({"action":"register"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
     client.begin_acp_operation(options()).unwrap();
-    let repaired = client.call_tool_once(identity_inbox(true,4096)).await.unwrap();
-    assert!(matches!(repaired, ego_mcp::McpManualOutcome::Complete(result) if result.is_error == Some(false)));
+    let repaired = client
+        .call_tool_once(identity_inbox(true, 4096))
+        .await
+        .unwrap();
+    assert!(
+        matches!(repaired, ego_mcp::McpManualOutcome::Complete(result) if result.is_error == Some(false))
+    );
     assert_eq!(effects.calls.lock().unwrap().len(), 3);
+    client.settle().await.unwrap();
+}
+
+// Catches: unrelated failures, inbox message data, or an uncertain effect poison
+// future inbox reads merely because they contain a retry-looking field.
+#[tokio::test(flavor = "current_thread")]
+async fn non_identity_failures_do_not_block_later_inbox_calls() {
+    for failure in [
+        serde_json::json!({"code":"other_failure","effect":"not_started","retryable":false}),
+        serde_json::json!({"code":"identity_context_required","effect":"not_started","retryable":true,"repair":{"max_attempts":2}}),
+        serde_json::json!({"messages":[{"code":"identity_context_required","effect":"not_started","retryable":false}]}),
+        serde_json::json!({"code":"identity_context_required","effect":"unknown","retryable":false}),
+    ] {
+        let effects = Arc::new(IdentityAcpEffects {
+            failure: Some(failure),
+            ..Default::default()
+        });
+        let mut client = McpClient::connect_acp(
+            "tuic".parse().unwrap(),
+            options(),
+            "identity-fixture".into(),
+            effects.clone(),
+        )
+        .unwrap();
+        client.discover().await.unwrap();
+        client
+            .call_tool_once(identity_inbox(false, 4096))
+            .await
+            .unwrap();
+        client.begin_acp_operation(options()).unwrap();
+        client
+            .call_tool_once(identity_inbox(false, 4096))
+            .await
+            .unwrap();
+        assert_eq!(effects.calls.lock().unwrap().len(), 2);
+        client.settle().await.unwrap();
+    }
+}
+
+// Catches: the repair bound is ignored when supplied as structuredContent rather
+// than JSON text, or caller identity state leaks into a separately admitted peer.
+#[tokio::test(flavor = "current_thread")]
+async fn structured_identity_repair_bound_blocks_only_its_own_connection() {
+    let effects = Arc::new(IdentityAcpEffects {
+        failure: Some(
+            serde_json::json!({"code":"identity_context_required","effect":"not_started","repair":{"max_attempts":1}}),
+        ),
+        structured: true,
+        ..Default::default()
+    });
+    let mut client = McpClient::connect_acp(
+        "tuic".parse().unwrap(),
+        options(),
+        "identity-fixture".into(),
+        effects.clone(),
+    )
+    .unwrap();
+    client.discover().await.unwrap();
+    client
+        .call_tool_once(identity_inbox(true, 4096))
+        .await
+        .unwrap();
+    client.begin_acp_operation(options()).unwrap();
+    let blocked = client
+        .call_tool_once(identity_inbox(false, 4096))
+        .await
+        .err()
+        .expect("retry refused");
+    assert_eq!(
+        blocked.delivery(),
+        Some(DeliveryCertainty::DefinitelyUnsent)
+    );
+    assert!(blocked.to_string().contains("reconnect"));
+    assert_eq!(effects.calls.lock().unwrap().len(), 1);
+    let mut other = McpClient::connect_acp(
+        "other".parse().unwrap(),
+        options(),
+        "other-identity-fixture".into(),
+        effects.clone(),
+    )
+    .unwrap();
+    other.discover().await.unwrap();
+    other
+        .call_tool_once(identity_inbox(false, 4096))
+        .await
+        .unwrap();
+    assert_eq!(effects.calls.lock().unwrap().len(), 2);
+    other.settle().await.unwrap();
     client.settle().await.unwrap();
 }

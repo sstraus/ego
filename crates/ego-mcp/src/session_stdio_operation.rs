@@ -64,6 +64,7 @@ async fn invoke(
         .await?;
     let mut lease = crate::session_stdio::RequestLease::new(&mut state);
     let client = lease.client.as_mut().expect("authorized client");
+    client.set_identity_retry(Arc::clone(&factory.identity_retry));
     let cancellation = client.cancellation();
     let mut request = Box::pin(request.invoke(client));
     let outcome = loop {
@@ -94,6 +95,15 @@ async fn invoke(
         Ok(outcome) => {
             lease.complete();
             Ok((outcome, envelope))
+        }
+        Err(error)
+            if error.failure() == McpFailure::Authority
+                && error.delivery() == Some(DeliveryCertainty::DefinitelyUnsent) =>
+        {
+            // A consumer-side retry refusal sent no bytes. Keep the healthy
+            // registered channel; tearing it down would discard identity state.
+            lease.complete();
+            Err(error)
         }
         Err(error) => {
             // Nothing retries this operation, including after possibly-sent failures.
