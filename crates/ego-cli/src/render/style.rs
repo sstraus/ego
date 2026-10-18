@@ -399,6 +399,7 @@ impl Palette {
     // --- diagnostics ------------------------------------------------------
     pub const TOOL: Rgb = Rgb(137, 221, 255);
     pub const ERROR: Rgb = Rgb(255, 107, 128);
+    pub const WARNING: Rgb = Rgb(229, 192, 80);
     pub const NOTE: Rgb = Rgb(153, 153, 153);
 }
 

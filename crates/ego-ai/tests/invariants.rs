@@ -1171,7 +1171,6 @@ impl Tool for NeverRunTool {
     }
 }
 
-    let TurnFixture { registry, tier } = fixture;
 // regression case: completed Codex sockets must not survive a human wait.
 #[derive(Default)]
 struct QuestionSocketState {
@@ -1377,4 +1376,89 @@ async fn question_answer_still_retries_a_real_connection_failure() {
 async fn unavailable_question_host_releases_the_provider_connection_before_suspension() {
     // Catches: a durable pending question retains its previous provider socket.
     question_wait_turn(false, false).await;
+}
+
+#[tokio::test]
+async fn fast_contract_catches_missing_wire_tier_and_unmultiplied_turn_cost() {
+    use ego_ai::service_tier::ServiceTier;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Real loopback HTTP, no model calls. The tariff is captured in
+    // ARCHITECTURE.md
+    for (tier, expected) in [
+        (ServiceTier::Standard, "0.0000453"),
+        (ServiceTier::Fast, "0.0000906"),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            let body = loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                request.extend_from_slice(&buf[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let size: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_owned)
+                        })
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + size {
+                        break serde_json::from_slice::<serde_json::Value>(
+                            &request[end + 4..end + 4 + size],
+                        )
+                        .unwrap();
+                    }
+                }
+            };
+            let transcript = include_str!("goldens/profile/openai/stream/text.sse");
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", transcript.len()).as_bytes()).await.unwrap();
+            socket.write_all(transcript.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+            body
+        });
+        let http = Arc::new(SocketHttp {
+            base,
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        });
+        let (outcome, state) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            turn_over_http(
+                "openai/gpt-6.1-sol",
+                ProviderRow::openai(),
+                &ego_ai::wire::openai_responses::OpenAiResponses,
+                http,
+                0,
+                Arc::new(NoRetryPause),
+                TurnFixture {
+                    tier: Some(tier),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("loopback turn must finish");
+        let body = server.await.unwrap();
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        assert_eq!(answer(&state), "ok");
+        if tier == ServiceTier::Fast {
+            assert_eq!(body["service_tier"], "fast");
+        } else {
+            assert_eq!(body["service_tier"], "default");
+        }
+        assert_eq!(
+            state.cost,
+            CumulativeCost::Known {
+                total: usd(expected)
+            }
+        );
+    }
 }

@@ -1641,6 +1641,26 @@ interruption is pending. `trust` renders `trusted` or `untrusted` and counts as
 inactive while trusted, so width pressure drops it from exactly the sessions
 whose posture is not worth reporting.
 
+The compact default reads as:
+
+```text
+gpt-6-sol · medium · yolo ▰▰▱▱▱▱▱▱▱▱ 58k/272k ≈$0.66 ~/G/p/mdkb ⎇ feat/configurable-embedder●
+```
+
+The ten context cells fill in proportion to measured occupancy. The meter is
+green below 60%, yellow from 60%, and red from 85%. Missing occupancy reads
+`▱▱▱▱▱▱▱▱▱▱ ?/272k` when the window is known. Colour is optional; the count
+and window remain visible without it. `≈$` means subscription-equivalent cost
+at standard API prices, not billed spend. `$` means billed cost. `(partial)`
+marks an estimate that excludes mixed or unpriced usage; `unpriced` means no
+complete price is available. `/statusline` explains these symbols in its setup
+selector. Home is `~`, intermediate path components use their first letter,
+and the final component stays complete. `⎇` precedes the branch; `●` means
+uncommitted changes. These symbols are standard single-cell BMP characters,
+not emoji or private font glyphs. Under width pressure, branch, cwd, and cost
+drop in that order before model, reasoning, mode, and context. At widths too
+small for that core, whole fields still drop rather than wrap or truncate.
+
 Configuration stores one final resolved shape rather than a preset plus a
 second override language:
 

@@ -1608,7 +1608,7 @@ fn status_row(status: &SurfaceStatus) -> String {
     let text = status
         .painter
         .current_status()
-        .map(|line| line.text().to_string())
+        .map(|line| line.terminal_text(&status.permission_capabilities))
         .unwrap_or_default();
     if text.is_empty() {
         String::new()
@@ -1623,13 +1623,16 @@ impl Prompt for Waiting {
         if let Some(receipt) = background_notice::row(buffer, width) {
             return Some(receipt);
         }
-        let (receipt, detail) = crate::render::prompt_echo::collapsed(buffer, width)?;
-        self.status
-            .lock()
-            .expect("surface status lock")
-            .details
-            .remember(detail);
-        Some(receipt)
+        if let Some((receipt, detail)) = crate::render::prompt_echo::collapsed(buffer, width) {
+            self.status
+                .lock()
+                .expect("surface status lock")
+                .details
+                .remember(detail);
+            return Some(receipt);
+        }
+        // Commit only the input, never the live status or composer notices.
+        Some(format!("> {}", buffer.replace('\n', "\n… ")))
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {
