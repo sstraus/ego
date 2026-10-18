@@ -5006,7 +5006,7 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
     drain_until_quiet(&reader, &mut output);
     let usage = normalized(&output[usage_start..]);
     assert!(
-        usage.contains("unpriced subscription-equivalent (standard API)"),
+        usage.contains("unpriced nonmonetary usage (no API equivalent)"),
         "nonmonetary usage cost: {usage:?}"
     );
     assert!(
