@@ -545,3 +545,86 @@ fn fast_contract_catches_hidden_fast_selection_or_mislabelled_equivalent() {
         ""
     );
 }
+
+// Catches: the active goal counter survives achievement or five blocker observations.
+#[test]
+fn goal_status_follows_durable_allowance_and_disappears_when_terminal() {
+    use ego_core::ceiling::Ceilings;
+    use ego_core::event::id::GoalId;
+    use ego_core::goal::{GoalOwner, GoalTransition};
+
+    for achieved in [true, false] {
+        let mut facts = SessionState::default();
+        let mut seq = Seq::default();
+        let mut apply = |facts: &mut SessionState, kind| {
+            let current = seq;
+            seq.next();
+            facts.apply(&DomainEvent {
+                env: Envelope {
+                    seq: current,
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(0),
+                    producer: Producer::Main,
+                },
+                kind,
+            });
+        };
+        let id = GoalId::new();
+        apply(
+            &mut facts,
+            EventKind::GoalSet {
+                id,
+                objective: "Verify artifact".into(),
+                owner: GoalOwner::Operator,
+                ceilings: Ceilings::default(),
+                derived_from: None,
+            },
+        );
+        let names = [StatusSegmentName::Model];
+        assert!(row(&facts, &names, 80).contains("goal 0/pending"));
+        apply(
+            &mut facts,
+            EventKind::GoalCheckConfigured {
+                id,
+                continuation_budget: 3,
+            },
+        );
+        apply(
+            &mut facts,
+            EventKind::GoalContinuation {
+                id,
+                text: "Continue".into(),
+            },
+        );
+        assert!(row(&facts, &names, 80).contains("goal 1/3"));
+        assert_eq!(row(&facts, &[], 80), "");
+        if achieved {
+            apply(
+                &mut facts,
+                EventKind::GoalTransitioned {
+                    id,
+                    transition: GoalTransition::Achieved {
+                        attested_by: GoalOwner::Operator,
+                        evidence: None,
+                    },
+                },
+            );
+        } else {
+            for _ in 0..5 {
+                apply(
+                    &mut facts,
+                    EventKind::GoalTransitioned {
+                        id,
+                        transition: GoalTransition::BlockerObserved {
+                            reason: "artifact missing".into(),
+                        },
+                    },
+                );
+            }
+        }
+        assert!(!row(&facts, &names, 80).contains("goal"));
+    }
+}
