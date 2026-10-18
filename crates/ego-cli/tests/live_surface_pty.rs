@@ -18,6 +18,8 @@ mod foreign_judge_reason;
 mod goal_ancestry;
 #[path = "live_surface_pty/goal_visibility.rs"]
 mod goal_visibility;
+#[path = "live_surface_pty/help_latency.rs"]
+mod help_latency;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
 #[path = "live_surface_pty/mcp_inventory.rs"]
