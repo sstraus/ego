@@ -385,10 +385,16 @@ async fn one_turn(
         StubHttp::replaying(transcript),
         0,
         Arc::new(NoRetryPause),
-        Vec::new(),
+        TurnFixture::default(),
     )
     .await;
     (outcome.exit_reason, state)
+}
+
+#[derive(Default)]
+struct TurnFixture {
+    registry: Vec<Arc<dyn Tool>>,
+    tier: Option<ego_ai::service_tier::ServiceTier>,
 }
 
 async fn turn_over_http(
@@ -398,8 +404,9 @@ async fn turn_over_http(
     http: Arc<dyn Http>,
     retry: u32,
     retry_pause: Arc<dyn ego_core::turn::RetryPause>,
-    registry: Vec<Arc<dyn Tool>>,
+    fixture: TurnFixture,
 ) -> (ego_core::turn::TurnOutcome, SessionState) {
+    let TurnFixture { registry, tier } = fixture;
     turn_over_http_with_question(
         slug,
         row,
@@ -413,6 +420,7 @@ async fn turn_over_http(
                 .map(ego_core::turn::RegisteredTool::Effect)
                 .collect(),
             None,
+            tier,
         ),
     )
     .await
@@ -428,29 +436,42 @@ async fn turn_over_http_with_question(
     question: (
         Vec<ego_core::turn::RegisteredTool>,
         Option<Arc<dyn ego_core::question::Elicitor>>,
+        Option<ego_ai::service_tier::ServiceTier>,
     ),
 ) -> (ego_core::turn::TurnOutcome, SessionState) {
-    let (registry, elicitor) = question;
+    let (registry, elicitor, tier) = question;
     let slug = ModelSlug::parse(slug).expect("a constant this file controls");
     // Through the catalogue rather than around it: "configuration" is the
     // claim, and a row handed straight to the generator would prove only that
     // the generator is generic.
     let catalogue = Catalogue::new([row]).with_hosted(&slug.to_string(), hosted());
-    let resolved = catalogue
+    let mut resolved = catalogue
         .resolve_hosted(&slug, wire)
         .expect("the row and its model were both configured above");
+    if tier.is_some() {
+        // Recorded GPT-6.1 Sol USD tariff, not a value computed by the policy under test.
+        let rates = resolved.rates.as_mut().unwrap();
+        rates.quote.uncached_input = Some("0.000002".parse().unwrap());
+        rates.quote.cache_read = Some("0.0000001".parse().unwrap());
+        rates.quote.cache_write = Some("0.0000025".parse().unwrap());
+        rates.quote.output = Some("0.00001".parse().unwrap());
+    }
+    let tier = tier.unwrap_or_default();
+    if tier == ego_ai::service_tier::ServiceTier::Fast {
+        let support = ego_ai::service_tier::fast_support(&slug.to_string()).unwrap();
+        let rates = resolved.rates.as_mut().unwrap();
+        rates.quote = ego_ai::service_tier::fast_quote(&rates.quote, &support).unwrap();
+    }
     let credential = resolved
         .row
         .credential
         .resolve(&FakeCredentials::holding(KEY))
         .expect("every variable is set on this fake machine");
 
-    let generator = Arc::new(WireGenerator::new(
-        resolved.row.clone(),
-        resolved.wire,
-        http,
-        credential,
-    ));
+    let generator = Arc::new(
+        WireGenerator::new(resolved.row.clone(), resolved.wire, http, credential)
+            .with_service_tier(tier),
+    );
     let store = MemStore::default();
     let clock = FixedClock;
     let fs = FakeFs::default();
@@ -1033,7 +1054,10 @@ async fn dropped_codex_turn(
         http,
         retry,
         pause.clone(),
-        vec![Arc::new(NeverRunTool)],
+        TurnFixture {
+            registry: vec![Arc::new(NeverRunTool)],
+            ..Default::default()
+        },
     )
     .await;
     server.abort();
@@ -1147,6 +1171,7 @@ impl Tool for NeverRunTool {
     }
 }
 
+    let TurnFixture { registry, tier } = fixture;
 // regression case: completed Codex sockets must not survive a human wait.
 #[derive(Default)]
 struct QuestionSocketState {
@@ -1291,6 +1316,7 @@ async fn question_wait_turn(fail_after_answer: bool, available: bool) {
                 live_during_wait: live.clone(),
                 available,
             })),
+            None,
         ),
     )
     .await;

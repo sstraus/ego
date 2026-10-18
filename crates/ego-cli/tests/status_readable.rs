@@ -492,3 +492,50 @@ fn rendered_status_explains_unmeasured_context() {
     }]);
     assert_eq!(row(&compacted, &names, 80), "ctx unmeasured");
 }
+
+#[test]
+fn fast_contract_catches_hidden_fast_selection_or_mislabelled_equivalent() {
+    let mut cost = estimated_cost("0.004");
+    if let CostDelta::Known {
+        attribution:
+            CostAttribution::MeteringPolicy {
+                equivalent: Some(equivalent),
+                ..
+            },
+        ..
+    } = &mut cost
+    {
+        let ego_core::cost::SubscriptionEquivalent::V1 { service_tier, .. } = equivalent.as_mut();
+        *service_tier = "fast".into();
+    }
+    let state = replay_costs([cost]);
+    let selected = SelectionFacts::new(
+        ModelRef("openai-codex/gpt-6.1-sol".into()),
+        ThinkingLevel::Low,
+        Mode::Default,
+    )
+    .with_fast(true);
+    let snapshot = SurfaceSnapshot::from_state(
+        SessionId::new(),
+        &state,
+        selected,
+        SeatFacts::new(QueueStatus::default(), 0, "/ws", Trust::Trusted),
+        None,
+    );
+    assert_eq!(snapshot.fast(), "fast");
+    let rendered = StatusLine::render(
+        &snapshot,
+        &[StatusSegmentName::Fast, StatusSegmentName::Cost],
+        180,
+    );
+    assert_eq!(
+        rendered.text(),
+        "fast · $0.004 subscription-equivalent (fast API)"
+    );
+    let standard = snapshot_for(&SessionState::default(), Trust::Trusted);
+    assert_eq!(standard.fast(), "");
+    assert_eq!(
+        StatusLine::render(&standard, &[StatusSegmentName::Fast], 80).text(),
+        ""
+    );
+}

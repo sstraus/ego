@@ -7,10 +7,11 @@ use ego_cli::repl::actions::{
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
-const NAMES: [&str; 32] = [
+const NAMES: [&str; 33] = [
     "help",
     "model",
     "thinking",
+    "fast",
     "mode",
     "plan",
     "yolo",
@@ -469,5 +470,26 @@ fn custom_shortcuts_cannot_capture_text_ime_or_reserved_controls() {
             ),]))
             .unwrap_err()
             .contains("unknown keybinding action")
+    );
+}
+
+#[test]
+fn fast_contract_catches_invalid_or_prompt_routed_tier_commands() {
+    let registry = ActionRegistry::final_surface();
+    for (text, enabled) in [("/fast on", true), ("/fast off", false)] {
+        assert_eq!(
+            registry.classify(registry.submit(text, InputOrigin::Typed)),
+            Dispatch::Fast(enabled)
+        );
+    }
+    for text in ["/fast", "/fast turbo", "/fast on extra"] {
+        assert!(matches!(
+            registry.classify(registry.submit(text, InputOrigin::Typed)),
+            Dispatch::Refused { .. }
+        ));
+    }
+    assert_eq!(
+        registry.classify(registry.submit("/fast on", InputOrigin::BracketedPaste)),
+        Dispatch::Prompt
     );
 }

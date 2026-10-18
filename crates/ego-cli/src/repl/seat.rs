@@ -96,6 +96,7 @@ struct Actions {
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
     Mode,
+    Fast,
     Export,
     Plan,
     Yolo,
@@ -140,6 +141,7 @@ impl ActionSink for SurfaceActionSink {
     fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
         let effect = match action.id {
             ActionId::Mode => SurfaceActionEffect::Mode,
+            ActionId::Fast => SurfaceActionEffect::Fast,
             ActionId::Plan => SurfaceActionEffect::Plan,
             ActionId::Yolo => SurfaceActionEffect::Yolo,
             ActionId::Permissions => SurfaceActionEffect::Permissions,
@@ -375,7 +377,8 @@ fn rebuild_snapshot(
     status.snapshot = Some(SurfaceSnapshot::from_state_with_git(
         base.session,
         state,
-        SelectionFacts::new(selection.identity, selection.thinking, base.mode),
+        SelectionFacts::new(selection.identity, selection.thinking, base.mode)
+            .with_fast(selection.service_tier == ego_ai::service_tier::ServiceTier::Fast),
         seat,
         base.git,
     ));
@@ -640,6 +643,7 @@ pub struct StatusSetup {
 pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentName] = &[
     ego_core::config::StatusSegmentName::Model,
     ego_core::config::StatusSegmentName::Effort,
+    ego_core::config::StatusSegmentName::Fast,
     ego_core::config::StatusSegmentName::Mode,
     ego_core::config::StatusSegmentName::Context,
     ego_core::config::StatusSegmentName::Cost,
@@ -1297,6 +1301,7 @@ impl Seat {
                         Line::HostCommand(HostCommand::Memory(arguments))
                     }
                     Dispatch::Init(arguments) => Line::HostCommand(HostCommand::Init(arguments)),
+                    Dispatch::Fast(enabled) => Line::HostCommand(HostCommand::Fast(enabled)),
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
@@ -1421,6 +1426,7 @@ impl Seat {
         }));
         for action in [
             ActionId::Mode,
+            ActionId::Fast,
             ActionId::Plan,
             ActionId::Yolo,
             ActionId::Permissions,

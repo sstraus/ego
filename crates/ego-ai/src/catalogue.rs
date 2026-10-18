@@ -250,7 +250,7 @@ pub enum ModelAvailability {
 }
 
 /// One stable, public row shared by every catalogue consumer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ModelCatalogueEntry {
     pub slug: ModelSlug,
     pub capabilities: ModelCapabilities,
@@ -258,6 +258,29 @@ pub struct ModelCatalogueEntry {
     pub provenance: ModelFactProvenance,
     pub freshness: FactFreshness,
     pub availability: ModelAvailability,
+}
+
+impl Serialize for ModelCatalogueEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut row = serializer.serialize_struct("ModelCatalogueEntry", 8)?;
+        row.serialize_field("slug", &self.slug)?;
+        row.serialize_field("capabilities", &self.capabilities)?;
+        row.serialize_field("metering", &self.metering)?;
+        row.serialize_field("provenance", &self.provenance)?;
+        row.serialize_field("freshness", &self.freshness)?;
+        row.serialize_field("availability", &self.availability)?;
+        row.serialize_field("standard_token_price_multiplier", &1)?;
+        row.serialize_field("fast", &self.fast_support())?;
+        row.end()
+    }
+}
+
+impl ModelCatalogueEntry {
+    /// Verified optional tier facts; absence means standard only.
+    pub fn fast_support(&self) -> Option<crate::service_tier::FastSupport> {
+        crate::service_tier::fast_support(&self.slug.to_string())
+    }
 }
 
 /// The latest observation status for one model source.

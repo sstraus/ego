@@ -86,6 +86,7 @@ impl StaticRequestProfile {
 /// authorities cannot expose a plausible protocol before resolution.
 pub struct WireGenerator {
     row: ProviderRow,
+    service_tier: crate::service_tier::ServiceTier,
     wire: &'static dyn WireFormat,
     profile: AdmittedHttpProfile,
     /// `Arc`, not a borrow, and that is forced rather than preferred:
@@ -125,12 +126,23 @@ impl WireGenerator {
         };
         WireGenerator {
             row,
+            service_tier: crate::service_tier::ServiceTier::Standard,
             wire,
             profile,
             http,
             credential,
             codex_session: Arc::default(),
         }
+    }
+
+    /// Bind a tier to this generation profile, not mutable process state.
+    pub fn with_service_tier(mut self, tier: crate::service_tier::ServiceTier) -> Self {
+        self.service_tier = tier;
+        self
+    }
+
+    pub fn service_tier(&self) -> crate::service_tier::ServiceTier {
+        self.service_tier
     }
 
     /// Whether a fresh resolution can retain this run-owned transport session.
@@ -183,7 +195,49 @@ impl WireGenerator {
         let target = wire::RequestTarget::new(base, &headers);
         let names = ToolNames::new(req);
         let encoded = names.encode(req);
-        let request = self.wire.build_request(&target, &encoded)?;
+        let mut request = self.wire.build_request(&target, &encoded)?;
+        if self.service_tier == crate::service_tier::ServiceTier::Fast || self.row.id() == "openai"
+        {
+            let slug = format!("{}/{}", self.row.id(), req.model);
+            self.service_tier
+                .validate(&slug)
+                .map_err(wire::RequestRefused::new)?;
+            let support = (self.service_tier == crate::service_tier::ServiceTier::Fast)
+                .then(|| crate::service_tier::fast_support(&slug).expect("validated fast support"));
+            let mut body: serde_json::Value =
+                serde_json::from_slice(request.body.as_deref().ok_or_else(|| {
+                    wire::RequestRefused::new("service tier requires a JSON request body")
+                })?)
+                .map_err(|error| wire::RequestRefused::new(error.to_string()))?;
+            // OpenAI omission inherits the project tier, which may be Fast.
+            let (field, value) = support
+                .as_ref()
+                .map_or(("service_tier", "default"), |support| {
+                    (support.wire_field, support.wire_value)
+                });
+            body[field] = value.into();
+            request.body = Some(
+                serde_json::to_vec(&body)
+                    .map_err(|error| wire::RequestRefused::new(error.to_string()))?,
+            );
+            if let Some(beta) = support.and_then(|support| support.beta_header) {
+                // Preserve beta capabilities already requested by the wire.
+                let previous = request
+                    .headers
+                    .iter()
+                    .find(|header| header.name().eq_ignore_ascii_case("anthropic-beta"))
+                    .map(|header| String::from_utf8_lossy(header.value()).into_owned());
+                request
+                    .headers
+                    .retain(|header| !header.name().eq_ignore_ascii_case("anthropic-beta"));
+                let value = previous
+                    .map_or_else(|| beta.to_owned(), |previous| format!("{previous},{beta}"));
+                request.headers.push(
+                    ego_core::permit::HttpHeader::new("anthropic-beta", value.into_bytes())
+                        .expect("verified beta header"),
+                );
+            }
+        }
         for (index, (original, tool)) in req.tools.iter().zip(&encoded.tools).enumerate() {
             tracing::debug!(target: "ego_ai::tool_names", index, original_name = %original.name,
                 provider_name = %tool.name, "provider tool declaration");

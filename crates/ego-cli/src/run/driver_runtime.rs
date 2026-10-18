@@ -2507,6 +2507,21 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             render_session_hooks(&session_hooks.state, diagnostics);
             Ok(CommandOutcome::Continue)
         }
+        repl::Line::HostCommand(repl::HostCommand::Fast(enabled)) => {
+            match selection.set_fast(enabled) {
+                Ok(receipt) => {
+                    diagnostics.note(&receipt);
+                    if let Some(status) = status
+                        && status.human
+                        && let Ok(selected) = selection.snapshot()
+                    {
+                        status.seat.refresh_status(state, selected);
+                    }
+                }
+                Err(error) => diagnostics.note(&error.to_string()),
+            }
+            Ok(CommandOutcome::Continue)
+        }
         repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
             switch_session_model(
                 request,

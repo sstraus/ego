@@ -1057,3 +1057,116 @@ fn request_diagnostics_include_wire_tool_names_without_private_request_data() {
     generator.ensure_expressible(&req).unwrap();
     assert_eq!(*captured.lock().unwrap(), ["[Some(String(\"read_file\"))]"]);
 }
+
+#[tokio::test]
+async fn fast_contract_catches_provider_field_drift_and_silent_unsupported_tiers() {
+    use ego_ai::service_tier::ServiceTier;
+    for (row, wire, model, field, beta) in [
+        (
+            ProviderRow::openai(),
+            &ego_ai::wire::openai_responses::OpenAiResponses as &'static dyn WireFormat,
+            "gpt-6.1-sol",
+            "service_tier",
+            false,
+        ),
+        (
+            ProviderRow::anthropic_default(),
+            &ego_ai::wire::anthropic_messages::AnthropicMessages as &'static dyn WireFormat,
+            "claude-opus-5-5",
+            "speed",
+            false,
+        ),
+        (
+            ProviderRow::anthropic_default(),
+            &ego_ai::wire::anthropic_messages::AnthropicMessages as &'static dyn WireFormat,
+            "claude-opus-4-8",
+            "speed",
+            true,
+        ),
+        (
+            ProviderRow::openrouter_default(),
+            &ego_ai::wire::openai_completions::OpenAiCompletions as &'static dyn WireFormat,
+            "openai/gpt-6.1-sol",
+            "service_tier",
+            false,
+        ),
+    ] {
+        for tier in [ServiceTier::Standard, ServiceTier::Fast] {
+            let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+            let credential = row
+                .credential
+                .resolve(&FakeCredentials::holding(KEY))
+                .unwrap();
+            let generator = WireGenerator::new(row.clone(), wire, http.clone(), credential)
+                .with_service_tier(tier);
+            let mut req = request();
+            req.model = model.into();
+            let mut gate = BudgetGate::new(usd("10"));
+            let attempt = attempt_for(&mut gate, &req);
+            let _: Vec<_> = generator.generate(req, attempt).collect().await;
+            let seen = http.seen.lock().unwrap();
+            let sent = seen.first().unwrap();
+            let body: serde_json::Value =
+                serde_json::from_slice(sent.body.as_deref().unwrap()).unwrap();
+            if tier == ServiceTier::Fast {
+                assert_eq!(
+                    body[field],
+                    if row.id() == "openrouter" {
+                        "priority"
+                    } else {
+                        "fast"
+                    }
+                );
+                if beta {
+                    assert!(sent.headers.iter().any(|header| {
+                        header.name() == "anthropic-beta"
+                            && String::from_utf8_lossy(header.value())
+                                .contains("fast-mode-2026-02-01")
+                    }));
+                }
+            } else {
+                assert_ne!(body[field], "fast");
+                assert_ne!(body[field], "priority");
+            }
+        }
+    }
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = generator(http.clone()).with_service_tier(ServiceTier::Fast);
+    let mut req = request();
+    req.model = "unknown".into();
+    assert!(
+        generator
+            .ensure_expressible(&req)
+            .unwrap_err()
+            .to_string()
+            .contains("no verified fast tier")
+    );
+    assert_eq!(http.calls(), 0);
+}
+
+#[tokio::test]
+async fn standard_tier_catches_fast_project_default_surviving_fast_off() {
+    // Captured OpenAI fast-mode documentation says omitted service_tier inherits
+    // the project's tier. Standard must override a Fast project explicitly, or
+    // /fast off can still incur Fast charges while ego quotes Standard prices.
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = WireGenerator::new(
+        row(),
+        &ego_ai::wire::openai_responses::OpenAiResponses,
+        http.clone(),
+        credential(&FakeCredentials::holding(KEY)),
+    )
+    .with_service_tier(ego_ai::service_tier::ServiceTier::Standard);
+    let mut req = request();
+    req.model = "gpt-6.1-sol".into();
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let _: Vec<_> = generator.generate(req, attempt).collect().await;
+    let seen = http.seen.lock().unwrap();
+    let sent = seen.first().expect("standard generation reaches transport");
+    let body: serde_json::Value = serde_json::from_slice(sent.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body["service_tier"], "default",
+        "Standard must override OpenAI project Fast defaults, not inherit them"
+    );
+}
