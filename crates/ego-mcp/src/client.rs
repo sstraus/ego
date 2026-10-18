@@ -1101,13 +1101,13 @@ impl McpClient {
             tracing::info!(client_call_id = %id, server = %self.server, "MCP tool call started");
         }
         let outcome = self.call_tool_round(params).await;
-        if let Ok(McpManualOutcome::Complete(result)) = &outcome {
-            if let Some(blocked) = identity.as_deref_mut() {
-                if action == Some("register") && result.is_error != Some(true) {
-                    *blocked = false;
-                } else if action == Some("inbox") && identity_context_refused(result) {
-                    *blocked = true;
-                }
+        if let Ok(McpManualOutcome::Complete(result)) = &outcome
+            && let Some(blocked) = identity.as_deref_mut()
+        {
+            if action == Some("register") && result.is_error != Some(true) {
+                *blocked = false;
+            } else if action == Some("inbox") && identity_context_refused(result) {
+                *blocked = true;
             }
         }
         if let Some(id) = correlation {

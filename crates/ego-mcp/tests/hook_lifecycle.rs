@@ -4109,6 +4109,167 @@ mod transport_selection_boundary {
         .expect("TUIC admission")
     }
 
+    #[derive(Default)]
+    struct CorrelationHttp(Mutex<Vec<serde_json::Value>>);
+
+    impl OneHop for CorrelationHttp {
+        fn admit_mcp(&self) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn begin_call(&self) -> std::time::Instant {
+            std::time::Instant::now() + Duration::from_secs(30)
+        }
+
+        fn execute(
+            &self,
+            _: ego_core::permit::ResolvedConnect,
+            request: ego_core::permit::HttpRequest,
+            _: std::time::Instant,
+        ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            let request: serde_json::Value = serde_json::from_slice(request.body()).unwrap();
+            let result = match request["method"].as_str().unwrap() {
+                "server/discover" => json!({
+                    "resultType":"complete",
+                    "supportedVersions":["2026-07-28"],
+                    "capabilities":{"tools":{"listChanged":false}},
+                    "ttlMs":0,
+                    "cacheScope":"private",
+                    "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"local","version":"1.0"}}
+                }),
+                "tools/call" => {
+                    self.0.lock().unwrap().push(request.clone());
+                    json!({"resultType":"complete","content":[],"isError":false})
+                }
+                method => panic!("unexpected MCP method: {method}"),
+            };
+            let body = serde_json::to_vec(&json!({
+                "jsonrpc":"2.0", "id":request["id"], "result":result
+            }))
+            .unwrap();
+            Box::pin(std::future::ready(Ok(OneHopResponse::response(
+                200,
+                vec![
+                    ego_core::permit::HttpHeader::new("content-type", b"application/json".to_vec())
+                        .unwrap(),
+                ],
+                body,
+            ))))
+        }
+    }
+
+    // Catches: correlation is dropped before transport or reused across selected invocations.
+    #[tokio::test(flavor = "current_thread")]
+    async fn selected_tool_correlation_is_fresh_at_guarded_http_effect() {
+        let config = McpHttpConfig::new(
+            "https://93.184.216.34/mcp".parse::<url::Url>().unwrap(),
+            ego_core::config::McpHttpAuth::None,
+            false,
+        )
+        .unwrap();
+        let admission = Arc::new(
+            McpServerAdmission::new(
+                "fixture".parse().unwrap(),
+                McpServerConfig::Http(config),
+                McpTransportMaterial::http(Vec::new()),
+            )
+            .unwrap(),
+        );
+        let factory = Arc::new(
+            McpHttpOperationFactory::new(owner(), 64 * 1024, Duration::from_secs(30)).unwrap(),
+        );
+        let capture = hook_capture(
+            admission.clone(),
+            factory.clone(),
+            "agent",
+            json!({"type":"object","properties":{"action":{"type":"string"}},"required":["action"],"additionalProperties":false}),
+        );
+        let http = Arc::new(CorrelationHttp::default());
+        let fs = ego_core::permit::fake::FakeFs::default();
+        let policy = PolicyEngine::new(
+            CanonPath::new("/workspace"),
+            Mode::Default,
+            Ruleset::from_layer(
+                PermCfg {
+                    judge: None,
+                    allow: ["tool(fixture/agent)", "net(93.184.216.34:443)"]
+                        .into_iter()
+                        .map(|rule| ego_core::permit::rule::Rule::load(rule).unwrap())
+                        .collect(),
+                    deny: Vec::new(),
+                },
+                Source::Project,
+            ),
+        );
+        for _ in 0..2 {
+            let call = capture
+                .prepare_hook_call("fixture", "agent", json!({"action":"inbox"}))
+                .unwrap();
+            let Classification::Settled(Ok(authorized)) = policy.classify(call) else {
+                panic!("selected HTTP call must be authorized")
+            };
+            let (call, io) = ToolEffectPorts::new(
+                &fs,
+                &NoProcess,
+                &EmptyEvidence,
+                Arc::new(OfflineResolver),
+                http.clone(),
+                Arc::new(ScriptedSpawner::new()),
+            )
+            .bind(authorized);
+            let outcome = factory
+                .execute(admission.clone(), call, &io, Arc::from("generation"))
+                .await
+                .unwrap();
+            assert!(matches!(outcome, ToolExecution::Complete(_)));
+        }
+        let seen = http.0.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "both selected calls must reach the HTTP effect"
+        );
+        let recorded: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/tuic-call-correlation-request.json"))
+                .unwrap();
+        let mut ids = Vec::new();
+        for request in seen.iter() {
+            let mut params = request["params"].clone();
+            let metadata = params["_meta"].as_object_mut().expect("wire metadata");
+            let id = metadata["tuic/call_id"]
+                .as_str()
+                .expect("client correlation")
+                .to_owned();
+            assert!(uuid::Uuid::parse_str(&id).is_ok());
+            ids.push(id.clone());
+            // These fields belong to the MCP client, not the selected operation.
+            assert_eq!(
+                metadata.remove("io.modelcontextprotocol/protocolVersion"),
+                Some(json!("2026-07-28"))
+            );
+            assert_eq!(
+                metadata.remove("io.modelcontextprotocol/clientInfo"),
+                Some(json!({"name":"ego","version":env!("CARGO_PKG_VERSION")}))
+            );
+            assert!(
+                metadata
+                    .remove("io.modelcontextprotocol/clientCapabilities")
+                    .is_some()
+            );
+            assert!(metadata.remove("progressToken").is_some());
+            let mut expected = recorded["request"]["params"].clone();
+            expected["_meta"]["tuic/call_id"] = json!(id);
+            assert_eq!(
+                params, expected,
+                "preserve captured TUIC metadata at transport"
+            );
+        }
+        assert_ne!(
+            ids[0], ids[1],
+            "each invocation needs a fresh correlation UUID"
+        );
+    }
+
     // Catches: HTTP hooks cross the guarded claim boundary with a changed transport.
     #[test]
     fn http_hook_rejects_changed_transport_before_claiming_the_selected_call() {
