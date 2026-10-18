@@ -70,6 +70,7 @@ impl EventSource for UnixInternalEventSource {
             return Ok(Some(event));
         }
 
+        let drain_ready = timeout == Some(Duration::ZERO);
         let timeout = PollTimeout::new(timeout);
 
         loop {
@@ -105,19 +106,18 @@ impl EventSource for UnixInternalEventSource {
                             Err(e) => return Err(e),
                         }
 
-                        if let Some(event) = self.parser.next() {
-                            return Ok(Some(event));
-                        }
-                        // An incomplete sequence stays in the parser. A blocking
-                        // tty must be polled again before reading its suffix.
-                        // Re-arm edge-triggered readiness for unread bytes that
-                        // were already available beyond this buffer.
+                        // Re-arm before returning parsed events too: unread bytes
+                        // beyond this buffer may already be ready without another edge.
+                        // Incomplete sequences stay in the parser until more bytes arrive.
                         let fd = self.tty_fd.raw_fd();
                         self.poll.registry().reregister(
                             &mut SourceFd(&fd),
                             TTY_TOKEN,
                             Interest::READABLE,
                         )?;
+                        if let Some(event) = self.parser.next() {
+                            return Ok(Some(event));
+                        }
                     }
                     SIGNAL_TOKEN => {
                         if self.signals.pending().next() == Some(signal_hook::consts::SIGWINCH) {
@@ -146,7 +146,9 @@ impl EventSource for UnixInternalEventSource {
             }
 
             // Processing above can take some time, check if timeout expired
-            if timeout.elapsed() {
+            // A zero timeout drains immediately readable bytes without waiting;
+            // incomplete parsing alone does not mean the source is empty.
+            if !drain_ready && timeout.elapsed() {
                 return Ok(None);
             }
         }

@@ -100,6 +100,7 @@ fn read_complete(fd: &FileDesc, buf: &mut [u8]) -> io::Result<usize> {
 
 impl EventSource for UnixInternalEventSource {
     fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
+        let drain_ready = timeout == Some(Duration::ZERO);
         let timeout = PollTimeout::new(timeout);
 
         fn make_pollfd<F: AsRawFd>(fd: &F) -> pollfd {
@@ -142,6 +143,7 @@ impl EventSource for UnixInternalEventSource {
                         format!("got unexpected error while polling: {:?}", e),
                     ))
                 }
+                Ok(0) => return Ok(None),
                 Ok(_) => (),
             };
             if fds[0].revents & POLLIN != 0 {
@@ -193,7 +195,9 @@ impl EventSource for UnixInternalEventSource {
                     "Poll operation was woken up by `Waker::wake`",
                 ));
             }
-            if timeout.elapsed() {
+            // A zero timeout drains immediately readable bytes without waiting;
+            // incomplete parsing alone does not mean the source is empty.
+            if !drain_ready && timeout.elapsed() {
                 return Ok(None);
             }
         }
