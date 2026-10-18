@@ -1428,7 +1428,8 @@ fn vim_composer_preserves_unicode_ime_paste_and_explicit_newlines() {
     }
 }
 
-// Catches: Vim consumes queue/steer/interrupt/draft keys while a turn runs.
+// Catches: Vim consumes queue/steer/interrupt/draft keys while a turn runs,
+// or a staged image steals busy Escape for image removal instead of interruption.
 #[test]
 fn vim_composer_keeps_busy_host_controls_in_both_modes() {
     let phase = SurfacePhase::new(EditPhase::Idle);
@@ -1436,10 +1437,12 @@ fn vim_composer_keeps_busy_host_controls_in_both_modes() {
     let mut mode = vim_surface(phase.clone(), Arc::clone(&status));
     for normal in [false, true] {
         phase.set(EditPhase::Idle);
+        status.lock().unwrap().image_chips.clear();
         if normal {
             mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
         }
         phase.set(EditPhase::Busy);
+        status.lock().unwrap().image_chips = vec!["clipboard 1".into()];
         let before = mode.edit_mode();
         for (code, modifiers, command) in [
             (KeyCode::Enter, KeyModifiers::NONE, BUSY_SUBMIT_COMMAND),
