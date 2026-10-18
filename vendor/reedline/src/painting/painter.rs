@@ -1,6 +1,6 @@
-use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
 #[cfg(feature = "helix")]
 use crate::PromptHelixMode;
+use crate::terminal_extensions::semantic_prompt::{PromptKind, SemanticPromptMarkers};
 use crate::{CursorConfig, PromptEditMode, PromptViMode};
 
 #[cfg(feature = "external_printer")]
@@ -8,15 +8,15 @@ use crate::LineBuffer;
 use {
     super::utils::{coerce_crlf, deferred_wrap_row, estimate_required_lines, line_width},
     crate::{
+        Prompt,
         menu::{Menu, ReedlineMenu},
         painting::PromptLines,
-        Prompt,
     },
     crossterm::{
+        QueueableCommand,
         cursor::{self, MoveTo, RestorePosition, SavePosition},
         style::{Attribute, Print, ResetColor, SetAttribute},
         terminal::{self, Clear, ClearType},
-        QueueableCommand,
     },
     std::io::{Result, Write},
     std::ops::RangeInclusive,
@@ -381,7 +381,10 @@ impl Painter {
     /// Computes layout values shared between rendering and snapshot creation.
     fn compute_layout(&self, lines: &PromptLines, menu: Option<&ReedlineMenu>) -> PromptLayout {
         let screen_width = self.screen_width();
-        let screen_height = self.screen_height();
+        let screen_height = self
+            .screen_height()
+            .saturating_sub(lines.footer_rows(screen_width))
+            .max(1);
 
         // Large buffer extra rows computation
         let (extra_rows, extra_rows_after_prompt) = if self.large_buffer {
@@ -549,11 +552,7 @@ impl Painter {
             let size = terminal::size()?;
             // if reported size is 0, 0 -
             // use a default size to avoid divide by 0 panics
-            if size == (0, 0) {
-                (80, 24)
-            } else {
-                size
-            }
+            if size == (0, 0) { (80, 24) } else { size }
         };
         let prompt_selector = select_prompt_row(suspended_state, cursor::position()?);
         let new_row = match prompt_selector {
@@ -613,6 +612,9 @@ impl Painter {
 
         let screen_width = self.screen_width();
         let screen_height = self.screen_height();
+
+        let bounded_lines = lines.with_bounded_footer(screen_width, screen_height);
+        let lines = &bounded_lines;
 
         // We add one here as [`PromptLines::prompt_lines_with_wrap`] intentionally subtracts 1 from the real value.
         self.prompt_height = lines.prompt_lines_with_wrap(screen_width) + 1;
@@ -690,6 +692,17 @@ impl Painter {
         } else {
             self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
         };
+
+        if !lines.footer.is_empty() {
+            // The footer owns measured rows, never the editing cursor or buffer.
+            if self.large_buffer {
+                let row = screen_height.saturating_sub(lines.footer_rows(screen_width));
+                self.stdout.queue(cursor::MoveTo(0, row))?;
+            } else {
+                self.stdout.queue(Print("\r\n"))?;
+            }
+            self.stdout.queue(Print(&coerce_crlf(&lines.footer)))?;
+        }
 
         self.last_layout = Some(layout);
 
@@ -995,9 +1008,13 @@ impl Painter {
         menu: &dyn Menu,
         use_ansi_coloring: bool,
         layout: &PromptLayout,
+        footer_rows: u16,
     ) -> Result<()> {
         let starting_row = layout.menu_start_row.unwrap_or(0);
-        let remaining_lines = self.screen_height().saturating_sub(starting_row);
+        let remaining_lines = self
+            .screen_height()
+            .saturating_sub(starting_row)
+            .saturating_sub(footer_rows);
         let menu_string = menu.menu_string(remaining_lines, use_ansi_coloring);
         self.clear_from_anchor(starting_row)?;
         self.stdout
@@ -1089,7 +1106,12 @@ impl Painter {
         ]);
 
         if let Some(menu) = menu {
-            self.print_menu(menu, use_ansi_coloring, layout)?;
+            self.print_menu(
+                menu,
+                use_ansi_coloring,
+                layout,
+                lines.footer_rows(self.screen_width()),
+            )?;
         } else {
             self.stdout.queue(Print(&lines.hint))?;
         }
@@ -1106,7 +1128,10 @@ impl Painter {
         layout: &PromptLayout,
     ) -> Result<Option<u16>> {
         let screen_width = self.screen_width();
-        let screen_height = self.screen_height();
+        let screen_height = self
+            .screen_height()
+            .saturating_sub(lines.footer_rows(screen_width))
+            .max(1);
         let cursor_distance = lines.distance_from_prompt(screen_width);
         let remaining_lines = screen_height.saturating_sub(cursor_distance);
 
@@ -1186,7 +1211,12 @@ impl Painter {
             } else {
                 self.stdout.queue(Print(&lines.after_cursor))?;
             }
-            self.print_menu(menu, use_ansi_coloring, layout)?;
+            self.print_menu(
+                menu,
+                use_ansi_coloring,
+                layout,
+                lines.footer_rows(self.screen_width()),
+            )?;
         } else {
             // Selecting lines for the hint
             // The -1 subtraction is done because the remaining lines consider the line where the
@@ -1741,6 +1771,7 @@ mod tests {
             before_cursor: Cow::Borrowed(before),
             after_cursor: Cow::Borrowed(after),
             hint: Cow::Borrowed(""),
+            footer: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
         }
     }
@@ -2478,8 +2509,8 @@ mod tests {
     #[test]
     fn crossterm_defaults_were_the_bright_palette_entries() {
         use crossterm::{
-            style::{Color as CtColor, SetForegroundColor},
             Command,
+            style::{Color as CtColor, SetForegroundColor},
         };
 
         fn crossterm_sgr(color: CtColor) -> String {

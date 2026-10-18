@@ -626,18 +626,14 @@ fn apply(
             )?;
             Ok(true)
         }
-        UserConfigMutation::Statusline { segments } => {
-            if statusline_matches(parsed, &segments) {
+        UserConfigMutation::Statusline { template } => {
+            if statusline_matches(parsed, &template) {
                 return Ok(false);
-            }
-            let mut array = Array::new();
-            for segment in &segments {
-                array.push(segment.as_str());
             }
             set_table_path(
                 document.as_table_mut(),
-                &managed_path(&ManagedConfigKey::StatuslineSegments),
-                value(array),
+                &managed_path(&ManagedConfigKey::StatuslineTemplate),
+                value(template),
             )?;
             Ok(true)
         }
@@ -985,12 +981,12 @@ fn managed_value(
                 .as_ref()
                 .and_then(|permissions| permissions.judge.clone())
                 .map(ManagedConfigValue::PermissionsJudge),
-            ManagedConfigKey::StatuslineSegments => parsed
+            ManagedConfigKey::StatuslineTemplate => parsed
                 .ui
                 .as_ref()
                 .and_then(|ui| ui.statusline.as_ref())
-                .and_then(|statusline| statusline.segments.clone())
-                .map(ManagedConfigValue::StatuslineSegments),
+                .and_then(|statusline| statusline.template.clone())
+                .map(ManagedConfigValue::StatuslineTemplate),
             ManagedConfigKey::SessionDir | ManagedConfigKey::ArtifactDir => None,
         },
         UserConfigTarget::Profile(name) => {
@@ -1032,7 +1028,7 @@ fn managed_value(
                     profile.artifact_dir.clone().map(ManagedConfigValue::Path)
                 }
                 ManagedConfigKey::Bare
-                | ManagedConfigKey::StatuslineSegments
+                | ManagedConfigKey::StatuslineTemplate
                 | ManagedConfigKey::Keybindings
                 | ManagedConfigKey::Vim => None,
             }
@@ -1040,20 +1036,13 @@ fn managed_value(
     }
 }
 
-fn statusline_matches(parsed: &ConfigLayer, segments: &[String]) -> bool {
-    let Some(current) = parsed
+fn statusline_matches(parsed: &ConfigLayer, template: &str) -> bool {
+    parsed
         .ui
         .as_ref()
         .and_then(|ui| ui.statusline.as_ref())
-        .and_then(|statusline| statusline.segments.as_ref())
-    else {
-        return false;
-    };
-    current.len() == segments.len()
-        && current
-            .iter()
-            .zip(segments)
-            .all(|(left, right)| left.as_str() == right)
+        .and_then(|statusline| statusline.template.as_deref())
+        == Some(template)
 }
 
 fn apply_managed_set(
@@ -1140,7 +1129,7 @@ fn managed_path(key: &ManagedConfigKey) -> Vec<&str> {
         ManagedConfigKey::Budget => vec!["budget"],
         ManagedConfigKey::Bare => vec!["bare"],
         ManagedConfigKey::PermissionsJudge => vec!["permissions", "judge"],
-        ManagedConfigKey::StatuslineSegments => vec!["ui", "statusline", "segments"],
+        ManagedConfigKey::StatuslineTemplate => vec!["ui", "statusline", "template"],
         ManagedConfigKey::Keybindings => vec!["ui", "keybindings"],
         ManagedConfigKey::Vim => vec!["ui", "vim"],
         ManagedConfigKey::SessionDir => vec!["session_dir"],

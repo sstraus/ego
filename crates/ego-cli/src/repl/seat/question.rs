@@ -1617,6 +1617,31 @@ fn status_right(status: &SharedStatus) -> String {
 }
 
 fn status_row(status: &SurfaceStatus) -> String {
+    let ephemeral = activity_or_status_row(status);
+    if status.activity || status.retry.is_some() {
+        // The compact default keeps 524's single Working row. Critical state
+        // still survives there; custom layouts retain all their configured rows.
+        let template = if status.template.is_compact() {
+            status
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.critical_values().join("\n"))
+                .unwrap_or_default()
+        } else {
+            status
+                .painter
+                .current_status()
+                .map(|line| line.terminal_text(&status.permission_capabilities))
+                .unwrap_or_default()
+        };
+        if !template.is_empty() {
+            return format!("{template}\n{ephemeral}");
+        }
+    }
+    ephemeral
+}
+
+fn activity_or_status_row(status: &SurfaceStatus) -> String {
     if let Some((message, started, delay_ms)) = &status.retry {
         let remaining = delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
         let message = if let Some((cause, rest)) =
@@ -1687,6 +1712,20 @@ fn status_row(status: &SurfaceStatus) -> String {
 }
 
 impl Prompt for Waiting {
+    fn render_prompt_footer(&self) -> Cow<'_, str> {
+        let status = self.status.lock().expect("surface status lock");
+        if !status.native_status {
+            return Cow::Borrowed("");
+        }
+        Cow::Owned(
+            status
+                .painter
+                .current_status()
+                .map(|line| line.terminal_footer(&status.permission_capabilities))
+                .unwrap_or_default(),
+        )
+    }
+
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
         let width = usize::from(width).saturating_sub(1);
         if let Some(receipt) = background_notice::row(buffer, width) {

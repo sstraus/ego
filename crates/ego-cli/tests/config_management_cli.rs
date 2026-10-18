@@ -188,7 +188,7 @@ fn closed_keys_and_values_are_typed_and_forbidden_shapes_are_rejected() {
         "budget=\"10$\"",
         "bare=true",
         "permissions.judge='ollama/qwen3'",
-        "ui.statusline.segments=[\"model\",\"context\"]",
+        "ui.statusline.template='{{ prompt }}'",
     ] {
         let output = fixture.run(&["config", "set", assignment]);
         assert_eq!(
@@ -204,7 +204,7 @@ fn closed_keys_and_values_are_typed_and_forbidden_shapes_are_rejected() {
         "mcp.foo=\"bar\"",
         "hooks.pre=\"echo\"",
         "future.key=\"x\"",
-        "ui.statusline.segments[0]=\"context\"",
+        "ui.statusline.template[0]=\"context\"",
         "ui={statusline={segments=[\"context\"]}}",
         "model=null",
     ] {
@@ -263,18 +263,18 @@ fn missing_and_empty_reads_have_their_exact_text_and_json_contracts() {
         b"{\"v\":1,\"scope\":\"user\",\"profile\":null,\"values\":{}}\n"
     );
 
-    fixture.write_config("model = \"ollama/qwen3\"\nthinking = \"high\"\nbare = true\n[ui.statusline]\nsegments = [\"model\", \"context\"]\n");
+    fixture.write_config("model = \"ollama/qwen3\"\nthinking = \"high\"\nbare = true\n[ui.statusline]\ntemplate = '{{ prompt }}'\n");
     let listed = fixture.run(&["config", "ls"]);
     assert_eq!(listed.status.code(), Some(0), "stderr: {}", error(&listed));
     assert_eq!(
         text(&listed),
-        "model\t\"ollama/qwen3\"\nthinking\t\"high\"\nbare\ttrue\nui.statusline.segments\t[\"model\", \"context\"]\n"
+        "model\t\"ollama/qwen3\"\nthinking\t\"high\"\nbare\ttrue\nui.statusline.template\t\"{{ prompt }}\"\n"
     );
     let json = fixture.run(&["config", "ls", "--json"]);
     assert_eq!(json.status.code(), Some(0));
     assert_eq!(
         text(&json),
-        "{\"v\":1,\"scope\":\"user\",\"profile\":null,\"values\":{\"model\":\"ollama/qwen3\",\"thinking\":\"high\",\"bare\":true,\"ui.statusline.segments\":[\"model\",\"context\"]}}\n"
+        "{\"v\":1,\"scope\":\"user\",\"profile\":null,\"values\":{\"model\":\"ollama/qwen3\",\"thinking\":\"high\",\"bare\":true,\"ui.statusline.template\":\"{{ prompt }}\"}}\n"
     );
 }
 
