@@ -12,6 +12,8 @@ graphemes and can divide by a transient zero terminal width.
 
 The permitted local delta is intentionally narrow:
 
+- add a default-empty `Prompt::render_prompt_footer` hook, counted with the
+  prompt footprint and painted below the buffer (regression case, approved 2026-10-18);
 - position external output from the painter's tracked prompt anchor instead of
   estimating rows from buffer bytes or display-width division;
 - erase the complete prompt footprint from that anchor before external output

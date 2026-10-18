@@ -506,49 +506,30 @@ pub(super) fn confirm_surface_action(
 }
 
 pub(super) enum StatuslineChoice {
-    Selected(Vec<ego_core::config::StatusSegmentName>),
+    Selected(String),
     Cancelled,
     Propagate(Line),
 }
 
-/// The segments each `/statusline` preset writes, and the label that offers it.
-///
-/// One table rather than two, because a preset whose label disagrees with what
-/// it writes is a lie the operator only finds out about after saving.
-pub(super) const STATUSLINE_PRESETS: [(&str, &str, &[ego_core::config::StatusSegmentName]); 4] = {
-    use ego_core::config::StatusSegmentName as Segment;
-
-    [
-        ("off", "Off", &[]),
-        (
-            "minimal",
-            "Minimal — model, effort, mode",
-            &[Segment::Model, Segment::Effort, Segment::Mode],
-        ),
-        (
-            "default",
-            "Default — model, effort, fast, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
-            DEFAULT_STATUSLINE_SEGMENTS,
-        ),
-        (
-            "full",
-            "Full — model, effort, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
-            &[
-                Segment::Model,
-                Segment::Effort,
-                Segment::Mode,
-                Segment::Context,
-                Segment::Cost,
-                Segment::Queue,
-                Segment::Drafts,
-                Segment::Interrupt,
-                Segment::Cwd,
-                Segment::Git,
-                Segment::Trust,
-            ],
-        ),
-    ]
-};
+/// Each preset stores a complete template, not a second configuration grammar.
+pub(super) const STATUSLINE_PRESETS: [(&str, &str, &str); 4] = [
+    ("off", "Off", "{{ prompt }}"),
+    (
+        "minimal",
+        "Minimal — model, effort, mode",
+        "{{ model }} · {{ effort }} · {{ mode }}\n{{ prompt }}",
+    ),
+    (
+        "default",
+        "Default — model, effort, fast, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
+        super::super::status::DEFAULT_TEMPLATE,
+    ),
+    (
+        "full",
+        "Full — model, effort, mode, context, cost, queue, drafts, interrupt, cwd, git, trust",
+        super::super::status::DEFAULT_TEMPLATE,
+    ),
+];
 
 pub(super) fn choose_statusline_preset(
     editor: &mut Reedline,
@@ -572,17 +553,14 @@ pub(super) fn choose_statusline_preset(
         PermissionField::Value(id) => STATUSLINE_PRESETS
             .iter()
             .find(|(preset, _, _)| *preset == id)
-            .map(|(_, _, segments)| StatuslineChoice::Selected(segments.to_vec()))
+            .map(|(_, _, template)| StatuslineChoice::Selected((*template).to_owned()))
             .unwrap_or(StatuslineChoice::Cancelled),
         PermissionField::Cancelled => StatuslineChoice::Cancelled,
         PermissionField::Propagate(line) => StatuslineChoice::Propagate(line),
     }
 }
 
-pub(super) fn configure_statusline(
-    status: &SharedStatus,
-    segments: Vec<ego_core::config::StatusSegmentName>,
-) {
+pub(super) fn configure_statusline(status: &SharedStatus, template: String) {
     let store = status
         .lock()
         .expect("surface status lock")
@@ -594,23 +572,22 @@ pub(super) fn configure_statusline(
         repaint_status(status);
         return;
     };
-    let names = segments
-        .iter()
-        .map(|segment| segment.as_str().to_string())
-        .collect::<Vec<_>>();
-    match store.mutate(UserConfigMutation::Statusline { segments: names }) {
+    match store.mutate(UserConfigMutation::Statusline {
+        template: template.clone(),
+    }) {
         Ok(result) => {
             let mut current = status.lock().expect("surface status lock");
-            current.configured = segments.into_iter().map(StatusSegmentName::from).collect();
-            current.native_status = !current.configured.is_empty();
+            let enabled = template.trim() != "{{ prompt }}";
+            current.template = super::super::status::StatusTemplate::new(template);
+            current.template_diagnostic = None;
             current.notice = Some(match result.publication {
-                UserConfigPublication::NotPublished if current.native_status => {
+                UserConfigPublication::NotPublished if enabled => {
                     "status line already enabled; configuration unchanged".to_string()
                 }
                 UserConfigPublication::NotPublished => {
                     "status line already disabled; configuration unchanged".to_string()
                 }
-                UserConfigPublication::PublishedDurably if current.native_status => {
+                UserConfigPublication::PublishedDurably if enabled => {
                     "status line enabled and saved".to_string()
                 }
                 UserConfigPublication::PublishedDurably => {

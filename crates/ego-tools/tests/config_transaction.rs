@@ -123,7 +123,7 @@ fn transaction_locks_read_edit_strict_reparse_replace_and_unlocks_after_replace(
 }
 
 #[test]
-fn statusline_mutation_stores_the_final_ordered_names_and_empty_disables_the_row() {
+fn statusline_mutation_preserves_template_and_prompt_only_disables_optional_rows() {
     let dir = tempfile::tempdir().unwrap();
     let path = config_file(&dir);
     let io = FaultIo::new();
@@ -131,37 +131,46 @@ fn statusline_mutation_stores_the_final_ordered_names_and_empty_disables_the_row
 
     store
         .mutate(UserConfigMutation::Statusline {
-            segments: vec!["queue".into(), "model".into(), "interrupt".into()],
+            template: "{{ model }}\n{{ prompt }}".into(),
         })
         .unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("segments = [\"queue\", \"model\", \"interrupt\"]"));
+    assert!(text.contains("template ="));
     store
-        .mutate(UserConfigMutation::Statusline { segments: vec![] })
+        .mutate(UserConfigMutation::Statusline {
+            template: "{{ prompt }}".into(),
+        })
         .unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("segments = []"));
+    assert!(text.contains("{{ prompt }}"));
 }
 
 #[test]
-fn unknown_or_duplicate_segment_names_fail_before_any_replace() {
+fn template_mutation_preserves_jinja_source_without_interpreting_it_as_toml() {
+    // Catches quoting or scalar type corruption at the config publication boundary.
     let dir = tempfile::tempdir().unwrap();
     let path = config_file(&dir);
-    let before = std::fs::read_to_string(&path).unwrap();
     let io = FaultIo::new();
     let store = OsUserConfigStore::new(&io, &path);
-
-    for segments in [
-        vec!["not-a-segment".into()],
-        vec!["model".into(), "model".into()],
-    ] {
-        assert!(
-            store
-                .mutate(UserConfigMutation::Statusline { segments })
-                .is_err()
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-    }
+    let template = "{% if trust == 'untrusted' %}{{ trust }}{% endif %}\n{{ prompt }}";
+    store
+        .mutate(UserConfigMutation::Statusline {
+            template: template.into(),
+        })
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let parsed = ConfigLayer::parse(Source::User, &text).unwrap();
+    assert_eq!(
+        parsed
+            .value
+            .ui
+            .unwrap()
+            .statusline
+            .unwrap()
+            .template
+            .as_deref(),
+        Some(template)
+    );
 }
 
 #[test]
@@ -224,7 +233,7 @@ fn two_writers_serialize_and_each_reads_after_acquiring_the_lock_without_lost_up
         ready_a.wait();
         store
             .mutate(UserConfigMutation::Statusline {
-                segments: vec!["model".into(), "queue".into()],
+                template: "{{ model }}\n{{ prompt }}".into(),
             })
             .unwrap();
     });
@@ -247,7 +256,7 @@ fn two_writers_serialize_and_each_reads_after_acquiring_the_lock_without_lost_up
     let text = std::fs::read_to_string(path).unwrap();
     assert!(text.contains("model = 'openai/new'"));
     assert!(text.contains("thinking = 'high'"));
-    assert!(text.contains("segments = [\"model\", \"queue\"]"));
+    assert!(text.contains("{{ model }}"));
 }
 
 #[test]

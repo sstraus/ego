@@ -251,16 +251,16 @@ fn invalid_target_key_and_value_are_refused_before_replace() {
     let store = adapter(&path, &io);
     assert!(ManagedConfigValue::parse(ManagedConfigKey::Budget, "'not-a-budget'").is_err());
     assert!(
-        ManagedConfigValue::parse(ManagedConfigKey::StatuslineSegments, "['model', 'model']")
+        ManagedConfigValue::parse(ManagedConfigKey::StatuslineTemplate, "['model', 'model']")
             .is_err()
     );
     let valid =
-        ManagedConfigValue::parse(ManagedConfigKey::StatuslineSegments, "['model']").unwrap();
+        ManagedConfigValue::parse(ManagedConfigKey::StatuslineTemplate, "'{{ prompt }}'").unwrap();
     assert!(
         store
             .mutate(UserConfigMutation::ManagedSet {
                 target: UserConfigTarget::Profile(ProfileName::parse("dev").unwrap()),
-                key: ManagedConfigKey::StatuslineSegments,
+                key: ManagedConfigKey::StatuslineTemplate,
                 value: valid,
             })
             .is_err()
