@@ -464,14 +464,17 @@ mod live_surface_red {
         );
     }
 
+    // Catches: a queued inspection backlog requiring one terminal round-trip per
+    // row, delaying quit; batching must retain rows and the finish barrier.
     #[test]
-    fn live_output_pump_keeps_generation_production_cancellable_and_finish_is_a_barrier() {
+    fn live_output_pump_batches_backlog_and_finish_is_a_barrier() {
         let (external, rendered) = crossbeam::channel::bounded(1);
+        external.send("held".to_owned()).unwrap();
         let cancel = ego_core::turn::CancelToken::new();
         let (mut output, pump) =
             SurfaceOutput::pumped(external, cancel, Arc::new(AtomicBool::new(false)));
-
-        output.write("first\nsecond\nthird").unwrap();
+        let expected = format!("{}tail", "first\n\nsecond\n".repeat(100));
+        output.write(&expected).unwrap();
 
         let (done_tx, done_rx) = mpsc::sync_channel(0);
         std::thread::scope(|scope| {
@@ -480,10 +483,21 @@ mod live_surface_red {
                 done_tx.send(()).unwrap();
             });
             assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
-            assert_eq!(rendered.recv().unwrap(), "first\n");
-            assert_eq!(rendered.recv().unwrap(), "second\n");
-            assert_eq!(rendered.recv().unwrap(), "third");
-            assert_eq!(rendered.recv().unwrap(), "");
+            assert_eq!(rendered.recv().unwrap(), "held");
+            let mut rows = Vec::new();
+            let mut batches = 0;
+            loop {
+                let batch = rendered.recv_timeout(Duration::from_secs(1)).unwrap();
+                if batch.is_empty() {
+                    break;
+                }
+                batches += 1;
+                rows.extend(batch.lines().map(str::to_owned));
+            }
+            assert_eq!(rows, expected.lines().collect::<Vec<_>>());
+            // At most one in-flight batch, one queued backlog, and the tail
+            // flushed by finish after the producer handed off its rows.
+            assert!(batches <= 3, "backlog took {batches} printer handoffs");
             done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         });
         drop(rendered);
