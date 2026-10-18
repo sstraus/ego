@@ -14,8 +14,8 @@ Usage: ego [OPTIONS] [PROMPT] [COMMAND]
 Run an agent, from one command line.
 
 - `ego run` — Run an agent from a prompt, headless.
-- `ego resume` — Continue a session; no ID = latest in this workspace.
-- `ego continue` — Continue a session; no ID = latest in this workspace.
+- `ego resume` — Continue a stored session.
+- `ego continue` — Continue a stored session.
 - `ego fork` — Fork a session at its tip or after the completed turn containing a message.
 - `ego rm` — Delete a stored session (history is retained for descendants).
 - `ego compact` — Compact a session into its deterministic successor.
@@ -42,15 +42,14 @@ Run an agent, from one command line.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text Repeatable.
-- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`.
+- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`. Conflicts: `--instructions`.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
 - `-C <DIR>` — Run as if started in DIR
-- `--ephemeral` — Refused: every run uses a durable session Default: `false`.
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
-- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
@@ -85,7 +84,7 @@ Run an agent, from one command line.
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable Repeatable.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
 - `-V, --version` — Print version
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
 - `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch Conflicts: `--session`, `--session-id`.
@@ -104,15 +103,14 @@ Run an agent from a prompt, headless.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text Repeatable.
-- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`.
+- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`. Conflicts: `--instructions`.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
 - `-C <DIR>` — Run as if started in DIR
-- `--ephemeral` — Refused: every run uses a durable session Default: `false`.
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
-- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
@@ -147,8 +145,7 @@ Run an agent from a prompt, headless.
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable Repeatable.
-- `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
 - `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch Conflicts: `--session`, `--session-id`.
 - `--yolo` — Shorthand for --mode yolo Default: `false`.
 - `<PROMPT>` — The prompt. `-` reads it from stdin
@@ -159,24 +156,24 @@ Run an agent from a prompt, headless.
 Usage: ego resume [OPTIONS] [ID] [PROMPT]
 ```
 
-Continue a session; no ID = latest in this workspace.
+Continue a stored session.
 
 - `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
 - `--answer <QUESTION_ID=JSON>` — Settle a pending question. Repeat for multiple sibling questions Repeatable.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text Repeatable.
-- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`.
+- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`. Conflicts: `--instructions`.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
 - `-C <DIR>` — Run as if started in DIR
-- `--ephemeral` — Refused: every run uses a durable session Default: `false`.
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
-- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
@@ -185,6 +182,7 @@ Continue a session; no ID = latest in this workspace.
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
+- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
@@ -200,20 +198,17 @@ Continue a session; no ID = latest in this workspace.
 - `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
 - `--schema-retries <SCHEMA_RETRIES>` — How many times to re-prompt on a schema mismatch Default: `2`.
-- `--session <SESSION>` — Named session: created or attached
 - `--session-dir <SESSION_DIR>` — Override the store location
-- `--session-id <SESSION_ID>` — A session id supplied by the caller
 - `-c, --set <K=V>` — Dotted-path config override, value parsed as TOML Repeatable.
 - `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable Repeatable.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
-- `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch Conflicts: `--session`, `--session-id`.
 - `--yolo` — Shorthand for --mode yolo Default: `false`.
-- `<ID>` — The session to continue. Omit it for the latest in this workspace
+- `<ID>` — Session UUID; omit it for the terminal picker or headless latest in this workspace
 - `<PROMPT>` — The prompt. `-` reads it from stdin
 
 `ego continue` shares the saved-session admission and options of `ego resume`.
@@ -252,24 +247,24 @@ Allow rules grant policy approval; sandbox and system ceilings still apply.
 Usage: ego continue [OPTIONS] [ID] [PROMPT]
 ```
 
-Continue a session; no ID = latest in this workspace.
+Continue a stored session.
 
 - `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
 - `--answer <QUESTION_ID=JSON>` — Settle a pending question. Repeat for multiple sibling questions Repeatable.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text Repeatable.
-- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`.
+- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`. Conflicts: `--instructions`.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
 - `-C <DIR>` — Run as if started in DIR
-- `--ephemeral` — Refused: every run uses a durable session Default: `false`.
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
-- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file
+- `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
@@ -278,6 +273,7 @@ Continue a session; no ID = latest in this workspace.
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
 - `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
+- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
@@ -293,20 +289,17 @@ Continue a session; no ID = latest in this workspace.
 - `--sandbox <SANDBOX>` — Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
 - `--schema <SCHEMA>` — JSON Schema the final answer must validate against; `@file` or inline
 - `--schema-retries <SCHEMA_RETRIES>` — How many times to re-prompt on a schema mismatch Default: `2`.
-- `--session <SESSION>` — Named session: created or attached
 - `--session-dir <SESSION_DIR>` — Override the store location
-- `--session-id <SESSION_ID>` — A session id supplied by the caller
 - `-c, --set <K=V>` — Dotted-path config override, value parsed as TOML Repeatable.
 - `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable Repeatable.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
-- `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch Conflicts: `--session`, `--session-id`.
 - `--yolo` — Shorthand for --mode yolo Default: `false`.
-- `<ID>` — The session to continue. Omit it for the latest in this workspace
+- `<ID>` — Session UUID; omit it for the terminal picker or headless latest in this workspace
 - `<PROMPT>` — The prompt. `-` reads it from stdin
 
 `ego continue` shares the saved-session admission and options of `ego resume`.
@@ -537,7 +530,7 @@ Inspect expected work without running effects.
 
 - `--directory <DIRECTORY>` — (undocumented)
 - `-h, --help` — Print help
-- `--items <ITEMS>` — Limit proposals to these report item IDs (comma-separated) Repeatable.
+- `--items <ID[,ID...]>` — Select proposal item IDs as one comma-separated list; repeat to add IDs Repeatable.
 - `--judge <JUDGE>` — Offer a validated judge for unresolved policy; never authorizes an action
 - `--profile <PROFILE>` — (undocumented)
 - `<PROMPT>` — (undocumented)
@@ -553,7 +546,7 @@ Serve the Agent Client Protocol on stdio or an endpoint.
 - `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
 - `--allow-public-bind` — Serve on an address reachable from outside this machine Default: `false`.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
-- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`.
+- `--bare` — No ambient discovery, even in a trusted workspace Default: `false`. Conflicts: `--instructions`.
 - `--connection-lifetime <CONNECTION_LIFETIME>` — Maximum lifetime of one listener connection: 90s, 10m or 2h (runtime default: 24h)
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
 - `-C <DIR>` — Run as if started in DIR
