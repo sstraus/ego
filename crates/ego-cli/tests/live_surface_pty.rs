@@ -7274,6 +7274,15 @@ fn tool_turn_with_completions(
 
     let mut after_expand = Vec::new();
     if expand {
+        // A busy composer also ends in `>`: wait for a completed idle frame
+        // after the answer, not just the transient screen shape above.
+        let answer_end = start
+            + output[start..]
+                .windows(TOOL_TURN_DONE.len())
+                .position(|window| window == TOOL_TURN_DONE.as_bytes())
+                .expect("the completed answer was observed")
+            + TOOL_TURN_DONE.len();
+        until_prompt_from(&reader, &mut output, answer_end);
         let start = output.len();
         input.write_all(b"\x1bo").expect("Meta-o");
         input.flush().expect("expand flush");
