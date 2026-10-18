@@ -227,7 +227,7 @@ impl Completer for ActionCompleter {
                     Availability::Disabled { owner } => {
                         format!("{} — unavailable: {owner}", registration.description_text())
                     }
-                    Availability::Busy => {
+                    Availability::Busy | Availability::BusyWithReason { .. } => {
                         format!("{} — busy", registration.description_text())
                     }
                     Availability::Enabled => registration.description_text().to_string(),
@@ -457,6 +457,7 @@ struct SurfaceStatus {
     retry: Option<(String, Instant, u64)>,
     notice: Option<String>,
     image_chips: Vec<String>,
+    images: super::ImageDraft,
     origin: InputOrigin,
     native_status: bool,
     width: usize,
@@ -558,6 +559,7 @@ impl Default for SurfaceStatus {
             retry: None,
             notice: None,
             image_chips: Vec::new(),
+            images: super::ImageDraft::default(),
             origin: InputOrigin::Typed,
             native_status: false,
             width: 0,
@@ -622,6 +624,7 @@ struct TerminalOwner {
 }
 
 struct ComposerDraft {
+    images: super::ImageDraft,
     text: String,
     cursor: usize,
     origin: InputOrigin,
@@ -841,9 +844,30 @@ impl SurfaceOutput {
         let owner = std::thread::Builder::new()
             .name("ego-output-pump".to_string())
             .spawn(move || {
-                while let Ok(message) = receiver.recv() {
+                let mut pending = None;
+                while let Some(message) = pending.take().or_else(|| receiver.recv().ok()) {
                     match message {
-                        SurfaceMessage::Row(row) => {
+                        SurfaceMessage::Row(mut row) => {
+                            // One printer handoff causes one repaint and cursor query.
+                            // Drain already queued rows together, but never cross a
+                            // finish barrier or change a message's line boundary.
+                            for _ in 0..receiver.len() {
+                                let Ok(message) = receiver.try_recv() else {
+                                    break;
+                                };
+                                match message {
+                                    SurfaceMessage::Row(next) => {
+                                        if !row.is_empty() && !row.ends_with('\n') {
+                                            row.push('\n');
+                                        }
+                                        row.push_str(&next);
+                                    }
+                                    barrier @ SurfaceMessage::Barrier(_) => {
+                                        pending = Some(barrier);
+                                        break;
+                                    }
+                                }
+                            }
                             if external.send(row).is_err() {
                                 pump_cancel.cancel(CancelCause::Host);
                                 break;
@@ -1370,7 +1394,10 @@ impl Seat {
                     recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
                     recv(live.input) -> line => line.unwrap_or(Line::Ended),
                 };
-                if matches!(line, Line::Submitted(_)) {
+                if matches!(
+                    line,
+                    Line::Submitted(_) | Line::HostCommand(HostCommand::SubmittedDraft { .. })
+                ) {
                     live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
                     status.begin_activity();
@@ -1982,6 +2009,18 @@ impl crate::run::InteractiveSeat for Seat {
     fn insert_paste_text(&self, text: String) {
         Seat::insert_paste_text(self, text);
     }
+    fn image_draft(&self) -> Option<super::ImageDraft> {
+        match &self.kind {
+            SeatKind::Live(live) => Some(
+                live.status
+                    .lock()
+                    .expect("surface status lock")
+                    .images
+                    .clone(),
+            ),
+            SeatKind::Sequential(_) => None,
+        }
+    }
     fn set_image_chips(&self, chips: Vec<String>) {
         Seat::set_image_chips(self, chips);
     }
@@ -2026,8 +2065,12 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn busy(&self) {
-        self.registry
-            .set_availability(ActionId::Compact, Availability::Busy);
+        self.registry.set_availability(
+            ActionId::Compact,
+            Availability::BusyWithReason {
+                reason: "ego is busy; a turn is running",
+            },
+        );
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Busy);
             let mut status = live.status.lock().expect("surface status lock");
@@ -2320,6 +2363,117 @@ fn own_terminal(
         if failed {
             cancel.cancel(CancelCause::Host);
         }
+        let image_operation = match &line {
+            Line::HostCommand(HostCommand::ClipboardPaste) => {
+                Some(super::ImageOperation::Clipboard)
+            }
+            Line::HostCommand(HostCommand::PastePath(path)) => {
+                Some(super::ImageOperation::Path(path.clone()))
+            }
+            Line::HostCommand(HostCommand::AdmitPrompt { .. }) => {
+                Some(super::ImageOperation::Admit)
+            }
+            _ => None,
+        };
+        let line = if let Some(operation) = image_operation {
+            let draft = status.lock().expect("surface status lock").images.clone();
+            let (request, answer) = super::ImageRequest::new(draft.clone(), operation);
+            // Retire the suspended prompt before draining output. Resuming it
+            // without retiring its footprint can leave a second visible draft.
+            if editor.erase_last_prompt().is_err()
+                || inspections.send(HostCommand::Images(request)).is_err()
+            {
+                break;
+            }
+            inspection_waker.wake();
+            let mut surface = ModalSurface {
+                phase: &phase,
+                status: &status,
+                asked_for_image: &asked_for_image,
+                ingress: &ingress,
+                drafts: &mut drafts,
+            };
+            let Some(result) = wait_image_reply(
+                &mut editor,
+                &phase,
+                &mut surface,
+                &control,
+                &mut pending_control,
+                &startup_output,
+                &signals,
+                &answer,
+            ) else {
+                break;
+            };
+            let images = match result {
+                Ok(images) => images,
+                Err(error) => {
+                    commit_to_transcript(&status, &error);
+                    repaint_status(&status);
+                    continue;
+                }
+            };
+            {
+                let mut current = status.lock().expect("surface status lock");
+                current.image_chips = current.images.labels();
+            }
+            let Line::HostCommand(HostCommand::AdmitPrompt { text, steer }) = line else {
+                repaint_status(&status);
+                continue;
+            };
+            let accepted = if phase.get() == EditPhase::Busy {
+                match futures::executor::block_on(ingress.submit(text.clone(), images.clone())) {
+                    Ok(queue) => {
+                        let mut current = status.lock().expect("surface status lock");
+                        current.queue = queue;
+                        if let Some(snapshot) = current.snapshot.as_mut() {
+                            snapshot.set_queue(queue);
+                        }
+                        true
+                    }
+                    Err(ego_core::turn::ControlError::Closed) => false,
+                    Err(error) => {
+                        commit_to_transcript(&status, &error.to_string());
+                        repaint_status(&status);
+                        continue;
+                    }
+                }
+            } else {
+                false
+            };
+            if editor
+                .accept_buffer(&Waiting::new(Arc::clone(&status)))
+                .is_err()
+            {
+                break;
+            }
+            draft.clear();
+            {
+                let mut current = status.lock().expect("surface status lock");
+                current.images = super::ImageDraft::default();
+                current.image_chips.clear();
+                current.origin = InputOrigin::Typed;
+                current.notice = None;
+            }
+            restore_latest_draft(&mut editor, &status, &mut drafts);
+            if accepted {
+                if steer {
+                    request_interrupt(&status, &ingress);
+                }
+                repaint_status(&status);
+                continue;
+            }
+            Line::HostCommand(HostCommand::SubmittedDraft { text, images })
+        } else if matches!(line, Line::HostCommand(HostCommand::RemovePasteImage)) {
+            let mut current = status.lock().expect("surface status lock");
+            current.images.pop();
+            current.image_chips = current.images.labels();
+            drop(current);
+            repaint_status(&status);
+            continue;
+        } else {
+            line
+        };
         if phase.get() == EditPhase::Busy
             && let Line::HostCommand(command) = &line
             && command.is_read_only_inspection()
@@ -2331,8 +2485,13 @@ fn own_terminal(
             continue;
         }
         match line {
-            Line::ExternalBreak(_) => match control.recv() {
-                Ok(Control::Shutdown) | Err(_) => break,
+            Line::ExternalBreak(_) => match control.try_recv() {
+                Ok(Control::Shutdown) | Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    break;
+                }
+                // The image rendezvous may already have serviced this wake's
+                // control message. A wake is not another queued request.
+                Err(crossbeam::channel::TryRecvError::Empty) => continue,
                 Ok(Control::Activate { session }) => {
                     drafts.activate(session);
                     continue;
@@ -2368,7 +2527,12 @@ fn own_terminal(
             | Line::Ended
             | Line::Refused(_)
             | Line::HostCommand(_) => {
-                if matches!(line, Line::Submitted(_) | Line::Ended) {
+                if matches!(
+                    line,
+                    Line::Submitted(_)
+                        | Line::HostCommand(HostCommand::SubmittedDraft { .. })
+                        | Line::Ended
+                ) {
                     phase.set(EditPhase::Busy);
                 }
                 let line = if matches!(line, Line::Interrupted) && phase.get() == EditPhase::Idle {
@@ -2390,6 +2554,7 @@ fn own_terminal(
                 let ended = matches!(line, Line::Ended);
                 if phase.get() == EditPhase::Busy
                     && let Line::HostCommand(command) = &line
+                    && !matches!(command, HostCommand::SubmittedDraft { .. })
                 {
                     let label = match command {
                         HostCommand::Action(action) => {
@@ -2427,6 +2592,46 @@ fn own_terminal(
     }
 }
 
+/// Wait for a driver effect without taking the terminal away from the active
+/// turn's permission/question modals or its bounded output pump.
+#[allow(clippy::too_many_arguments)]
+fn wait_image_reply(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    surface: &mut ModalSurface<'_>,
+    controls: &Receiver<Control>,
+    pending_control: &mut Option<Control>,
+    output: &Receiver<String>,
+    signals: &Receiver<String>,
+    answer: &Receiver<Result<Vec<ego_core::generator::types::ImageRef>, String>>,
+) -> Option<Result<Vec<ego_core::generator::types::ImageRef>, String>> {
+    loop {
+        if let Some(control) = pending_control.take() {
+            if !answer_control(editor, phase, surface, controls, pending_control, control) {
+                return None;
+            }
+            continue;
+        }
+        crossbeam::channel::select_biased! {
+            recv(controls) -> control => {
+                let Ok(control) = control else { return None; };
+                if matches!(control, Control::Shutdown) { return None; }
+                if !answer_control(editor, phase, surface, controls, pending_control, control) { return None; }
+            }
+            recv(answer) -> reply => return Some(reply.unwrap_or_else(|_| Err("image admission was cancelled; the draft was retained".to_owned()))),
+            recv(signals) -> sequence => {
+                let Ok(sequence) = sequence else { return None; };
+                let mut out = std::io::stdout().lock();
+                if out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).is_err() { return None; }
+            }
+            recv(output) -> row => {
+                let Ok(row) = row else { return None; };
+                if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() { return None; }
+            }
+        }
+    }
+}
+
 /// Write one external-printer message before Reedline reads, with the line
 /// contract its own printer applies once it reads: `str::lines`, then CRLF.
 /// Raw mode turns off output processing, so a bare LF would start the next
@@ -2452,8 +2657,8 @@ mod suspend;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;
-use action_execution::surface_line;
 pub(crate) use action_execution::{render_action_help, render_key_hints};
+use action_execution::{request_interrupt, restore_latest_draft, surface_line};
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
 #[cfg(test)]

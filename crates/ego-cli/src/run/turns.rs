@@ -119,7 +119,7 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         picker: Arc<Mutex<ModelPicker>>,
         notice: Option<String>,
     ) -> crate::model_picker::PickerOutcome;
-    /// Read-only host requests can be answered without waiting for a model turn.
+    /// Host inspections and image admission share the idle/busy driver inbox.
     fn next_inspection(&self) -> futures::future::BoxFuture<'_, repl::HostCommand> {
         Box::pin(futures::future::pending())
     }
@@ -130,6 +130,10 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         std::time::Duration::ZERO
     }
     fn set_image_chips(&self, _chips: Vec<String>) {}
+    /// The current text draft owns this handle, including across stash/restore.
+    fn image_draft(&self) -> Option<repl::ImageDraft> {
+        None
+    }
     fn set_notice(&self, _notice: String) {}
     fn pasteboard_kind(&self) -> Result<PasteboardKind, String> {
         Err("OS pasteboard is unavailable".to_owned())

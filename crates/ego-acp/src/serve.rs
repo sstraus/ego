@@ -4152,7 +4152,7 @@ where
                         // Durable admission awaits the running coordinator. Keep the
                         // connection free to process permissions and cancellation.
                         cx.spawn(async move {
-                            let response = match ingress.submit(text).await {
+                            let response = match ingress.submit(text, Vec::new()).await {
                                 Ok(_) => serde_json::json!({"v":1,"state":"accepted"}),
                                 Err(ego_core::turn::ControlError::Closed) => serde_json::json!({"v":1,"state":"not-busy"}),
                                 Err(error) => serde_json::json!({"v":1,"state":"rejected","reason":error.to_string()}),

@@ -990,11 +990,13 @@ fn source_target_source_activation_restores_source_drafts_in_lifo_order() {
     let target = SessionId::new();
     let mut drafts = DraftStash::new(source);
     drafts.push_active(ComposerDraft {
+        images: super::super::ImageDraft::default(),
         text: "source-first".to_string(),
         cursor: 12,
         origin: InputOrigin::Typed,
     });
     drafts.push_active(ComposerDraft {
+        images: super::super::ImageDraft::default(),
         text: "source-second".to_string(),
         cursor: 13,
         origin: InputOrigin::Typed,
@@ -1006,6 +1008,7 @@ fn source_target_source_activation_restores_source_drafts_in_lifo_order() {
     assert_eq!(drafts.count(source), 2);
     assert_eq!(drafts.count(target), 0);
     drafts.push_active(ComposerDraft {
+        images: super::super::ImageDraft::default(),
         text: "target-only".to_string(),
         cursor: 11,
         origin: InputOrigin::Typed,
@@ -1425,7 +1428,8 @@ fn vim_composer_preserves_unicode_ime_paste_and_explicit_newlines() {
     }
 }
 
-// Catches: Vim consumes queue/steer/interrupt/draft keys while a turn runs.
+// Catches: Vim consumes queue/steer/interrupt/draft keys while a turn runs,
+// or a staged image steals busy Escape for image removal instead of interruption.
 #[test]
 fn vim_composer_keeps_busy_host_controls_in_both_modes() {
     let phase = SurfacePhase::new(EditPhase::Idle);
@@ -1433,10 +1437,12 @@ fn vim_composer_keeps_busy_host_controls_in_both_modes() {
     let mut mode = vim_surface(phase.clone(), Arc::clone(&status));
     for normal in [false, true] {
         phase.set(EditPhase::Idle);
+        status.lock().unwrap().image_chips.clear();
         if normal {
             mode.parse_event(keyboard_event(KeyCode::Esc, KeyModifiers::NONE));
         }
         phase.set(EditPhase::Busy);
+        status.lock().unwrap().image_chips = vec!["clipboard 1".into()];
         let before = mode.edit_mode();
         for (code, modifiers, command) in [
             (KeyCode::Enter, KeyModifiers::NONE, BUSY_SUBMIT_COMMAND),
@@ -1622,4 +1628,69 @@ fn template_diagnostic_is_emitted_only_once_per_configuration() {
         assert!(visible.contains("(line 1)"), "{visible}");
         assert!(visible.ends_with("> diagnostic-probe"), "{visible}");
     }
+}
+
+// Catches: a session switch or draft restore keeps a global image list and
+// attaches the source's images to a different session's text.
+#[test]
+fn session_switch_restores_text_and_attachments_as_one_draft() {
+    use ego_core::generator::types::{ImageMediaType, ImageRef};
+    use ego_core::store::blob::{BlobId, BlobRef};
+    let bytes = b"published session image";
+    let reference = ImageRef::new(
+        BlobRef::new(
+            BlobId::parse(ego_core::digest::sha256_hex(bytes)).unwrap(),
+            bytes.len() as u64,
+        ),
+        ImageMediaType::Png,
+        1,
+        1,
+    )
+    .unwrap();
+    let images = super::super::ImageDraft::recalled(&[reference]);
+    let source = SessionId::new();
+    let target = SessionId::new();
+    let phase = SurfacePhase::new(EditPhase::Idle);
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        images,
+        ..SurfaceStatus::default()
+    }));
+    let mut editor = Reedline::create();
+    editor.run_edit_commands(&[EditCommand::InsertString("source text".into())]);
+    let asked = AtomicBool::new(false);
+    let (ingress, _control) = interactive_control();
+    let mut drafts = DraftStash::new(source);
+    let (_control, controls) = crossbeam::channel::unbounded();
+    for session in [target, source] {
+        let (reply, answer) = bounded(1);
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        assert!(answer_control(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            Control::ActivateSession {
+                target: session,
+                reply
+            }
+        ));
+        assert!(answer.recv().unwrap());
+        if session == target {
+            assert!(editor.current_buffer_contents().is_empty());
+            assert!(status.lock().unwrap().images.is_empty());
+            // Clearing the target's active attachment handle must not clear
+            // the saved source handle.
+            status.lock().unwrap().images.clear();
+        }
+    }
+    assert_eq!(editor.current_buffer_contents(), "source text");
+    assert_eq!(status.lock().unwrap().images.labels(), ["recalled 1"]);
+    assert_eq!(drafts.active_count(), 0);
 }

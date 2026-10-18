@@ -48,16 +48,6 @@ async fn admit_saved_session_policy(
     Ok(())
 }
 
-enum StagedPasteSource {
-    Path(String),
-    Inline(Image),
-}
-
-struct StagedPasteImage {
-    label: String,
-    source: StagedPasteSource,
-}
-
 async fn paste_image_limits(
     source: &Arc<model::CliGenerationModelSource>,
     confinement: &RunConfinement,
@@ -81,10 +71,6 @@ async fn paste_image_limits(
     )
     .cloned()
     .map_err(|error| error.to_string())
-}
-
-fn paste_chips(images: &[StagedPasteImage]) -> Vec<String> {
-    images.iter().map(|image| image.label.clone()).collect()
 }
 
 /// A successor session opened inside this process needs its own run context
@@ -488,7 +474,6 @@ pub(super) async fn drive_execution<S: EventSink>(
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
             let mut resumed = resume;
             let mut pending_attachments = args.attach.clone();
-            let mut staged_images = Vec::<StagedPasteImage>::new();
             let mut epoch_start = EpochStart::Initial;
             if !args.no_context_tool && args.tools.is_none() {
                 registry.push(RegisteredTool::Context);
@@ -702,11 +687,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     InteractiveCommand {
                                         args: &args,
                                         active: &active,
+                                        pending_attachments: &mut pending_attachments,
                                         seat: &seat,
                                         source: &source,
                                         confinement: &confinement,
                                         run_deadline,
-                                        staged_images: &mut staged_images,
                                         last: &mut last,
                                         state: &mut state,
                                         diagnostics,
@@ -779,7 +764,6 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     perimeter,
                                     session_hook_ports: &session_hook_ports,
                                     pending_attachments: &mut pending_attachments,
-                                    staged_images: &mut staged_images,
                                     source: &source,
                                     cwd: &cwd,
                                     diagnostics,
@@ -920,73 +904,43 @@ pub(super) async fn drive_execution<S: EventSink>(
 
 async fn stage_clipboard_image(
     seat: &dyn InteractiveSeat,
-    pending_work: bool,
     source: &Arc<model::CliGenerationModelSource>,
     effects: (
         &RunConfinement,
         &SessionEvidenceStore,
         Option<std::time::Instant>,
     ),
-    staged_images: &mut Vec<StagedPasteImage>,
-) {
-    let (confinement, evidence, run_deadline) = effects;
-    if pending_work {
-        seat.set_notice("image paste is unavailable while source work is pending".to_owned());
-        return;
-    }
-    let kind = match seat.pasteboard_kind() {
-        Ok(kind) => kind,
-        Err(error) => {
-            seat.set_notice(format!("pasteboard could not be inspected: {error}"));
-            return;
-        }
-    };
-    match kind {
+    draft: &repl::ImageDraft,
+) -> Result<(), String> {
+    let (confinement, evidence, deadline) = effects;
+    match seat
+        .pasteboard_kind()
+        .map_err(|error| format!("pasteboard could not be inspected: {error}"))?
+    {
         PasteboardKind::Image => {
-            let limits = match paste_image_limits(source, confinement, evidence, run_deadline).await
-            {
-                Ok(limits) => limits,
-                Err(error) => {
-                    seat.set_notice(error);
-                    return;
-                }
-            };
+            let limits = paste_image_limits(source, confinement, evidence, deadline).await?;
             let cap = limits
                 .max_bytes_per_image()
-                .map_or(ego_core::generator::types::MAX_IMAGE_BYTES, |limit| {
-                    limit.get()
-                });
-            let bytes = match seat.pasteboard_image(cap) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    seat.set_notice(error);
-                    return;
-                }
-            };
-            let image = match Image::new(bytes, ego_core::generator::types::ImageMediaType::Png) {
-                Ok(image) => image,
-                Err(error) => {
-                    seat.set_notice(format!("pasteboard image is invalid: {error}"));
-                    return;
-                }
-            };
-            staged_images.push(StagedPasteImage {
-                label: "clipboard".to_owned(),
-                source: StagedPasteSource::Inline(image),
-            });
-            seat.set_image_chips(paste_chips(staged_images));
+                .map_or(ego_core::generator::types::MAX_IMAGE_BYTES, |n| n.get());
+            let bytes = seat.pasteboard_image(cap)?;
+            let image = Image::new(bytes, ego_core::generator::types::ImageMediaType::Png)
+                .map_err(|error| format!("pasteboard image is invalid: {error}"))?;
+            let label = format!("clipboard {}", draft.labels().len() + 1);
+            draft.push(
+                repl::DraftImage {
+                    label,
+                    source: repl::DraftImageSource::Inline(image),
+                },
+                &limits,
+            )?;
         }
-        PasteboardKind::Text => match seat.pasteboard_text() {
-            Ok(text) => seat.insert_paste_text(text),
-            Err(error) => seat.set_notice(error),
-        },
-        PasteboardKind::Empty => seat.set_notice("pasteboard has no image or text".to_owned()),
+        PasteboardKind::Text => seat.insert_paste_text(seat.pasteboard_text()?),
+        PasteboardKind::Empty => return Err("pasteboard has no image or text".to_owned()),
     }
+    Ok(())
 }
 
 async fn stage_image_path(
-    seat: &dyn InteractiveSeat,
-    pending_work: bool,
     path: String,
     source: &Arc<model::CliGenerationModelSource>,
     effects: (
@@ -994,47 +948,100 @@ async fn stage_image_path(
         &SessionEvidenceStore,
         Option<std::time::Instant>,
     ),
-    staged_images: &mut Vec<StagedPasteImage>,
-) {
-    let (confinement, evidence, run_deadline) = effects;
-    if pending_work {
-        seat.set_notice("image paste is unavailable while source work is pending".to_owned());
-        return;
-    }
-    let limits = match paste_image_limits(source, confinement, evidence, run_deadline).await {
-        Ok(limits) => limits,
-        Err(error) => {
-            seat.set_notice(error);
-            return;
-        }
-    };
-    let size = match std::fs::metadata(&path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) => {
-            seat.set_notice(format!("image paste could not inspect {path}: {error}"));
-            return;
-        }
-    };
-    let cap = limits
-        .max_bytes_per_image()
-        .map_or(ego_core::generator::types::MAX_IMAGE_BYTES, |limit| {
-            limit.get()
-        });
-    if size > cap {
-        seat.set_notice(format!(
-            "image paste is {size} bytes, above the {cap}-byte limit"
-        ));
-        return;
-    }
-    let name = std::path::Path::new(&path)
+    draft: &repl::ImageDraft,
+) -> Result<(), String> {
+    let (confinement, evidence, deadline) = effects;
+    let limits = paste_image_limits(source, confinement, evidence, deadline).await?;
+    let bytes = std::fs::metadata(&path)
+        .map_err(|error| format!("image paste could not inspect {path}: {error}"))?
+        .len();
+    let label = Path::new(&path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.clone());
-    staged_images.push(StagedPasteImage {
-        label: name,
-        source: StagedPasteSource::Path(path),
-    });
-    seat.set_image_chips(paste_chips(staged_images));
+    draft.push(
+        repl::DraftImage {
+            label,
+            source: repl::DraftImageSource::Path { path, bytes },
+        },
+        &limits,
+    )
+}
+
+fn image_inputs(draft: &repl::ImageDraft) -> Vec<attachment::AttachmentInput> {
+    draft
+        .snapshot()
+        .into_iter()
+        .map(|image| match image.source {
+            repl::DraftImageSource::Inline(image) => attachment::AttachmentInput::Inline(image),
+            repl::DraftImageSource::Path { path, .. } => attachment::AttachmentInput::Spec(path),
+            repl::DraftImageSource::Published(image) => {
+                attachment::AttachmentInput::Published(image)
+            }
+        })
+        .collect()
+}
+
+async fn answer_image_request(
+    request: &repl::ImageRequest,
+    seat: &dyn InteractiveSeat,
+    source: &Arc<model::CliGenerationModelSource>,
+    effects: (
+        &RunConfinement,
+        &SessionEvidenceStore,
+        Option<std::time::Instant>,
+    ),
+    cwd: &Path,
+    extra_specs: &[String],
+) -> bool {
+    let (confinement, evidence, deadline) = effects;
+    let draft = request.draft();
+    let result = match request.operation() {
+        repl::ImageOperation::Clipboard => stage_clipboard_image(seat, source, effects, draft)
+            .await
+            .map(|()| Vec::new()),
+        repl::ImageOperation::Path(path) => stage_image_path(path.clone(), source, effects, draft)
+            .await
+            .map(|()| Vec::new()),
+        repl::ImageOperation::Admit => {
+            let mut inputs = image_inputs(draft);
+            inputs.extend(
+                extra_specs
+                    .iter()
+                    .cloned()
+                    .map(attachment::AttachmentInput::Spec),
+            );
+            if inputs.is_empty() {
+                Ok(Vec::new())
+            } else {
+                let cancel = CancelToken::new();
+                match effect_scope(confinement, evidence, &cancel, deadline, None).await {
+                    Ok((ports, _, _)) => acquire_image_inputs(
+                        &inputs,
+                        source,
+                        &ports,
+                        &cancel,
+                        deadline,
+                        cwd,
+                        evidence.blob_store(),
+                    )
+                    .await
+                    .map_err(|error| format!("{error:?}; the complete draft was retained")),
+                    Err(error) => Err(format!(
+                        "image admission failed: {error:?}; the complete draft was retained"
+                    )),
+                }
+            }
+        }
+    };
+    let accepted = result.is_ok();
+    if let Ok(images) = &result
+        && matches!(request.operation(), repl::ImageOperation::Admit)
+    {
+        draft.published(images);
+    }
+    request.reply(result);
+    accepted
 }
 
 fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String {
@@ -1449,7 +1456,7 @@ async fn drive_interactive_input<'session: 'turn, 'turn>(
                     .drive_checkpoint(loop_, turn_cancel, diagnostics)
                     .await,
             ),
-            Some(InteractiveTurnInput::Prompt(asked)) => {
+            Some(InteractiveTurnInput::Prompt { text: asked, .. }) => {
                 let (termination, result) = turns
                     .drive_with_images(loop_, &asked, images, turn_cancel, diagnostics)
                     .await;
@@ -2356,11 +2363,11 @@ enum CommandOutcome<'store> {
 struct InteractiveCommand<'a, 'session, 'store> {
     args: &'a Args,
     active: &'session ActiveSession<'store>,
+    pending_attachments: &'a mut Vec<String>,
     seat: &'a Arc<dyn InteractiveSeat>,
     source: &'a Arc<model::CliGenerationModelSource>,
     confinement: &'a RunConfinement,
     run_deadline: Option<std::time::Instant>,
-    staged_images: &'a mut Vec<StagedPasteImage>,
     last: &'a mut Ended,
     state: &'a mut SessionState,
     diagnostics: &'a dyn Diagnostics,
@@ -2416,11 +2423,11 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
     let InteractiveCommand {
         args,
         active,
+        pending_attachments,
         seat,
         source,
         confinement,
         run_deadline,
-        staged_images,
         last,
         state,
         diagnostics,
@@ -2468,37 +2475,74 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
     } = input;
     let (pending_work, _, _) = posture;
     match line {
+        repl::Line::HostCommand(repl::HostCommand::Images(request)) => {
+            let admitted = matches!(request.operation(), repl::ImageOperation::Admit);
+            if answer_image_request(
+                &request,
+                seat.as_ref(),
+                source,
+                (confinement, active.evidence(), run_deadline),
+                cwd,
+                pending_attachments,
+            )
+            .await
+                && admitted
+            {
+                pending_attachments.clear();
+            }
+            Ok(CommandOutcome::Continue)
+        }
         repl::Line::HostCommand(repl::HostCommand::RemovePasteImage) => {
-            if staged_images.pop().is_some() {
-                seat.set_image_chips(paste_chips(staged_images));
+            if let Some(draft) = seat.image_draft() {
+                draft.pop();
+                seat.set_image_chips(draft.labels());
             }
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::ClipboardPaste) => {
-            stage_clipboard_image(
-                seat.as_ref(),
-                pending_work,
-                source,
-                (confinement, active.evidence(), run_deadline),
-                staged_images,
-            )
-            .await;
+            if let Some(draft) = seat.image_draft() {
+                if let Err(error) = stage_clipboard_image(
+                    seat.as_ref(),
+                    source,
+                    (confinement, active.evidence(), run_deadline),
+                    &draft,
+                )
+                .await
+                {
+                    seat.set_notice(error);
+                }
+                seat.set_image_chips(draft.labels());
+            }
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::PastePath(path)) => {
-            stage_image_path(
-                seat.as_ref(),
-                pending_work,
-                path,
-                source,
-                (confinement, active.evidence(), run_deadline),
-                staged_images,
-            )
-            .await;
+            if let Some(draft) = seat.image_draft() {
+                if let Err(error) = stage_image_path(
+                    path,
+                    source,
+                    (confinement, active.evidence(), run_deadline),
+                    &draft,
+                )
+                .await
+                {
+                    seat.set_notice(error);
+                }
+                seat.set_image_chips(draft.labels());
+            }
             Ok(CommandOutcome::Continue)
         }
-        repl::Line::Submitted(text) => {
-            Ok(CommandOutcome::Input(InteractiveTurnInput::Prompt(text)))
+        repl::Line::Submitted(text) => Ok(CommandOutcome::Input(InteractiveTurnInput::Prompt {
+            text,
+            images: None,
+        })),
+        repl::Line::HostCommand(repl::HostCommand::SubmittedDraft { text, images }) => {
+            Ok(CommandOutcome::Input(InteractiveTurnInput::Prompt {
+                text,
+                images: Some(images),
+            }))
+        }
+        repl::Line::HostCommand(repl::HostCommand::AdmitPrompt { .. }) => {
+            unreachable!("native prompt admission is owned by the terminal")
         }
         repl::Line::Blank => Ok(CommandOutcome::Continue),
         // Ctrl+C at an idle prompt drops the line and nothing
@@ -2932,11 +2976,11 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 InteractiveCommand {
                     args,
                     active,
+                    pending_attachments,
                     seat,
                     source,
                     confinement,
                     run_deadline,
-                    staged_images,
                     last,
                     state,
                     diagnostics,
@@ -3108,6 +3152,9 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     // One automatic attempt per source epoch; failure remains visible.
     *automatic_compaction_failed = automatic_compaction;
     seat.busy();
+    seat.set_compaction_availability(repl::actions::Availability::BusyWithReason {
+        reason: "ego is busy; compaction already running",
+    });
 
     let target_runtime = Arc::new(Mutex::new(None));
     let prepared_runtime = Arc::clone(&target_runtime);
@@ -3283,7 +3330,6 @@ async fn end_session_epoch(
 struct InteractiveImages<'a> {
     asked: Option<&'a InteractiveTurnInput>,
     pending_attachments: &'a mut Vec<String>,
-    staged_images: &'a mut Vec<StagedPasteImage>,
     source: &'a Arc<model::CliGenerationModelSource>,
     ports: &'a Arc<RunEffectPorts>,
     cancel: &'a CancelToken,
@@ -3300,7 +3346,6 @@ async fn acquire_interactive_images(
     let InteractiveImages {
         asked,
         pending_attachments,
-        staged_images,
         source,
         ports,
         cancel: turn_cancel,
@@ -3310,64 +3355,51 @@ async fn acquire_interactive_images(
         seat,
         diagnostics,
     } = input;
-    let inline = staged_images
-        .iter()
-        .filter_map(|staged| match &staged.source {
-            StagedPasteSource::Inline(image) => Some(image.clone()),
-            StagedPasteSource::Path(_) => None,
-        })
-        .collect::<Vec<_>>();
-    let specs = pending_attachments
-        .iter()
-        .cloned()
-        .chain(
-            staged_images
-                .iter()
-                .filter_map(|staged| match &staged.source {
-                    StagedPasteSource::Path(path) => Some(path.clone()),
-                    StagedPasteSource::Inline(_) => None,
-                }),
-        )
-        .collect::<Vec<_>>();
-    let images = if matches!(asked, Some(InteractiveTurnInput::Prompt(_)))
-        && (!inline.is_empty() || !specs.is_empty())
-    {
-        let images = match acquire_attachments(
-            Attachments {
-                inline: &inline,
-                specs: &specs,
-            },
-            source,
-            ports,
-            turn_cancel,
-            run_deadline,
-            cwd,
-            blobs,
-        )
-        .await
-        {
-            Ok(images) => images,
-            // An admission refusal of this turn's
-            // attachments is not a bad command line:
-            // the staged images stay so the user can
-            // remove one (Ctrl+Backspace) and resubmit.
-            Err(RunTermination::UsageError { message }) => {
-                diagnostics.note(&format!(
-                    "{message}; the turn was not sent, remove an attachment and submit it again"
-                ));
-                return Ok(None);
-            }
-            Err(other) => return Err(other),
-        };
-        pending_attachments.clear();
-        staged_images.clear();
-        seat.set_image_chips(Vec::new());
-        images
-    } else {
-        Vec::new()
+    let Some(InteractiveTurnInput::Prompt { images, .. }) = asked else {
+        return Ok(Some(Vec::new()));
     };
-
-    Ok(Some(images))
+    let draft = seat.image_draft();
+    let mut inputs = match images {
+        Some(_) => Vec::new(),
+        None => draft.as_ref().map_or_else(Vec::new, image_inputs),
+    };
+    inputs.extend(
+        pending_attachments
+            .iter()
+            .cloned()
+            .map(attachment::AttachmentInput::Spec),
+    );
+    let mut acquired = match acquire_image_inputs(
+        &inputs,
+        source,
+        ports,
+        turn_cancel,
+        run_deadline,
+        cwd,
+        blobs,
+    )
+    .await
+    {
+        Ok(images) => images,
+        Err(RunTermination::UsageError { message }) => {
+            diagnostics.note(&format!(
+                "{message}; the turn was not sent, remove an attachment and submit it again"
+            ));
+            return Ok(None);
+        }
+        Err(other) => return Err(other),
+    };
+    if let Some(images) = images {
+        acquired.splice(0..0, images.iter().cloned());
+    }
+    pending_attachments.clear();
+    if images.is_none()
+        && let Some(draft) = draft
+    {
+        draft.clear();
+        seat.set_image_chips(Vec::new());
+    }
+    Ok(Some(acquired))
 }
 
 fn refresh_turn_status(
@@ -3606,7 +3638,6 @@ struct InteractiveTurnPhase<'a, 'session, 'store> {
     perimeter: crate::perimeter::Perimeter,
     session_hook_ports: &'a Arc<RunEffectPorts>,
     pending_attachments: &'a mut Vec<String>,
-    staged_images: &'a mut Vec<StagedPasteImage>,
     source: &'a Arc<model::CliGenerationModelSource>,
     cwd: &'a Path,
     diagnostics: &'a dyn Diagnostics,
@@ -3659,7 +3690,6 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         mut perimeter,
         session_hook_ports,
         pending_attachments,
-        staged_images,
         source,
         cwd,
         diagnostics,
@@ -3718,7 +3748,6 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     let Some(images) = acquire_interactive_images(InteractiveImages {
         asked: asked.as_ref(),
         pending_attachments,
-        staged_images,
         source,
         ports: &ports,
         cancel: &turn_cancel,
@@ -3799,6 +3828,27 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
             match futures::future::select(driving.as_mut(), inspection).await {
                 futures::future::Either::Left((result, _)) => break result,
                 futures::future::Either::Right((command, _)) => {
+                    if let repl::HostCommand::Images(request) = command {
+                        let admission = answer_image_request(
+                            &request,
+                            seat,
+                            source,
+                            (confinement, active.evidence(), run_deadline),
+                            cwd,
+                            &[],
+                        );
+                        futures::pin_mut!(admission);
+                        match futures::future::select(driving.as_mut(), admission).await {
+                            futures::future::Either::Left((result, admission)) => {
+                                // Settle the already accepted terminal request even when
+                                // the active turn closes first. Its ingress may then
+                                // reject submission, which returns the envelope to idle.
+                                admission.await;
+                                break result;
+                            }
+                            futures::future::Either::Right((_, _)) => continue,
+                        }
+                    }
                     assert!(
                         command.is_read_only_inspection(),
                         "inspection inbox is read-only"

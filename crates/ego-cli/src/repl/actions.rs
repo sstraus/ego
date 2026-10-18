@@ -61,6 +61,7 @@ pub enum ActionKind {
 pub enum Availability {
     Enabled,
     Busy,
+    BusyWithReason { reason: &'static str },
     Disabled { owner: &'static str },
 }
 
@@ -974,12 +975,20 @@ impl ActionRegistry {
     }
     pub fn dispatch(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Dispatch {
         let current = self.availability(id);
-        if displayed.availability.get(&id) != Some(&current) || current != Availability::Enabled {
-            Dispatch::Refused {
+        if displayed.availability.get(&id) != Some(&current) {
+            return Dispatch::Refused {
                 reason: "action is no longer available",
-            }
-        } else {
-            self.route(id, false)
+            };
+        }
+        match current {
+            Availability::Busy => Dispatch::Refused {
+                reason: "ego is busy; wait for the current work to finish",
+            },
+            Availability::BusyWithReason { reason } => Dispatch::Refused { reason },
+            Availability::Disabled { .. } => Dispatch::Refused {
+                reason: "action is no longer available",
+            },
+            Availability::Enabled => self.route(id, false),
         }
     }
     pub fn route(&self, id: ActionId, _busy: bool) -> Dispatch {
@@ -1014,8 +1023,11 @@ impl ActionRegistry {
             }
             Availability::Busy => {
                 return ActionDispatch::Refused {
-                    reason: "action is no longer available",
+                    reason: "ego is busy; wait for the current work to finish",
                 };
+            }
+            Availability::BusyWithReason { reason } => {
+                return ActionDispatch::Refused { reason };
             }
             Availability::Enabled => {}
         }

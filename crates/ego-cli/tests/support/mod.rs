@@ -246,6 +246,11 @@ impl ReleaseGate {
         self.wake.notify_all();
     }
 
+    /// Hold the next exchange after an earlier phase has crossed this gate.
+    pub fn hold(&self) {
+        *self.released.lock().expect("release gate lock") = false;
+    }
+
     fn wait(&self) {
         let mut released = self.released.lock().expect("release gate lock");
         while !*released {
