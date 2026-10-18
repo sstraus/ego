@@ -3940,9 +3940,9 @@ mod transport_selection_boundary {
     use super::*;
     use ego_core::config::{McpHttpConfig, McpServerConfig};
     use ego_core::credentials::SecretMaterial;
-    use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
+    use ego_core::mcp::{McpOperationKind, McpSubject};
     use ego_core::permit::{GuardedIo, InvocationDigest, McpHttpClaim, ToolError};
-    use ego_mcp::{McpHttpOperationFactory, McpOperation, McpOperationFactory};
+    use ego_mcp::{McpHttpOperationFactory, McpOperationFactory};
     use std::ffi::OsString;
     use std::sync::atomic::AtomicBool;
 
@@ -3952,6 +3952,52 @@ mod transport_selection_boundary {
             Arc::new(ExactCaptureResolver::default()),
         )
     }
+    fn hook_capture(
+        admission: Arc<McpServerAdmission>,
+        factory: Arc<dyn McpOperationFactory>,
+        name: &str,
+        parameters: serde_json::Value,
+    ) -> McpRegistryCapture {
+        let inventory = McpCandidateInventory::new(
+            McpCapabilities::tools(),
+            None,
+            vec![ego_core::generator::types::ToolDescriptor {
+                name: name.into(),
+                description: "transport selection fixture".into(),
+                parameters,
+            }],
+            Vec::new(),
+            Vec::new(),
+            McpCacheMetadata::default(),
+            None,
+        );
+        let candidate = McpAdmittedCandidate::new(
+            admission.clone(),
+            McpCandidateIdentity::validated(admission.name().as_str()),
+            inventory,
+            factory,
+        )
+        .expect("candidate");
+        let registry = McpRegistryController::new(
+            Arc::new(RegistryJournal::default()),
+            Arc::new(OneCandidate(Mutex::new(VecDeque::from([candidate])))),
+        )
+        .expect("registry");
+        let refresh = McpRegistryRefresh::new(
+            vec![McpRegistryCandidate::ready(
+                admission,
+                ego_core::config::McpConfigProvenance::Layer {
+                    source: Source::User,
+                },
+            )],
+            RegistryTrigger::Add,
+            RegistryScope::All,
+        )
+        .expect("refresh");
+        block_on(registry.reconcile(refresh)).expect("publication");
+        registry.capture().expect("capture")
+    }
+
     struct DuplexProbe(AtomicBool);
 
     impl<'io> GuardedIo<'io> for DuplexProbe {
@@ -4080,24 +4126,24 @@ mod transport_selection_boundary {
             )
             .unwrap(),
         );
-        let operation = || {
-            McpOperation::captured(
-                McpSubject::Tool {
-                    server: "fixture".into(),
-                    name: "lookup".into(),
-                },
-                McpOperationKind::CallTool,
-                McpAdmissionFingerprint::new("capture", "fixture/lookup", "schema").unwrap(),
-                serde_json::json!({}),
-                vec![],
-            )
-        };
         let probe = DuplexProbe(AtomicBool::new(false));
-        let factory =
-            McpHttpOperationFactory::new(owner(), 64 * 1024, Duration::from_secs(30)).unwrap();
+        let factory = Arc::new(
+            McpHttpOperationFactory::new(owner(), 64 * 1024, Duration::from_secs(30)).unwrap(),
+        );
+        let capture = hook_capture(
+            admission.clone(),
+            factory.clone(),
+            "lookup",
+            json!({"type": "object", "additionalProperties": false}),
+        );
+        let selected = || {
+            capture
+                .prepare_hook_call("fixture", "lookup", json!({}))
+                .unwrap()
+        };
         let result = futures::executor::block_on(factory.execute_hook(
             admission.clone(),
-            factory.prepare(admission.clone(), operation()).unwrap(),
+            selected(),
             &probe,
             EffectScope::new(Duration::from_secs(30)),
         ));
@@ -4119,7 +4165,7 @@ mod transport_selection_boundary {
         );
         let result = futures::executor::block_on(factory.execute_hook(
             changed_admission,
-            factory.prepare(admission, operation()).unwrap(),
+            selected(),
             &probe,
             EffectScope::new(Duration::from_secs(30)),
         ));
@@ -4135,8 +4181,9 @@ mod transport_selection_boundary {
     #[test]
     fn selected_tuic_search_reaches_guarded_duplex_after_observation() {
         let server_admission = Arc::new(tuic_admission());
-        let factory =
-            McpStdioOperationFactory::new(owner(), 64 * 1024, Duration::from_secs(30)).unwrap();
+        let factory = Arc::new(
+            McpStdioOperationFactory::new(owner(), 64 * 1024, Duration::from_secs(30)).unwrap(),
+        );
         let McpServerConfig::Stdio(config) = server_admission.config() else {
             panic!("TUIC admission must be stdio")
         };
@@ -4150,16 +4197,19 @@ mod transport_selection_boundary {
                 .expect("selected tool"),
             InvocationDigest::from_bytes(&serde_json::to_vec(&input).expect("selected input")),
         );
-        let operation = McpOperation::captured(
-            subject.clone(),
-            McpOperationKind::CallTool,
-            McpAdmissionFingerprint::new("capture-v1", "tuicommander/search_tools", "schema-v1")
-                .expect("admission fingerprint"),
-            input.clone(),
-            vec![invocation.clone()],
+        let capture = hook_capture(
+            server_admission.clone(),
+            factory.clone(),
+            "search_tools",
+            json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false,
+            }),
         );
-        let planned = factory
-            .prepare(server_admission.clone(), operation)
+        let planned = capture
+            .prepare_hook_call("tuicommander", "search_tools", input.clone())
             .expect("planned selected call");
         let envelope = planned.mcp_envelope().expect("selected envelope");
         let observed = SpawnSpec::new(
