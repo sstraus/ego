@@ -45,10 +45,12 @@ catalogue. Reload changes a future boundary, not an active call's authority.
 
 The collapsed model surface starts with vendor-neutral bootstrap operations for
 catalogue inspection and call selection. A `search_tools` response can include a
-complete MCP definition (`name`, `description`, `inputSchema`) in `results[0]`.
+complete MCP definition in the sibling `top_schema` field, with its `name`
+matching `results[0].name`.
 Ego admits that top hit before the next generation, so the model can call
 `call_tool` without a separate `get_tool_schema` round. The complete inline hit
-must fit within 16 KiB of serialized JSON. Other hits and summary-only responses
+must fit within 16 KiB of serialized JSON. Optional tool metadata is preserved.
+Other hits and summary-only responses
 still need an exact schema lookup. Servers own ranking and inline publication;
 ego does not issue hidden lookup calls or pin server-specific tools.
 
