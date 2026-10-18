@@ -841,9 +841,30 @@ impl SurfaceOutput {
         let owner = std::thread::Builder::new()
             .name("ego-output-pump".to_string())
             .spawn(move || {
-                while let Ok(message) = receiver.recv() {
+                let mut pending = None;
+                while let Some(message) = pending.take().or_else(|| receiver.recv().ok()) {
                     match message {
-                        SurfaceMessage::Row(row) => {
+                        SurfaceMessage::Row(mut row) => {
+                            // One printer handoff causes one repaint and cursor query.
+                            // Drain already queued rows together, but never cross a
+                            // finish barrier or change a message's line boundary.
+                            for _ in 0..receiver.len() {
+                                let Ok(message) = receiver.try_recv() else {
+                                    break;
+                                };
+                                match message {
+                                    SurfaceMessage::Row(next) => {
+                                        if !row.is_empty() && !row.ends_with('\n') {
+                                            row.push('\n');
+                                        }
+                                        row.push_str(&next);
+                                    }
+                                    barrier @ SurfaceMessage::Barrier(_) => {
+                                        pending = Some(barrier);
+                                        break;
+                                    }
+                                }
+                            }
                             if external.send(row).is_err() {
                                 pump_cancel.cancel(CancelCause::Host);
                                 break;
