@@ -143,7 +143,7 @@ printf '{"verdict":"continue","reason":"Verification remains after %s"}\n' "$ste
             .ego(&stub)
             .subcommand("resume")
             .without_fixture_thinking()
-            .args([&target, "--goal", "show", "--output", "json"])
+            .args([&target, "--goal-operation", "show", "--output", "json"])
             .run();
         assert_eq!(metadata.code, Some(0), "{}", metadata.stderr);
         assert_eq!(metadata.report()["goal"]["state"], "achieved");
