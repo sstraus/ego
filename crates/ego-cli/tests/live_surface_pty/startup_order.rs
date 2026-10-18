@@ -65,7 +65,7 @@ fn startup_name_precedes_notices() {
             }
             if name != "trusted" {
                 assert!(
-                    shown.contains("not applied in the bare posture"),
+                    support::notice_prose(&shown).contains("not applied in the bare posture"),
                     "bare notice retained: {shown}"
                 );
             }
