@@ -85,7 +85,8 @@ fn submission_contract(multiline: bool, resize: bool) {
         input.write_all(b"\x1b[201~\r").unwrap();
         input.flush().unwrap();
         until_normalized(&reader, &mut output, start, done);
-        until_prompt_from(&reader, &mut output, start);
+        // A busy composer also paints a prompt; capture only the completed idle frame.
+        until_idle_status_ready(&reader, &mut output, start);
         drain_until_quiet(&reader, &mut output);
     }
     parser.process(&output[processed..]);
