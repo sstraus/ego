@@ -6624,7 +6624,9 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
 
         let details_start = output.len();
         let prompt_count = support::ready_prompt_count(&output);
-        input.write_all(b"/doctor details\r").expect("doctor details");
+        input
+            .write_all(b"/doctor details\r")
+            .expect("doctor details");
         input.flush().expect("doctor details flush");
         until_normalized_without_new_generation(
             &reader,
