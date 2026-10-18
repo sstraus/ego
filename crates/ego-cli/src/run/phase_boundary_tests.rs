@@ -99,6 +99,7 @@ fn args(model: &str) -> Args {
 
 #[derive(Debug)]
 struct ClipboardSeat {
+    images: repl::ImageDraft,
     case: String,
     lines: Mutex<VecDeque<repl::Line>>,
     chips: Mutex<Vec<Vec<String>>>,
@@ -132,6 +133,9 @@ impl InteractiveSeat for ClipboardSeat {
     }
     fn permission(&self, _: &PermissionRequest) -> PermissionDecision {
         PermissionDecision::Deny
+    }
+    fn image_draft(&self) -> Option<repl::ImageDraft> {
+        Some(self.images.clone())
     }
     fn set_image_chips(&self, chips: Vec<String>) {
         self.chips.lock().unwrap().push(chips);
@@ -219,6 +223,7 @@ fn clipboard_ingress_preserves_image_limits_and_refusals_before_submission() {
         }
         lines.push_back(repl::Line::Submitted("submit after paste".to_owned()));
         let seat = Arc::new(ClipboardSeat {
+            images: repl::ImageDraft::default(),
             case: case.clone(),
             lines: Mutex::new(lines),
             chips: Mutex::new(Vec::new()),
@@ -247,11 +252,11 @@ fn clipboard_ingress_preserves_image_limits_and_refusals_before_submission() {
         assert_eq!(ended.termination.exit_code(), 0);
         let chips = seat.chips.lock().unwrap();
         match case.as_str() {
-            "image" => assert!(chips.iter().any(|chips| chips == &["clipboard"])),
+            "image" => assert!(chips.iter().any(|chips| chips == &["clipboard 1"])),
             "remove" => {
                 let staged = chips
                     .iter()
-                    .position(|chips| chips == &["clipboard"])
+                    .position(|chips| chips == &["clipboard 1"])
                     .unwrap();
                 assert!(chips[staged + 1..].iter().any(Vec::is_empty));
             }

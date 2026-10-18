@@ -1518,7 +1518,11 @@ sequence.
 bracketed paste that names an existing supported image file, stages a
 removable chip and submits with the next turn through the same durable
 `--attach` path (`ARCHITECTURE.md`).
-Escape removes the newest staged chip. Pasteboard text, and a path that is
+Idle Escape removes the newest staged chip; busy Escape still interrupts
+active work. Image paste is available while a turn is running. Text and
+images remain one draft through stash, restore, clear, and queue recall.
+Enter validates and queues the complete draft before clearing it; an
+admission failure retains it. Pasteboard text, and a path that is
 missing or not a supported image, remain ordinary editor text; an
 unsupported or unknown model capability refuses staging before any bytes are
 read; an oversized image is refused with its observed size. Image input also

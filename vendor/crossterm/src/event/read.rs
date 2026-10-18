@@ -39,6 +39,23 @@ impl InternalEventReader {
         self.source.as_ref().expect("reader source not set").waker()
     }
 
+    /// Discard matching events already available, without waiting or losing input.
+    #[cfg(unix)]
+    pub(crate) fn discard_pending<F: Filter>(&mut self, filter: &F) -> io::Result<()> {
+        let source = self.source.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Failed to initialize input reader")
+        })?;
+        let pending = source.pending_events()?;
+        self.events.extend(self.skipped_events.drain(..));
+        self.events.retain(|event| !filter.eval(event));
+        for event in pending {
+            if !filter.eval(&event) {
+                self.events.push_back(event);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn poll<F>(&mut self, timeout: Option<Duration>, filter: &F) -> io::Result<bool>
     where
         F: Filter,
@@ -143,6 +160,193 @@ mod tests {
         }
     }
 
+    // Catches: a timed-out cursor report is reused by the next query, or
+    // removing it consumes keyboard/resize events queued on either side.
+    #[test]
+    #[cfg(unix)]
+    fn discard_pending_cursor_reports_preserves_input_order() {
+        use super::super::{KeyCode, KeyEvent, KeyModifiers};
+        let key = InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        let resize = InternalEvent::Event(Event::Resize(80, 24));
+        let mut reader = InternalEventReader {
+            events: vec![InternalEvent::CursorPosition(0, 18), key.clone()].into(),
+            source: Some(Box::new(FakeSource::with_events(&[
+                resize.clone(),
+                InternalEvent::CursorPosition(79, 18),
+                key.clone(),
+            ]))),
+            skipped_events: Vec::new(),
+        };
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), key);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), resize);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), key);
+        assert!(!reader
+            .poll(Some(Duration::ZERO), &InternalEventFilter)
+            .unwrap());
+    }
+
+    // Catches: a partial terminal key sequence makes cursor-query draining
+    // block until the user sends more input, despite its zero timeout.
+    #[test]
+    #[cfg(unix)]
+    fn discard_pending_does_not_wait_for_partial_key_sequence() {
+        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
+
+        use super::super::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        sender.write_all(b"\x1b[").unwrap();
+        let completion = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            sender.write_all(b"A").unwrap();
+            sender
+        });
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        let start = Instant::now();
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        let elapsed = start.elapsed();
+        let _sender = completion.join().unwrap();
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
+        );
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "zero-timeout cursor drain waited for partial key input: {elapsed:?}"
+        );
+    }
+
+    // Catches: a zero-timeout drain stops at a partial paste buffer and
+    // leaves an already-arrived stale CPR for the next cursor query.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn discard_pending_removes_cursor_report_behind_multibuffer_paste() {
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+        use std::{io::Write, os::unix::net::UnixStream};
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        let text = "x".repeat(2048);
+        sender
+            .write_all(format!("y\x1b[200~{text}\x1b[201~\x1b[19;1R").as_bytes())
+            .unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Key(super::super::KeyCode::Char('y').into()))
+        );
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Paste(text))
+        );
+        assert!(
+            !reader
+                .poll(Some(Duration::from_millis(20)), &CursorPositionFilter)
+                .unwrap(),
+            "pre-query cursor drain left an already-arrived stale report behind a large paste"
+        );
+    }
+    // Catches: re-polling an edge-triggered source loses unread paste bytes
+    // beyond the first read buffer when no new bytes arrive afterward.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn partial_paste_rechecks_already_ready_bytes() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        let text = "x".repeat(2048);
+        sender.write_all(format!("\x1b[200~{text}\x1b[201~").as_bytes()).unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        assert!(reader.poll(Some(Duration::from_millis(100)), &InternalEventFilter).unwrap());
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(text)));
+    }
+
+
+    // Catches: a zero-timeout drain follows new paste bytes until the producer stops.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn zero_timeout_does_not_follow_continuously_arriving_paste() {
+        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        sender.write_all(b"\x1b[200~").unwrap();
+        sender.write_all(&vec![b'x'; 65536]).unwrap();
+        let writer = std::thread::spawn(move || {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(250) {
+                sender.write_all(&[b'x'; 4096]).unwrap();
+            }
+            sender.write_all(b"\x1b[201~").unwrap();
+            sender
+        });
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        let start = Instant::now();
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        let elapsed = start.elapsed();
+        // Drain the producer afterward even on a correct early return.
+        assert!(matches!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(_))));
+        let _sender = writer.join().unwrap();
+        eprintln!("continuous paste zero-timeout drain: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(100), "zero-timeout drain followed new input for {elapsed:?}");
+    }
     #[test]
     fn test_poll_fails_without_event_source() {
         let mut reader = InternalEventReader {
@@ -406,6 +610,11 @@ mod tests {
     }
 
     impl EventSource for FakeSource {
+        #[cfg(unix)]
+        fn pending_events(&mut self) -> io::Result<Vec<InternalEvent>> {
+            Ok(self.events.drain(..).collect())
+        }
+
         fn try_read(&mut self, _timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
             // Return error if set in case there's just one remaining event
             if self.events.len() == 1 {

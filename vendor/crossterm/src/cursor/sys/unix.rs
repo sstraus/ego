@@ -4,7 +4,10 @@ use std::{
 };
 
 use crate::{
-    event::{filter::CursorPositionFilter, poll_internal, read_internal, InternalEvent},
+    event::{
+        filter::CursorPositionFilter, lock_internal_event_reader, poll_internal, read_internal,
+        InternalEvent,
+    },
     terminal::{disable_raw_mode, enable_raw_mode, sys::is_raw_mode_enabled},
 };
 
@@ -30,6 +33,11 @@ fn read_position() -> io::Result<(u16, u16)> {
 }
 
 fn read_position_raw() -> io::Result<(u16, u16)> {
+    // Replies to timed-out queries can remain queued behind pasted input.
+    // They describe an earlier screen, not the position requested below.
+    // Retain input events, but discard reports already available before DSR.
+    lock_internal_event_reader().discard_pending(&CursorPositionFilter)?;
+
     // Use `ESC [ 6 n` to and retrieve the cursor position.
     let mut stdout = io::stdout();
     stdout.write_all(b"\x1B[6n")?;

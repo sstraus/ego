@@ -65,6 +65,18 @@ impl UnixInternalEventSource {
 }
 
 impl EventSource for UnixInternalEventSource {
+    fn pending_events(&mut self) -> io::Result<Vec<InternalEvent>> {
+        let bytes = self.tty_fd.read_pending()?;
+        self.parser.advance(&bytes, false);
+        let fd = self.tty_fd.raw_fd();
+        self.poll.registry().reregister(
+            &mut SourceFd(&fd),
+            TTY_TOKEN,
+            Interest::READABLE,
+        )?;
+        Ok(self.parser.by_ref().collect())
+    }
+
     fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
         if let Some(event) = self.parser.next() {
             return Ok(Some(event));
@@ -92,31 +104,30 @@ impl EventSource for UnixInternalEventSource {
             for token in self.events.iter().map(|x| x.token()) {
                 match token {
                     TTY_TOKEN => {
-                        loop {
-                            match self.tty_fd.read(&mut self.tty_buffer) {
-                                Ok(read_count) => {
-                                    if read_count > 0 {
-                                        self.parser.advance(
-                                            &self.tty_buffer[..read_count],
-                                            read_count == TTY_BUFFER_SIZE,
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    // No more data to read at the moment. We will receive another event
-                                    if e.kind() == io::ErrorKind::WouldBlock {
-                                        break;
-                                    }
-                                    // once more data is available to read.
-                                    else if e.kind() == io::ErrorKind::Interrupted {
-                                        continue;
-                                    }
-                                }
-                            };
+                        match self.tty_fd.read(&mut self.tty_buffer) {
+                            Ok(0) => return Ok(None),
+                            Ok(read_count) => self.parser.advance(
+                                &self.tty_buffer[..read_count],
+                                read_count == TTY_BUFFER_SIZE,
+                            ),
+                            Err(e) if matches!(
+                                e.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                            ) => {},
+                            Err(e) => return Err(e),
+                        }
 
-                            if let Some(event) = self.parser.next() {
-                                return Ok(Some(event));
-                            }
+                        // Re-arm before returning parsed events too: unread bytes
+                        // beyond this buffer may already be ready without another edge.
+                        // Incomplete sequences stay in the parser until more bytes arrive.
+                        let fd = self.tty_fd.raw_fd();
+                        self.poll.registry().reregister(
+                            &mut SourceFd(&fd),
+                            TTY_TOKEN,
+                            Interest::READABLE,
+                        )?;
+                        if let Some(event) = self.parser.next() {
+                            return Ok(Some(event));
                         }
                     }
                     SIGNAL_TOKEN => {

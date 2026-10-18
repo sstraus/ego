@@ -640,7 +640,10 @@ pub(super) fn compaction_availability(pending_work: bool) -> repl::actions::Avai
 
 pub(super) enum InteractiveTurnInput {
     Checkpoint,
-    Prompt(String),
+    Prompt {
+        text: String,
+        images: Option<Vec<ImageRef>>,
+    },
     Skill(AdmittedSkillOperation),
     McpContext(repl::actions::McpContextCommand),
 }

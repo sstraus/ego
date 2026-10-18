@@ -282,7 +282,7 @@ fn dynamic_candidate(
     let wrapper = json!({"type":"object","properties":{"tool_name":{"type":"string"},"arguments":{"type":"object"}},"required":["tool_name","arguments"],"additionalProperties":false});
     let inner = descriptor(
         "weather",
-        json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}),
+        json!({"type":"object","properties":{"city":{"type":"string","enum":["Rome","Paris"]}},"required":["city"],"additionalProperties":false}),
     );
     let catalogue = McpCollapsedCatalogue::new(vec![inner]).expect("catalogue");
     McpAdmittedCandidate::new(
@@ -423,6 +423,7 @@ fn published_capture_retains_old_operation_until_capture_drop() {
 
 #[test]
 fn dynamic_capture_validates_inner_schema_and_executes_one_selected_call() {
+    // Catches invalid required/enum arguments reaching the MCP effect boundary.
     let factory = Arc::new(FakeFactory::default());
     let (admission, provenance) = alpha_admission();
     let controller = McpRegistryController::new(
@@ -450,17 +451,15 @@ fn dynamic_capture_validates_inner_schema_and_executes_one_selected_call() {
         cwd: ego_core::permit::CanonPath::new("/fixture"),
         resolver: &fs,
     };
-    let call = tool
-        .prepare(
-            json!({"tool_name":"weather","arguments":{"city":"Rome"}}),
-            &ctx,
-        )
-        .expect("valid");
-    assert_eq!(factory.prepares.lock().expect("prepares").as_slice(), &[2]);
-    assert!(
-        tool.prepare(json!({"tool_name":"weather","arguments":{"city":7}}), &ctx)
-            .is_err()
-    );
+    for arguments in [json!({}), json!({"city":7}), json!({"city":"Berlin"})] {
+        assert!(matches!(
+            tool.prepare(json!({"tool_name":"weather","arguments":arguments}), &ctx),
+            Err(ToolError::InvalidParams(_))
+        ));
+        assert!(factory.prepares.lock().expect("prepares").is_empty());
+        assert!(factory.operations.lock().expect("operations").is_empty());
+        assert_eq!(factory.executions.load(Ordering::SeqCst), 0);
+    }
     for management in ["search_tools", "get_tool_schema", "call_tool"] {
         assert!(
             tool.prepare(json!({"tool_name":management,"arguments":{}}), &ctx)
@@ -468,6 +467,16 @@ fn dynamic_capture_validates_inner_schema_and_executes_one_selected_call() {
             "management tool {management} cannot recurse through call_tool"
         );
     }
+    assert!(factory.prepares.lock().expect("prepares").is_empty());
+    assert_eq!(factory.executions.load(Ordering::SeqCst), 0);
+    let call = tool
+        .prepare(
+            json!({"tool_name":"weather","arguments":{"city":"Rome"}}),
+            &ctx,
+        )
+        .expect("valid");
+    assert_eq!(factory.prepares.lock().expect("prepares").as_slice(), &[2]);
+    assert_eq!(factory.operations.lock().expect("operations").len(), 1);
     futures::executor::block_on(tool.execute(call, &NoIo)).expect("execute");
     assert_eq!(factory.executions.load(Ordering::SeqCst), 1);
 }

@@ -869,9 +869,16 @@ async fn write_handler_input(
     loop {
         tokio::select! {
             result = &mut write => {
-                return result.map_err(|error| ProcessError::Backend(
-                    format!("writing hook handler stdin failed: {error}")
-                ));
+                // A handler may finish without consuming all of its input.
+                // Its exit status and output, not unused stdin, decide success.
+                if let Err(error) = result
+                    && error.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    return Err(ProcessError::Backend(format!(
+                        "writing hook handler stdin failed: {error}"
+                    )));
+                }
+                return Ok(());
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(scope.deadline())) => {
                 return Err(ProcessError::Timeout { timeout: scope.timeout() });
