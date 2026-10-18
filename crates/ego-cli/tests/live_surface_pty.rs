@@ -6161,7 +6161,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("usage", Some("usage as of")),
         ("export", None),
         ("config perimeter", Some("capabilities")),
-        ("doctor", Some("acp.extension:hold")),
+        ("doctor", Some("acp: ok")),
+        ("doctor details", Some("acp.extension:hold")),
         ("new", None),
         ("name", None),
         ("goal", None),
@@ -6196,7 +6197,11 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
                 "compact must send one checkpoint and one malformed-output correction"
             );
         } else {
+            let start = output.len();
             submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+            if command == "doctor" {
+                assert_doctor_summary(&output[start..]);
+            }
         }
     }
 
@@ -6519,6 +6524,27 @@ fn quitting_without_any_turn_prints_no_resume_hint() {
     );
 }
 
+// Catches: the concise doctor view omits section health or leaks detailed evidence.
+fn assert_doctor_summary(output: &[u8]) {
+    let prose = support::notice_prose(&normalized(output));
+    for marker in [
+        "doctor: not_checked",
+        "/doctor details for evidence and remediation",
+        "configuration: ok",
+        "credentials: not_checked",
+        "session_store: ok",
+        "sandbox: not_checked",
+        "catalogue: not_checked",
+        "mcp: ok",
+        "skills: not_checked",
+        "hooks: ok",
+        "acp: ok",
+    ] {
+        assert!(prose.contains(marker), "missing {marker}: {prose}");
+    }
+    assert!(!prose.contains("acp.extension:hold"), "{prose}");
+}
+
 #[test]
 fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
     let stub = Stub::start(Plan::default());
@@ -6589,6 +6615,21 @@ fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
             &reader,
             &mut output,
             doctor_start,
+            "acp: ok",
+            &stub,
+            0,
+        );
+        until_prompt_after(&reader, &mut output, prompt_count);
+        assert_doctor_summary(&output[doctor_start..]);
+
+        let details_start = output.len();
+        let prompt_count = support::ready_prompt_count(&output);
+        input.write_all(b"/doctor details\r").expect("doctor details");
+        input.flush().expect("doctor details flush");
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            details_start,
             "acp.extension:hold",
             &stub,
             0,
