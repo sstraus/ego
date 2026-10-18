@@ -5,7 +5,10 @@
 //! and transcript output stay live without creating a second terminal writer.
 
 mod clipboard;
+mod images;
 mod keyboard;
+pub(crate) use images::{DraftImage, DraftImageSource, ImageOperation};
+pub use images::{ImageDraft, ImageRequest};
 mod keys;
 mod seat;
 
@@ -87,6 +90,18 @@ pub enum HostCommand {
     PastePath(String),
     RemovePasteImage,
     ClipboardPaste,
+    /// An image effect addressed to the driver's existing inbox.
+    Images(ImageRequest),
+    /// The owner retains the complete composer until admission succeeds.
+    AdmitPrompt {
+        text: String,
+        steer: bool,
+    },
+    /// Native prompt envelope, admitted before clearing the source draft.
+    SubmittedDraft {
+        text: String,
+        images: Vec<ego_core::generator::types::ImageRef>,
+    },
 }
 
 impl HostCommand {

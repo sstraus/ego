@@ -124,7 +124,23 @@ pub(super) fn answer_control(
             return true;
         }
         Control::ActivateSession { target, reply } => {
-            surface.drafts.activate(target);
+            if surface.drafts.active() != target {
+                let text = editor.current_buffer_contents().to_owned();
+                let mut current = surface.status.lock().expect("surface status lock");
+                if !text.is_empty() || !current.images.is_empty() {
+                    surface.drafts.push_active(ComposerDraft {
+                        text,
+                        cursor: editor.current_insertion_point(),
+                        origin: current.origin,
+                        images: std::mem::take(&mut current.images),
+                    });
+                }
+                current.image_chips.clear();
+                drop(current);
+                editor.run_edit_commands(&[EditCommand::Clear]);
+                surface.drafts.activate(target);
+                restore_latest_draft(editor, surface.status, surface.drafts);
+            }
             {
                 let mut current = surface.status.lock().expect("surface status lock");
                 if let Some(base) = current.status_base.as_mut() {
@@ -2133,4 +2149,200 @@ pub(crate) fn test_resumed_round_terminal(mut request: QuestionRequest) {
         matches!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Answered(QuestionAnswer::Round(answer)) if answer.confirmed && answer.responses.len() == 2)
     );
     assert!(TERMINAL_SCRIPT.take().unwrap().launches.is_empty());
+}
+
+#[cfg(test)]
+mod image_admission_tests {
+    use super::*;
+
+    fn retained_draft() -> super::super::super::ImageDraft {
+        use ego_core::store::blob::{BlobId, BlobRef};
+        let bytes = b"already published image";
+        let reference = ego_core::generator::types::ImageRef::new(
+            BlobRef::new(
+                BlobId::parse(ego_core::digest::sha256_hex(bytes)).unwrap(),
+                bytes.len() as u64,
+            ),
+            ego_core::generator::types::ImageMediaType::Png,
+            1,
+            1,
+        )
+        .unwrap();
+        super::super::super::ImageDraft::recalled(&[reference])
+    }
+
+    // Catches: waiting only for the image reply deadlocks a question that
+    // must be answered before the driver can finish the admission.
+    #[test]
+    fn pending_image_admission_services_question_before_admission_reply() {
+        rendezvous(false);
+    }
+
+    // Catches: an admission failure or a cancelled reply consumes the text
+    // or attachment while the active turn's modal is being serviced.
+    #[test]
+    fn failed_or_cancelled_image_admission_keeps_the_complete_draft() {
+        rendezvous(true);
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("unsent text".into())]);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            images: retained_draft(),
+            ..SurfaceStatus::default()
+        }));
+        let before = status.lock().unwrap().images.labels();
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let asked = AtomicBool::new(false);
+        let (ingress, _control) = interactive_control();
+        let mut drafts = DraftStash::new(SessionId::new());
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        let (_controls, controls) = crossbeam::channel::unbounded();
+        let (_output, output) = crossbeam::channel::unbounded();
+        let (_signals, signals) = crossbeam::channel::unbounded();
+        let (reply, answer) = crossbeam::channel::bounded(1);
+        drop(reply);
+        let result = wait_image_reply(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            &output,
+            &signals,
+            &answer,
+        )
+        .unwrap();
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert_eq!(editor.current_buffer_contents(), "unsent text");
+        assert_eq!(status.lock().unwrap().images.labels(), before);
+    }
+
+    // Catches: a ready admission reply is starved by continuously ready output.
+    #[test]
+    fn ready_image_admission_is_not_starved_by_sustained_output() {
+        let mut editor = Reedline::create();
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let asked = AtomicBool::new(false);
+        let (ingress, _control) = interactive_control();
+        let mut drafts = DraftStash::new(SessionId::new());
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        let (_control, controls) = crossbeam::channel::unbounded();
+        let (printer, output) = crossbeam::channel::bounded(128);
+        // Empty messages keep the printer ready without emitting test noise.
+        // Disconnect after this finite backlog so a broken priority fails rather
+        // than hanging forever on an actual unbounded producer.
+        for _ in 0..128 {
+            printer.send(String::new()).unwrap();
+        }
+        drop(printer);
+        let (_signal, signals) = crossbeam::channel::unbounded();
+        let (reply, answer) = crossbeam::channel::bounded(1);
+        reply.send(Ok(Vec::new())).unwrap();
+        let result = wait_image_reply(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            &output,
+            &signals,
+            &answer,
+        );
+        assert!(matches!(result, Some(Ok(_))), "ready admission must finish");
+        assert_eq!(output.len(), 128, "output must not precede a ready reply");
+    }
+
+    fn rendezvous(fail: bool) {
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("unsent text".into())]);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            images: retained_draft(),
+            ..SurfaceStatus::default()
+        }));
+        let before = status.lock().unwrap().images.labels();
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let asked = AtomicBool::new(false);
+        let (ingress, _control) = interactive_control();
+        let mut drafts = DraftStash::new(SessionId::new());
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        let (control, controls) = crossbeam::channel::unbounded();
+        let (_output, output) = crossbeam::channel::unbounded();
+        let (_signals, signals) = crossbeam::channel::unbounded();
+        let (reply, answer) = crossbeam::channel::bounded(1);
+        let (question_reply, mut question_answer) = oneshot::channel();
+        control
+            .send(Control::Question {
+                id: ItemId::new(),
+                request: QuestionRequest::new(
+                    "Question during image admission",
+                    QuestionMode::FreeText,
+                    Vec::new(),
+                    true,
+                ),
+                reply: question_reply,
+            })
+            .unwrap();
+        TERMINAL_SCRIPT.set(Some(TerminalScript {
+            lines: [Line::Submitted("continue".into())].into(),
+            ..TerminalScript::default()
+        }));
+        let driver = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let answered = loop {
+                match question_answer.try_recv() {
+                    Ok(Some(outcome)) => break matches!(outcome, QuestionOutcome::Answered(_)),
+                    Err(_) => break false,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Ok(None) => break false,
+                }
+            };
+            let result = if fail || !answered {
+                Err("image admission refused; draft retained".into())
+            } else {
+                Ok(Vec::new())
+            };
+            reply.send(result).unwrap();
+            // Keep the control sender alive until the terminal has received
+            // the question and the admission result.
+            (answered, control)
+        });
+        let result = wait_image_reply(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            &output,
+            &signals,
+            &answer,
+        )
+        .unwrap();
+        let (answered, _control) = driver.join().unwrap();
+        assert!(answered, "question must finish before admission can reply");
+        assert_eq!(result.is_err(), fail);
+        assert_eq!(editor.current_buffer_contents(), "unsent text");
+        assert_eq!(status.lock().unwrap().images.labels(), before);
+        assert_eq!(phase.get(), EditPhase::Busy);
+        assert_eq!(TERMINAL_SCRIPT.take().unwrap().prompts.len(), 1);
+    }
 }
