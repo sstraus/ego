@@ -85,8 +85,10 @@ fn submission_contract(multiline: bool, resize: bool) {
         input.write_all(b"\x1b[201~\r").unwrap();
         input.flush().unwrap();
         until_normalized(&reader, &mut output, start, done);
-        // A busy composer also paints a prompt; capture only the completed idle frame.
-        until_idle_status_ready(&reader, &mut output, start);
+        // Input echo can paint an idle status before the driver starts. Only
+        // an idle frame after this reply proves that the turn has settled.
+        let completed = start + find(&output[start..], done.as_bytes()) + done.len();
+        until_idle_status_ready(&reader, &mut output, completed);
         drain_until_quiet(&reader, &mut output);
     }
     parser.process(&output[processed..]);
