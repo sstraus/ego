@@ -14,6 +14,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::render::line::{Line, Span};
 use crate::render::style::{Palette, Style};
 
+mod template;
+pub(crate) use template::{DEFAULT_TEMPLATE, StatusTemplate};
+
 const SEPARATOR: &str = " · ";
 
 fn compact_cwd(cwd: &str) -> String {
@@ -279,6 +282,10 @@ pub struct SurfaceSnapshot {
     window: Option<u64>,
     cost_display: Option<String>,
     goal: Option<(u32, Option<u32>)>,
+    goal_objective: Option<String>,
+    raw_cwd: String,
+    cost_amount: Option<String>,
+    cost_equivalent: bool,
     queue: QueueStatus,
     drafts: usize,
     cwd: String,
@@ -323,6 +330,7 @@ impl SurfaceSnapshot {
             CumulativeCost::Unknown(_) => "unknown".to_owned(),
             CumulativeCost::Known { total } => format!("{} {}", total.amount, total.currency),
         };
+        let (cost_display, cost_amount, cost_equivalent) = visible_cost(state);
         Self {
             fast: selection.fast,
             revision: session.to_string(),
@@ -333,7 +341,15 @@ impl SurfaceSnapshot {
             cost,
             used_tokens: state.context.used_tokens,
             window: state.context.window,
-            cost_display: visible_cost(state),
+            cost_amount,
+            cost_equivalent,
+            cost_display,
+            raw_cwd: seat.cwd.clone(),
+            goal_objective: state
+                .goal
+                .as_ref()
+                .filter(|goal| goal.state == ego_core::goal::GoalState::Active)
+                .map(|goal| goal.objective.clone()),
             goal: state
                 .goal
                 .as_ref()
@@ -350,8 +366,9 @@ impl SurfaceSnapshot {
     }
 
     /// Replace the active goal counter from live reduced state.
-    pub(crate) fn set_goal(&mut self, goal: Option<(u32, Option<u32>)>) {
-        self.goal = goal;
+    pub(crate) fn set_goal(&mut self, goal: Option<(String, u32, Option<u32>)>) {
+        self.goal_objective = goal.as_ref().map(|goal| goal.0.clone());
+        self.goal = goal.map(|(_, used, max)| (used, max));
     }
 
     /// Replace the live queue projection before publishing a new snapshot.
@@ -377,7 +394,8 @@ impl SurfaceSnapshot {
 
     /// Replace the working directory before publishing a new snapshot.
     pub fn set_cwd(&mut self, cwd: impl Into<String>) {
-        self.cwd = compact_cwd(&cwd.into());
+        self.raw_cwd = cwd.into();
+        self.cwd = compact_cwd(&self.raw_cwd);
     }
 
     /// Install the latest successful asynchronous Git projection.
@@ -454,6 +472,21 @@ impl SurfaceSnapshot {
                 || self.queue.interrupt_pending,
             modal: self.modal,
         }
+    }
+
+    /// Operational values that a template or activity row cannot hide.
+    pub(crate) fn critical_values(&self) -> Vec<String> {
+        [
+            StatusSegmentName::Queue,
+            StatusSegmentName::Drafts,
+            StatusSegmentName::Interrupt,
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            self.value(&name)
+                .map(|value| format!("{}={}", name.label(), value.0))
+        })
+        .collect()
     }
 
     fn context_display(&self) -> String {
@@ -553,7 +586,7 @@ impl SurfaceSnapshot {
 }
 
 // Policy zeros are budget accounting, not a known per-token currency price.
-fn visible_cost(state: &SessionState) -> Option<String> {
+fn visible_cost(state: &SessionState) -> (Option<String>, Option<String>, bool) {
     let mut equivalent: Option<Money> = None;
     let mut policies = 0;
     let mut unpriced = matches!(state.cost, CumulativeCost::Unknown(_));
@@ -591,16 +624,24 @@ fn visible_cost(state: &SessionState) -> Option<String> {
     }
     if policies > 0 {
         let estimate = equivalent.map(|amount| format!("≈{}", money_display(&amount)));
-        return Some(if unpriced || monetary {
-            estimate.map_or_else(|| "unpriced".to_owned(), |text| format!("{text} (partial)"))
-        } else {
-            estimate.unwrap_or_else(|| "unpriced".to_owned())
-        });
+        return (
+            Some(if unpriced || monetary {
+                estimate.map_or_else(|| "unpriced".to_owned(), |text| format!("{text} (partial)"))
+            } else {
+                estimate.unwrap_or_else(|| "unpriced".to_owned())
+            }),
+            equivalent.map(|money| money.amount.to_string()),
+            true,
+        );
     }
     match &state.cost {
-        CumulativeCost::Unstarted => None,
-        CumulativeCost::Unknown(_) => Some("unpriced".to_owned()),
-        CumulativeCost::Known { total } => Some(money_display(total)),
+        CumulativeCost::Unstarted => (None, None, false),
+        CumulativeCost::Unknown(_) => (Some("unpriced".to_owned()), None, false),
+        CumulativeCost::Known { total } => (
+            Some(money_display(total)),
+            Some(total.amount.to_string()),
+            false,
+        ),
     }
 }
 
@@ -771,6 +812,8 @@ pub struct StatusLine {
     text: String,
     width: usize,
     styled: Line,
+    footer: Vec<Line>,
+    template_rows: Option<Vec<Line>>,
     omitted: Vec<StatusSegmentName>,
     diagnostics: Vec<StatusDiagnostic>,
     snapshot_revision: String,
@@ -879,6 +922,8 @@ impl StatusLine {
             width: styled.width(),
             text,
             styled,
+            footer: Vec::new(),
+            template_rows: None,
             omitted,
             diagnostics,
             snapshot_revision: snapshot.revision.clone(),
@@ -894,6 +939,8 @@ impl StatusLine {
             text: String::new(),
             width: 0,
             styled: Line::empty(),
+            footer: Vec::new(),
+            template_rows: None,
             omitted,
             diagnostics,
             snapshot_revision: snapshot.revision.clone(),
@@ -907,7 +954,24 @@ impl StatusLine {
 
     /// Paint the retained context segment using the terminal colour policy.
     pub fn terminal_text(&self, capabilities: &crate::render::Capabilities) -> String {
-        self.styled.render(capabilities.depth)
+        self.template_rows.as_ref().map_or_else(
+            || self.styled.render(capabilities.depth),
+            |rows| {
+                rows.iter()
+                    .map(|line| line.render(capabilities.depth))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+        )
+    }
+
+    /// Template rows below the editable buffer, painted by Reedline.
+    pub(crate) fn terminal_footer(&self, capabilities: &crate::render::Capabilities) -> String {
+        self.footer
+            .iter()
+            .map(|line| line.render(capabilities.depth))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Unicode display-cell width of [`Self::text`].

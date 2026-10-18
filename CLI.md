@@ -288,7 +288,7 @@ is checked against `ManagedConfigKey`; it is not a separate runtime allowlist.
 | `budget` | yes | yes | yes |
 | `bare` | yes | no | no |
 | `permissions.judge` | yes | yes | yes |
-| `ui.statusline.segments` | yes | no | no |
+| `ui.statusline.template` | yes | no | no |
 | `ui.keybindings` | yes | no | no |
 | `ui.vim` | yes | no | no |
 | `session_dir` | no | no | yes |
@@ -1718,16 +1718,9 @@ the same question degrades to a numbered plain prompt.
 
 ### 6.5 Native status line
 
-The status line is one width-aware row owned by the interactive surface, not a
-shell subprocess and not model output. It renders ordered segments from a
-snapshot; expensive producers such as Git update asynchronously and never
-block input. The built-in segment names are `model`, `effort`, `mode`,
-`context`, `cost`, `queue`, `drafts`, `interrupt`, `cwd`, `git`, and `trust`.
-The queue snapshot distinguishes pending steers from ordinary queued prompts,
-and the interrupt segment remains visible while expedited or ordinary
-interruption is pending. `trust` renders `trusted` or `untrusted` and counts as
-inactive while trusted, so width pressure drops it from exactly the sessions
-whose posture is not worth reporting.
+The status line is owned by the interactive surface, not a shell subprocess or
+model output. It renders a value-only MiniJinja template from an immutable
+snapshot. Git and external providers update asynchronously and never block input.
 
 The compact default reads as:
 
@@ -1749,26 +1742,48 @@ not emoji or private font glyphs. Under width pressure, branch, cwd, and cost
 drop in that order before model, reasoning, mode, and context. At widths too
 small for that core, whole fields still drop rather than wrap or truncate.
 
-Configuration stores one final resolved shape rather than a preset plus a
-second override language:
+Configuration stores a complete template:
 
 ```toml
 [ui.statusline]
-segments = ["model", "effort", "mode", "context", "queue", "drafts", "interrupt", "cwd", "git", "trust"]
+template = """
+{% filter priority(20) %}{{ model }} · {{ effort }} · {{ mode }}{% endfilter %}{% filter priority(10) %} {{ ctx.percent|bar(10) }} {{ ctx.used|tokens }}/{{ ctx.window|tokens }}{% endfilter %}
+{{ prompt }}
+{% filter priority(0) %}{{ git.branch }}{% endfilter %}
+"""
 ```
 
-When `ui.statusline.segments` is absent, the surface uses that `default` order
-in memory and does not mutate configuration. An explicitly stored empty list
-is distinct and disables the row.
+`{{ prompt }}` must render once on its own line. Text before it goes above the
+editable buffer; text after it goes below. Filter blocks use `priority(integer)`:
+lower priorities disappear first when a row is too wide. Blocks cannot nest or
+contain the prompt. Unblocked rows are indivisible. Values are never truncated.
+Active queue, draft and interrupt state is added even when the template omits it.
+At a width too small for one critical value, that value remains whole.
 
-`/statusline` offers named setup presets but writes that ordered list. An empty
-list disables the row. When width is insufficient, lower-priority segments
-disappear as units; semantic values are never truncated into ambiguity. Queue
-and draft counts, and interrupt-pending state, remain visible while active
-whenever the terminal can represent their combined whole segments. If physical
-width cannot represent that critical set, whole segments degrade in the order
-drafts, queue, interrupt; the retained priority is interrupt, then queue, then
-drafts, and the surface emits one overflow diagnostic.
+Variables: `model`, `effort`, `fast`, `mode`, `ctx.used`, `ctx.window`,
+`ctx.percent`, `cost.amount`, `cost.equivalent`, `cwd`, `git.branch`, `git.dirty`,
+`queue`, `drafts`, `interrupt`, `trust`, `goal.active`, `goal.objective`,
+`goal.turns_used`, `goal.turns_max`, and `providers.NAME`. Unknown measured
+numbers, inactive goal fields and an unavailable Git branch are `none`.
+`queue` is pending steers plus queued prompts. `cost.amount` is the numeric
+amount represented by the visible cost; `cost.equivalent` distinguishes a
+subscription estimate from billed cost. `cwd` is the full working directory.
+
+Filters: `tokens` abbreviates counts, `money` formats a dollar amount,
+`short_path` abbreviates a path, `bar(n)` renders a percent with `n` cells
+(maximum 256), and `color(name)` accepts `green`, `yellow` or `red`.
+`text|threshold(ctx.percent)` applies the context thresholds to text. Colours
+respect the terminal colour policy and add no display width.
+
+With no template configured, `{{ compact }}\n{{ prompt }}` is the built-in
+default. `compact` preserves the 524 layout, including its width priorities.
+`/statusline` presets write templates. The Off preset stores `{{ prompt }}`;
+critical operational state remains visible. The unreleased `segments` key is
+removed, without compatibility parsing. An invalid template retains the compact
+default and emits one diagnostic with the error and source line. The environment
+has no filesystem loader, network functions or subprocess functions. Source is
+limited to 65536 bytes, output to 65536 bytes, evaluation to 10000 fuel units,
+and recursion to 32 levels.
 
 The live Working row also shows an approximate output-token count from model
 text (four characters per token, rounded up), not provider usage. Tool output is

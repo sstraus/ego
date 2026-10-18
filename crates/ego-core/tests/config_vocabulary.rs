@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ego_core::ceiling::Budget;
 use ego_core::config::{
     ConfigLayer, ManagedConfigKey, ManagedConfigValue, Mode, ModelRef, ProfileName, Source,
-    StatusSegmentName, UserConfigTarget,
+    UserConfigTarget,
 };
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
@@ -64,8 +64,8 @@ fn managed_keys_have_exact_canonical_order_and_target_availability() {
         (ManagedConfigKey::Bare, "bare"),
         (ManagedConfigKey::PermissionsJudge, "permissions.judge"),
         (
-            ManagedConfigKey::StatuslineSegments,
-            "ui.statusline.segments",
+            ManagedConfigKey::StatuslineTemplate,
+            "ui.statusline.template",
         ),
         (ManagedConfigKey::ExecEnv, "exec.env"),
         (ManagedConfigKey::ExecEnvAllowlist, "exec.env_allowlist"),
@@ -168,13 +168,10 @@ fn managed_values_parse_to_existing_strong_types_and_canonical_toml() {
             ManagedConfigValue::PermissionsJudge(ModelRef("provider/judge".to_owned())),
         ),
         (
-            ManagedConfigKey::StatuslineSegments,
-            "[\"model\", \"effort\"]",
-            "[\"model\", \"effort\"]",
-            ManagedConfigValue::StatuslineSegments(vec![
-                StatusSegmentName::Model,
-                StatusSegmentName::Effort,
-            ]),
+            ManagedConfigKey::StatuslineTemplate,
+            "\"{{ model }}\\n{{ prompt }}\"",
+            "\"\"\"\n{{ model }}\n{{ prompt }}\"\"\"",
+            ManagedConfigValue::StatuslineTemplate("{{ model }}\n{{ prompt }}".into()),
         ),
         (
             ManagedConfigKey::SessionDir,
@@ -204,13 +201,13 @@ fn managed_values_parse_to_existing_strong_types_and_canonical_toml() {
     assert!(ManagedConfigValue::parse(ManagedConfigKey::Budget, "\"not-money\"").is_err());
     assert!(
         ManagedConfigValue::parse(
-            ManagedConfigKey::StatuslineSegments,
+            ManagedConfigKey::StatuslineTemplate,
             "[\"model\", \"model\"]"
         )
         .is_err()
     );
     assert!(
-        ManagedConfigValue::parse(ManagedConfigKey::StatuslineSegments, "[\"future\"]").is_err()
+        ManagedConfigValue::parse(ManagedConfigKey::StatuslineTemplate, "[\"future\"]").is_err()
     );
     for (key, raw) in [
         (ManagedConfigKey::Model, "null"),
@@ -255,4 +252,23 @@ fn keyboard_preference_types_round_trip_without_profile_inheritance() {
     ] {
         assert!(ManagedConfigValue::parse(key, raw).is_err());
     }
+}
+
+#[test]
+fn statusline_template_replaces_unreleased_segments() {
+    // Catches the obsolete segment schema rejecting a template or accepting segments.
+    assert!(
+        ego_core::config::ConfigLayer::parse(
+            ego_core::config::Source::User,
+            "[ui.statusline]\ntemplate = '{{ model }}\\n{{ prompt }}'"
+        )
+        .is_ok()
+    );
+    assert!(
+        ego_core::config::ConfigLayer::parse(
+            ego_core::config::Source::User,
+            "[ui.statusline]\nsegments = ['model']"
+        )
+        .is_err()
+    );
 }
