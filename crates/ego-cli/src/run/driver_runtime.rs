@@ -3152,6 +3152,9 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     // One automatic attempt per source epoch; failure remains visible.
     *automatic_compaction_failed = automatic_compaction;
     seat.busy();
+    seat.set_compaction_availability(repl::actions::Availability::BusyWithReason {
+        reason: "ego is busy; compaction already running",
+    });
 
     let target_runtime = Arc::new(Mutex::new(None));
     let prepared_runtime = Arc::clone(&target_runtime);
