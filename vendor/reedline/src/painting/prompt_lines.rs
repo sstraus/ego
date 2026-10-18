@@ -1,8 +1,8 @@
 use super::utils::{coerce_crlf, estimate_required_lines, line_width, strip_ansi};
 use crate::{
-    Prompt, PromptHistorySearch,
     menu::{Menu, ReedlineMenu},
     prompt::PromptEditMode,
+    Prompt, PromptHistorySearch,
 };
 use std::borrow::Cow;
 use unicode_segmentation::UnicodeSegmentation;
@@ -110,11 +110,7 @@ impl<'prompt> PromptLines<'prompt> {
             end = offset + text.len();
             offset += line.len();
         }
-        lines.footer = Cow::Owned(
-            self.footer[..end]
-                .trim_end_matches(['\r', '\n'])
-                .to_owned(),
-        );
+        lines.footer = Cow::Owned(self.footer[..end].trim_end_matches(['\r', '\n']).to_owned());
         lines
     }
 
