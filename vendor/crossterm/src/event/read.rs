@@ -233,6 +233,37 @@ mod tests {
         );
     }
 
+    // Catches: a zero-timeout drain stops at a partial paste buffer and
+    // leaves an already-arrived stale CPR for the next cursor query.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn discard_pending_removes_cursor_report_behind_multibuffer_paste() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        let text = "x".repeat(2048);
+        sender.write_all(format!("\x1b[200~{text}\x1b[201~\x1b[19;1R").as_bytes()).unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(text)));
+        assert!(!reader.poll(Some(Duration::from_millis(20)), &CursorPositionFilter).unwrap(),
+            "pre-query cursor drain left an already-arrived stale report behind a large paste");
+    }
+
     // Catches: re-polling an edge-triggered source loses unread paste bytes
     // beyond the first read buffer when no new bytes arrive afterward.
     #[test]
