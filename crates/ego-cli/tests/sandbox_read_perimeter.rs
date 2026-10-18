@@ -54,16 +54,17 @@ fn broad_reads(sandbox: &str) {
     let finished = places.ego(&stub).args(["Inspect sibling"]).run();
     assert_eq!(finished.code, Some(0), "{}", finished.stderr);
     let generations = stub.generations();
-    for (index, expected) in [
-        (1, "SIBLING-PUBLIC-CONTENT"),
-        (2, "public.txt"),
-        (3, "SIBLING-PUBLIC-CONTENT"),
+    for (index, call_id, expected) in [
+        (1, "read", "SIBLING-PUBLIC-CONTENT"),
+        (2, "list", "public.txt"),
+        (3, "search", "SIBLING-PUBLIC-CONTENT"),
     ] {
         let result = generations[index]["messages"]
             .as_array()
             .unwrap()
-            .last()
-            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+            .expect("the requested tool result reaches the next generation")
             .to_string();
         assert!(
             result.contains(expected),
