@@ -84,7 +84,7 @@ Run an agent, from one command line.
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `-V, --version` — Print version
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
 - `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch Conflicts: `--session`, `--session-id`.
@@ -145,7 +145,7 @@ Run an agent from a prompt, headless.
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch Conflicts: `--session`, `--session-id`.
 - `--yolo` — Shorthand for --mode yolo Default: `false`.
 - `<PROMPT>` — The prompt. `-` reads it from stdin
@@ -205,7 +205,7 @@ Continue a stored session.
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
 - `--yolo` — Shorthand for --mode yolo Default: `false`.
 - `<ID>` — Session UUID; omit it for the terminal picker or headless latest in this workspace
@@ -296,7 +296,7 @@ Continue a stored session.
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
-- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable.
+- `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
 - `--yolo` — Shorthand for --mode yolo Default: `false`.
 - `<ID>` — Session UUID; omit it for the terminal picker or headless latest in this workspace
