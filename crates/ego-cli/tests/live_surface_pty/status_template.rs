@@ -119,3 +119,69 @@ fn status_template_footer_does_not_overwrite_composer_at_terminal_height() {
         assert!(stub.generations().is_empty());
     }
 }
+
+// Catches diagnostics suppressed by the terminal adapter, duplicated on repaint,
+// or reissued after a modal retires the notice for the same configuration.
+#[test]
+fn status_template_diagnostic_is_visible_once_across_live_repaints() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--mode",
+            "yolo",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# diagnostic fixture\n");
+    ego.home_file(
+        "config.toml",
+        "[ui.statusline]\ntemplate = '''{{ unknown }}\n{{ prompt }}'''\n",
+    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 120, Some((24, 120)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "statusline:");
+    let mut screens = Vec::new();
+    for _ in 0..3 {
+        let start = output.len();
+        // Ctrl+L redraws without dismissing the notice; printable input intentionally does.
+        input.write_all(b"\x0c").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "statusline:");
+        drain_until_quiet(&reader, &mut output);
+        let mut parser = vt100::Parser::new(24, 120, 0);
+        parser.process(&output);
+        screens.push(parser.screen().contents());
+    }
+    let start = output.len();
+    input.write_all(b"\x15/model\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(b"\x1b").unwrap();
+    input.flush().unwrap();
+    until_post_trust_prompt(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(b"after-modal-repaint").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "after-modal-repaint");
+    drain_until_quiet(&reader, &mut output);
+    let after_modal = normalized(&output[start..]);
+    input.write_all(b"\x15/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    for screen in screens {
+        assert_eq!(screen.matches("statusline:").count(), 1, "{screen}");
+        assert!(screen.contains("(line 1)"), "{screen}");
+    }
+    assert!(!after_modal.contains("statusline:"), "{after_modal}");
+    assert!(stub.generations().is_empty());
+}

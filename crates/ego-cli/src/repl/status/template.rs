@@ -535,7 +535,28 @@ mod tests {
             line.template_rows.unwrap()[0].spans[0].style,
             Style::fg(Palette::ERROR)
         );
-        assert_eq!(clean("evil\x1b[2J\u{e000}"), "evil[2J");
+        let untrusted = SurfaceSnapshot::from_state(
+            SessionId::new(),
+            &SessionState::default(),
+            SelectionFacts::new(
+                ModelRef("evil\x1b[2J\u{e000}\u{e001}9\u{e002}\u{e003}".into()),
+                ThinkingLevel::Medium,
+                Mode::Yolo,
+            ),
+            SeatFacts::new(QueueStatus::default(), 0, "/workspace", Trust::Trusted),
+            None,
+        );
+        let (line, error) =
+            StatusTemplate::new("{{ model }}\n{{ prompt }}".into()).render(&untrusted, &[], 120);
+        assert_eq!(error, None);
+        assert_eq!(
+            line.terminal_text(&crate::render::Capabilities::plain()),
+            "evil[2J9"
+        );
+        assert!(
+            line.terminal_footer(&crate::render::Capabilities::plain())
+                .is_empty()
+        );
         let (_, error) =
             StatusTemplate::new("{% for i in range(100000) %}x{% endfor %}\n{{ prompt }}".into())
                 .render(&snapshot(), &[], 120);

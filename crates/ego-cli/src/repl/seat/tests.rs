@@ -91,16 +91,91 @@ fn trust_accepts_only_an_explicit_yes_or_no() {
 
 #[test]
 fn statusline_presets_store_templates_with_one_prompt_slot() {
-    // Catches presets writing the removed segment grammar or losing the composer.
-    for (_, _, template) in STATUSLINE_PRESETS {
-        assert_eq!(template.matches("{{ prompt }}").count(), 1);
-    }
-    for id in ["default", "full"] {
-        let (_, _, template) = STATUSLINE_PRESETS
-            .iter()
-            .find(|(name, _, _)| *name == id)
-            .unwrap();
-        assert_eq!(*template, super::super::status::DEFAULT_TEMPLATE);
+    // Catches presets losing the composer or failing to display their offered fields.
+    use ego_core::cost::{Amount, CumulativeCost, CurrencyCode, Money};
+    let mut state = SessionState::default();
+    state.context.used_tokens = Some(58_000);
+    state.context.window = Some(272_000);
+    state.cost = CumulativeCost::Known {
+        total: Money::new(
+            "0.661".parse::<Amount>().unwrap(),
+            CurrencyCode::new("USD").unwrap(),
+        ),
+    };
+    let snapshot = SurfaceSnapshot::from_state_with_git(
+        SessionId::new(),
+        &state,
+        SelectionFacts::new(
+            ego_core::config::ModelRef("provider/model".into()),
+            ego_core::generator::types::ThinkingLevel::Medium,
+            Mode::Yolo,
+        )
+        .with_fast(true),
+        SeatFacts::new(
+            QueueStatus {
+                pending_steers: 1,
+                queued: 2,
+                interrupt_pending: true,
+            },
+            3,
+            "/workspace/ego",
+            Trust::Untrusted,
+        ),
+        Some(GitFacts::new("feat/preset", true)),
+    );
+    for (id, _, template) in STATUSLINE_PRESETS {
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            native_status: true,
+            width: 300,
+            snapshot: Some(snapshot.clone()),
+            template: super::super::status::StatusTemplate::new(template.into()),
+            ..SurfaceStatus::default()
+        }));
+        repaint_status(&status);
+        let waiting = Waiting::new(status);
+        let output = format!(
+            "{}preset-probe",
+            waiting.render_prompt_indicator(PromptEditMode::Emacs)
+        );
+        let mut terminal = vt100::Parser::new(12, 300, 0);
+        terminal.process(output.replace('\n', "\r\n").as_bytes());
+        let visible = terminal.screen().contents();
+        assert_eq!(
+            visible.matches("> preset-probe").count(),
+            1,
+            "{id}: {visible}"
+        );
+        assert!(!visible.contains("statusline:"), "{id}: {visible}");
+        for critical in ["queue=1/2", "drafts=3", "interrupt=yes"] {
+            assert!(visible.contains(critical), "{id}: {visible}");
+        }
+        match id {
+            "off" => assert_eq!(
+                visible,
+                "queue=1/2\ndrafts=3\ninterrupt=yes\n> preset-probe"
+            ),
+            "minimal" => assert!(
+                visible.starts_with("provider/model · medium · yolo\n"),
+                "{visible}"
+            ),
+            "default" | "full" => {
+                for field in [
+                    "model",
+                    "medium",
+                    "fast",
+                    "yolo",
+                    "58k/272k",
+                    "$0.66",
+                    "/w/ego",
+                    "feat/preset",
+                    "untrusted",
+                ] {
+                    assert!(visible.contains(field), "{id} omitted {field}: {visible}");
+                }
+            }
+            _ => panic!("preset {id} needs a visible-output contract"),
+        }
+        assert_eq!(terminal.screen().cursor_position().1, 14, "{id}: {visible}");
     }
 }
 
@@ -1533,16 +1608,18 @@ fn template_diagnostic_is_emitted_only_once_per_configuration() {
         template: super::super::status::StatusTemplate::new("{{ unknown }}\n{{ prompt }}".into()),
         ..SurfaceStatus::default()
     }));
-    repaint_status(&status);
-    assert!(
-        status
-            .lock()
-            .unwrap()
-            .notice
-            .take()
-            .unwrap()
-            .contains("statusline:")
-    );
-    repaint_status(&status);
-    assert!(status.lock().unwrap().notice.is_none());
+    let waiting = Waiting::new(Arc::clone(&status));
+    for _ in 0..3 {
+        repaint_status(&status);
+        let output = format!(
+            "{}diagnostic-probe",
+            waiting.render_prompt_indicator(PromptEditMode::Emacs)
+        );
+        let mut terminal = vt100::Parser::new(12, 120, 0);
+        terminal.process(output.replace('\n', "\r\n").as_bytes());
+        let visible = terminal.screen().contents();
+        assert_eq!(visible.matches("statusline:").count(), 1, "{visible}");
+        assert!(visible.contains("(line 1)"), "{visible}");
+        assert!(visible.ends_with("> diagnostic-probe"), "{visible}");
+    }
 }
