@@ -13,6 +13,7 @@ name = "ego"
 path = "src/main.rs"
 
 [dependencies]
+minijinja.workspace = true
 ego-a2a = { path = "../ego-a2a" }
 ego-acp = { path = "../ego-acp" }
 ego-ai = { path = "../ego-ai" }

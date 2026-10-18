@@ -60,6 +60,8 @@ mod status_compact;
 mod status_history;
 #[path = "live_surface_pty/status_providers.rs"]
 mod status_providers;
+#[path = "live_surface_pty/status_template.rs"]
+mod status_template;
 mod support;
 #[path = "live_surface_pty/task_rows.rs"]
 mod task_rows;

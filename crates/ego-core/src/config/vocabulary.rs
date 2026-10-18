@@ -8,7 +8,7 @@ use std::str::FromStr;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::layer::{Mode, ModelRef, StatusSegmentName, validate_unique_status_segments};
+use super::layer::{Mode, ModelRef};
 use super::mutation::UserConfigError;
 use crate::ceiling::Budget;
 use crate::generator::types::ThinkingLevel;
@@ -130,7 +130,7 @@ pub enum ManagedConfigKey {
     Budget,
     Bare,
     PermissionsJudge,
-    StatuslineSegments,
+    StatuslineTemplate,
     Keybindings,
     Vim,
     SessionDir,
@@ -146,7 +146,7 @@ impl ManagedConfigKey {
         Self::Budget,
         Self::Bare,
         Self::PermissionsJudge,
-        Self::StatuslineSegments,
+        Self::StatuslineTemplate,
         Self::ExecEnv,
         Self::ExecEnvAllowlist,
         Self::Network,
@@ -202,7 +202,7 @@ impl ManagedConfigKey {
             Self::Budget => "budget",
             Self::Bare => "bare",
             Self::PermissionsJudge => "permissions.judge",
-            Self::StatuslineSegments => "ui.statusline.segments",
+            Self::StatuslineTemplate => "ui.statusline.template",
             Self::Keybindings => "ui.keybindings",
             Self::Vim => "ui.vim",
             Self::SessionDir => "session_dir",
@@ -260,7 +260,7 @@ impl ManagedConfigKey {
             "budget" => Ok(Self::Budget),
             "bare" => Ok(Self::Bare),
             "permissions.judge" => Ok(Self::PermissionsJudge),
-            "ui.statusline.segments" => Ok(Self::StatuslineSegments),
+            "ui.statusline.template" => Ok(Self::StatuslineTemplate),
             "ui.keybindings" => Ok(Self::Keybindings),
             "ui.vim" => Ok(Self::Vim),
             "session_dir" => Ok(Self::SessionDir),
@@ -303,7 +303,7 @@ pub enum ManagedConfigValue {
     Budget(Budget),
     Bare(bool),
     PermissionsJudge(ModelRef),
-    StatuslineSegments(Vec<StatusSegmentName>),
+    StatuslineTemplate(String),
     Keybindings(std::collections::BTreeMap<String, Vec<String>>),
     Vim(bool),
     Path(PathBuf),
@@ -346,14 +346,8 @@ impl ManagedConfigValue {
             ManagedConfigKey::Keybindings => decode(&key, value).map(Self::Keybindings),
             ManagedConfigKey::Vim => decode(&key, value).map(Self::Vim),
             ManagedConfigKey::PermissionsJudge => decode(&key, value).map(Self::PermissionsJudge),
-            ManagedConfigKey::StatuslineSegments => {
-                let segments: Vec<StatusSegmentName> = decode(&key, value)?;
-                validate_unique_status_segments(&segments).map_err(|error| {
-                    UserConfigError::new(format!(
-                        "invalid value for managed configuration key `{key}`: {error}"
-                    ))
-                })?;
-                Ok(Self::StatuslineSegments(segments))
+            ManagedConfigKey::StatuslineTemplate => {
+                decode(&key, value).map(Self::StatuslineTemplate)
             }
             ManagedConfigKey::SessionDir | ManagedConfigKey::ArtifactDir => {
                 decode(&key, value).map(Self::Path)
@@ -393,12 +387,7 @@ impl ManagedConfigValue {
             Self::Keybindings(bindings) => {
                 toml::Value::try_from(bindings).expect("keybindings are TOML data")
             }
-            Self::StatuslineSegments(segments) => toml::Value::Array(
-                segments
-                    .iter()
-                    .map(|segment| toml::Value::String(segment.as_str().to_owned()))
-                    .collect(),
-            ),
+            Self::StatuslineTemplate(template) => toml::Value::String(template.clone()),
             Self::Roots(roots) => toml::Value::try_from(roots).expect("roots are TOML data"),
             Self::ExecPaths(paths) => toml::Value::try_from(paths).expect("paths are TOML data"),
             Self::AuthHeaders(headers) => {

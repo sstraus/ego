@@ -21,7 +21,7 @@ pub(crate) const INTERRUPTED_RECEIPT: &str = "Interrupted by user";
 
 pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::Confirmation;
-pub(crate) use seat::effective_statusline_segments;
+pub(crate) use seat::effective_statusline_template;
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
