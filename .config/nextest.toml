@@ -1,3 +1,10 @@
+# These PTY tests measure a 500 ms wall-clock contract. Reserve the whole
+# nextest budget so unrelated test processes cannot consume that budget.
+# Keep the assertions unchanged: the pre-batching implementation must fail.
+[[profile.default.overrides]]
+filter = 'binary(live_surface_pty) & test(help_latency::)'
+threads-required = 'num-test-threads'
+
 [test-groups]
 # The real macOS general pasteboard is one machine-wide resource. nextest
 # runs each test as its own process, so an in-process lock cannot serialize

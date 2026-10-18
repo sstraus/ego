@@ -99,6 +99,12 @@ fn read_complete(fd: &FileDesc, buf: &mut [u8]) -> io::Result<usize> {
 }
 
 impl EventSource for UnixInternalEventSource {
+    fn pending_events(&mut self) -> io::Result<Vec<InternalEvent>> {
+        let bytes = self.tty.read_pending()?;
+        self.parser.advance(&bytes, false);
+        Ok(self.parser.by_ref().collect())
+    }
+
     fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
         let timeout = PollTimeout::new(timeout);
 
@@ -123,7 +129,7 @@ impl EventSource for UnixInternalEventSource {
             make_pollfd(&self.wake_pipe.receiver),
         ];
 
-        while timeout.leftover().map_or(true, |t| !t.is_zero()) {
+        loop {
             // check if there are buffered events from the last read
             if let Some(event) = self.parser.next() {
                 return Ok(Some(event));
@@ -142,26 +148,23 @@ impl EventSource for UnixInternalEventSource {
                         format!("got unexpected error while polling: {:?}", e),
                     ))
                 }
+                Ok(0) => return Ok(None),
                 Ok(_) => (),
             };
             if fds[0].revents & POLLIN != 0 {
-                loop {
-                    let read_count = read_complete(&self.tty, &mut self.tty_buffer)?;
-                    if read_count > 0 {
-                        self.parser.advance(
-                            &self.tty_buffer[..read_count],
-                            read_count == TTY_BUFFER_SIZE,
-                        );
-                    }
-
-                    if let Some(event) = self.parser.next() {
-                        return Ok(Some(event));
-                    }
-
-                    if read_count == 0 {
-                        break;
-                    }
+                let read_count = read_complete(&self.tty, &mut self.tty_buffer)?;
+                if read_count == 0 {
+                    return Ok(None);
                 }
+                self.parser.advance(
+                    &self.tty_buffer[..read_count],
+                    read_count == TTY_BUFFER_SIZE,
+                );
+                if let Some(event) = self.parser.next() {
+                    return Ok(Some(event));
+                }
+                // Preserve a partial sequence and poll again before reading;
+                // the descriptor is blocking even when the timeout is zero.
             }
             if fds[1].revents & POLLIN != 0 {
                 #[cfg(feature = "libc")]
@@ -197,8 +200,10 @@ impl EventSource for UnixInternalEventSource {
                     "Poll operation was woken up by `Waker::wake`",
                 ));
             }
+            if timeout.elapsed() {
+                return Ok(None);
+            }
         }
-        Ok(None)
     }
 
     #[cfg(feature = "event-stream")]
