@@ -91,6 +91,8 @@ fn snapshot_is_v2_json_with_explicit_nulls_empty_arrays_and_full_slug_order() {
                     "fast": null,
                     "capabilities": serde_json::to_value(capabilities()).unwrap(),
                     "metering": "currency",
+                    "standard_token_price_multiplier": 1,
+                    "fast": null,
                     "provenance": { "source": "supplied", "authority": "user" },
                     "freshness": "cached",
                     "availability": {
@@ -105,6 +107,8 @@ fn snapshot_is_v2_json_with_explicit_nulls_empty_arrays_and_full_slug_order() {
                     "fast": null,
                     "capabilities": serde_json::to_value(capabilities()).unwrap(),
                     "metering": "unmetered",
+                    "standard_token_price_multiplier": 1,
+                    "fast": null,
                     "provenance": { "source": "discovered", "provider": "zeta" },
                     "freshness": "cached",
                     "availability": {

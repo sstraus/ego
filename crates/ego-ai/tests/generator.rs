@@ -1125,7 +1125,8 @@ async fn fast_contract_catches_provider_field_drift_and_silent_unsupported_tiers
                     }));
                 }
             } else {
-                assert!(body.get(field).is_none());
+                assert_ne!(body[field], "fast");
+                assert_ne!(body[field], "priority");
             }
         }
     }
@@ -1141,4 +1142,31 @@ async fn fast_contract_catches_provider_field_drift_and_silent_unsupported_tiers
             .contains("no verified fast tier")
     );
     assert_eq!(http.calls(), 0);
+}
+
+#[tokio::test]
+async fn standard_tier_catches_fast_project_default_surviving_fast_off() {
+    // Captured OpenAI fast-mode documentation says omitted service_tier inherits
+    // the project's tier. Standard must override a Fast project explicitly, or
+    // /fast off can still incur Fast charges while ego quotes Standard prices.
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = WireGenerator::new(
+        row(),
+        &ego_ai::wire::openai_responses::OpenAiResponses,
+        http.clone(),
+        credential(&FakeCredentials::holding(KEY)),
+    )
+    .with_service_tier(ego_ai::service_tier::ServiceTier::Standard);
+    let mut req = request();
+    req.model = "gpt-6.1-sol".into();
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let _: Vec<_> = generator.generate(req, attempt).collect().await;
+    let seen = http.seen.lock().unwrap();
+    let sent = seen.first().expect("standard generation reaches transport");
+    let body: serde_json::Value = serde_json::from_slice(sent.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body["service_tier"], "default",
+        "Standard must override OpenAI project Fast defaults, not inherit them"
+    );
 }
