@@ -1573,6 +1573,101 @@ fn child_stdin_is_a_closed_pipe_and_reaches_eof() {
     assert!(format!("{out:?}").contains("stdin-eof:0"));
 }
 
+/// Catches: an early stdin close discards a valid handler verdict, or hides its
+/// unsuccessful exit. The payload exceeds the pipe capacity without a reader.
+#[cfg(unix)]
+#[test]
+fn handler_early_stdin_close_preserves_verdict_and_exit_status() {
+    use ego_core::hook::EffectScope;
+
+    let input = vec![b'x'; 4 * 1024 * 1024];
+    let verdict = r#"{"verdict":"achieved","reason":"verified artifact"}"#;
+    for code in [0, 7] {
+        let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+        let script = format!("exec 0<&-; printf '%s' '{verdict}'; exit {code}");
+        let spec = SpawnSpec::new(
+            ["/bin/sh", "-c", &script].map(OsString::from).to_vec(),
+            Some(cwd()),
+            Some(Duration::from_secs(5)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let result = block_on(run.ports.process().execute_handler(
+            &spec,
+            &input,
+            EffectScope::new(Duration::from_secs(5)),
+        ));
+        let output = match result {
+            Ok(output) if code == 0 => output,
+            Err(ProcessError::Exit {
+                code: actual,
+                result,
+            }) if code == 7 => {
+                assert_eq!(actual, Some(code));
+                result
+            }
+            other => panic!("handler exit {code} lost its result: {other:?}"),
+        };
+        let stdout = output
+            .content
+            .iter()
+            .find(|block| {
+                matches!(
+                    block.provenance,
+                    ToolOutputProvenance::Process {
+                        stream: StreamProvenance::Stdout,
+                        ..
+                    }
+                )
+            })
+            .expect("handler stdout");
+        assert_eq!(stdout.text, verdict, "handler exit {code}");
+    }
+}
+
+/// Catches: treating closed stdin as completion bypasses the handler's deadline
+/// or cancellation while the child is still running.
+#[cfg(unix)]
+#[test]
+fn handler_closed_stdin_still_obeys_scope_stops() {
+    use ego_core::hook::EffectScope;
+
+    let input = vec![b'x'; 4 * 1024 * 1024];
+    for cancelled in [false, true] {
+        let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+        let spec = SpawnSpec::new(
+            ["/bin/sh", "-c", "exec 0<&-; printf not-finished; sleep 30"]
+                .map(OsString::from)
+                .to_vec(),
+            Some(cwd()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let scope = EffectScope::new(if cancelled {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(250)
+        });
+        let cancellation = cancelled.then(|| {
+            let token = scope.cancel_token();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                token.cancel(CancelCause::User);
+            })
+        });
+        let result = block_on(run.ports.process().execute_handler(&spec, &input, scope));
+        if let Some(cancellation) = cancellation {
+            cancellation.join().unwrap();
+        }
+        assert!(
+            matches!(&result, Err(ProcessError::Cancelled)) && cancelled
+                || matches!(&result, Err(ProcessError::Timeout { .. })) && !cancelled,
+            "cancelled={cancelled}: {result:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn child_does_not_inherit_open_descriptors_at_or_above_three() {
