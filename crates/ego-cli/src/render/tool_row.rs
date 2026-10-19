@@ -41,6 +41,8 @@ pub struct ToolRecord {
     pub rows: String,
     /// The row followed by the whole result, for the expand key.
     pub detail: String,
+    /// Only output-free top-level successful commands may be replaced live.
+    pub shell_progress: Option<Line>,
 }
 
 /// One finished tool call.
@@ -98,6 +100,7 @@ impl ToolRows {
             rows,
             // Expand is an independent view: it always names its owning task.
             detail: cap(format!("{header}\n{}", indent(&nested.detail))),
+            shell_progress: None,
         }
     }
 }
@@ -111,16 +114,19 @@ fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let width = capabilities.width;
     let depth = capabilities.depth;
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
-    let header = header(call, &args, width);
+    let heading = header(call, &args, width);
 
-    let mut rows = vec![header.clone()];
+    let mut rows = vec![heading.clone()];
     if call.name == "exec" {
         rows.extend(tail(call, width));
     }
 
-    let mut detail = vec![header];
+    let shell_progress =
+        (call.name == "exec" && call.ok && output_lines(call).is_empty()).then(|| heading.clone());
+    let mut detail = vec![heading];
     detail.extend(body(call, &args, width));
     ToolRecord {
+        shell_progress,
         rows: render(&rows, depth),
         detail: cap(render(&detail, depth)),
     }

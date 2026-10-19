@@ -50,6 +50,8 @@ mod raw_columns;
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/shell_rows.rs"]
+mod shell_rows;
 #[path = "live_surface_pty/slash_completion.rs"]
 mod slash_completion;
 #[path = "live_surface_pty/slash_inspections.rs"]

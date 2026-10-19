@@ -46,6 +46,11 @@ pub trait Diagnostics: Send + Sync {
         self.note(rows);
     }
 
+    /// A replaceable successful shell row; append-only adapters keep the row.
+    fn shell_row(&self, rows: &str, detail: String, _live: crate::render::Line) {
+        self.tool_row(rows, detail);
+    }
+
     /// Print the detail of the most recent tool call, if this surface kept
     /// one.
     fn expand_last_tool(&self) {}
@@ -69,6 +74,7 @@ pub trait TextOutput: Diagnostics {
     /// Refresh the active goal counter without writing a transcript row.
     fn goal_status(&self, _goal: Option<(String, u32, Option<u32>)>) {}
     fn begin_block(&self) {}
+    fn settle_shell(&self) {}
     fn finish(&self) {}
 }
 
@@ -260,6 +266,15 @@ impl Diagnostics for InteractiveOutput {
         self.details.remember(detail);
     }
 
+    fn shell_row(&self, rows: &str, detail: String, live: crate::render::Line) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .write_shell(rows, live);
+        self.details.remember(detail);
+    }
+
     fn expand_last_tool(&self) {
         let detail = self.details.latest();
         match detail {
@@ -318,6 +333,14 @@ impl TextOutput for InteractiveOutput {
             .lock()
             .expect("surface output lock")
             .begin_block();
+    }
+
+    fn settle_shell(&self) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .settle_shell();
     }
 
     fn finish(&self) {
@@ -657,6 +680,7 @@ impl<'a> TextSink<'a> {
             .expect("a poisoned lock means a writer panicked mid-line");
         self.finish_text(&mut text);
         text.tools.separate();
+        self.out.settle_shell();
     }
 
     fn finish_text(&self, text: &mut Streaming) {
@@ -729,6 +753,20 @@ impl EventSink for TextSink<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.goal_receipts(event, state);
+        // Only adjacent completed top-level exec calls share the live row.
+        // Settle before prose (even buffered prose), another tool, or a turn boundary.
+        if matches!(
+            event,
+            PublicEvent::TurnStarted { .. }
+                | PublicEvent::TurnCompleted { .. }
+                | PublicEvent::ItemDelta {
+                    kind: ItemKind::AgentMessage,
+                    ..
+                }
+        ) || matches!(event, PublicEvent::ItemStarted { kind: ItemKind::Tool, name: Some(name), .. } if name != "exec")
+        {
+            self.out.settle_shell();
+        }
         if self.capabilities.on_screen()
             && self.out.live_retry()
             && matches!(
@@ -886,7 +924,13 @@ impl EventSink for TextSink<'_> {
                         },
                         self.capabilities.with_current_width(),
                     );
-                    self.out.tool_row(&record.rows, record.detail);
+                    if self.capabilities.on_screen()
+                        && let Some(live) = record.shell_progress
+                    {
+                        self.out.shell_row(&record.rows, record.detail, live);
+                    } else {
+                        self.out.tool_row(&record.rows, record.detail);
+                    }
                 }
             }
             // Deliberately **not** gated on `quiet`. `-q` is presentation —
