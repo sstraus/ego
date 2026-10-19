@@ -1034,8 +1034,15 @@ mod tests {
             RootAccess::ReadWrite,
         )]);
         let admitted = policy_digest(&initial, &backend).expect("initial digest");
+        // Keep the historical framing vector tied to its recorded revision;
+        // the live null backend revision follows the workspace package version.
+        let historical_backend = IdentityBackend {
+            identity: BackendIdentity::new("null", "0.1.0"),
+        };
         assert_eq!(
-            admitted.as_str(),
+            policy_digest(&initial, &historical_backend)
+                .expect("historical digest")
+                .as_str(),
             "cfcf897964188137affec341edbfa33e68d65592e2183aae868bec7f0250a0be"
         );
         assert_eq!(
