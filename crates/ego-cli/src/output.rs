@@ -33,6 +33,11 @@ use crate::repl::SurfaceOutput;
 pub trait Diagnostics: Send + Sync {
     fn note(&self, message: &str);
 
+    /// One already-laid-out diagnostic block, with no spacing between its rows.
+    fn notice_block(&self, message: &str) {
+        self.note(message);
+    }
+
     /// A finished tool call: its rows, and the full detail the expand key
     /// shows later. A headless run has no expand key, so the rows are a
     /// diagnostic and the detail is dropped; a terminal surface commits the
@@ -73,6 +78,10 @@ pub struct Stderr;
 impl Diagnostics for Stderr {
     fn note(&self, message: &str) {
         note(message);
+    }
+
+    fn notice_block(&self, message: &str) {
+        let _ = writeln!(std::io::stderr(), "{DISPLAY_NAME}: {message}");
     }
 }
 
@@ -175,6 +184,10 @@ impl Diagnostics for Stdout {
     fn note(&self, message: &str) {
         note(message);
     }
+
+    fn notice_block(&self, message: &str) {
+        Stderr.notice_block(message);
+    }
 }
 
 impl TextOutput for Stdout {
@@ -233,6 +246,10 @@ impl Diagnostics for InteractiveOutput {
         let text = format!("{DISPLAY_NAME}: {message}");
         let width = terminal_size::terminal_size().map(|(width, _)| usize::from(width.0));
         self.line(&wrap_notice(&text, width));
+    }
+
+    fn notice_block(&self, message: &str) {
+        self.line(&format!("{DISPLAY_NAME}: {message}"));
     }
 
     fn tool_row(&self, rows: &str, detail: String) {
@@ -338,6 +355,43 @@ pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Layout before painting: ANSI bytes must never participate in notice wrapping.
+fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> String {
+    use crate::render::Line;
+    use crate::render::style::{Palette, Style};
+    use ego_core::plan::StepStatus;
+
+    if plan.steps.is_empty() {
+        return "Plan cleared".into();
+    }
+    let completed = plan
+        .steps
+        .iter()
+        .filter(|step| step.status == StepStatus::Completed)
+        .count();
+    let mut rows = vec![format!("Plan {completed}/{}", plan.steps.len())];
+    for step in &plan.steps {
+        let (symbol, colour) = match step.status {
+            StepStatus::Completed => ("✓", Palette::ADDED_FG),
+            StepStatus::InProgress => ("▶", Palette::CODE),
+            StepStatus::Pending => ("○", Palette::GUTTER_FG),
+            StepStatus::Blocked => ("!", Palette::ERROR),
+        };
+        // A step is one logical row even when its text contains line breaks.
+        let text = ego_core::permit::terminal_safe(
+            &step.text.split_whitespace().collect::<Vec<_>>().join(" "),
+        );
+        let mut row = Line::styled(symbol, Style::fg(colour));
+        row.push(crate::render::Span::plain(format!(" {text}")));
+        rows.extend(
+            row.wrap_hanging(caps.width, 2)
+                .into_iter()
+                .map(|row| row.render(caps.depth)),
+        );
+    }
+    rows.join("\n")
 }
 
 fn write_note(mut err: impl Write, message: &str, width: Option<usize>) {
@@ -768,13 +822,10 @@ impl EventSink for TextSink<'_> {
             }
             PublicEvent::PlanUpdated { .. } if !self.quiet => {
                 self.finish();
-                for step in &state.plan.steps {
-                    self.out
-                        .note(&format!("[{:?}] {}: {}", step.status, step.id, step.text));
-                }
-                if state.plan.steps.is_empty() {
-                    self.out.note("Plan cleared");
-                }
+                self.out.notice_block(&plan_block(
+                    &state.plan,
+                    self.capabilities.with_current_width(),
+                ));
             }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
@@ -1514,6 +1565,117 @@ mod tests {
         }
     }
 
+    // Catches: separate notes insert blank lines and expose Debug status names.
+    #[test]
+    fn plan_block_compact() {
+        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+        let mut state = SessionState::default();
+        state.plan.steps = [
+            (StepStatus::Completed, "Read the current output path"),
+            (
+                StepStatus::InProgress,
+                "Render the plan as one compact block with readable status symbols",
+            ),
+            (StepStatus::Pending, "Verify narrow output"),
+            (StepStatus::Blocked, "Wait for review"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (status, text))| PlanStep {
+            id: index.to_string(),
+            text: text.into(),
+            status,
+        })
+        .collect();
+        let event = PublicEvent::PlanUpdated {
+            turn: TurnId::new(),
+            update: PlanUpdate::Replace { steps: vec![] },
+        };
+        for (width, plain, coloured) in [
+            (
+                40,
+                include_str!("../tests/goldens/plan/40.txt"),
+                include_str!("../tests/goldens/plan/40.ansi"),
+            ),
+            (
+                80,
+                include_str!("../tests/goldens/plan/80.txt"),
+                include_str!("../tests/goldens/plan/80.ansi"),
+            ),
+            (
+                120,
+                include_str!("../tests/goldens/plan/120.txt"),
+                include_str!("../tests/goldens/plan/120.ansi"),
+            ),
+        ] {
+            for (depth, expected) in [
+                (crate::render::Depth::None, plain),
+                (crate::render::Depth::TrueColor, coloured),
+            ] {
+                let out = Recorded::default();
+                let mut caps = Capabilities::plain();
+                caps.width = width;
+                caps.depth = depth;
+                TextSink::new(&out, false, caps).publish(&event, &state);
+                let notes = out.notes.lock().unwrap();
+                assert_eq!(notes.len(), 1, "one update must be one block");
+                assert_eq!(
+                    format!("{DISPLAY_NAME}: {}\n", notes[0]),
+                    expected,
+                    "width {width}, {depth:?}"
+                );
+            }
+        }
+    }
+
+    // Catches: embedded newlines split a step into blank blocks, or narrow
+    // output truncates unbreakable Unicode text instead of retaining every cell.
+    #[test]
+    fn plan_block_preserves_multiline_and_long_unicode_text() {
+        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+        let mut state = SessionState::default();
+        state
+            .plan
+            .apply(&PlanUpdate::Replace {
+                steps: vec![PlanStep {
+                    id: "unicode".into(),
+                    text: "Read\n\n界界界界界界界界界界界界界界界界界界界界界界\tthen verify"
+                        .into(),
+                    status: StepStatus::Pending,
+                }],
+            })
+            .unwrap();
+        let event = PublicEvent::PlanUpdated {
+            turn: TurnId::new(),
+            update: PlanUpdate::Step {
+                id: "unicode".into(),
+                status: StepStatus::Pending,
+            },
+        };
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.width = 40;
+        TextSink::new(&out, false, caps).publish(&event, &state);
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].contains("\n\n"));
+        let rows: Vec<_> = notes[0].lines().collect();
+        assert!(rows[2..].iter().all(|row| row.starts_with("  ")));
+        assert!(
+            rows.iter()
+                .all(|row| crate::render::Line::plain(*row).width() <= 40)
+        );
+        assert_eq!(
+            rows[1..]
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(' ', ""),
+            "○Read界界界界界界界界界界界界界界界界界界界界界界thenverify"
+        );
+    }
+
     #[test]
     fn terminal_plan_rows_use_reduced_state_and_respect_quiet_progress() {
         // Catches: terminal renders stale operation payloads instead of the authoritative plan.
@@ -1534,10 +1696,7 @@ mod tests {
         let out = Recorded::default();
         let sink = TextSink::new(&out, false, Capabilities::plain());
         sink.publish(&event, &state);
-        assert_eq!(
-            *out.notes.lock().unwrap(),
-            ["[Blocked] stable: Verify output"]
-        );
+        assert_eq!(*out.notes.lock().unwrap(), ["Plan 0/1\n! Verify output"]);
         state.plan.steps.clear();
         sink.publish(&event, &state);
         assert_eq!(out.notes.lock().unwrap().last().unwrap(), "Plan cleared");

@@ -1,0 +1,6 @@
+εgo: Plan 1/4
+[38;2;80;200;80m✓[0m Read the current output path
+[38;2;177;185;249m▶[0m Render the plan as one compact block
+  with readable status symbols
+[38;2;128;128;128m○[0m Verify narrow output
+[38;2;255;107;128m![0m Wait for review
