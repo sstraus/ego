@@ -125,7 +125,7 @@ Commands:
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
       --mode <MODE>
-          Permission mode: plan|default|auto|edits|yolo
+          Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
           Shorthand for --mode plan
       --yolo
@@ -241,7 +241,7 @@ Options:
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
       --mode <MODE>
-          Permission mode: plan|default|auto|edits|yolo
+          Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
           Shorthand for --mode plan
       --yolo
@@ -353,7 +353,7 @@ Options:
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
       --mode <MODE>
-          Permission mode: plan|default|auto|edits|yolo
+          Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
           Shorthand for --mode plan
       --yolo
@@ -471,7 +471,7 @@ Options:
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
       --mode <MODE>
-          Permission mode: plan|default|auto|edits|yolo
+          Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
           Shorthand for --mode plan
       --yolo
@@ -1454,7 +1454,7 @@ Options:
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
       --mode <MODE>
-          Permission mode: plan|default|auto|edits|yolo
+          Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
           Shorthand for --mode plan
       --yolo

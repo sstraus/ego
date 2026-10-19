@@ -340,8 +340,17 @@ second human-input boundary.
 
 
 1. **Mode** — `plan` (read-only, ends in an approval gate) · `default`
-   (reviews unresolved sensitive actions) · **`auto`** (judge model, below) ·
-   `edits` (auto-approves workspace writes) · `yolo` (bypass).
+   (free reads, prompts for uncovered writes, honors allow rules and retains
+   coordinator bounded admission) · **`auto`** (bounded analysis/judge, below) ·
+   `accept-edits` (auto-approves workspace file writes, not execution, network,
+   opaque tools or writes outside the workspace) · `yolo` (bypass ordinary approvals).
+   `edits` remains an input alias for accept-edits. Snapshot v1 retains its historical
+   spelling only inside content-addressed authority bytes for saved-session resume.
+   Direct `/mode <name>`, the picker and Shift+Tab stage the same generation-owned
+   selection. Cycle order is plan, default, auto, accept-edits, yolo; modals ignore
+   Shift+Tab. During a turn, cycle intents queue and resolve from the owner's last
+   accepted staged mode, not stale editor status. Drafts remain intact. System
+   max_mode and fixed confinement remain unchanged. No approval mechanism is added.
 2. **Rules** — persistent, scoped (project/user), with **stable IDs**,
    listable and revocable without the original context, storable without
    executing (`rules remember`). fx's contract verbatim (`ARCHITECTURE.md`

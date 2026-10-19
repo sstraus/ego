@@ -1624,10 +1624,18 @@ fn handle_interactive_policy(
         }
         return false;
     };
-    if let PolicyControlRequest::SetMode(mode) = &request {
-        let mode = *mode;
-        let notice = match owner.apply(PolicyControlRequest::SetMode(mode)) {
-            Ok(PolicyControlOutcome::Mode { staging }) => {
+    if matches!(
+        request,
+        PolicyControlRequest::SetMode(_) | PolicyControlRequest::CycleMode
+    ) {
+        let notice = match owner
+            .apply(request)
+            .and_then(|outcome| owner.selected_mode().map(|mode| (mode, outcome)))
+        {
+            Ok((mode, PolicyControlOutcome::Mode { staging })) => {
+                if let Some(status) = status.as_ref() {
+                    status.seat.set_selected_mode(mode);
+                }
                 if staging.changed {
                     format!("mode `{mode}` staged for the next generation")
                 } else {

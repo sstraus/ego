@@ -66,6 +66,7 @@ use ego_mcp::McpRegistryController;
 use ego_tools::fs::OsFs;
 
 const CHANNEL_CAPACITY: usize = 1;
+pub(super) const MODE_CYCLE_COMMAND: &str = "ego:mode-cycle";
 pub(super) const ACTION_COMMAND: &str = "ego:action:";
 const ACTION_MENU: &str = "ego_action_menu";
 pub(super) const MODEL_PICKER_COMMAND: &str = "ego:model-picker:";
@@ -467,6 +468,7 @@ struct SurfaceStatus {
     config_store: Option<Arc<dyn UserConfigStore>>,
     snapshot: Option<SurfaceSnapshot>,
     status_base: Option<StatusBase>,
+    selected_mode: Option<Mode>,
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
@@ -569,6 +571,7 @@ impl Default for SurfaceStatus {
             config_store: None,
             snapshot: None,
             status_base: None,
+            selected_mode: None,
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
@@ -1440,6 +1443,9 @@ impl Seat {
                     }
                     Dispatch::Init(arguments) => Line::HostCommand(HostCommand::Init(arguments)),
                     Dispatch::Fast(enabled) => Line::HostCommand(HostCommand::Fast(enabled)),
+                    Dispatch::Mode(mode) => {
+                        Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode)))
+                    }
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
@@ -1701,6 +1707,16 @@ impl Seat {
         }
     }
 
+    /// The last accepted selection, including one staged for the next boundary.
+    pub(crate) fn set_selected_mode(&self, mode: Mode) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status
+                .lock()
+                .expect("surface status lock")
+                .selected_mode = Some(mode);
+        }
+    }
+
     /// Replace only the active generation mode used by the next status rebuild.
     pub(crate) fn set_status_mode(&self, mode: Mode) {
         let SeatKind::Live(live) = &self.kind else {
@@ -1786,6 +1802,13 @@ impl Seat {
         } = setup;
         {
             let mut status = live.status.lock().expect("surface status lock");
+            if status
+                .status_base
+                .as_ref()
+                .is_none_or(|base| base.session != session)
+            {
+                status.selected_mode = None;
+            }
             status.native_status = native;
             status.width = width;
             status.template = super::status::StatusTemplate::new(template);
@@ -2170,6 +2193,10 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn activate_session(&self, target: SessionId) -> bool {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            status.selected_mode = None;
+        }
         self.request(|reply| Control::ActivateSession { target, reply }, false)
     }
 

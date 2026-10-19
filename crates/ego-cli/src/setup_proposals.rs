@@ -1360,7 +1360,7 @@ mod tests {
     #[test]
     fn setup_write_preview_requires_workspace_and_preserves_unrelated_policy() {
         let (_temp, workspace, home, layers, effective, mut probes, findings) = fixture(
-            "sandbox='workspace'\nmode='edits'\n[permissions]\ndeny=['write(/unrelated/**)']\n",
+            "sandbox='workspace'\nmode='yolo'\n[permissions]\ndeny=['write(/unrelated/**)']\n",
         );
         probes[0] = Probe::Write {
             path: findings[0].requested.clone(),
@@ -1554,7 +1554,7 @@ mod tests {
     #[test]
     fn setup_absent_write_confirmation_binds_parent_and_absence() {
         let (_temp, workspace, home, layers, effective, mut probes, findings) =
-            fixture("sandbox='workspace'\nmode='edits'");
+            fixture("sandbox='workspace'\nmode='yolo'");
         std::fs::remove_file(&findings[0].requested).unwrap();
         probes[0] = Probe::Write {
             path: findings[0].requested.clone(),
@@ -1573,7 +1573,7 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("path changed"));
         assert_eq!(
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
-            "roots=[]\nsandbox='workspace'\nmode='edits'"
+            "roots=[]\nsandbox='workspace'\nmode='yolo'"
         );
     }
 

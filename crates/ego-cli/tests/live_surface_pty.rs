@@ -6154,7 +6154,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("model", "Select model"),
         ("sessions", "Select session"),
         ("thinking", "Select reasoning for"),
-        ("mode", "Choose execution mode"),
+        ("mode", "Choose permission mode"),
         ("permissions", "Choose permission operation"),
         ("statusline", "Choose status-line setup"),
         ("setup", "Select setup proposal items"),

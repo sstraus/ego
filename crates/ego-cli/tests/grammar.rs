@@ -391,6 +391,7 @@ fn the_mode_flags_collapse_into_one_value() {
         ("default", Mode::Default),
         ("auto", Mode::Auto),
         ("edits", Mode::Edits),
+        ("accept-edits", Mode::Edits),
         ("yolo", Mode::Yolo),
     ] {
         assert_eq!(
