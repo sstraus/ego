@@ -27,7 +27,7 @@ impl TypedTool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read at most 2000 lines or 32 KiB of a file. Truncated results include the next byte offset."
+        "Read file content when the path is known; use glob to find paths and grep to locate matching lines. Returns at most 2000 lines or 32 KiB. To continue a truncated read, pass its next byte offset, not a line number."
     }
 
     fn prepare_typed(

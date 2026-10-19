@@ -9,9 +9,9 @@ configuration and instructions are admitted. These are separate authorities.
 | Mode | Purpose |
 | --- | --- |
 | `plan` | Prevent mutating operations; inspect and reason |
-| `default` | Apply ordinary deterministic policy and escalation |
+| `default` | Free reads, prompts for uncovered writes, honors allow rules and coordinator bounded admission |
 | `auto` | Use deterministic low/bounded analysis, a judge where needed, then ordinary escalation |
-| `edits` | Allow ordinary editing while retaining separate checks for higher-risk effects |
+| `accept-edits` | Admit workspace file edits; execution, network, opaque tools and external writes retain their normal checks |
 | `yolo` | Relax ordinary session approval; retain system denies, confinement, offline, budgets, and hard boundaries |
 
 Trusted interactive sessions choose `auto` only when no mode is configured.
@@ -24,6 +24,21 @@ explicitly, use `ego --mode auto --sandbox workspace`.
 Headless work does not ask a human; unavailable required approval becomes exit 3.
 `--plan` and `--yolo` are mode shortcuts. REPL `/mode`, `/plan`, and `/yolo`
 use live session authorities; a system `max_mode` can refuse a selection.
+
+Use `/mode` for the picker or `/mode <name>` for direct selection. Shift+Tab
+cycles plan → default → auto → accept-edits → yolo → plan without submitting
+or clearing the draft. Modals ignore it. During a turn, selections wait until
+the turn ends and then stage the next generation. Unavailable modes report why
+and leave the previous mode unchanged. The fixed sandbox cannot be relaxed.
+
+Default remains a normal public mode with its existing policy. This selection
+feature adds no new permission or session-approval mechanism. Existing rules,
+ACP permission answers, denies and confinement checks keep their behavior.
+`edits` remains an input alias for accept-edits and config emits `accept-edits`.
+Snapshot v1 preserves its historical bytes and digests for saved-session resume.
+Missing mode still uses default except for existing trusted-interactive auto.
+Busy cycle intents resolve in the owner's queue order, so repeated keys and
+preceding direct selections compose from the latest accepted staged mode.
 
 A prepared call can contain several operations: `edit` needs read and write,
 external tools need connection and opaque-call authority. Every required operation

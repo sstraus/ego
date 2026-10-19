@@ -40,11 +40,35 @@ pub enum Mode {
     Plan,
     Default,
     Auto,
+    #[serde(rename = "accept-edits", alias = "edits")]
     Edits,
     Yolo,
 }
 
 impl Mode {
+    /// Public selection and cycle order. Default is the ordinary deterministic permission policy.
+    pub const SELECTABLE: [Self; 5] = [
+        Self::Plan,
+        Self::Default,
+        Self::Auto,
+        Self::Edits,
+        Self::Yolo,
+    ];
+
+    pub fn parse_selection(value: &str) -> Option<Self> {
+        Self::SELECTABLE
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::SELECTABLE
+            .iter()
+            .position(|mode| *mode == self)
+            .expect("every permission mode is selectable");
+        Self::SELECTABLE[(index + 1) % Self::SELECTABLE.len()]
+    }
+
     /// Whether this mode stays under the approved system maximum.
     pub const fn within(self, maximum: Self) -> bool {
         self.ceiling_rank() <= maximum.ceiling_rank()
@@ -65,7 +89,7 @@ impl Mode {
             Mode::Plan => "plan",
             Mode::Default => "default",
             Mode::Auto => "auto",
-            Mode::Edits => "edits",
+            Mode::Edits => "accept-edits",
             Mode::Yolo => "yolo",
         }
     }

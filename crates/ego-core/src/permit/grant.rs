@@ -975,11 +975,17 @@ impl fmt::Display for PermissionRequest {
                             EscapedBytes(content)
                         )?,
                         Change::Replace {
+                            replace_all,
                             old_string,
                             new_string,
                         } => write!(
                             f,
-                            "\n  replace old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
+                            "\n  replace {} old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
+                            if *replace_all {
+                                "all original non-overlapping occurrences of"
+                            } else {
+                                "exactly one occurrence of"
+                            },
                             TerminalSafe(old_string),
                             TerminalSafe(new_string)
                         )?,
@@ -2405,6 +2411,7 @@ mod tests {
                 Op::Write {
                     path: CanonPath::new("/ws/edit.txt"),
                     change: Change::Replace {
+                        replace_all: false,
                         old_string: "old\n".to_string(),
                         new_string: "new\t".to_string(),
                     },
@@ -2427,7 +2434,7 @@ mod tests {
                 "- list /ws/src matching *.rs\\n\n",
                 "- search /ws/src for unsafe\\u{1b}\n",
                 "- write /ws/edit.txt\n",
-                "  replace old text: old\\n\n",
+                "  replace exactly one occurrence of old text: old\\n\n",
                 "  with new text: new\\t\n",
                 "  final content depends on the file at execution time",
             )

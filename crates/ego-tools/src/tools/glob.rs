@@ -35,7 +35,7 @@ impl TypedTool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files whose path matches a glob pattern. Returns paths relative to the search root, one per line; it does not read the files. Stops after 512 visited entries and marks an incomplete result."
+        "Find paths by glob pattern, not file contents (use grep for content). Returns paths relative to the search root, one per line; it does not read the files. Stops after 512 visited entries and marks an incomplete result."
     }
 
     fn prepare_typed(

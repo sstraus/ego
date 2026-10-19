@@ -547,10 +547,12 @@ pub(super) fn handle_policy_request(
     };
 
     match request {
-        PolicyControlRequest::SetMode(mode) => match apply(PolicyControlRequest::SetMode(mode))? {
-            PolicyControlOutcome::Mode { .. } => Ok(None),
-            _ => Err(mismatch()),
-        },
+        request @ (PolicyControlRequest::SetMode(_) | PolicyControlRequest::CycleMode) => {
+            match apply(request)? {
+                PolicyControlOutcome::Mode { .. } => Ok(None),
+                _ => Err(mismatch()),
+            }
+        }
         PolicyControlRequest::Rule(mutation) => {
             let effect = mutation.effect;
             let PolicyControlOutcome::Rule { receipt, .. } =

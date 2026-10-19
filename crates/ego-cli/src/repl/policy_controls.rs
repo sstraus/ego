@@ -21,13 +21,7 @@ use ego_core::turn::{
 pub use crate::rules::{RememberPreview, RememberRequest, RuleMutationReceipt};
 use crate::rules::{RuleApplication, RuleApplicationError, RuleChange, RuleReadAuthority};
 
-const MODE_OPTIONS: [Mode; 5] = [
-    Mode::Plan,
-    Mode::Default,
-    Mode::Auto,
-    Mode::Edits,
-    Mode::Yolo,
-];
+const MODE_OPTIONS: [Mode; 5] = Mode::SELECTABLE;
 
 /// A read-only operation over the generation's admitted permission rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +40,7 @@ pub enum PermissionInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyControlRequest {
     SetMode(Mode),
+    CycleMode,
     Rule(RuleMutation),
     Permission(PermissionInput),
 }
@@ -405,9 +400,15 @@ impl PolicyApplicationOwner {
     ) -> Result<PolicyControlOutcome, PolicyControlError> {
         match request {
             PolicyControlRequest::SetMode(mode) => self.apply_mode(mode),
+            PolicyControlRequest::CycleMode => self.apply_mode(self.selected_mode()?.next()),
             PolicyControlRequest::Rule(mutation) => self.apply_rule(mutation),
             PolicyControlRequest::Permission(input) => self.apply_permission(input),
         }
+    }
+
+    /// Last accepted mode, including pending changes at the generation boundary.
+    pub fn selected_mode(&self) -> Result<Mode, PolicyControlError> {
+        Ok(self.selection.next_snapshot()?.mode)
     }
 
     /// Inspect admitted rules without reading mutable config a second time.

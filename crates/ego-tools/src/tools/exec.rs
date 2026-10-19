@@ -46,7 +46,7 @@ impl TypedTool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Run one exact argv-native process without a shell"
+        "Run one argv-native process: pass executable and arguments separately, with no implicit shell, pipes or redirects. Use cwd for its working directory and timeout_ms to bound execution. Set background=true for long work; returns a session-owned ID for exec_status or exec_cancel. Use read_tool_result with returned full-output references for truncated output"
     }
 
     fn prepare_typed(

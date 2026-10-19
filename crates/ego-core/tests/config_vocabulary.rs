@@ -140,7 +140,7 @@ fn managed_values_parse_to_existing_strong_types_and_canonical_toml() {
         (
             ManagedConfigKey::Mode,
             "\"edits\"",
-            "\"edits\"",
+            "\"accept-edits\"",
             ManagedConfigValue::Mode(Mode::Edits),
         ),
         (

@@ -485,3 +485,40 @@ fn judge_decoder_accepts_only_one_complete_json_fence() {
     });
     assert!(matches!(decoder.finish(), JudgeOutcome::Escalate { .. }));
 }
+
+// Catches: a judge approval for unique replacement is reused for an explicit bulk edit.
+#[test]
+fn replace_all_mode_changes_judge_identity_and_visible_evidence() {
+    let make = |replace_all| {
+        PreparedCall::new(
+            "edit",
+            Op::Write {
+                path: CanonPath::new(TEST_ROOT),
+                change: ego_core::permit::Change::Replace {
+                    replace_all,
+                    old_string: "old".into(),
+                    new_string: "new".into(),
+                },
+            },
+        )
+    };
+    let unique = make(false);
+    let bulk = make(true);
+    assert_ne!(unique.authority_fingerprint(), bulk.authority_fingerprint());
+    let facts = |call: &PreparedCall| {
+        canonical_json(
+            &JudgeInput::new(
+                call,
+                &confinement(Confinement::Workspace, false),
+                ExecCaps::READ_SCOPED,
+                &escalation(),
+            )
+            .request(&config()),
+        )
+    };
+    let unique_facts = facts(&unique);
+    let bulk_facts = facts(&bulk);
+    assert_ne!(unique_facts, bulk_facts);
+    assert!(bulk_facts.to_string().contains("\"replace_all\":true"));
+    assert!(unique_facts.to_string().contains("\"replace_all\":false"));
+}

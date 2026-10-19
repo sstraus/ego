@@ -219,7 +219,7 @@ fn nested_insertion_pruning_preserves_unrelated_profile_content_and_comments() {
             .unwrap()
             .mode
             .map(|mode| mode.as_str()),
-        Some("edits")
+        Some("accept-edits")
     );
     assert!(after_set.contains("# retain this valid field"));
     store
@@ -238,7 +238,7 @@ fn nested_insertion_pruning_preserves_unrelated_profile_content_and_comments() {
             .unwrap()
             .mode
             .map(|mode| mode.as_str()),
-        Some("edits")
+        Some("accept-edits")
     );
     assert!(text.contains("# retain this valid field"));
 }
@@ -361,7 +361,7 @@ fn concurrent_distinct_managed_writes_serialize_without_lost_updates() {
     }
     let text = std::fs::read_to_string(&path).unwrap();
     let parsed = ConfigLayer::parse(Source::User, &text).unwrap().value;
-    assert_eq!(parsed.mode.map(|mode| mode.as_str()), Some("edits"));
+    assert_eq!(parsed.mode.map(|mode| mode.as_str()), Some("accept-edits"));
     assert_eq!(parsed.bare, Some(true));
 }
 
