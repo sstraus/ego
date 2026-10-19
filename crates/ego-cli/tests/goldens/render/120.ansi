@@ -1,12 +1,10 @@
 [1;38;2;155;181;204mThe renderer[0m
 
-A paragraph with [1mstrong weight[0m, [3memphasis[0m, [9ma retraction[0m and [38;2;174;185;213minline_code()[0m in it, long enough that it has to wrap at every
-width this document is rendered at.
+A paragraph with [1mstrong weight[0m, [3memphasis[0m, [9ma retraction[0m and [38;2;174;185;213minline_code()[0m in it, long enough that it has to wrap at every width this document is rendered at.
 
 [1;38;2;155;181;204mTwo axes[0m
 
-Syntax highlighting writes a foreground; a diff writes a background. They compose on one cell grid. See [4;38;2;150;173;209mthe decision[0m
-[4;38;2;150;173;209mrecord[0m.
+Syntax highlighting writes a foreground; a diff writes a background. They compose on one cell grid. See [4;38;2;150;173;209mthe decision record[0m.
 
 [38;2;85;85;85m───[0m [1;38;2;155;181;204mRules[0m
 
