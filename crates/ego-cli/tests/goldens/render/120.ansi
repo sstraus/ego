@@ -1,21 +1,21 @@
-[1;38;2;137;221;255mThe renderer[0m
+[1;38;2;155;181;204mThe renderer[0m
 
-A paragraph with [1mstrong weight[0m, [3memphasis[0m, [9ma retraction[0m and [38;2;177;185;249minline_code()[0m in it, long enough that it has to wrap at every width this document is rendered at.
+A paragraph with [1mstrong weight[0m, [3memphasis[0m, [9ma retraction[0m and [38;2;174;185;213minline_code()[0m in it, long enough that it has to wrap at every width this document is rendered at.
 
-[1;38;2;137;221;255mTwo axes[0m
+[1;38;2;155;181;204mTwo axes[0m
 
-Syntax highlighting writes a foreground; a diff writes a background. They compose on one cell grid. See [4;38;2;130;170;255mthe decision record[0m.
+Syntax highlighting writes a foreground; a diff writes a background. They compose on one cell grid. See [4;38;2;150;173;209mthe decision record[0m.
 
-[38;2;85;85;85m───[0m [1;38;2;137;221;255mRules[0m
+[38;2;85;85;85m───[0m [1;38;2;155;181;204mRules[0m
 
-[38;2;137;221;255m• [0mMeasure in display cells, never in bytes.
-[38;2;137;221;255m• [0mDegrade at the gate, never at the call site.
-  [38;2;137;221;255m◦ [0mA nested claim, wrapped so the continuation has to keep its column.
-[38;2;137;221;255m• [0mEmit nothing a terminal in the matrix would draw as garbage.
+[38;2;155;181;204m• [0mMeasure in display cells, never in bytes.
+[38;2;155;181;204m• [0mDegrade at the gate, never at the call site.
+  [38;2;155;181;204m◦ [0mA nested claim, wrapped so the continuation has to keep its column.
+[38;2;155;181;204m• [0mEmit nothing a terminal in the matrix would draw as garbage.
 
-[38;2;137;221;255m1. [0mParse.
-[38;2;137;221;255m2. [0mMeasure.
-[38;2;137;221;255m3. [0mDraw.
+[38;2;155;181;204m1. [0mParse.
+[38;2;155;181;204m2. [0mMeasure.
+[38;2;155;181;204m3. [0mDraw.
 
 [38;2;153;153;153m▌ [0mA blockquote, which carries a bar in the left column and wraps like any other prose.
 
@@ -34,8 +34,8 @@ Syntax highlighting writes a foreground; a diff writes a background. They compos
 
 Loose lists are the case a tight one hides:
 
-[38;2;137;221;255m• [0mThe first item, which is a paragraph in its own right.
-[38;2;137;221;255m• [0mThe second item, whose continuation follows a blank line and has to keep the column the bullet set.
+[38;2;155;181;204m• [0mThe first item, which is a paragraph in its own right.
+[38;2;155;181;204m• [0mThe second item, whose continuation follows a blank line and has to keep the column the bullet set.
 
   A second paragraph inside that same item.
 

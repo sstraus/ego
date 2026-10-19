@@ -4,7 +4,7 @@
 //! `ARCHITECTURE.md` settle
 //! what would otherwise be a matter of taste. A model emits
 //! `**Step 13.5 spedito** (` a9b84ad `)`; what reaches the terminal is
-//! `ESC[1mStep 13.5 spedito ESC[22m ( ESC[38;2;177;185;249ma9b84ad ESC[39m )`.
+//! `ESC[1mStep 13.5 spedito ESC[22m ( ESC[38;2;174;185;213ma9b84ad ESC[39m )`.
 //! Two rules, and they are rules rather than preferences:
 //!
 //! - `**strong**` is **weight and no colour**.
@@ -638,11 +638,11 @@ mod tests {
         let out = bytes("**shipped** in `run.rs`", 80);
         assert!(out.contains("\x1b[1mshipped\x1b[0m"), "{out:?}");
         assert!(
-            out.contains("\x1b[38;2;177;185;249mrun.rs\x1b[0m"),
+            out.contains("\x1b[38;2;174;185;213mrun.rs\x1b[0m"),
             "{out:?}"
         );
         // And neither borrows the other's axis.
-        assert!(!out.contains("\x1b[1;38;2;177;185;249mrun.rs"));
+        assert!(!out.contains("\x1b[1;38;2;174;185;213mrun.rs"));
     }
 
     /// Nesting composes rather than overwrites. `**bold with `code`**` is what
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn nested_emphasis_composes() {
         let out = bytes("**bold with `code` inside**", 80);
-        assert!(out.contains("\x1b[1;38;2;177;185;249mcode"), "{out:?}");
+        assert!(out.contains("\x1b[1;38;2;174;185;213mcode"), "{out:?}");
     }
 
     #[test]
@@ -754,7 +754,7 @@ mod tests {
         let source = "| flag | note |\n|---|---|\n| `--no-color` | off |\n";
         let lines = render(source, 60);
         let rendered = crate::render::block(&lines, Depth::TrueColor);
-        assert!(rendered.contains("38;2;177;185;249m--no-color"));
+        assert!(rendered.contains("38;2;174;185;213m--no-color"));
         let widths: Vec<usize> = lines
             .iter()
             .filter(|line| line.text().starts_with(['┌', '│', '├', '└']))

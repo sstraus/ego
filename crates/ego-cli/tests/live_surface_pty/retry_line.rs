@@ -159,8 +159,8 @@ fn retry_colour_contract(recovers: bool, no_color: bool) {
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    let red = vt100::Color::Rgb(255, 107, 128); // Palette::ERROR
-    let green = vt100::Color::Rgb(80, 200, 80); // Palette::ADDED_FG (successful tool rows)
+    let red = vt100::Color::Rgb(221, 151, 158); // Palette::ERROR
+    let green = vt100::Color::Rgb(151, 207, 167); // Palette::ADDED_FG (successful tool rows)
     let expected_live = if no_color { vt100::Color::Default } else { red };
     let expected_receipt = if no_color {
         vt100::Color::Default
@@ -179,7 +179,7 @@ fn retry_colour_contract(recovers: bool, no_color: bool) {
     );
     if !recovers {
         assert!(
-            !String::from_utf8_lossy(&after).contains("\x1b[38;2;80;200;80m"),
+            !String::from_utf8_lossy(&after).contains("\x1b[38;2;151;207;167m"),
             "failed turn emitted success colour"
         );
     }

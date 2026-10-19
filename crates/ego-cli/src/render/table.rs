@@ -422,7 +422,7 @@ mod tests {
         let rendered = table.render(40, Depth::TrueColor);
         let header = rendered[1].render(Depth::TrueColor);
         assert!(
-            header.contains("\x1b[1;38;2;177;185;249m--flag"),
+            header.contains("\x1b[1;38;2;174;185;213m--flag"),
             "{header}"
         );
     }

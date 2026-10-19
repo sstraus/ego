@@ -116,16 +116,25 @@ pub fn open<'a>(
     id: &SessionId,
     clock: &dyn Clock,
 ) -> Result<OpenSession<'a>, StoreError> {
+    let opened = open_candidate(store, id, clock)?;
+    opened.writer.publish_pid_index().map_err(StoreError::Io)?;
+    Ok(opened)
+}
+
+/// Open a possible successor without changing the host's active-session binding.
+pub(crate) fn open_candidate<'a>(
+    store: &'a JsonlStore,
+    id: &SessionId,
+    clock: &dyn Clock,
+) -> Result<OpenSession<'a>, StoreError> {
     let inputs = LeaseInputs {
         pid: std::process::id(),
         now: clock.now(),
         stale_after: STALE_AFTER,
         is_alive: &assume_alive,
     };
-    store.open_writer(id, inputs).map_err(|err| {
-        // The three `OpenError` variants differ in what they already changed
-        // on disk, which the message keeps; what the caller needs from here is
-        // a store failure it can report as one.
+    store.open_candidate(id, inputs).map_err(|err| {
+        // Preserve recovery details in the store failure reported to the caller.
         StoreError::Io(std::io::Error::other(err.to_string()))
     })
 }
@@ -138,7 +147,11 @@ pub fn open<'a>(
 /// equal to itself. Resolving it a second time here would be the second
 /// canonicaliser `AGENTS.md`'s reuse-first rule exists to prevent.
 pub fn jsonl(root: PathBuf, workspace: PathBuf) -> JsonlStore {
-    JsonlStore::new(root, workspace, Box::new(OsIo))
+    let store = JsonlStore::new(root, workspace, Box::new(OsIo));
+    match crate::config::ego_home() {
+        Some(home) => store.with_pid_index(home),
+        None => store,
+    }
 }
 
 /// The state a durable run starts from, and the writer it owns.

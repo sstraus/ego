@@ -372,14 +372,21 @@ impl<'a> Tools<'a> {
                 .description
                 .push_str(super::delegation_guidance(self.delegation_host));
         }
-        if matches!(tool, RegisteredTool::Task) && !self.named_agents.is_empty() {
-            let names: Vec<_> = self
-                .named_agents
-                .iter()
-                .map(|agent| agent.name.as_str())
-                .collect();
-            descriptor.parameters["properties"]["agent"]["enum"] = serde_json::json!(names);
-            descriptor.description.push_str(" Select an optional named agent with the agent field; its authority cannot exceed yours.");
+        if matches!(tool, RegisteredTool::Task) {
+            if self.named_agents.is_empty() {
+                descriptor.parameters["properties"]
+                    .as_object_mut()
+                    .expect("task properties are an object")
+                    .remove("agent");
+            } else {
+                let names: Vec<_> = self
+                    .named_agents
+                    .iter()
+                    .map(|agent| agent.name.as_str())
+                    .collect();
+                descriptor.parameters["properties"]["agent"]["enum"] = serde_json::json!(names);
+                descriptor.description.push_str(" Select an optional named agent with the agent field; its authority cannot exceed yours.");
+            }
         }
         descriptor
     }

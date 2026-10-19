@@ -10,7 +10,7 @@ configuration and instructions are admitted. These are separate authorities.
 | --- | --- |
 | `plan` | Prevent mutating operations; inspect and reason |
 | `default` | Apply ordinary deterministic policy and escalation |
-| `auto` | Use deterministic low/bounded analysis, a judge where needed (main model by default), then ordinary escalation |
+| `auto` | Use deterministic low/bounded analysis, a judge where needed, then ordinary escalation |
 | `edits` | Allow ordinary editing while retaining separate checks for higher-risk effects |
 | `yolo` | Relax ordinary session approval; retain system denies, confinement, offline, budgets, and hard boundaries |
 
@@ -60,7 +60,10 @@ mean the command is known to be harmful. An exec can report `runs a program`,
 `program not fully identified`, or `runs code from its arguments`, even for a
 read-only shell script. `default` mode can ask for each such call. In `auto`,
 deterministic analysis runs first, then a configured `permissions.judge`, then
-ordinary escalation. No configured judge means there is no sentinel model.
+ordinary escalation. Without an explicit judge selection, auto mode derives a
+judge from the current provider/model, preferring a supplied review or small-model
+default for supported providers. It does not mean that no judge runs.
+`permissions.judge="none"` disables that role.
 The judge receives bounded task context and action evidence (see
 [Judge action evidence](#judge-action-evidence)); it cannot classify a shell
 script from content it is not shown. A configured
