@@ -1250,9 +1250,8 @@ impl PolicyEngine {
         self.coordinator && self.risk(call).class == super::analysis::RiskClass::High
     }
 
-    /// What this engine lets a run do at `path`: the most specific containing
-    /// boundary decides. A path with a `..` component is not canonical and is
-    /// never inside anything.
+    /// Nested read-only restrictions veto writes throughout their subtree.
+    /// Otherwise the most specific root wins. Parent traversal is not canonical.
     fn reach(&self, path: &CanonPath) -> Option<RootAccess> {
         if path
             .as_path()
@@ -1260,6 +1259,11 @@ impl PolicyEngine {
             .any(|part| part == std::path::Component::ParentDir)
         {
             return None;
+        }
+        if self.roots.iter().any(|root| {
+            root.restricts_writes(&self.workspace, &self.roots) && path.is_or_under(root.path())
+        }) {
+            return Some(RootAccess::Read);
         }
         let depth = |base: &CanonPath| base.as_path().components().count();
         self.roots

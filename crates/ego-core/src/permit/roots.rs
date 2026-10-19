@@ -56,14 +56,21 @@ impl ProfileRoot {
     pub fn access(&self) -> RootAccess {
         self.access
     }
+
+    /// A read root inside writable authority subtracts that subtree. A broad
+    /// read root may still contain a more specific writable root or workspace.
+    pub fn restricts_writes(&self, workspace: &CanonPath, roots: &[ProfileRoot]) -> bool {
+        self.access == RootAccess::Read
+            && (self.path.is_or_under(workspace)
+                || roots.iter().any(|root| {
+                    root.access == RootAccess::ReadWrite && self.path.is_or_under(&root.path)
+                }))
+    }
 }
 
 /// Why a profile's roots were refused at load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootsError {
-    NestedReadOnly {
-        path: CanonPath,
-    },
     OutsideCeiling {
         path: CanonPath,
     },
@@ -83,10 +90,6 @@ pub enum RootsError {
 impl std::fmt::Display for RootsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RootsError::NestedReadOnly { path } => write!(
-                f,
-                "nested-read-only-root: {path} is beneath a read-write root; Landlock cannot enforce it"
-            ),
             RootsError::OutsideCeiling { path } => {
                 write!(f, "extra root {path} exceeds the system roots ceiling")
             }
@@ -150,17 +153,6 @@ pub fn admit_roots(
             Ok(ProfileRoot::new(path, root.access))
         })
         .collect::<Result<Vec<_>, RootsError>>()?;
-    for root in &admitted {
-        if root.access() == RootAccess::Read
-            && admitted.iter().any(|other| {
-                other.access() == RootAccess::ReadWrite && root.path().is_or_under(other.path())
-            })
-        {
-            return Err(RootsError::NestedReadOnly {
-                path: root.path().clone(),
-            });
-        }
-    }
     Ok(admitted)
 }
 

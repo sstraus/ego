@@ -137,8 +137,12 @@ The first `ego roots add` writes an explicit list and replaces implicit
 express them. Use `ego config set 'exec_paths=["/absolute/path"]'` to edit `exec_paths`. Restart or resume the
 session to apply changed perimeter settings.
 
-Extra roots use canonical paths; conflicting nested read-only/read-write roots
-are refused. See [permissions](../guides/permissions.md).
+Extra roots use canonical paths. A nested read-only root restricts built-in
+writes below a writable root or workspace. macOS Seatbelt also denies native
+writes and execution there. Linux Landlock cannot subtract ancestor grants;
+ego reports that the writable ancestor wins for exec children without exiting.
+The read-only boundary still applies to built-in tools. See
+[permissions](../guides/permissions.md).
 
 `exec.env="core"` retains only present PATH, HOME, USER, LOGNAME, SHELL, TMPDIR,
 TMP, TEMP, LANG, LC_ALL, LC_CTYPE, SYSTEMROOT, WINDIR, COMSPEC, and PATHEXT.

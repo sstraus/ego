@@ -57,6 +57,16 @@ impl ExecutionPolicy {
                         .runtime_roots
                         .iter()
                         .all(|path| covered(path, &old.runtime_roots))
+                    && old
+                        .roots
+                        .iter()
+                        .filter(|root| root.restricts_writes(&old.workspace, &old.roots))
+                        .all(|previous| {
+                            self.roots.iter().any(|root| {
+                                root.restricts_writes(&self.workspace, &self.roots)
+                                    && previous.path().is_or_under(root.path())
+                            })
+                        })
                     && self.roots.iter().all(|root| {
                         old.roots.iter().any(|previous| {
                             root.path().as_path().starts_with(previous.path().as_path())

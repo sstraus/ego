@@ -2084,9 +2084,16 @@ when loading a session that has not yet started a run. Paths inside the grant
 are still canonicalized by each built-in tool, so symlinks cannot open siblings.
 
 Effective perimeter inspection warns when canonical roots overlap the workspace.
-A read root beneath a read-write root is refused with `nested-read-only-root`,
-including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
-remains an admission error; it is never shown as an admitted root.
+A read root beneath a writable root or the workspace is admitted. Built-in tools
+keep that subtree read-only, even if a deeper write root exists. On macOS,
+Seatbelt denies writes and execution in the subtree; later grants cannot reopen
+it, and its ancestors cannot be renamed to bypass the restriction. On Linux,
+Landlock grants are additive: the writable ancestor wins for exec children,
+including execution in the read subtree. Ego reports that limitation without
+exiting; built-in tools still enforce read-only access. With `sandbox=ro`, the
+global native write denial remains in force. With `sandbox=off`, native writes
+are not confined. A missing or unresolvable configured path is reported as a
+warning and remains an admission error; it is never shown as an admitted root.
 
 `/config` lists Model, Mode, Sandbox, Perimeter, and Budget from the session's
 captured startup configuration. Each declaration names its origin layer and

@@ -924,6 +924,26 @@ pub(super) fn finish_rooted_settings(
     let roots =
         super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
 
+    #[cfg(target_os = "linux")]
+    for read in roots
+        .iter()
+        .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
+    {
+        if effective.sandbox != Some(ego_core::permit::Confinement::Off)
+            && read.restricts_writes(&CanonPath::new(&root), &roots)
+        {
+            let winner = if effective.sandbox == Some(ego_core::permit::Confinement::Ro) {
+                "executable ancestor wins for exec children; sandbox ro still denies writes"
+            } else {
+                "writable ancestor wins for exec children (including execution)"
+            };
+            diagnostics.note(&format!(
+                "Landlock cannot subtract read-only root {} from an ancestor grant; {winner}; built-in tools remain read-only",
+                read.path()
+            ));
+        }
+    }
+
     let exec_paths = effective
         .exec_paths
         .iter()

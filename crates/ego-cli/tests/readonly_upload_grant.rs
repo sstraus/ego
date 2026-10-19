@@ -87,6 +87,73 @@ fn grant_is_read_only() {
     );
 }
 
+// Catches: an attachment subtree under writable authority aborts CLI startup.
+#[test]
+fn nested_launch_grant_starts_and_preserves_builtin_read_only_authority() {
+    for (sandbox, external_root) in [("workspace", false), ("off", false), ("workspace", true)] {
+        let places = Places::new();
+        configure(&places);
+        let external = tempfile::tempdir().unwrap();
+        let external = external.path().canonicalize().unwrap();
+        let writable = if external_root {
+            external.as_path()
+        } else {
+            places.workspace_path()
+        };
+        if external_root || sandbox == "off" {
+            std::fs::write(places.home_path().join("config.toml"), format!(
+            "model='ollama/qwen3'\nthinking='off'\nsandbox='{sandbox}'\nmode='yolo'\nroots=[{{path='{}',access='read-write'}}]\n",
+            writable.display()
+        )).unwrap();
+        }
+        let uploads = writable.join("attachments");
+        std::fs::create_dir(&uploads).unwrap();
+        let uploads = uploads.canonicalize().unwrap();
+        let source = uploads.join("attachment.txt");
+        let sibling = writable.join("sibling.txt");
+        std::fs::write(&source, "NESTED-UPLOAD").unwrap();
+        let stub = Stub::start(Plan {
+            completions: vec![
+                call("read_upload", "read", json!({"path": source})),
+                call(
+                    "write_upload",
+                    "write",
+                    json!({"path": source, "content": "OVERWRITTEN"}),
+                ),
+                call(
+                    "write_sibling",
+                    "write",
+                    json!({"path": sibling, "content": "SIBLING-WRITE"}),
+                ),
+                Reply::Sse(text("Finished.")),
+            ],
+            ..Plan::default()
+        });
+        let finished = places
+            .ego(&stub)
+            .args([
+                "--read-only-dir",
+                uploads.to_str().unwrap(),
+                "Inspect nested upload",
+            ])
+            .run();
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        assert!(stub.generations()[1].to_string().contains("NESTED-UPLOAD"));
+        assert_eq!(std::fs::read(&source).unwrap(), b"NESTED-UPLOAD");
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"SIBLING-WRITE");
+        #[cfg(target_os = "linux")]
+        if sandbox != "off" {
+            assert!(
+                finished
+                    .stderr
+                    .contains("writable ancestor wins for exec children"),
+                "{}",
+                finished.stderr
+            );
+        }
+    }
+}
+
 // Catches: ACP accepts additionalDirectories but fails to carry reads into a turn.
 #[test]
 fn acp_additional_directories_become_read_roots() {
@@ -268,31 +335,12 @@ fn upload_grant_with_narrower_host_sandbox_ceiling_reads_on_prompt() {
     );
 }
 
-// Catches: a launch grant bypasses system roots ceilings or writable overlap checks.
+// Catches: a launch grant bypasses system roots ceilings.
 #[test]
-fn grant_respects_ceilings_and_existing_write_authority() {
+fn grant_respects_system_roots_ceilings() {
     let places = Places::new();
     configure(&places);
     let stub = Stub::start(Plan::default());
-    let refused = places
-        .ego(&stub)
-        .args([
-            "--read-only-dir",
-            places
-                .workspace_path()
-                .canonicalize()
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "Inspect",
-        ])
-        .run();
-    assert_eq!(refused.code, Some(2), "{}", refused.stderr);
-    assert!(
-        refused.stderr.contains("writable root"),
-        "{}",
-        refused.stderr
-    );
     let uploads = tempfile::tempdir().unwrap();
     let uploads = uploads.path().canonicalize().unwrap();
     std::fs::write(
