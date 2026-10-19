@@ -73,7 +73,7 @@ pub(crate) async fn observed_selection_host(
     };
     let policy = PolicyEngine::new(
         workspace.clone(),
-        effective.mode.unwrap_or(ego_core::config::Mode::Manual),
+        effective.mode.unwrap_or(ego_core::config::Mode::Default),
         effective.permissions.clone(),
     )
     .with_profile_roots(roots);

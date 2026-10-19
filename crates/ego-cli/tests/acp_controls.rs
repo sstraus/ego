@@ -828,7 +828,7 @@ fn acp_mode_selection_cannot_raise_system_maximum() {
         "ACP accepted yolo above system max_mode=default"
     );
     let state = seat.state(session).unwrap();
-    assert_eq!(state.mode.current, Some(Mode::Manual));
+    assert_eq!(state.mode.current, Some(Mode::Default));
     assert_eq!(state.mode.chosen, None);
 }
 

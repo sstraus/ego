@@ -162,7 +162,6 @@ impl ModeApprover {
                 // here — the boundary was settled before the question was
                 // ever asked — so this widens nothing.
                 Mode::Yolo => true,
-                Mode::Manual => false,
                 // Auto-approves workspace writes. `classify`'s step 0 already
                 // established that every path in this call is in the
                 // workspace.

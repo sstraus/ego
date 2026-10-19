@@ -265,7 +265,7 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
             self.ceiling
         };
         let result = serde_json::json!({"profile": profile, "ceilingProfile": ceiling,
-            "effective": {"mode": effective.mode.unwrap_or(ego_core::config::Mode::Manual),
+            "effective": {"mode": effective.mode.unwrap_or(ego_core::config::Mode::Default),
                 "sandbox": sandbox, "roots": effective.roots, "execPaths": effective.exec_paths},
             "warnings": effective.profile_warnings});
         self.controls

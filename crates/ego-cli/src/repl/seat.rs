@@ -469,7 +469,6 @@ struct SurfaceStatus {
     snapshot: Option<SurfaceSnapshot>,
     status_base: Option<StatusBase>,
     selected_mode: Option<Mode>,
-    session_permissions: ego_core::permit::SessionPermissions,
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
@@ -573,7 +572,6 @@ impl Default for SurfaceStatus {
             snapshot: None,
             status_base: None,
             selected_mode: None,
-            session_permissions: ego_core::permit::SessionPermissions::default(),
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
@@ -1809,7 +1807,6 @@ impl Seat {
                 .as_ref()
                 .is_none_or(|base| base.session != session)
             {
-                status.session_permissions = ego_core::permit::SessionPermissions::default();
                 status.selected_mode = None;
             }
             status.native_status = native;
@@ -2198,7 +2195,6 @@ impl crate::run::InteractiveSeat for Seat {
     fn activate_session(&self, target: SessionId) -> bool {
         if let SeatKind::Live(live) = &self.kind {
             let mut status = live.status.lock().expect("surface status lock");
-            status.session_permissions = ego_core::permit::SessionPermissions::default();
             status.selected_mode = None;
         }
         self.request(|reply| Control::ActivateSession { target, reply }, false)
@@ -2245,15 +2241,6 @@ impl crate::run::InteractiveSeat for Seat {
         let SeatKind::Live(live) = &self.kind else {
             return Box::pin(futures::future::ready(PermissionDecision::Deny));
         };
-        if live
-            .status
-            .lock()
-            .expect("surface status lock")
-            .session_permissions
-            .allows(request)
-        {
-            return Box::pin(futures::future::ready(PermissionDecision::Allow));
-        }
         let (reply, answer) = oneshot::channel();
         if live
             .control

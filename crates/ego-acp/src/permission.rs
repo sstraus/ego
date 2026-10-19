@@ -9,8 +9,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1;
@@ -36,7 +36,6 @@ pub struct AcpPermissionAdapter {
     connection: Option<ConnectionTo<Client>>,
     rule_writer: Option<Arc<dyn PermissionRuleWriter>>,
     session_approval: Arc<AtomicBool>,
-    exact_approvals: Arc<Mutex<ego_core::permit::SessionPermissions>>,
 }
 
 impl std::fmt::Debug for AcpPermissionAdapter {
@@ -63,7 +62,6 @@ impl AcpPermissionAdapter {
             connection: None,
             rule_writer: None,
             session_approval: Arc::new(AtomicBool::new(false)),
-            exact_approvals: Arc::default(),
         }
     }
 
@@ -73,7 +71,6 @@ impl AcpPermissionAdapter {
             connection: Some(connection),
             rule_writer: None,
             session_approval: Arc::new(AtomicBool::new(false)),
-            exact_approvals: Arc::default(),
         }
     }
 
@@ -84,14 +81,6 @@ impl AcpPermissionAdapter {
 
     pub fn with_session_approval(mut self, approval: Arc<AtomicBool>) -> Self {
         self.session_approval = approval;
-        self
-    }
-
-    pub fn with_exact_approvals(
-        mut self,
-        approvals: Arc<Mutex<ego_core::permit::SessionPermissions>>,
-    ) -> Self {
-        self.exact_approvals = approvals;
         self
     }
 
@@ -169,7 +158,6 @@ impl AcpPermissionAdapter {
         let plan = self
             .rule_writer
             .as_ref()
-            .filter(|_| !request.is_manual())
             .and_then(|_| request.presentation())
             .and_then(|presentation| presentation.remember_plan().ok());
         let mut title = request.to_string();
@@ -184,29 +172,13 @@ impl AcpPermissionAdapter {
                 ));
             }
         }
-        if request.is_manual() {
-            title.push_str(&format!(
-                "\n{}",
-                ego_core::permit::terminal_safe(&request.session_scope_description())
-            ));
-            let mut wire = Self::wire_request(&self.session, item, title, false, true);
-            if request.session_reusable() {
-                wire.options.push(v1::PermissionOption::new(
-                    v1::PermissionOptionId::new(Self::ALLOW_SESSION),
-                    "Allow this exact displayed scope for this session only",
-                    v1::PermissionOptionKind::AllowAlways,
-                ));
-            }
-            wire
-        } else {
-            Self::wire_request(
-                &self.session,
-                item,
-                title,
-                plan.is_some(),
-                request.requires_explicit_answer(),
-            )
-        }
+        Self::wire_request(
+            &self.session,
+            item,
+            title,
+            plan.is_some(),
+            request.requires_explicit_answer(),
+        )
     }
 
     /// What the host answered, in core's vocabulary.
@@ -249,19 +221,7 @@ impl AcpPermissionAdapter {
         };
         // A previous tool-session grant cannot approve newly reconstructed
         // execution authority. Use this same permission seat for a fresh answer.
-        if request.is_manual()
-            && self
-                .exact_approvals
-                .lock()
-                .expect("exact approval lock")
-                .allows(&request)
-        {
-            return PermissionDecision::Allow;
-        }
-        if !request.is_manual()
-            && self.session_approval.load(Ordering::Acquire)
-            && !request.requires_explicit_answer()
-        {
+        if self.session_approval.load(Ordering::Acquire) && !request.requires_explicit_answer() {
             return PermissionDecision::Allow;
         }
         let wire = self.live_request(item, &request);
@@ -287,21 +247,6 @@ impl AcpPermissionAdapter {
         let v1::RequestPermissionOutcome::Selected(selected) = &response.outcome else {
             return PermissionDecision::Deny;
         };
-        if request.is_manual() {
-            return match selected.option_id.0.as_ref() {
-                Self::ALLOW_ONCE => PermissionDecision::Allow,
-                Self::ALLOW_SESSION
-                    if self
-                        .exact_approvals
-                        .lock()
-                        .expect("exact approval lock")
-                        .allow(request) =>
-                {
-                    PermissionDecision::Allow
-                }
-                _ => PermissionDecision::Deny,
-            };
-        }
         match selected.option_id.0.as_ref() {
             Self::ALLOW_SESSION => {
                 self.session_approval.store(true, Ordering::Release);
@@ -348,81 +293,5 @@ impl HumanApprover for AcpPermissionAdapter {
         request: &'a PermissionRequest,
     ) -> Pin<Box<dyn Future<Output = PermissionDecision> + Send + 'a>> {
         Box::pin(self.decide_live(item, request.clone()))
-    }
-}
-
-#[cfg(test)]
-mod manual_tests {
-    use super::*;
-    use ego_core::config::{Mode, Ruleset};
-    use ego_core::permit::{CanonPath, Classification, PolicyEngine, PreparedCall};
-
-    fn manual_request(path: &str) -> PermissionRequest {
-        let policy = PolicyEngine::new(
-            CanonPath::new("/workspace"),
-            Mode::Manual,
-            Ruleset::default(),
-        );
-        let Classification::Ask(pending) = policy.classify(PreparedCall::new(
-            "read",
-            Op::Read {
-                path: CanonPath::new(path),
-            },
-        )) else {
-            panic!("manual read must ask");
-        };
-        pending.request().clone()
-    }
-
-    // Catches: manual ACP choices persist broad rules or advertise a grant for all commands.
-    #[test]
-    fn manual_acp_shows_exact_scope_and_no_persistent_options() {
-        let adapter = AcpPermissionAdapter::new(v1::SessionId::new("manual-test"));
-        let request = manual_request("/workspace/a");
-        let wire = adapter.live_request(ItemId::new(), &request);
-        let ids = wire
-            .options
-            .iter()
-            .map(|option| option.option_id.0.as_ref())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                AcpPermissionAdapter::ALLOW_ONCE,
-                AcpPermissionAdapter::REJECT_ONCE,
-                AcpPermissionAdapter::ALLOW_SESSION
-            ]
-        );
-        let encoded = serde_json::to_string(&wire).unwrap();
-        assert!(encoded.contains("/workspace/a"));
-        assert!(encoded.contains("no config is written"));
-        assert!(!encoded.contains("Allow all"));
-    }
-
-    // Catches: the ACP session answer grants changed effects or survives a new adapter/session.
-    #[test]
-    fn manual_acp_answer_only_remembers_the_exact_invocation() {
-        let adapter = AcpPermissionAdapter::new(v1::SessionId::new("manual-test"));
-        let request = manual_request("/workspace/a");
-        let response = v1::RequestPermissionResponse::new(v1::RequestPermissionOutcome::Selected(
-            v1::SelectedPermissionOutcome::new(v1::PermissionOptionId::new(
-                AcpPermissionAdapter::ALLOW_SESSION,
-            )),
-        ));
-        assert_eq!(
-            futures::executor::block_on(adapter.apply_answer(&request, &response)),
-            PermissionDecision::Allow
-        );
-        let approved = adapter.exact_approvals.lock().unwrap();
-        assert!(approved.allows(&request));
-        assert!(!approved.allows(&manual_request("/workspace/b")));
-        assert!(!adapter.session_approval.load(Ordering::Acquire));
-        assert!(
-            !AcpPermissionAdapter::new(v1::SessionId::new("new-session"))
-                .exact_approvals
-                .lock()
-                .unwrap()
-                .allows(&request)
-        );
     }
 }

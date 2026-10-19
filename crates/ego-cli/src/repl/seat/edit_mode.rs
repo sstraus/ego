@@ -238,7 +238,6 @@ impl EditMode for SurfaceEditMode {
                         KeyCode::Char('n' | 'N') => permission_decision_command("deny"),
                         KeyCode::Char('e' | 'E') => permission_decision_command("amend"),
                         KeyCode::Char('a' | 'A') => permission_decision_command("remember"),
-                        KeyCode::Char('s' | 'S') => permission_decision_command("session"),
                         KeyCode::Char('d' | 'D') => permission_decision_command("details"),
                         KeyCode::Enter => ReedlineEvent::None,
                         KeyCode::Esc => {

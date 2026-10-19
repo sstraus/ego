@@ -363,23 +363,12 @@ pub(super) fn surface_line(
         let signal = editor.read_line(prompt);
         if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == MODE_CYCLE_COMMAND)
         {
-            let mode = {
-                let current = status.lock().expect("surface status lock");
-                current
-                    .selected_mode
-                    .or_else(|| current.status_base.as_ref().map(|base| base.mode))
-            };
-            if let Some(mode) = mode {
-                return (
-                    Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(
-                        mode.next(),
-                    ))),
-                    false,
-                );
-            }
-            status.lock().expect("surface status lock").notice =
-                Some("effective permission mode is unavailable".into());
-            continue;
+            // Preserve intent until the owner consumes this queued command. During
+            // a turn, the editor's visible/staged mode can lag earlier commands.
+            return (
+                Line::HostCommand(HostCommand::Policy(PolicyControlRequest::CycleMode)),
+                false,
+            );
         }
         // Reject blank input before Reedline commits it to history or clears
         // the composer, for both idle submission and busy queue admission.

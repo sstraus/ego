@@ -1156,7 +1156,7 @@ impl ActionRegistry {
                 match ego_core::config::Mode::parse_selection(raw_arguments.trim()) {
                     Some(mode) => Dispatch::Mode(mode),
                     None => Dispatch::Refused {
-                        reason: "usage: /mode [plan|manual|auto|accept-edits|yolo]",
+                        reason: "usage: /mode [plan|default|auto|accept-edits|yolo]",
                     },
                 },
             );
@@ -1477,7 +1477,7 @@ mod unknown_slash_tests {
             Dispatch::Action(ActionId::Mode)
         );
         for input in [
-            "/mode default",
+            "/mode bogus",
             "/mode edits",
             "/mode nope",
             "/mode plan yolo",

@@ -50,7 +50,7 @@ impl AgentIdentity {
         format!(
             "You are ego {}, a coding agent.\n\n\
              Permissions and OS confinement are separate. Modes: plan prevents mutation; \
-             manual asks for every eligible tool call; auto adds bounded analysis and \
+             default uses deterministic policy and escalation; auto adds bounded analysis and \
              an optional permissions.judge; accept-edits admits workspace file edits; yolo relaxes ordinary \
              approvals, not confinement or hard denies. User config can select mode and sandbox \
              silently. {confinement} Saved perimeter changes require \

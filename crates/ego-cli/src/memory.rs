@@ -411,7 +411,7 @@ fn policy_admitted(effective: &Effective, root: &Path, paths: &[PathBuf]) -> boo
     };
     let policy = PolicyEngine::new(
         workspace,
-        effective.mode.unwrap_or(Mode::Manual),
+        effective.mode.unwrap_or(Mode::Default),
         effective.permissions.clone(),
     )
     .with_profile_roots(roots);

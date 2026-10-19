@@ -39,7 +39,6 @@ impl std::fmt::Display for ModelRef {
 pub enum Mode {
     Plan,
     Default,
-    Manual,
     Auto,
     #[serde(rename = "accept-edits", alias = "edits")]
     Edits,
@@ -47,10 +46,10 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Public selection and cycle order. Legacy `default` is a compatibility policy, not a public choice.
+    /// Public selection and cycle order. Default is the ordinary deterministic permission policy.
     pub const SELECTABLE: [Self; 5] = [
         Self::Plan,
-        Self::Manual,
+        Self::Default,
         Self::Auto,
         Self::Edits,
         Self::Yolo,
@@ -63,8 +62,11 @@ impl Mode {
     }
 
     pub fn next(self) -> Self {
-        let index = Self::SELECTABLE.iter().position(|mode| *mode == self);
-        Self::SELECTABLE[index.map_or(1, |index| (index + 1) % Self::SELECTABLE.len())]
+        let index = Self::SELECTABLE
+            .iter()
+            .position(|mode| *mode == self)
+            .expect("every permission mode is selectable");
+        Self::SELECTABLE[(index + 1) % Self::SELECTABLE.len()]
     }
 
     /// Whether this mode stays under the approved system maximum.
@@ -75,11 +77,10 @@ impl Mode {
     const fn ceiling_rank(self) -> u8 {
         match self {
             Self::Plan => 0,
-            Self::Manual => 1,
-            Self::Default => 2,
-            Self::Edits => 3,
-            Self::Auto => 4,
-            Self::Yolo => 5,
+            Self::Default => 1,
+            Self::Edits => 2,
+            Self::Auto => 3,
+            Self::Yolo => 4,
         }
     }
 
@@ -87,7 +88,6 @@ impl Mode {
         match self {
             Mode::Plan => "plan",
             Mode::Default => "default",
-            Mode::Manual => "manual",
             Mode::Auto => "auto",
             Mode::Edits => "accept-edits",
             Mode::Yolo => "yolo",

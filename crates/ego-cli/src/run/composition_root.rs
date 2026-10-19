@@ -471,7 +471,7 @@ impl CliPrepared {
             &opening,
         );
 
-        let mode = self.effective.mode.unwrap_or(Mode::Manual);
+        let mode = self.effective.mode.unwrap_or(Mode::Default);
         let policy_selection =
             GenerationPolicySelection::new(mode, self.effective.permissions.clone());
         // The execution context, not this process, says whether a person is

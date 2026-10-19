@@ -547,10 +547,12 @@ pub(super) fn handle_policy_request(
     };
 
     match request {
-        PolicyControlRequest::SetMode(mode) => match apply(PolicyControlRequest::SetMode(mode))? {
-            PolicyControlOutcome::Mode { .. } => Ok(None),
-            _ => Err(mismatch()),
-        },
+        request @ (PolicyControlRequest::SetMode(_) | PolicyControlRequest::CycleMode) => {
+            match apply(request)? {
+                PolicyControlOutcome::Mode { .. } => Ok(None),
+                _ => Err(mismatch()),
+            }
+        }
         PolicyControlRequest::Rule(mutation) => {
             let effect = mutation.effect;
             let PolicyControlOutcome::Rule { receipt, .. } =
@@ -1416,7 +1418,7 @@ pub(super) async fn generation_preflight_inner(
         effect_scope(confinement, &proof_evidence, cancel, run_deadline, None).await?;
     let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
 
-    let mode = effective.mode.unwrap_or(Mode::Manual);
+    let mode = effective.mode.unwrap_or(Mode::Default);
     let judge_identity = effective.judge.clone();
     let mut thinking = effective.thinking;
     let human_picker = if status.as_ref().is_some_and(|status| status.human) {

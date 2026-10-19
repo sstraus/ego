@@ -389,7 +389,6 @@ fn the_mode_flags_collapse_into_one_value() {
     for (spelling, mode) in [
         ("plan", Mode::Plan),
         ("default", Mode::Default),
-        ("manual", Mode::Manual),
         ("auto", Mode::Auto),
         ("edits", Mode::Edits),
         ("accept-edits", Mode::Edits),

@@ -128,7 +128,7 @@ impl AcpSessionControls {
         let mut controls = Self::seeded(
             effective.model.clone(),
             effective.thinking,
-            effective.mode.unwrap_or(Mode::Manual),
+            effective.mode.unwrap_or(Mode::Default),
             effective.judge.is_some(),
             ceiling,
             catalogue,
@@ -502,7 +502,7 @@ impl AcpSessionControls {
             .and_then(|model| explicit_effort.or_else(|| self.resolved_effort(model, None)));
         let mode = chosen.mode.unwrap_or_else(|| {
             profile.map_or(self.mode, |effective| {
-                effective.mode.unwrap_or(Mode::Manual)
+                effective.mode.unwrap_or(Mode::Default)
             })
         });
         Ok(SessionControlState {

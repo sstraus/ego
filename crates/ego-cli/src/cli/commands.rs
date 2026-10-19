@@ -840,7 +840,7 @@ pub(super) struct Flags {
     )]
     pub(super) mcp: Vec<McpSelector>,
 
-    /// Permission mode: plan|manual|auto|accept-edits|yolo (legacy: default, edits).
+    /// Permission mode: plan|default|auto|accept-edits|yolo (alias: edits).
     #[arg(long, value_parser = parse_mode, group = "mode-choice")]
     pub(super) mode: Option<Mode>,
 

@@ -419,7 +419,7 @@ the final grammar.
 **Permissions and confinement** (one axis pair, Codex-style)
 
 ```
-    --mode M            plan|manual|auto|accept-edits|yolo   shortcuts: --plan, --yolo
+    --mode M            plan|default|auto|accept-edits|yolo   shortcuts: --plan, --yolo
                         trusted interactive sessions default to auto when no
                         mode is configured; deterministic low/bounded calls
                         need no judge, while unknown calls may use the
@@ -1404,10 +1404,10 @@ every field at 120, 80, 60, and 40 columns instead of relying on terminal
 reflow or attaching multiline output to the composer.
 
 `/mode` opens the permission picker. `/mode <name>` selects exactly one of
-`plan`, `manual`, `auto`, `accept-edits`, and `yolo` (bypass permissions).
+`plan`, `default`, `auto`, `accept-edits`, and `yolo` (bypass permissions).
 Unknown names and extra arguments are local usage errors, never model input.
 `/plan`, `/yolo`, and `/permissions` still take no arguments.
-Shift+Tab cycles in this order: plan → manual → auto → accept-edits → yolo → plan.
+Shift+Tab cycles in this order: plan → default → auto → accept-edits → yolo → plan.
 It preserves the composer draft and attachments and does not submit them, in both
 Emacs and Vim editing. While a picker, permission prompt, or other modal is open,
 Shift+Tab does nothing. During an active turn it queues a local selection until
@@ -1419,35 +1419,18 @@ Auto selection validates its configured judge without a provider effect.
 `/plan` stages plan idempotently. `/yolo` and picker selection stage yolo directly;
 they do not ask for a second confirmation.
 
-Manual asks for every permission-eligible tool invocation, including reads and
-allow-rule-covered calls, after hard boundaries and explicit denies. It offers
-allow once or `[s]` allow the exact displayed scope for this live session. The
-session option shows and confirms the canonical tool, effects, parameters,
-workspace, executable identity, argv, cwd, and environment scope. It compares
-all those facts, not a command prefix, and writes no configuration. Changed
-arguments, environment, cwd, executable bytes, tool target, or workspace ask again.
-An incomplete executable identity or uncaptured environment permits once-only
-approval. Secret release and open protocol connections are also once-only.
-Switching sessions, process restart, and resume clear terminal session grants;
-ACP closes/loads/resumes clear its session grants. Persistent remember choices are
-not offered or honored in manual mode. Internal session-evidence retrieval and
-inspection/cancellation of already-owned session processes keep their existing
-internal authority and are exempt, as are non-tool UI/config/catalogue operations. Internal context, goal, plan, history,
-skill admission and task scheduling do not enter the effect-tool permission chain;
-effects that a skill or child executes still use their captured policy.
-Neither once nor session approval can override a deny, hard boundary or sandbox.
+Default keeps its existing policy: reads are admitted without a human prompt,
+uncovered writes ask, explicit allow rules are honored, and coordinator bounded
+calls retain their deterministic admission. Explicit denies and hard boundaries
+still win. This selection feature does not add a new approval mechanism or change
+existing ACP/session permission answers.
 
-Configuration, CLI flags, ACP controls and new saved selections use the same
-canonical names. For compatibility, explicit `default` in old config or sessions
-retains the old deterministic-read/sensitive-action policy; it is not an alias
-for manual and is not in the new picker or cycle. Legacy `edits` decodes
-with the accept-edits policy (external-root writes now require normal approval) and is written as `accept-edits`. Legacy
-CLI `--mode default|edits` remains accepted. The private content-addressed
-snapshot v1 wire retains `edits` to preserve old authority digests; this is not a
-public selection spelling. Missing mode falls back to manual
-except for the existing trusted-interactive auto default. Old sessions with no
-recorded mode use current resolution, which does not grant new approval authority.
-A legacy default session enters manual on its first Shift+Tab.
+Configuration, CLI flags, ACP controls and saved selections use the same public
+names. `edits` remains an input alias for `accept-edits`; saved config emits
+`accept-edits`. The private content-addressed snapshot v1 wire retains `edits` to
+preserve saved authority digests. Missing mode still falls back to default except
+for the existing trusted-interactive auto default. Session resume keeps its
+recorded policy and confinement; selection never widens them implicitly.
 
 `/permissions`
 exposes the same list, allow, deny, revoke, remember, and explain services and
@@ -1458,7 +1441,7 @@ then edit its schema-derived fields with exact values prefilled; nested shapes
 remain in one prefilled JSON fallback instead of requiring a whole call to be
 typed as JSON.
 
-Outside manual mode, an unresolved permission modal is at most four rows: the call as a readable
+An unresolved permission modal is at most four rows: the call as a readable
 command, its risk in plain words, and the keys `[y] yes`, `[a] yes, do not ask
 again for <rules>`, `[n] no, say what to do instead`, `[e] edit`, `[d]
 details`. The risk row never shows an internal name; a limited risk (changes
@@ -2072,7 +2055,7 @@ The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
 System policy can also set `max_mode="accept-edits"`, using the order
-plan < manual < default (legacy) < accept-edits < auto < yolo. A selected mode above the maximum is
+plan < default < accept-edits < auto < yolo. A selected mode above the maximum is
 refused before run effects, including live ACP and REPL selections. A refused
 selection preserves the current and pending mode. `max_mode` is system-only and does not change
 the default mode; a plan maximum must be paired with `mode="plan"`.

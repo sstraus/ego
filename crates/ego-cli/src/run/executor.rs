@@ -212,7 +212,7 @@ pub(super) struct ChildAuthorityCeiling {
 impl ChildAuthorityCeiling {
     pub(super) fn from_parent(effective: &Effective, confinement: &RunConfinement) -> Self {
         Self {
-            mode: effective.mode.unwrap_or(Mode::Manual),
+            mode: effective.mode.unwrap_or(Mode::Default),
             sandbox: effective.sandbox.unwrap_or_default(),
             offline: confinement.offline(),
             permissions: effective.permissions.clone(),
@@ -221,7 +221,7 @@ impl ChildAuthorityCeiling {
     }
 
     pub(super) fn admit(&self, effective: &Effective, offline: bool) -> Result<(), String> {
-        let mode = effective.mode.unwrap_or(Mode::Manual);
+        let mode = effective.mode.unwrap_or(Mode::Default);
         if !mode_is_no_wider(mode, self.mode) {
             return Err(format!(
                 "child profile mode {mode} widens parent mode {}",
@@ -268,7 +268,6 @@ impl ChildAuthorityCeiling {
 
 fn mode_is_no_wider(child: Mode, parent: Mode) -> bool {
     child == Mode::Plan
-        || child == Mode::Manual && parent != Mode::Plan
         || child == parent
         || matches!(parent, Mode::Edits | Mode::Yolo) && !matches!(child, Mode::Yolo)
 }
@@ -578,7 +577,7 @@ impl CliCompactionCommand {
         drop(proof_evidence);
         let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
             .map_err(CompactionError::Internal)?;
-        let mode = effective.mode.unwrap_or(Mode::Manual);
+        let mode = effective.mode.unwrap_or(Mode::Default);
         let policy_selection = GenerationPolicySelection::new(mode, effective.permissions.clone());
         let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
             CliGenerationPolicySource::new(policy_selection, CanonPath::new(&root), None),
@@ -884,7 +883,7 @@ impl CliRunExecutor {
             root,
             model,
             thinking,
-            mode: effective.mode.unwrap_or(Mode::Manual),
+            mode: effective.mode.unwrap_or(Mode::Default),
             ceilings: effective.ceilings,
             profile: frozen.profile().map(str::to_owned),
         };

@@ -688,12 +688,6 @@ pub trait RunBindingsBuilder: Send + Sync {
 /// Production ACP bindings: live updates plus the existing question adapter.
 #[derive(Debug, Default)]
 pub struct AcpRunBindingsBuilder {
-    exact_permissions: std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            Arc<std::sync::Mutex<ego_core::permit::SessionPermissions>>,
-        >,
-    >,
     controls: Option<Arc<dyn SessionControls>>,
     permission_rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
     sandbox_store: Option<Arc<dyn crate::sandbox::SandboxGrantStore>>,
@@ -715,7 +709,6 @@ impl AcpRunBindingsBuilder {
     pub fn with_controls(controls: Option<Arc<dyn SessionControls>>) -> Self {
         Self {
             controls,
-            exact_permissions: std::sync::Mutex::default(),
             permission_rules: None,
             sandbox_store: None,
             sandbox_sessions: std::sync::Mutex::default(),
@@ -771,10 +764,6 @@ impl EventSinkFactory for AcpSinkFactory {
 
 impl RunBindingsBuilder for AcpRunBindingsBuilder {
     fn end_session(&self, session: &v1::SessionId) {
-        self.exact_permissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(session.0.as_ref());
         self.sandbox_sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -802,13 +791,6 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             crate::permission::AcpPermissionAdapter::live(session.clone(), connection.clone())
                 .with_rule_writer(self.permission_rules.clone())
                 .with_session_approval(session_approval)
-                .with_exact_approvals(Arc::clone(
-                    self.exact_permissions
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .entry(session.0.to_string())
-                        .or_default(),
-                ))
                 .approver();
         let session_grants = Arc::clone(
             self.sandbox_sessions
