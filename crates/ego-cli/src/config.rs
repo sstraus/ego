@@ -56,6 +56,15 @@ pub(crate) fn report_discarded(
     effective: &Effective,
     diagnostics: &dyn Diagnostics,
 ) {
+    report_discarded_in(workspace, effective, diagnostics, ego_home().as_deref());
+}
+
+fn report_discarded_in(
+    workspace: &Path,
+    effective: &Effective,
+    diagnostics: &dyn Diagnostics,
+    home: Option<&Path>,
+) {
     for discarded in &effective.discarded {
         diagnostics.note(&discarded.to_string());
     }
@@ -63,7 +72,7 @@ pub(crate) fn report_discarded(
         return;
     }
     for (source, path) in project_layer_paths(workspace) {
-        if ego_home().is_some_and(|home| same_config_file(&path, &home.join("config.toml"))) {
+        if home.is_some_and(|home| same_config_file(&path, &home.join("config.toml"))) {
             continue;
         }
         if effective
@@ -1588,9 +1597,46 @@ mod tests {
         assert_eq!(found[0].source, Source::User);
         let effective = resolve(&found, Trust::Trusted, None).unwrap();
         assert_eq!(effective.roots.len(), 1);
+        assert_eq!(effective.roots_source, Some(Source::User));
         assert_eq!(
             effective.roots[0].access,
             ego_core::permit::RootAccess::ReadWrite
+        );
+    }
+
+    // Catches bare diagnostics mislabeling the selected user file as an ignored
+    // project file, or suppressing the warning for a genuinely distinct file.
+    #[test]
+    fn bare_diagnostics_preserve_user_identity_and_warn_for_distinct_project() {
+        #[derive(Default)]
+        struct Recorded(std::sync::Mutex<Vec<String>>);
+        impl Diagnostics for Recorded {
+            fn note(&self, message: &str) {
+                self.0.lock().unwrap().push(message.to_owned());
+            }
+        }
+
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join(".ego");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::write(user_dir.join("config.toml"), "bare=true").unwrap();
+        let layers = base_layers_in(owner.path(), Trust::Trusted, Some(&user_dir)).unwrap();
+        let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+        let diagnostics = Recorded::default();
+        report_discarded_in(owner.path(), &effective, &diagnostics, Some(&user_dir));
+        assert!(diagnostics.0.lock().unwrap().is_empty());
+
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        std::fs::write(workspace.join(".ego/config.toml"), "model='project/model'").unwrap();
+        report_discarded_in(&workspace, &effective, &diagnostics, Some(&user_dir));
+        let notes = diagnostics.0.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("project configuration"), "{}", notes[0]);
+        assert!(
+            notes[0].contains("not applied in the bare posture"),
+            "{}",
+            notes[0]
         );
     }
 
