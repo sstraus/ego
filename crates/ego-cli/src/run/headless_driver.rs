@@ -285,9 +285,9 @@ pub(super) async fn drive_headless_turn(
         }),
         HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => None,
     };
-    if (command.is_some() || mcp_command.is_some()) && !images.is_empty() {
+    if (command.is_some() || mcp_command.is_some()) && (!images.is_empty() || !audio.is_empty()) {
         return Err(RunTermination::UsageError {
-            message: "custom commands do not accept image attachments".to_owned(),
+            message: "custom commands do not accept image or audio attachments".to_owned(),
         });
     }
     let tools = match admitted_tools {

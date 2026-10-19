@@ -1891,7 +1891,7 @@ enum ExecutionMode {
         root: RunRoot,
         origin: RunOrigin,
         model: ModelRef,
-        prompt: RunPrompt,
+        prompt: Box<RunPrompt>,
         prepared: Box<dyn Any + Send>,
     },
     RecoveredObserve {
@@ -2150,7 +2150,7 @@ where
                     root: request.root.clone(),
                     origin: request.origin.clone(),
                     model,
-                    prompt: request.prompt,
+                    prompt: Box::new(request.prompt),
                     prepared: Box::new(prepared),
                 };
                 Ok(RunCommandOutcome::Admitted(self.admission(
@@ -2281,7 +2281,7 @@ where
                     root: folded.snapshot.root.clone(),
                     origin: folded.snapshot.origin.clone(),
                     model,
-                    prompt: request.prompt,
+                    prompt: Box::new(request.prompt),
                     prepared: Box::new(prepared),
                 };
                 Ok(RunCommandOutcome::Admitted(self.admission(

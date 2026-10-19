@@ -47,8 +47,14 @@ fn admitted_capabilities(
         && row.base().as_str() == "https://api.openai.com/v1/"
     {
         ego_core::generator::capabilities::AudioInputSupport::SupportedWav
-    } else {
+    } else if supplied.audio_input
+        == ego_core::generator::capabilities::AudioInputSupport::SupportedWav
+    {
+        // Operator claims cannot promote an unproved model/route. Preserve
+        // Unknown as ignorance rather than inventing a negative provider fact.
         ego_core::generator::capabilities::AudioInputSupport::Unsupported
+    } else {
+        supplied.audio_input
     };
     caps
 }
@@ -1302,7 +1308,7 @@ impl Catalogue {
             capabilities: admitted_capabilities(
                 &slug.provider,
                 &slug.model,
-                &row,
+                row,
                 &hosted.capabilities,
             ),
             metering: hosted.metering.clone(),

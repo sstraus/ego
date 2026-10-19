@@ -39,11 +39,6 @@ impl WireFormat for XaiResponses {
         target: &RequestTarget<'_>,
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused> {
-        if super::request_has_audio(req) {
-            return Err(RequestRefused::new(
-                "this wire contract does not support audio input",
-            ));
-        }
         build_request(target, req).map_err(RequestRefused::from)
     }
 

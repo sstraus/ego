@@ -186,19 +186,35 @@ fn committed_audio_replays_exactly_after_session_reopen_and_refuses_missing_blob
     let reference = writer.commit().unwrap();
     let mut event = image_prompt(&reference.to_string());
     event.kind = EventKind::UserPrompt {
-        text: String::new(),
+        text: "éafter".into(),
         images: Vec::new(),
-        audio: vec![AudioRef::new(reference.clone(), AudioMediaType::Wav).unwrap()],
+        audio: vec![
+            AudioRef::new(reference.clone(), AudioMediaType::Wav)
+                .unwrap()
+                .with_text_offset(Some(2)),
+        ],
         queued_prompt: None,
     };
+    assert_eq!(event.kind.blob_references(), vec![reference.clone()]);
+    let encoded = serde_json::to_vec(&event).unwrap();
+    assert!(!String::from_utf8_lossy(&encoded).contains("RIFF"));
     let mut state = SessionState::default();
-    state.apply(&event);
+    state.apply(&serde_json::from_slice::<DomainEvent>(&encoded).unwrap());
     drop(store);
     let reopened = SessionBlobStore::open(root.path(), session, 64 * 1024).unwrap();
     let (conversation, _) = conversation_from_with_blobs(&state, &reopened).unwrap();
-    assert!(
-        matches!(&conversation.messages()[0].content[0], ContentBlock::Audio { audio } if audio.bytes() == bytes)
-    );
+    let content = &conversation.messages()[0].content;
+    assert!(matches!(&content[0], ContentBlock::Text { text } if text == "é"));
+    assert!(matches!(&content[1], ContentBlock::Audio { audio } if audio.bytes() == bytes));
+    assert!(matches!(&content[2], ContentBlock::Text { text } if text == "after"));
+    assert!(ego_core::generator::history::conversation_from(&state).is_err());
+    let blob = root
+        .path()
+        .join(session.to_string())
+        .join("evidence")
+        .join(format!("{}.blob", reference.id));
+    std::fs::write(blob, vec![0; bytes.len()]).unwrap();
+    assert!(conversation_from_with_blobs(&state, &reopened).is_err());
     let (_, _, empty) = fixture();
     assert!(conversation_from_with_blobs(&state, &empty).is_err());
     assert!(state.blob_references().contains(&reference));

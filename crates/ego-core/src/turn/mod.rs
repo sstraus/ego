@@ -25,6 +25,14 @@ mod task;
 pub use task::{BackgroundTaskLaunch, BackgroundTaskPort, NamedAgent, delegation_guidance};
 mod tools;
 
+/// One ordered durable user prompt, optionally consuming a queue acceptance.
+type PendingPrompt = (
+    String,
+    Vec<crate::generator::types::ImageRef>,
+    Vec<crate::generator::audio::AudioRef>,
+    Option<crate::event::id::QueuedPromptId>,
+);
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -3246,12 +3254,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     )]
     async fn run_prompts(
         &mut self,
-        prompts: Vec<(
-            String,
-            Vec<crate::generator::types::ImageRef>,
-            Vec<crate::generator::audio::AudioRef>,
-            Option<crate::event::id::QueuedPromptId>,
-        )>,
+        prompts: Vec<PendingPrompt>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
         if let Err(cause) = self.journal.recover_interrupted_attempts(turn) {
@@ -3872,12 +3875,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     async fn drive(
         &mut self,
         turn: TurnId,
-        prompts: &[(
-            String,
-            Vec<crate::generator::types::ImageRef>,
-            Vec<crate::generator::audio::AudioRef>,
-            Option<crate::event::id::QueuedPromptId>,
-        )],
+        prompts: &[PendingPrompt],
     ) -> Result<DriveOutcome, StoreError> {
         if let Some(outcome) = self.admit_turn_prompts(turn, prompts).await? {
             return Ok(outcome);
@@ -4246,12 +4244,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     async fn admit_turn_prompts(
         &mut self,
         turn: TurnId,
-        prompts: &[(
-            String,
-            Vec<crate::generator::types::ImageRef>,
-            Vec<crate::generator::audio::AudioRef>,
-            Option<QueuedPromptId>,
-        )],
+        prompts: &[PendingPrompt],
     ) -> Result<Option<DriveOutcome>, StoreError> {
         for (index, (text, images, audio, queued_prompt)) in prompts.iter().enumerate() {
             let item = ItemId::new();

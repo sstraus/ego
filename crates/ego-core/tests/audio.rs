@@ -138,9 +138,10 @@ fn queued_audio_metadata_and_gc_roots_survive_event_roundtrip() {
     use ego_core::state::SessionState;
     let reference = BlobRef::new(BlobId::parse("0".repeat(64)).unwrap(), WAV.len() as u64);
     let audio = AudioRef::new(reference.clone(), AudioMediaType::Wav).unwrap();
+    let mut seq = Seq::ZERO;
     let event = DomainEvent {
         env: Envelope {
-            seq: Seq::ZERO.next(),
+            seq: seq.next(),
             id: EventId::new(),
             turn: TurnId::new(),
             item: None,
