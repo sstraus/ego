@@ -14,3 +14,6 @@ mutants.out.old/
 # Local source installation prefix from the quick start.
 /.ego-bin
 
+# Generated mdBook output.
+/docs/book/
+

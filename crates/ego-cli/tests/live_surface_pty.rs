@@ -6196,7 +6196,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("skills", None),
         ("hooks", Some("no hooks are admitted")),
         ("retry", Some("no provider retry wait is active")),
-        ("version", Some("ego 0.1.0")),
+        ("version", Some(concat!("ego ", env!("CARGO_PKG_VERSION")))),
     ] {
         if command == "compact" {
             let start = output.len();

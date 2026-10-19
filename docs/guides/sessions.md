@@ -55,6 +55,23 @@ A fork retains lineage and conversation; it does not duplicate charges or live
 run state. Instructions captured for the prompt epoch are inherited; `/refresh`
 opens a new epoch when idle. Current tool admission remains current.
 
+## File checkpoints
+
+File checkpoints are recovery points for session-owned edits, not conversation
+forks or compaction checkpoints. Built-in `write` and `edit` capture them in Git
+worktrees. Preview the selected session before choosing a restore:
+
+```sh
+ego checkpoint SESSION_ID preview
+ego checkpoint SESSION_ID restore CHECKPOINT_COMMIT
+```
+
+Preview reports checkpoint IDs, affected paths, and external-change conflicts.
+Restore refuses conflicting external changes instead of forcing an overwrite.
+`ego checkpoint SESSION_ID close` releases the session's private recovery ref
+without restoring files. Do not close it while you still need those recovery
+points. These are explicit operator actions, not model-generated prompts.
+
 ## Compact
 
 `ego compact SOURCE` and idle-only `/compact` ask a tool-less generation for a

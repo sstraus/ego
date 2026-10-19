@@ -17,7 +17,11 @@ can add admitted operations, subject to the same ceilings.
 | `grep` | `query`, optional `path` | Search contents under a bounded traversal; root defaults to working directory |
 | `write` | `path`, `contents` | Create/replace a file with durable replacement semantics; parent must exist |
 | `edit` | `path`, `old_string`, `new_string` | Conditional literal replacement; requires both read and write authority |
-| `exec` | `argv`, optional `cwd`, `timeout_ms` | Execute exact argv with admitted environment, confinement, deadline, and process-tree ownership |
+| `notebook_edit` | `path`, cell edit operation | Replace, insert, or delete one nbformat 4.5 cell by stable ID; preserve other cells and do not execute code |
+| `exec` | `argv`, optional `cwd`, `timeout_ms`, `background` | Execute exact argv with admitted environment, confinement, deadline, and process-tree ownership |
+| `exec_status`, `exec_cancel` | `id` | Inspect or cancel a background process owned by this session |
+| `web_fetch` | `url` | Fetch bounded public HTTP(S) text without URL credentials; redirects require a fresh admitted call |
+| `web_search` | `query`, `allow_paid` | Provider-hosted search or explicitly admitted Exa search, depending on the active provider and configuration |
 | `read_tool_result` | `reference`, `offset` (default 0) | Page retained session evidence instead of treating a truncated preview as the full result |
 
 Traversal skips `.git`, `target`, and `node_modules` and respects ignore rules.
@@ -30,6 +34,24 @@ with a wider one after permission.
 argv is a process request with its own risk and confinement. A timeout is not
 proof that a child never started. Detached-process recovery also uses evidence
 and settlement; do not repeat an uncertain effect blindly.
+
+## Background processes and web access
+
+`exec` with `background=true` returns a session-owned ID. The model can use
+`exec_status` to inspect bounded output and settlement, or `exec_cancel` to cancel
+that process. Interactive users can inspect `/tasks` and cancel with
+`/tasks cancel ID`. An ID is not permission to inspect another session's process.
+
+`web_fetch` accepts public HTTP(S) URLs, at most 1 MiB of input and 32 KiB of
+output, with a 30-second limit. It does not forward credentials or follow a
+redirect under the original destination's authority. Each new destination needs
+its own policy-checked call; public-address checks still apply.
+
+`web_search` depends on the selected provider and admitted catalogue. Hosted
+OpenAI/Anthropic search uses that provider's credential and can incur search and
+token charges. Other providers use the Exa adapter only when configured, with
+`EXA_API_KEY`, `allow_paid=true`, and ordinary network permission. There is no
+silent fallback between backends. See [web search reference](../reference/tools.md).
 
 ## Other model operations
 
