@@ -1,0 +1,6 @@
+εgo: Plan 1/4
+✓ Read the current output path
+▶ Render the plan as one compact block
+  with readable status symbols
+○ Verify narrow output
+! Wait for review
