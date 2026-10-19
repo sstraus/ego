@@ -697,7 +697,22 @@ impl EventSink for TextSink<'_> {
             self.out.retry_status(None);
             if let Some(cause) = self.retry_cause.lock().expect("retry cause lock").take() {
                 self.finish();
-                self.out.note(&format!("{cause} — retry finished"));
+                let colour = if matches!(event, PublicEvent::TurnCompleted { ok: false, .. }) {
+                    crate::render::style::Palette::ERROR
+                } else {
+                    crate::render::style::Palette::ADDED_FG
+                };
+                let capabilities = self.capabilities.with_current_width();
+                let receipt = crate::render::Line::styled(
+                    format!("{DISPLAY_NAME}: {cause} — retry finished"),
+                    crate::render::style::Style::fg(colour),
+                )
+                .wrap(capabilities.width)
+                .into_iter()
+                .map(|line| line.render(capabilities.depth))
+                .collect::<Vec<_>>()
+                .join("\n");
+                self.out.line(&receipt);
             }
         }
         match event {

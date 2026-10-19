@@ -2284,6 +2284,15 @@ fn own_terminal(
     let mut idle_interrupt = None;
     let mut drafts = DraftStash::new(SessionId::new());
     loop {
+        // Reedline's default indicator colour otherwise leaks into unstyled
+        // retry rows even when the renderer's capability gate forbids colour.
+        editor = editor.with_ansi_colors(
+            status
+                .lock()
+                .expect("surface status lock")
+                .permission_capabilities
+                .coloured(),
+        );
         if matches!(pending_control.as_ref(), Some(Control::Activate { .. })) {
             let Some(Control::Activate { session }) = pending_control.take() else {
                 unreachable!("the pending activation was just matched");

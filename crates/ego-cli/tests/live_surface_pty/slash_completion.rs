@@ -36,7 +36,8 @@ fn selected_completion(accept: &[u8], tab_first: bool) {
         let start = output.len();
         input.write_all(b"/mc").expect("prefix");
         input.flush().expect("flush");
-        until_normalized(&reader, &mut output, start, "/mcp");
+        // With no TERM, Reedline marks the selected plain menu row in uppercase.
+        until_normalized(&reader, &mut output, start, "/MCP");
         drain_until_quiet(&reader, &mut output);
         if tab_first {
             let before = output.len();
@@ -90,7 +91,8 @@ fn selected_skill_completion_enter_delivers_one_admitted_instruction() {
     let start = output.len();
     input.write_all(b"/zebra-c").expect("skill prefix");
     input.flush().expect("flush");
-    until_normalized(&reader, &mut output, start, "/zebra-completion");
+    // With no TERM, Reedline marks the selected plain menu row in uppercase.
+    until_normalized(&reader, &mut output, start, "/ZEBRA-COMPLETION");
     input.write_all(b"\r").expect("accept skill");
     input.flush().expect("flush");
     until(&reader, &mut output, b"SELECTED-SKILL-REPLY");
