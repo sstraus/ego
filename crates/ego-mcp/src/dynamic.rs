@@ -61,7 +61,7 @@ impl McpCollapsedBootstrap {
     }
 
     pub fn tool_names(&self) -> impl Iterator<Item = &'static str> {
-        [GET_TOOL_SCHEMA, SEARCH_TOOLS].into_iter()
+        [CALL_TOOL, GET_TOOL_SCHEMA, SEARCH_TOOLS].into_iter()
     }
 
     pub(crate) fn admits_schema_from(&self, name: &str) -> bool {
@@ -152,6 +152,13 @@ pub struct McpCollapsedCatalogue {
 }
 
 impl McpCollapsedCatalogue {
+    /// A visible dispatcher has no inner authority until schema admission.
+    pub(crate) fn bootstrap() -> Self {
+        Self {
+            inner: Arc::new(BTreeMap::new()),
+        }
+    }
+
     pub fn new(tools: Vec<GeneratorToolDescriptor>) -> Result<Self, McpError> {
         if tools.is_empty() {
             return Err(protocol("collapsed MCP catalogue is empty"));

@@ -57,13 +57,13 @@ fn collapsed_management() -> Vec<ToolDescriptor> {
 }
 
 #[test]
-fn collapsed_bootstrap_withholds_dispatch_until_exact_schema_lookup() {
+fn collapsed_bootstrap_keeps_dispatch_visible_before_exact_schema_lookup() {
     let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
     assert_eq!(
         bootstrap.tool_names().collect::<Vec<_>>(),
-        vec!["get_tool_schema", "search_tools"]
+        vec!["call_tool", "get_tool_schema", "search_tools"]
     );
-    assert!(!bootstrap.tool_names().any(|name| name == "call_tool"));
+    assert!(bootstrap.tool_names().any(|name| name == "call_tool"));
 
     let structured_content = json!({
         "name":"weather",
