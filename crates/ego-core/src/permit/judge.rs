@@ -548,6 +548,7 @@ enum CanonicalChange {
         sha256: String,
     },
     Replace {
+        replace_all: bool,
         old_bytes: usize,
         old_sha256: String,
         new_bytes: usize,
@@ -570,9 +571,11 @@ impl From<&Change> for CanonicalChange {
                 sha256: sha256_hex(bytes),
             },
             Change::Replace {
+                replace_all,
                 old_string,
                 new_string,
             } => Self::Replace {
+                replace_all: *replace_all,
                 old_bytes: old_string.len(),
                 old_sha256: sha256_hex(old_string.as_bytes()),
                 new_bytes: new_string.len(),
