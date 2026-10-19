@@ -454,7 +454,20 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                         .iter()
                         .find(|agent| &agent.name == name)
                         .cloned()
-                        .ok_or_else(|| format!("unknown named agent `{name}`"))
+                        .ok_or_else(|| {
+                            if self.tools.named_agents.is_empty() {
+                                format!("unknown named agent `{name}`; no named agents are configured, omit agent for an ordinary task")
+                            } else {
+                                let available = self
+                                    .tools
+                                    .named_agents
+                                    .iter()
+                                    .map(|agent| agent.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!("unknown named agent `{name}`; available: {available}")
+                            }
+                        })
                         .and_then(|definition| {
                             if definition.sandbox.is_some_and(|sandbox| {
                                 self.config
