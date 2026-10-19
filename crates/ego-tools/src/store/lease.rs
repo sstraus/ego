@@ -167,7 +167,7 @@ pub struct Lease {
     #[allow(dead_code)]
     lock: RwLock<File>,
     path: PathBuf,
-    pid_index: Option<(PathBuf, Vec<u8>)>,
+    pid_index: Mutex<Option<(PathBuf, Vec<u8>)>>,
 }
 
 impl std::fmt::Debug for Lease {
@@ -183,7 +183,7 @@ impl Drop for Lease {
         let _guard = PID_INDEX_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some((path, contents)) = &self.pid_index
+        if let Some((path, contents)) = &*self.pid_index.lock().unwrap_or_else(|error| error.into_inner())
             // A new lease for this PID may already have replaced the binding.
             && fs::read(path).is_ok_and(|current| current == *contents)
         {
@@ -194,7 +194,7 @@ impl Drop for Lease {
 
 impl Lease {
     pub(super) fn publish_pid_index(
-        &mut self,
+        &self,
         home: &Path,
         pid: u32,
         session_id: &ego_core::event::id::SessionId,
@@ -212,7 +212,10 @@ impl Lease {
         }))?;
         // Register cleanup before publication: a directory fsync error can be
         // reported after the rename has already made the binding visible.
-        self.pid_index = Some((path.clone(), contents.clone()));
+        *self
+            .pid_index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((path.clone(), contents.clone()));
         io.replace_atomic(&path, &contents)
     }
 
@@ -237,7 +240,7 @@ impl Lease {
         Ok(Some(Self {
             lock,
             path: path.to_path_buf(),
-            pid_index: None,
+            pid_index: Mutex::new(None),
         }))
     }
 
@@ -324,7 +327,7 @@ impl Lease {
             return Ok(Lease {
                 lock,
                 path: path.to_path_buf(),
-                pid_index: None,
+                pid_index: Mutex::new(None),
             });
         }
 
@@ -447,7 +450,7 @@ fn take_over(
     Ok(Lease {
         lock: tmp_lock,
         path: path.to_path_buf(),
-        pid_index: None,
+        pid_index: Mutex::new(None),
     })
 }
 

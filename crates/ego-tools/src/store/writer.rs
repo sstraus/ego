@@ -139,6 +139,7 @@ pub struct OpenSession<'a> {
 pub struct SessionWriter<'a> {
     store: &'a JsonlStore,
     id: SessionId,
+    pid: u32,
     /// Released on drop, which is the whole point. Never read.
     _lease: Arc<Lease>,
     /// References derived from the repaired log and accepted snapshot state.
@@ -148,6 +149,11 @@ pub struct SessionWriter<'a> {
 }
 
 impl SessionWriter<'_> {
+    /// Publish this writer as the process's active session after candidate acceptance.
+    pub fn publish_pid_index(&self) -> std::io::Result<()> {
+        self.store.index_lease(&self._lease, &self.id, self.pid)
+    }
+
     /// The session this writer holds the lease for.
     pub fn id(&self) -> SessionId {
         self.id
@@ -319,7 +325,22 @@ impl JsonlStore {
         id: &SessionId,
         lease: LeaseInputs<'_>,
     ) -> Result<OpenSession<'_>, OpenError> {
-        let mut held = Lease::acquire(
+        let opened = self.open_candidate(id, lease)?;
+        opened
+            .writer
+            .publish_pid_index()
+            .map_err(|error| OpenError::Lease(LeaseError::Io(error)))?;
+        Ok(opened)
+    }
+
+    /// Lease and rebuild a candidate without replacing the active process index.
+    /// The accepting caller publishes through [`SessionWriter::publish_pid_index`].
+    pub fn open_candidate(
+        &self,
+        id: &SessionId,
+        lease: LeaseInputs<'_>,
+    ) -> Result<OpenSession<'_>, OpenError> {
+        let held = Lease::acquire(
             &self.lease_path(id),
             lease.pid,
             lease.now,
@@ -327,9 +348,6 @@ impl JsonlStore {
             lease.is_alive,
         )
         .map_err(OpenError::Lease)?;
-
-        self.index_lease(&mut held, id, lease.pid)
-            .map_err(|error| OpenError::Lease(LeaseError::Io(error)))?;
 
         let repair = self.recover(id).map_err(OpenError::Recover)?;
 
@@ -359,6 +377,7 @@ impl JsonlStore {
             writer: SessionWriter {
                 store: self,
                 id: *id,
+                pid: lease.pid,
                 _lease: Arc::new(held),
                 reachable_blobs,
                 evidence_index: Mutex::new(evidence_index),

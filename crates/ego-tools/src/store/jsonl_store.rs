@@ -554,7 +554,7 @@ impl JsonlStore {
 
     pub(super) fn index_lease(
         &self,
-        lease: &mut Lease,
+        lease: &Lease,
         id: &SessionId,
         pid: u32,
     ) -> std::io::Result<()> {

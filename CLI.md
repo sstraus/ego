@@ -971,8 +971,9 @@ While ego holds a session writer lease, it atomically publishes
 
 `pid` is the process ID, `session_id` is the leased session UUID, and `cwd` is
 its absolute workspace path. Publication writes a temporary file beside the
-index, then renames it into place. Acquiring a replacement session lease
-replaces the binding. Releasing the last owner of that lease removes its
+index, then renames it into place. Opening the initial session successfully
+publishes its binding. A replacement session replaces the binding only after
+it becomes active; opening or rejecting a candidate does not change it. Releasing the last owner of that lease removes its
 binding; releasing an older session does not remove a newer binding. Normal
 exit releases these owners. A crash or forced termination can leave an index.
 The index is only a lookup hint, not a liveness or ownership guarantee: hosts

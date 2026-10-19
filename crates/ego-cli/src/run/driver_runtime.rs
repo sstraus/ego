@@ -74,12 +74,19 @@ async fn paste_image_limits(
 }
 
 /// A successor session opened inside this process needs its own run context
-/// before its first generation can be admitted.
+/// before its first generation can be admitted. Publish its PID binding only
+/// here, after the active owner has been replaced.
 fn admit_successor_context(
     admission: &EvidenceAdmissionService,
     active: &ActiveSession<'_>,
     run_context: &Option<RunContextEvidence>,
 ) -> Result<(), RunTermination> {
+    active
+        .writer()
+        .publish_pid_index()
+        .map_err(|error| RunTermination::Failed {
+            message: format!("the active session PID index could not be published: {error}"),
+        })?;
     let context = run_context
         .as_ref()
         .expect("the admitted run context outlives its first session")
@@ -1263,7 +1270,7 @@ async fn select_session_transition<'store>(
         diagnostics.note("the selected session root is unavailable");
         return None;
     }
-    let opened = match session::open(store.as_ref(), &target, clock) {
+    let opened = match session::open_candidate(store.as_ref(), &target, clock) {
         Ok(opened) => opened,
         Err(error) => {
             diagnostics.note(&format!(
@@ -1319,7 +1326,7 @@ async fn new_session_transition<'store>(
         return None;
     }
     let target = SessionId::new();
-    let target_opened = match session::open(store.as_ref(), &target, clock) {
+    let target_opened = match session::open_candidate(store.as_ref(), &target, clock) {
         Ok(opened) => opened,
         Err(error) => {
             diagnostics.note(&format!("the new session could not be opened: {error}"));
@@ -1384,7 +1391,7 @@ async fn fork_session_transition<'store>(
             return None;
         }
     };
-    let target_opened = match session::open(store.as_ref(), &target, clock) {
+    let target_opened = match session::open_candidate(store.as_ref(), &target, clock) {
         Ok(opened) => opened,
         Err(error) => {
             diagnostics.note(&format!(
@@ -3253,7 +3260,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         *state = session_hooks.state.state();
     }
     let target = receipt.target;
-    let target_opened = match session::open(jsonl_store.as_ref(), &target, clock) {
+    let target_opened = match session::open_candidate(jsonl_store.as_ref(), &target, clock) {
         Ok(opened) => Opened::Durable(Box::new(opened)),
         Err(error) => {
             diagnostics.note(&format!("compaction target could not be opened: {error}"));
@@ -4010,5 +4017,116 @@ mod setup_picker_label_tests {
             assert_eq!(label, expected);
             assert!(crate::render::line::Line::plain(label).width() <= width);
         }
+    }
+}
+
+#[cfg(test)]
+mod pid_index_tests {
+    use super::*;
+    use crate::run::tests::CompactionDecisionSeat;
+    use ego_core::event::domain::{DomainEvent, Envelope};
+    use ego_core::event::id::Seq;
+    use ego_core::event::time::Timestamp;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn rejected_resume_of_unfinished_session_preserves_active_pid_binding() {
+        rejected_resume_preserves_active_pid_binding(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_activation_rejection_preserves_active_pid_binding() {
+        // Catches publication before the terminal accepts the successor session.
+        rejected_resume_preserves_active_pid_binding(false, false).await;
+    }
+
+    async fn rejected_resume_preserves_active_pid_binding(unfinished: bool, activate: bool) {
+        // Catches a rejected candidate replacing and then deleting the active PID binding.
+        #[derive(Default)]
+        struct Notes(Mutex<Vec<String>>);
+        impl crate::output::Diagnostics for Notes {
+            fn note(&self, message: &str) {
+                self.0.lock().unwrap().push(message.to_owned());
+            }
+        }
+        let home = tempdir().unwrap();
+        let root = std::fs::canonicalize(home.path()).unwrap();
+        let store = Arc::new(
+            JsonlStore::new(root.join("sessions"), &root, Box::new(OsIo))
+                .with_pid_index(root.clone()),
+        );
+        let first = SessionId::new();
+        let candidate = SessionId::new();
+        {
+            let opened = session::open(&store, &candidate, &SystemClock).unwrap();
+            opened
+                .writer
+                .append(
+                    &candidate,
+                    &DomainEvent {
+                        env: Envelope {
+                            id: EventId::new(),
+                            seq: Seq::default().next(),
+                            ts: Timestamp::from_millis(9000),
+                            turn: TurnId::new(),
+                            item: Some(ItemId::new()),
+                            parent: None,
+                            producer: Producer::Main,
+                        },
+                        kind: if unfinished {
+                            EventKind::PromptQueued {
+                                id: ego_core::event::id::QueuedPromptId::new(),
+                                text: "unfinished prompt".into(),
+                                images: Vec::new(),
+                            }
+                        } else {
+                            EventKind::TurnCompleted {
+                                ok: true,
+                                exit_reason: ego_core::event::domain::ExitReason::Completed,
+                            }
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        let active = session::open(&store, &first, &SystemClock).unwrap();
+        let index = root
+            .join("pids")
+            .join(format!("{}.json", std::process::id()));
+        let before: Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        assert_eq!(before["session_id"], first.to_string());
+        let notes = Notes::default();
+        let transition = select_session_transition(
+            repl::HostCommand::Resume(Some(candidate.to_string())),
+            &CompactionDecisionSeat {
+                confirm: true,
+                activate,
+            },
+            false,
+            &store,
+            &root,
+            first,
+            (&SystemClock, &notes),
+        )
+        .await;
+        assert!(transition.is_none());
+        let expected = if unfinished {
+            "has unfinished work"
+        } else {
+            "could not activate"
+        };
+        assert!(
+            notes
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|note| note.contains(expected))
+        );
+        let after: Value = serde_json::from_slice(
+            &std::fs::read(&index).expect("rejected resume must preserve active PID binding"),
+        )
+        .unwrap();
+        assert_eq!(after["session_id"], active.writer.id().to_string());
     }
 }

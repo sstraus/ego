@@ -84,3 +84,44 @@ fn per_pid_file_follows_a_session_switch() {
     drop(new);
     assert!(!home.path().join("pids/4242.json").exists());
 }
+
+#[test]
+fn candidate_binding_is_published_only_after_acceptance() {
+    // Catches early publication during candidate preparation, including evidence setup.
+    let home = tempfile::tempdir().unwrap();
+    let store = JsonlStore::new(home.path().join("sessions"), home.path(), Box::new(OsIo))
+        .with_pid_index(home.path().to_path_buf());
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let old = store.open_writer(&first, inputs()).unwrap();
+    let candidate = store.open_candidate(&second, inputs()).unwrap();
+    let evidence = candidate.writer.evidence_store(1024).unwrap();
+    assert_eq!(binding(home.path())["session_id"], first.to_string());
+    candidate.writer.publish_pid_index().unwrap();
+    drop(old);
+    assert_eq!(binding(home.path())["session_id"], second.to_string());
+    drop(candidate);
+    assert_eq!(binding(home.path())["session_id"], second.to_string());
+    drop(evidence);
+    assert!(!home.path().join("pids/4242.json").exists());
+}
+
+#[test]
+fn failed_open_preserves_the_active_pid_binding() {
+    // Catches startup publication before recovery succeeds erasing the active binding.
+    let home = tempfile::tempdir().unwrap();
+    let store = JsonlStore::new(home.path().join("sessions"), home.path(), Box::new(OsIo))
+        .with_pid_index(home.path().to_path_buf());
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let _active = store.open_writer(&first, inputs()).unwrap();
+    fs::create_dir_all(
+        home.path()
+            .join("sessions")
+            .join(second.to_string())
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(store.open_writer(&second, inputs()).is_err());
+    assert_eq!(binding(home.path())["session_id"], first.to_string());
+}
