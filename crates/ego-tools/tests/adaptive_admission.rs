@@ -8,6 +8,8 @@ use std::sync::Arc;
 use ego_core::permit::{CanonPath, Confinement};
 use ego_tools::exec::admit_confinement;
 
+#[path = "support/admission_fixture.rs"]
+mod admission_fixture;
 #[path = "support/reexec.rs"]
 mod reexec;
 
@@ -17,10 +19,7 @@ fn isolated(name: &str) -> Option<PathBuf> {
             std::env::var_os("EGO_ADMISSION_ROOT").unwrap(),
         ));
     }
-    let root = tempfile::Builder::new()
-        .prefix(".ego-admission-")
-        .tempdir_in(std::env::current_dir().unwrap())
-        .unwrap();
+    let root = admission_fixture::root();
     for dir in [
         "home",
         "workspace",
