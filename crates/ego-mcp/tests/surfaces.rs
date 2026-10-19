@@ -335,13 +335,13 @@ fn dynamic_refresh(admission: &Arc<McpServerAdmission>) -> McpRegistryRefresh {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn collapsed_family_without_schema_publishes_management_only_bootstrap() {
+async fn collapsed_family_without_schema_publishes_stable_management_bootstrap() {
     let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
     assert_eq!(
         bootstrap.tool_names().collect::<Vec<_>>(),
-        vec!["get_tool_schema", "search_tools"]
+        vec!["call_tool", "get_tool_schema", "search_tools"]
     );
-    assert!(!bootstrap.tool_names().any(|name| name == "call_tool"));
+    assert!(bootstrap.tool_names().any(|name| name == "call_tool"));
     let admission = dynamic_admission();
     let queue = Arc::new(DynamicAdmission::default());
     queue.push(DynamicOutcome::Candidate(dynamic_candidate(
@@ -362,10 +362,14 @@ async fn collapsed_family_without_schema_publishes_management_only_bootstrap() {
     assert_eq!(publication.generation(), "generation-1");
     assert_eq!(
         publication.admitted_tools(),
-        &["get_tool_schema".to_owned(), "search_tools".to_owned()]
+        &[
+            "call_tool".to_owned(),
+            "get_tool_schema".to_owned(),
+            "search_tools".to_owned()
+        ]
     );
     assert!(
-        !publication
+        publication
             .admitted_tools()
             .iter()
             .any(|name| name == "call_tool")
@@ -417,7 +421,7 @@ async fn described_collapsed_catalogue_publishes_next_generation_and_keeps_old_c
             .any(|name| name == "call_tool")
     );
     assert!(
-        !old_capture
+        old_capture
             .tools()
             .iter()
             .any(|tool| tool.descriptor().name == "call_tool")

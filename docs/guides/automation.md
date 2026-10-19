@@ -11,9 +11,11 @@ printf '%s\n' 'Reply with one sentence about what a coding harness does.' | \
   ego run -m ollama/gemma4:e4b-mlx --thinking off --no-tools --timeout 30s --output json -
 ```
 
-Replace the model with one your installation can resolve. For workspace-only
-access, save `ego config set 'roots=[]'` in your user configuration first. The
-absent default adds `~/Gits` when it exists. `-` selects stdin as
+Replace the model with one your installation can resolve. To clear configured
+extra roots, save `ego config set 'roots=[]'` in your user configuration first.
+Select `--sandbox workspace` explicitly when you need that confinement level;
+the macOS default is adaptive and can derive additional roots. Under strict
+confinement, an absent root declaration adds `~/Gits` when it exists. `-` selects stdin as
 prompt. JSON writes one final object; JSONL writes live versioned public events;
 text writes the answer with diagnostics on stderr. `--quiet` suppresses stderr
 progress, not the result. [CLI reference](../reference/README.md) lists exits.

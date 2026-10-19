@@ -960,6 +960,27 @@ changed nothing, so the refusal is returned to the model as a failed tool
 result and the turn continues (regression case). Writes and spawns outside the
 workspace still end the run.
 
+### Host PID-to-session index
+
+While ego holds a session writer lease, it atomically publishes
+`$EGO_HOME/pids/<pid>.json` (default `~/.ego/pids/<pid>.json`):
+
+```json
+{"pid":12345,"session_id":"01900000-0000-7000-8000-000000000001","cwd":"/absolute/workspace"}
+```
+
+`pid` is the process ID, `session_id` is the leased session UUID, and `cwd` is
+its absolute workspace path. Publication writes a temporary file beside the
+index, then renames it into place. Opening the initial session successfully
+publishes its binding. A replacement session replaces the binding only after
+it becomes active; opening or rejecting a candidate does not change it. Releasing the last owner of that lease removes its
+binding; releasing an older session does not remove a newer binding. Normal
+exit releases these owners. A crash or forced termination can leave an index.
+The index is only a lookup hint, not a liveness or ownership guarantee: hosts
+must verify that the selected session's `lease` records the same PID and that
+the process is live. The session lease remains the source of truth. A custom
+`--session-dir` does not move this index out of `$EGO_HOME/pids`.
+
 ### 4.5 Parse and lifecycle contract (normative before release)
 
 The grammar ships with: a command × flag **applicability matrix** (no flag
@@ -1121,6 +1142,11 @@ close** — a paragraph is drawn when the blank line after it arrives, a table
 when its last row does — so the output is live without a half-built table ever
 reaching the screen. Colour depth is whatever the gate found: 24-bit, 256, 16,
 or none.
+
+Top-level prose paragraphs stay on one logical line. The terminal or narrower
+viewer owns their soft wrapping; ego adds no continuation indentation. Explicit
+Markdown hard breaks and paragraph boundaries remain. Lists, block quotes,
+fenced code, and tables keep their structured layout.
 
 **One gate decides, once** (`crates/ego-cli/src/render/caps.rs`). In precedence
 order: `--no-color`, then `NO_COLOR` (presence, not value), then whether stdout

@@ -4,6 +4,12 @@
 These guides describe the implemented user surfaces in this checkout. Start with
 what you want to do; each guide explains the feature before its controls.
 
+This is also the introduction to the mdBook user guide. Its sidebar follows
+[the book summary](SUMMARY.md): user tasks first, then integrations and reference.
+Build with `mdbook build docs` from the repository root, or use `mdbook serve docs`
+for a local preview. See [build and maintenance](maintaining.md) for requirements,
+checks, and output paths. No hosted website is implied.
+
 | Your task | Guide |
 | --- | --- |
 | Install, choose a model, and send a first prompt | [Getting started](getting-started/README.md) |
@@ -16,6 +22,8 @@ what you want to do; each guide explains the feature before its controls.
 | Understand the model's tool surface | [Tools](guides/tools.md) |
 | Set authority and confinement | [Permissions and confinement](guides/permissions.md) |
 | Resume, branch, compact, inspect usage, and export | [Sessions and history](guides/sessions.md) |
+| Isolate work in a retained Git checkout | [Git worktrees](guides/worktrees.md) |
+| Initialize instructions and review persistent memory | [Instructions and memory](guides/memory.md) |
 | Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
 | Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
 | Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
@@ -27,8 +35,5 @@ path. [Configuration](reference/configuration.md) identifies the source schemas.
 remain design authorities; they include planned behavior and older examples, so
 use the source-backed guides and current binary help for invocation details.
 
-[Internals](internals/README.md) preserves research, dated decisions, evidence,
-metrics, and orchestration notes. These are historical records, not installation
-instructions or guarantees that a provider still accepts a dated example.
-
-Documentation verification is recorded in [the validation record](internals/documentation-validation.md).
+[Internals](internals/README.md) contains dated design decisions and historical
+research. These are not installation instructions or current provider guarantees.

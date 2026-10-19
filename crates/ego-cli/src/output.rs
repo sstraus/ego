@@ -427,16 +427,6 @@ struct StartedCall {
     args: String,
 }
 
-fn compact_tokens(count: u64) -> String {
-    if count < 1_000 {
-        count.to_string()
-    } else if count < 100_000 {
-        format!("{:.1}K", count as f64 / 1_000.0)
-    } else {
-        format!("{}K", count / 1_000)
-    }
-}
-
 /// The state of the answer currently being written.
 struct Streaming {
     answer: Answer,
@@ -697,7 +687,22 @@ impl EventSink for TextSink<'_> {
             self.out.retry_status(None);
             if let Some(cause) = self.retry_cause.lock().expect("retry cause lock").take() {
                 self.finish();
-                self.out.note(&format!("{cause} — retry finished"));
+                let colour = if matches!(event, PublicEvent::TurnCompleted { ok: false, .. }) {
+                    crate::render::style::Palette::ERROR
+                } else {
+                    crate::render::style::Palette::ADDED_FG
+                };
+                let capabilities = self.capabilities.with_current_width();
+                let receipt = crate::render::Line::styled(
+                    format!("{DISPLAY_NAME}: {cause} — retry finished"),
+                    crate::render::style::Style::fg(colour),
+                )
+                .wrap(capabilities.width)
+                .into_iter()
+                .map(|line| line.render(capabilities.depth))
+                .collect::<Vec<_>>()
+                .join("\n");
+                self.out.line(&receipt);
             }
         }
         match event {
@@ -706,17 +711,6 @@ impl EventSink for TextSink<'_> {
                     .lock()
                     .expect("turn clock lock")
                     .insert(*turn, Instant::now());
-            }
-            PublicEvent::UsageUpdated { usage_delta, .. }
-                if self.capabilities.on_screen()
-                    && !self.quiet
-                    && usage_delta.cache_read_tokens > 0 =>
-            {
-                self.finish();
-                self.out.note(&format!(
-                    "cache hit: {} tokens",
-                    compact_tokens(usage_delta.cache_read_tokens)
-                ));
             }
             PublicEvent::TurnCompleted { turn, ok, .. }
                 if self.capabilities.on_screen() && !self.quiet =>
@@ -736,7 +730,7 @@ impl EventSink for TextSink<'_> {
                     let elapsed = tool_row::duration(started.elapsed());
                     let clock = chrono::Local::now().format("%-I:%M %p");
                     let outcome = if *ok { "done" } else { "stopped" };
-                    let mut receipt = format!("✻ Turn elapsed {elapsed} · {outcome} {clock}");
+                    let mut receipt = format!("Turn elapsed {elapsed} · {outcome} {clock}");
                     if let Some(lines) = lines {
                         let (green, red, reset) = if self.capabilities.coloured() {
                             ("\x1b[32m", "\x1b[31m", "\x1b[0m")
@@ -1222,10 +1216,9 @@ mod tests {
         }
     }
 
-    /// Catches: reporting a cache hit as a raw token count or dropping it from
-    /// the interactive transcript after a provider reports reused input.
+    /// Catches: successful cache hits adding a notice for every generation.
     #[test]
-    fn interactive_usage_reports_compact_cache_hits_only_when_read_tokens_exist() {
+    fn interactive_usage_keeps_successful_cache_hits_silent() {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
@@ -1248,7 +1241,7 @@ mod tests {
                 &state,
             );
         }
-        assert_eq!(*out.notes.lock().unwrap(), ["cache hit: 18.4K tokens"]);
+        assert!(out.notes.lock().unwrap().is_empty());
     }
 
     /// Catches: treating a first miss or a different cache prefix as a reset,
@@ -1359,7 +1352,7 @@ mod tests {
         headless.publish(&end, &state);
         let notes = out.notes.lock().unwrap();
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].starts_with("✻ Turn elapsed "), "{notes:?}");
+        assert!(notes[0].starts_with("Turn elapsed "), "{notes:?}");
         assert!(notes[0].contains(" · done "), "{notes:?}");
     }
 
