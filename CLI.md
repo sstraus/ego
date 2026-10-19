@@ -1122,6 +1122,11 @@ when its last row does — so the output is live without a half-built table ever
 reaching the screen. Colour depth is whatever the gate found: 24-bit, 256, 16,
 or none.
 
+Top-level prose paragraphs stay on one logical line. The terminal or narrower
+viewer owns their soft wrapping; ego adds no continuation indentation. Explicit
+Markdown hard breaks and paragraph boundaries remain. Lists, block quotes,
+fenced code, and tables keep their structured layout.
+
 **One gate decides, once** (`crates/ego-cli/src/render/caps.rs`). In precedence
 order: `--no-color`, then `NO_COLOR` (presence, not value), then whether stdout
 is a terminal, then `TERM`, then `COLORTERM`, then `TERM_PROGRAM`. No other

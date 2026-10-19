@@ -27,8 +27,8 @@ use super::table::{Align, Table};
 
 /// Turn a markdown document into rendered rows.
 ///
-/// `width` is the wrap column: the terminal's on a screen, a fixed 80 on a
-/// pipe, so a redirected run produces the same bytes from any window.
+/// `width` lays out containers and tables. Top-level prose stays on logical
+/// lines so each terminal viewer can wrap it at its own edge.
 pub fn render(source: &str, width: usize) -> Vec<Line> {
     let mut renderer = Renderer::new(width);
     let mut paragraph = false;
@@ -116,6 +116,8 @@ struct Renderer {
     marker: Option<Line>,
     /// Host markers must reach the terminal as one logical line so it owns wrapping.
     host_line: bool,
+    /// Top-level paragraphs leave wrapping to the terminal viewer.
+    paragraph: bool,
 }
 
 #[derive(Default)]
@@ -142,6 +144,7 @@ impl Renderer {
             link: None,
             marker: None,
             host_line: false,
+            paragraph: false,
         }
     }
 
@@ -188,18 +191,14 @@ impl Renderer {
             .saturating_sub(self.indent + prefix.width())
             .max(8);
         let taken = std::mem::take(&mut self.current);
-        if std::mem::take(&mut self.host_line) {
+        if std::mem::take(&mut self.host_line)
+            || (self.paragraph && self.lists.is_empty() && self.quote == 0)
+        {
             self.out.push(taken);
             return;
         }
         let marker = self.marker.take();
-        // TUIC keeps hard-wrapped answer rows in the answer region when they
-        // carry a hanging indent. The overlay itself consumes no cells.
-        let rows = if taken.text().starts_with("💬 ") {
-            taken.wrap_hanging(body, super::line::cells("💬 "))
-        } else {
-            taken.wrap(body)
-        };
+        let rows = taken.wrap(body);
         for (position, mut row) in rows.into_iter().enumerate() {
             let mut line = prefix.clone();
             match (&marker, position) {
@@ -275,7 +274,7 @@ impl Renderer {
                 self.current.push(Span::new(code.to_string(), style));
             }
             // A soft break is a newline the author typed inside a paragraph.
-            // It becomes a space: the renderer owns the wrap column, and
+            // It becomes a space: the viewer owns the prose wrap column, and
             // honouring the author's would produce a ragged column of the
             // width *their* editor happened to be.
             Event::SoftBreak => self.text(" "),
@@ -313,6 +312,7 @@ impl Renderer {
         match tag {
             Tag::Paragraph => {
                 self.flush();
+                self.paragraph = true;
                 // Not before the first paragraph of a list item. A pending
                 // marker means this paragraph *is* the item, and separating a
                 // bullet from its own text with a blank line reads as an empty
@@ -429,7 +429,10 @@ impl Renderer {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph => self.flush(),
+            TagEnd::Paragraph => {
+                self.flush();
+                self.paragraph = false;
+            }
             TagEnd::Heading(_) => {
                 self.flush();
                 self.styles.pop();
@@ -605,9 +608,9 @@ mod tests {
         );
     }
 
-    // Catches: adjacent answer markers merge or their styled tails overflow.
+    // Catches: adjacent answer markers merge or styled tails acquire hard wraps.
     #[test]
-    fn marked_answers_keep_boundaries_and_word_wrapped_styled_tails() {
+    fn marked_answers_keep_boundaries_and_unwrapped_styled_tails() {
         let source = format!(
             "💬 **{}**\n💬 second answer",
             "accented perché l’eseguibile ".repeat(10).trim_end()
@@ -617,9 +620,14 @@ mod tests {
             .iter()
             .position(|row| row == "💬 second answer")
             .unwrap();
-        assert!(second > 1);
-        assert!(rows[1..second].iter().all(|row| row.starts_with("   ")));
-        assert!(rows.iter().all(|row| super::super::line::cells(row) <= 80));
+        assert_eq!(second, 1);
+        assert_eq!(
+            rows[0],
+            format!(
+                "💬 {}",
+                "accented perché l’eseguibile ".repeat(10).trim_end()
+            )
+        );
         assert!(bytes(&source, 80).contains("\x1b[1m"));
     }
 
@@ -713,9 +721,9 @@ mod tests {
     /// The author's newline inside a paragraph is not a layout instruction:
     /// honouring it produces a column as wide as *their* editor was.
     #[test]
-    fn a_soft_break_is_a_space_and_the_renderer_owns_the_wrap() {
+    fn a_soft_break_is_a_space_and_the_viewer_owns_the_wrap() {
         let out = text("one two\nthree four\nfive six seven\n", 20);
-        assert_eq!(out, vec!["one two three four", "five six seven"]);
+        assert_eq!(out, vec!["one two three four five six seven"]);
     }
 
     #[test]
