@@ -1,8 +1,8 @@
 use super::*;
 
-// Catches: hard-wrapped answer continuations lose the TUIC answer extent.
+// Catches: marked answers acquire explicit breaks and indentation at the PTY edge.
 #[test]
-fn marked_answers_word_wrap_with_hanging_indent_at_live_width() {
+fn marked_answers_soft_wrap_without_hanging_indent_at_live_width() {
     let errors: Vec<_> = [80, 200]
         .into_iter()
         .flat_map(|width| check_answer_wrap(width, width))
@@ -10,9 +10,9 @@ fn marked_answers_word_wrap_with_hanging_indent_at_live_width() {
     assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
 
-// Catches: a long-lived sink renders at startup width after the PTY shrinks.
+// Catches: a long-lived sink inserts stale-width hard breaks after the PTY shrinks.
 #[test]
-fn marked_answers_use_resized_pty_width_without_splitting_words() {
+fn marked_answers_soft_wrap_at_resized_pty_width() {
     let errors = check_answer_wrap(200, 120);
     assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
@@ -121,7 +121,7 @@ fn check_answer_wrap(initial: u16, width: u16) -> Vec<String> {
         let grid = terminal.screen();
         let rows: Vec<String> = (0..40)
             .map(|row| {
-                (0..width)
+                let text = (0..width)
                     .filter_map(|col| grid.cell(row, col))
                     .filter(|cell| !cell.is_wide_continuation())
                     .map(|cell| {
@@ -131,9 +131,12 @@ fn check_answer_wrap(initial: u16, width: u16) -> Vec<String> {
                             cell.contents()
                         }
                     })
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
+                    .collect::<String>();
+                if grid.row_wrapped(row) {
+                    text
+                } else {
+                    text.trim_end().to_owned()
+                }
             })
             .collect();
         let first = rows
@@ -144,24 +147,22 @@ fn check_answer_wrap(initial: u16, width: u16) -> Vec<String> {
             .iter()
             .position(|row| row.contains("REGRESSION-MARKER-END"))
             .expect("visible answer end");
-        let shown = rows[first..=last].join("\n");
+        let shown = rows[first..=last].join("");
         let context = format!("{language} initial={initial} live={width}: {shown:?}");
-        if shown.split_whitespace().collect::<Vec<_>>()
-            != source.split_whitespace().collect::<Vec<_>>()
-        {
-            errors.push(format!("terminal split a word or lost text: {context}"));
+        if shown != source {
+            errors.push(format!("terminal lost text: {context}"));
         }
         if last <= first {
             errors.push(format!("answer did not wrap: {context}"));
         }
         for (index, row) in rows.iter().enumerate().take(last + 1).skip(first) {
-            if grid.row_wrapped(index as u16) {
+            if index < last && !grid.row_wrapped(index as u16) {
                 errors.push(format!(
-                    "terminal auto-wrapped an emitted answer row: {context}"
+                    "renderer inserted a hard answer row boundary: {context}"
                 ));
             }
-            if index > first && !row.starts_with("  ") {
-                errors.push(format!("TUIC continuation needs hanging indent: {context}"));
+            if index > first && row.starts_with("  ") {
+                errors.push(format!("renderer added a hanging indent: {context}"));
             }
         }
     }
