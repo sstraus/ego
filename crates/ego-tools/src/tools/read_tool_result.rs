@@ -28,7 +28,7 @@ impl TypedTool for ReadToolResult {
     }
 
     fn description(&self) -> &str {
-        "Read one fixed 32 KiB page of process output from this session"
+        "Read one fixed 32 KiB page of process output owned by this session. Copy the exact full-output reference from a prior tool result and use original-byte offsets to continue; do not invent references"
     }
 
     fn prepare_typed(

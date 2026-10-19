@@ -26,7 +26,7 @@ impl TypedTool for ExecStatusTool {
     }
 
     fn description(&self) -> &str {
-        "Read bounded output and settlement for a background exec ID"
+        "Read bounded output and settlement for a background exec ID owned by this session. Use the ID returned by exec with background=true. A running status does not mean completion; use read_tool_result for any returned full-output reference"
     }
 
     fn prepare_typed(
