@@ -1676,11 +1676,14 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
         };
         let message = message.replace(['\r', '\n', '\t'], " ");
         let mut line = crate::render::line::Line::empty();
-        line.push(crate::render::line::Span::plain(message));
+        line.push(crate::render::line::Span::new(
+            message,
+            crate::render::style::Style::fg(crate::render::style::Palette::ERROR),
+        ));
         return format!(
             "{}\n",
             line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
-                .text()
+                .render(status.permission_capabilities.depth)
         );
     }
     if status.activity {
