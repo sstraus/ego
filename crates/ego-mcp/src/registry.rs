@@ -505,9 +505,12 @@ fn compile_candidate_tool_definitions(
     for descriptor in descriptors {
         let definition = match collapsed_bootstrap {
             Some(bootstrap) if descriptor.name == bootstrap.dispatch_name() => {
-                collapsed.map(|catalogue| {
-                    McpToolDefinition::collapsed(descriptor.clone(), catalogue.clone())
-                })
+                Some(McpToolDefinition::collapsed(
+                    descriptor.clone(),
+                    collapsed
+                        .cloned()
+                        .unwrap_or_else(McpCollapsedCatalogue::bootstrap),
+                ))
             }
             _ => Some(McpToolDefinition::direct(descriptor.clone())),
         };
@@ -2919,28 +2922,85 @@ mod collapsed_mcp_red {
         })
     }
 
+    // Catches: schema admission inserts call_tool before existing wire tools and drops continuation.
     #[tokio::test(flavor = "current_thread")]
-    async fn collapsed_bootstrap_publishes_management_without_call_tool() {
+    async fn collapsed_schema_admission_preserves_generator_catalogue_bytes() {
+        let (controller, _admission, first) = bootstrap().await;
+        let descriptors = |capture: &McpRegistryCapture| {
+            serde_json::to_vec(
+                &capture
+                    .tools()
+                    .iter()
+                    .map(|tool| RegisteredTool::Effect(Arc::clone(tool)).descriptor())
+                    .collect::<Vec<_>>(),
+            )
+            .expect("serialized generator descriptors")
+        };
+        let before = descriptors(first.capture());
+        let second = controller
+            .reconcile_tool_schema(command(
+                first.capture(),
+                "generation-1",
+                "weather",
+                schema_definition("weather", weather_schema()),
+            ))
+            .await
+            .expect("schema reconciliation");
+        assert_eq!(
+            before,
+            descriptors(second.capture()),
+            "schema admission must not mutate the wire catalogue"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn collapsed_bootstrap_publishes_dispatcher_without_inner_authority() {
         let bootstrap_contract =
             McpCollapsedBootstrap::new(management()).expect("collapsed bootstrap");
         assert_eq!(
             bootstrap_contract.tool_names().collect::<Vec<_>>(),
-            vec!["get_tool_schema", "search_tools"]
+            vec!["call_tool", "get_tool_schema", "search_tools"]
         );
         let (controller, _admission, publication) = bootstrap().await;
         assert_eq!(publication.generation(), "generation-1");
         assert_eq!(
             publication.admitted_tools(),
-            &["get_tool_schema".to_owned(), "search_tools".to_owned()]
+            &[
+                "call_tool".to_owned(),
+                "get_tool_schema".to_owned(),
+                "search_tools".to_owned()
+            ]
         );
-        assert!(
-            !controller
-                .capture()
-                .expect("capture")
-                .tools()
-                .iter()
-                .any(|tool| tool.descriptor().name == "call_tool")
-        );
+        let capture = controller.capture().expect("capture");
+        assert_unadmitted_dispatch_refused(&capture);
+    }
+
+    fn assert_unadmitted_dispatch_refused(capture: &McpRegistryCapture) {
+        let tool = capture
+            .tools()
+            .iter()
+            .find(|tool| tool.descriptor().name == "call_tool")
+            .expect("visible dispatcher");
+        let fs = ego_core::permit::fake::FakeFs::default();
+        let ctx = ego_core::permit::PrepareCtx {
+            cwd: CanonPath::new("/fixture"),
+            resolver: &fs,
+        };
+        for name in [
+            "weather",
+            "unknown",
+            "call_tool",
+            "get_tool_schema",
+            "search_tools",
+        ] {
+            assert!(
+                matches!(
+                    tool.prepare(json!({"tool_name":name,"arguments":{"city":"Rome"}}), &ctx),
+                    Err(ToolError::InvalidParams(_))
+                ),
+                "bootstrap must refuse {name} before factory preparation"
+            );
+        }
     }
 
     // Catches: Tool annotations prevent a real registry schema lookup from publishing.
@@ -2963,12 +3023,7 @@ mod collapsed_mcp_red {
                 .iter()
                 .any(|name| name == "call_tool")
         );
-        assert!(
-            !old_capture
-                .tools()
-                .iter()
-                .any(|tool| tool.descriptor().name == "call_tool")
-        );
+        assert_unadmitted_dispatch_refused(&old_capture);
         assert!(
             second
                 .capture()
