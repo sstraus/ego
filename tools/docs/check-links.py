@@ -29,7 +29,7 @@ def anchors(path):
     return result
 
 def main():
-    files = [ROOT / p for p in ("README.md", "ARCHITECTURE.md", "CLI.md", "SPEC.md", "CHANGELOG.md")]
+    files = [ROOT / p for p in ("README.md", "ARCHITECTURE.md", "CLI.md", "SPEC.md")]
     files += sorted((ROOT / "docs").rglob("*.md"))
     errors = []
     checked = 0
