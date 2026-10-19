@@ -90,27 +90,39 @@ fn regenerate() {
     }
 }
 
-/// The claim the transcripts cannot make on their own, because a golden agrees
-/// with whatever produced it: **no line is wider than the terminal**.
-///
-/// Measured on the plain rendering, where a cell is a cell. A line that
-/// overflows wraps in the emulator at a column the renderer did not choose, and
-/// every alignment below it on the screen is wrong from there down.
-///
-/// Two things are allowed past the edge, and both are refusals to corrupt
-/// content rather than oversights:
-///
-/// - **A word wider than the line** — a URL, a path. `wrap_soft` will not break
-///   one, because half a link is not a link.
-/// - **A line of fenced code.** A code block is verbatim, and hard-wrapping it
-///   puts a real newline into text somebody is going to copy out of the
-///   scrollback. Letting the emulator soft-wrap costs the same screen space and
-///   copies back as the original line, because emulators track continuation.
+/// Catches: paragraphs acquire renderer hard breaks, or structured rows overflow.
+/// Prose stays on logical lines and the terminal owns its soft wrapping. Lists,
+/// quotes and tables keep width-constrained layout; verbatim code and oversized
+/// words retain their existing overflow exceptions.
 #[test]
-fn nothing_is_drawn_past_the_right_edge() {
+fn paragraphs_keep_logical_lines_and_structured_rows_keep_their_width() {
+    let paragraphs = [
+        "A paragraph with strong weight, emphasis, a retraction and inline_code() in it, long enough that it has to wrap at every width this document is rendered at.",
+        "Syntax highlighting writes a foreground; a diff writes a background. They compose on one cell grid. See the decision record.",
+        "Loose lists are the case a tight one hides:",
+        "The last paragraph.",
+    ];
     let verbatim = code_lines();
     for width in WIDTHS {
-        for line in transcript(width, Depth::None).lines() {
+        let rendered = transcript(width, Depth::None);
+        for paragraph in paragraphs {
+            assert_eq!(
+                rendered.lines().filter(|line| *line == paragraph).count(),
+                1,
+                "at {width} columns the logical paragraph changed: {paragraph:?}"
+            );
+            let mut terminal = vt100::Parser::new(12, width as u16, 0);
+            terminal.process(format!("{paragraph}\r\n").as_bytes());
+            assert_eq!(
+                terminal.screen().row_wrapped(0),
+                ego_cli::render::line::cells(paragraph) > width,
+                "the terminal must own paragraph wrapping at {width} columns"
+            );
+        }
+        for line in rendered.lines() {
+            if paragraphs.contains(&line) {
+                continue;
+            }
             if verbatim.iter().any(|code| line.trim_end().ends_with(code)) {
                 continue;
             }
