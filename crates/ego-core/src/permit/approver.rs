@@ -162,17 +162,24 @@ impl ModeApprover {
                 // here — the boundary was settled before the question was
                 // ever asked — so this widens nothing.
                 Mode::Yolo => true,
+                Mode::Manual => false,
                 // Auto-approves workspace writes. `classify`'s step 0 already
                 // established that every path in this call is in the
                 // workspace.
-                Mode::Edits => !matches!(
-                    op,
-                    Op::Spawn { .. }
-                        | Op::Opaque { .. }
-                        | Op::Connect { .. }
-                        | Op::SecretEgress { .. }
-                        | Op::ProtocolConnect { .. }
-                ),
+                Mode::Edits => {
+                    (!op.mutates()
+                        || op.subject_path(&self.workspace).is_some_and(|path| {
+                            path.as_path().starts_with(self.workspace.as_path())
+                        }))
+                        && !matches!(
+                            op,
+                            Op::Spawn { .. }
+                                | Op::Opaque { .. }
+                                | Op::Connect { .. }
+                                | Op::SecretEgress { .. }
+                                | Op::ProtocolConnect { .. }
+                        )
+                }
                 // `ARCHITECTURE.md:242` — these review unresolved
                 // **sensitive** actions, not every action. A read inside the
                 // workspace that stopped the run to ask would be the prompt

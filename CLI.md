@@ -419,7 +419,7 @@ the final grammar.
 **Permissions and confinement** (one axis pair, Codex-style)
 
 ```
-    --mode M            plan|default|auto|edits|yolo   shortcuts: --plan, --yolo
+    --mode M            plan|manual|auto|accept-edits|yolo   shortcuts: --plan, --yolo
                         trusted interactive sessions default to auto when no
                         mode is configured; deterministic low/bounded calls
                         need no judge, while unknown calls may use the
@@ -1237,7 +1237,7 @@ family as skills; `--var` fills `{{placeholders}}`; shebang makes it a program:
 ---
 version: 1
 model: anthropic/claude-sonnet-5
-mode: edits
+mode: accept-edits
 sandbox: workspace
 allow: ["exec(cargo *)"]
 schema: "@review-schema.json"
@@ -1403,15 +1403,52 @@ wraps the shared health snapshot at the live terminal width. Both preserve
 every field at 120, 80, 60, and 40 columns instead of relying on terminal
 reflow or attaching multiline output to the composer.
 
-`/mode`, `/plan`, `/yolo`, and `/permissions` are argument-free local modal
-actions. A direct-argument form such as `/mode edits` or `/permissions allow
-...` is rejected as action usage and never submitted as a prompt. `/mode`
-selects one of `plan`, `default`, `auto`, `edits`, or `yolo` for this session;
-`/plan` stages plan idempotently. `/yolo`, the Yolo palette action, and Yolo
-selected through `/mode` stage yolo directly and produce one receipt; they do
-not open a second confirmation ritual. Selecting auto validates a configured
-judge and its current model/request without a provider effect; deterministic
-local calls remain available when no judge is configured.
+`/mode` opens the permission picker. `/mode <name>` selects exactly one of
+`plan`, `manual`, `auto`, `accept-edits`, and `yolo` (bypass permissions).
+Unknown names and extra arguments are local usage errors, never model input.
+`/plan`, `/yolo`, and `/permissions` still take no arguments.
+Shift+Tab cycles in this order: plan → manual → auto → accept-edits → yolo → plan.
+It preserves the composer draft and attachments and does not submit them, in both
+Emacs and Vim editing. While a picker, permission prompt, or other modal is open,
+Shift+Tab does nothing. During an active turn it queues a local selection until
+the turn ends; it does not change that turn's captured policy. Repeated selections
+start from the last accepted staged mode. A receipt shows the selected mode and
+its next-generation boundary. Fixed sandbox, system max_mode and profile ceilings
+still apply. A refused selection leaves the prior selection intact and reports why.
+Auto selection validates its configured judge without a provider effect.
+`/plan` stages plan idempotently. `/yolo` and picker selection stage yolo directly;
+they do not ask for a second confirmation.
+
+Manual asks for every permission-eligible tool invocation, including reads and
+allow-rule-covered calls, after hard boundaries and explicit denies. It offers
+allow once or `[s]` allow the exact displayed scope for this live session. The
+session option shows and confirms the canonical tool, effects, parameters,
+workspace, executable identity, argv, cwd, and environment scope. It compares
+all those facts, not a command prefix, and writes no configuration. Changed
+arguments, environment, cwd, executable bytes, tool target, or workspace ask again.
+An incomplete executable identity or uncaptured environment permits once-only
+approval. Secret release and open protocol connections are also once-only.
+Switching sessions, process restart, and resume clear terminal session grants;
+ACP closes/loads/resumes clear its session grants. Persistent remember choices are
+not offered or honored in manual mode. Internal session-evidence retrieval and
+inspection/cancellation of already-owned session processes keep their existing
+internal authority and are exempt, as are non-tool UI/config/catalogue operations. Internal context, goal, plan, history,
+skill admission and task scheduling do not enter the effect-tool permission chain;
+effects that a skill or child executes still use their captured policy.
+Neither once nor session approval can override a deny, hard boundary or sandbox.
+
+Configuration, CLI flags, ACP controls and new saved selections use the same
+canonical names. For compatibility, explicit `default` in old config or sessions
+retains the old deterministic-read/sensitive-action policy; it is not an alias
+for manual and is not in the new picker or cycle. Legacy `edits` decodes
+with the accept-edits policy (external-root writes now require normal approval) and is written as `accept-edits`. Legacy
+CLI `--mode default|edits` remains accepted. The private content-addressed
+snapshot v1 wire retains `edits` to preserve old authority digests; this is not a
+public selection spelling. Missing mode falls back to manual
+except for the existing trusted-interactive auto default. Old sessions with no
+recorded mode use current resolution, which does not grant new approval authority.
+A legacy default session enters manual on its first Shift+Tab.
+
 `/permissions`
 exposes the same list, allow, deny, revoke, remember, and explain services and
 DTOs as the root `rules` command. List/explain use the session's
@@ -1421,7 +1458,7 @@ then edit its schema-derived fields with exact values prefilled; nested shapes
 remain in one prefilled JSON fallback instead of requiring a whole call to be
 typed as JSON.
 
-An unresolved permission modal is at most four rows: the call as a readable
+Outside manual mode, an unresolved permission modal is at most four rows: the call as a readable
 command, its risk in plain words, and the keys `[y] yes`, `[a] yes, do not ask
 again for <rules>`, `[n] no, say what to do instead`, `[e] edit`, `[d]
 details`. The risk row never shows an internal name; a limited risk (changes
@@ -2034,8 +2071,8 @@ Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
-System policy can also set `max_mode="edits"`, using the order
-plan < default < edits < auto < yolo. A selected mode above the maximum is
+System policy can also set `max_mode="accept-edits"`, using the order
+plan < manual < default (legacy) < accept-edits < auto < yolo. A selected mode above the maximum is
 refused before run effects, including live ACP and REPL selections. A refused
 selection preserves the current and pending mode. `max_mode` is system-only and does not change
 the default mode; a plan maximum must be paired with `mode="plan"`.

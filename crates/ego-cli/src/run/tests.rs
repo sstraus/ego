@@ -2277,7 +2277,7 @@ fn repl_mode_selection_cannot_raise_system_maximum() {
     let layers = vec![ConfigLayer::parse(Source::System, "max_mode = 'default'").unwrap()];
     let effective = resolve(&layers, Trust::Trusted, None).unwrap();
     let selection = GenerationPolicySelection::new(
-        effective.mode.unwrap_or(Mode::Default),
+        effective.mode.unwrap_or(Mode::Manual),
         effective.permissions,
     );
     let owner = PolicyApplicationOwner::new(
@@ -2297,7 +2297,7 @@ fn repl_mode_selection_cannot_raise_system_maximum() {
         result.is_err(),
         "REPL accepted yolo above system max_mode=default"
     );
-    assert_eq!(selection.capture().unwrap().mode, Mode::Default);
+    assert_eq!(selection.capture().unwrap().mode, Mode::Manual);
 }
 
 // Catches: auto startup applies Off to fallback models that reject it.

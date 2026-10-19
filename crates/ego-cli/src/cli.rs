@@ -965,12 +965,13 @@ pub use commands::{AuthAction, AuthArgs};
 fn parse_mode(value: &str) -> Result<Mode, String> {
     match value {
         "plan" => Ok(Mode::Plan),
-        "default" => Ok(Mode::Default),
+        "default" => Ok(Mode::Default), // Preserve legacy authority; not an alias for manual.
+        "manual" => Ok(Mode::Manual),
         "auto" => Ok(Mode::Auto),
-        "edits" => Ok(Mode::Edits),
+        "edits" | "accept-edits" => Ok(Mode::Edits),
         "yolo" => Ok(Mode::Yolo),
         other => Err(format!(
-            "`{other}` is not a permission mode: plan|default|auto|edits|yolo"
+            "`{other}` is not a permission mode: plan|manual|auto|accept-edits|yolo (legacy: default, edits)"
         )),
     }
 }

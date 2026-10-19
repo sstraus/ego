@@ -27,13 +27,7 @@ use crate::model_picker::reasoning_levels;
 ///
 /// The host is the human seat and shows each mode before the operator selects
 /// it. A selection changes only this session's subsequent generations.
-const HOST_MODES: [Mode; 5] = [
-    Mode::Plan,
-    Mode::Default,
-    Mode::Edits,
-    Mode::Auto,
-    Mode::Yolo,
-];
+const HOST_MODES: [Mode; 5] = Mode::SELECTABLE;
 
 /// What one ACP session's operator has picked, if anything.
 #[derive(Debug, Clone, Default)]
@@ -134,7 +128,7 @@ impl AcpSessionControls {
         let mut controls = Self::seeded(
             effective.model.clone(),
             effective.thinking,
-            effective.mode.unwrap_or(Mode::Default),
+            effective.mode.unwrap_or(Mode::Manual),
             effective.judge.is_some(),
             ceiling,
             catalogue,
@@ -508,7 +502,7 @@ impl AcpSessionControls {
             .and_then(|model| explicit_effort.or_else(|| self.resolved_effort(model, None)));
         let mode = chosen.mode.unwrap_or_else(|| {
             profile.map_or(self.mode, |effective| {
-                effective.mode.unwrap_or(Mode::Default)
+                effective.mode.unwrap_or(Mode::Manual)
             })
         });
         Ok(SessionControlState {

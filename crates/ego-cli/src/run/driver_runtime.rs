@@ -1628,6 +1628,9 @@ fn handle_interactive_policy(
         let mode = *mode;
         let notice = match owner.apply(PolicyControlRequest::SetMode(mode)) {
             Ok(PolicyControlOutcome::Mode { staging }) => {
+                if let Some(status) = status.as_ref() {
+                    status.seat.set_selected_mode(mode);
+                }
                 if staging.changed {
                     format!("mode `{mode}` staged for the next generation")
                 } else {

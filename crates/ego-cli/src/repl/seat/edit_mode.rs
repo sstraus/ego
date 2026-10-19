@@ -93,6 +93,17 @@ impl EditMode for SurfaceEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let raw: Event = event.into();
 
+        // Modal keys belong only to that modal. Never change authority behind it.
+        if let Event::Key(key) = &raw
+            && key.code == KeyCode::BackTab
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        {
+            return if self.phase.get() == EditPhase::Modal {
+                ReedlineEvent::None
+            } else {
+                ReedlineEvent::ExecuteHostCommand(MODE_CYCLE_COMMAND.to_owned())
+            };
+        }
         let picker_open = self.picker_open();
         let question_selector_open = if self.phase.get() == EditPhase::Modal {
             self.status
@@ -227,6 +238,7 @@ impl EditMode for SurfaceEditMode {
                         KeyCode::Char('n' | 'N') => permission_decision_command("deny"),
                         KeyCode::Char('e' | 'E') => permission_decision_command("amend"),
                         KeyCode::Char('a' | 'A') => permission_decision_command("remember"),
+                        KeyCode::Char('s' | 'S') => permission_decision_command("session"),
                         KeyCode::Char('d' | 'D') => permission_decision_command("details"),
                         KeyCode::Enter => ReedlineEvent::None,
                         KeyCode::Esc => {

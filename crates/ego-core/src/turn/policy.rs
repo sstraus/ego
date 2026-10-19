@@ -535,11 +535,22 @@ struct PolicyWire {
         skip_serializing_if = "crate::permit::ReadPerimeter::is_default"
     )]
     read_perimeter: crate::permit::ReadPerimeter,
+    // Snapshot v1 is a content-addressed authority format, not public UI grammar.
+    // Keep its original spelling so old edits sessions retain the exact digest.
+    #[serde(serialize_with = "snapshot_mode")]
     mode: Mode,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     coordinator: bool,
     allow: Vec<RuleWire>,
     deny: Vec<RuleWire>,
+}
+
+fn snapshot_mode<S: serde::Serializer>(mode: &Mode, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(if *mode == Mode::Edits {
+        "edits"
+    } else {
+        mode.as_str()
+    })
 }
 
 impl PolicyWire {

@@ -1446,6 +1446,7 @@ pub(super) enum PermissionWord {
     Deny,
     Amend,
     Remember,
+    Session,
 }
 
 pub(super) fn parse_trust(answer: &str) -> Option<Trust> {
@@ -1462,6 +1463,7 @@ pub(super) fn parse_permission(answer: &str) -> Option<PermissionWord> {
         "d" | "deny" | "n" | "no" => Some(PermissionWord::Deny),
         "m" | "amend" | "e" | "edit" => Some(PermissionWord::Amend),
         "r" | "remember" => Some(PermissionWord::Remember),
+        "s" | "session" => Some(PermissionWord::Session),
         _ => None,
     }
 }
@@ -1527,6 +1529,39 @@ fn settle_permission(
                 .permission_modal = false;
             amendment(editor, surface, request, notice)
         }
+        PermissionWord::Session => {
+            if !request.session_reusable() {
+                return PermissionDecision::Deny;
+            }
+            let prompt = Question::new(
+                format!(
+                    "{}\nAllow this exact scope for this session? [y/N] ",
+                    ego_core::permit::terminal_safe(&request.session_scope_description())
+                ),
+                Arc::clone(surface.status),
+            );
+            surface
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_modal = false;
+            let accepted = matches!(modal_line(editor, surface, &prompt),
+                Line::Submitted(answer) if parse_trust(&answer) == Some(Trust::Trusted));
+            if accepted
+                && surface
+                    .status
+                    .lock()
+                    .expect("surface status lock")
+                    .session_permissions
+                    .allow(request)
+            {
+                *notice = Some("Allowed this exact scope for this session only.".into());
+                PermissionDecision::Allow
+            } else {
+                PermissionDecision::Deny
+            }
+        }
+        PermissionWord::Remember if request.is_manual() => PermissionDecision::Deny,
         PermissionWord::Remember => match remember_permission(surface.status, request) {
             Ok(receipt) => {
                 *notice = Some(receipt);

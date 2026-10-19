@@ -890,7 +890,7 @@ fn tool_descriptors(compaction: bool) -> Vec<ToolDescriptor> {
                     "root":{"type":"string"}, "prompt":{"type":"string"},
                     "model":{"type":"string"},
                     "thinking":{"enum":["off","minimal","low","medium","high","xhigh","max"]},
-                    "mode":{"enum":["plan","default","auto","edits","yolo"]},
+                    "mode":{"enum":["plan","manual","auto","accept-edits","yolo","default","edits"]},
                     "budget":{"type":"string"}, "profile":{"type":"string"}
                 }
             }),

@@ -236,7 +236,7 @@ fn presenter_mode_selector_has_exact_values_and_emits_plan_each_time() {
         presenter.mode_options(),
         [
             Mode::Plan,
-            Mode::Default,
+            Mode::Manual,
             Mode::Auto,
             Mode::Edits,
             Mode::Yolo

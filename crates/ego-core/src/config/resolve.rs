@@ -592,8 +592,8 @@ fn resolve_inner(
 
     let mut profile_warnings = Vec::new();
     if let Some(ceiling) = profile_ceiling {
-        let maximum = ceiling.mode.unwrap_or(Mode::Default);
-        let selected = mode.unwrap_or(Mode::Default);
+        let maximum = ceiling.mode.unwrap_or(Mode::Manual);
+        let selected = mode.unwrap_or(Mode::Manual);
         if !selected.within(maximum) {
             profile_warnings.push(format!(
                 "mode {selected} exceeds profile ceiling {maximum}; using {maximum}"
@@ -621,7 +621,7 @@ fn resolve_inner(
     )?;
 
     if let Some(ceiling) = profile_ceiling {
-        let maximum = ceiling.mode.unwrap_or(Mode::Default);
+        let maximum = ceiling.mode.unwrap_or(Mode::Manual);
         if max_mode.is_none_or(|system| maximum.within(system)) {
             max_mode = Some(maximum);
         }
@@ -868,7 +868,7 @@ fn system_authority_ceilings(
         }
     }
     if let Some(maximum) = max_mode {
-        let selected = mode.unwrap_or(Mode::Default);
+        let selected = mode.unwrap_or(Mode::Manual);
         if !selected.within(maximum) {
             return Err(ConfigError::Invalid {
                 source: Source::System,

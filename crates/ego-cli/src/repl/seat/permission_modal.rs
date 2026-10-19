@@ -44,7 +44,13 @@ pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> Strin
         .join("; ");
     rows.push(format!("{prefix}Allow {operations}?"));
     rows.extend(headline_rows(request).into_iter().skip(1));
-    rows.push(if let Some(rules) = remembered_rules(request) {
+    rows.push(if request.is_manual() {
+        if request.session_reusable() {
+            "[y] allow once   [s] allow exact scope for this session (confirm scope next)".into()
+        } else {
+            "[y] allow once (session reuse unavailable: context is not fully captured)".into()
+        }
+    } else if let Some(rules) = remembered_rules(request) {
         let exact = format!("[y] yes   [a] yes, do not ask again for {rules}");
         if crate::render::line::Line::plain(&exact).width() <= width {
             exact

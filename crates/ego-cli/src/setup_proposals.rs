@@ -91,7 +91,7 @@ fn operation_admitted(
     }
     let policy = PolicyEngine::new(
         workspace.clone(),
-        effective.mode.unwrap_or(ego_core::config::Mode::Default),
+        effective.mode.unwrap_or(ego_core::config::Mode::Manual),
         effective.permissions.clone(),
     )
     .with_profile_roots(roots);
@@ -232,7 +232,7 @@ fn action_reachable(effective: &Effective, workspace: &CanonPath, probe: &Probe)
 fn action_resolution(effective: &Effective, workspace: &CanonPath, call: PreparedCall) -> u8 {
     let policy = PolicyEngine::new(
         workspace.clone(),
-        effective.mode.unwrap_or(ego_core::config::Mode::Default),
+        effective.mode.unwrap_or(ego_core::config::Mode::Manual),
         effective.permissions.clone(),
     );
     match policy.classify(call) {

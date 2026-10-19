@@ -125,6 +125,7 @@ pub enum Dispatch {
     Init(String),
     Config(String),
     Fast(bool),
+    Mode(ego_core::config::Mode),
     Setup(String),
     Tasks(String),
     Mcp(String),
@@ -1150,6 +1151,16 @@ impl ActionRegistry {
                 },
             });
         }
+        if id == ActionId::Mode && !raw_arguments.is_empty() {
+            return Some(
+                match ego_core::config::Mode::parse_selection(raw_arguments.trim()) {
+                    Some(mode) => Dispatch::Mode(mode),
+                    None => Dispatch::Refused {
+                        reason: "usage: /mode [plan|manual|auto|accept-edits|yolo]",
+                    },
+                },
+            );
+        }
         if matches!(
             id,
             ActionId::Mode | ActionId::Plan | ActionId::Yolo | ActionId::Permissions
@@ -1456,6 +1467,47 @@ fn admitted_skill_operation(
 #[cfg(test)]
 mod unknown_slash_tests {
     use super::*;
+
+    // Catches: valid direct mode selections are rejected instead of routed locally.
+    #[test]
+    fn direct_mode_names_route_locally() {
+        let registry = ActionRegistry::final_surface();
+        for mode in ["plan", "manual", "auto", "accept-edits", "yolo"] {
+            let input = format!("/mode {mode}");
+            let dispatch = registry.classify(registry.submit(input, InputOrigin::Typed));
+            assert!(
+                !matches!(dispatch, Dispatch::Refused { .. } | Dispatch::Prompt),
+                "direct mode {mode} must be a local selection: {dispatch:?}"
+            );
+        }
+    }
+
+    // Catches: invalid or extra mode arguments escape into a paid model turn.
+    #[test]
+    fn invalid_mode_arguments_are_local_refusals_and_empty_keeps_picker() {
+        let registry = ActionRegistry::final_surface();
+        assert_eq!(
+            registry.classify(registry.submit("/mode", InputOrigin::Typed)),
+            Dispatch::Action(ActionId::Mode)
+        );
+        for input in [
+            "/mode default",
+            "/mode edits",
+            "/mode nope",
+            "/mode plan yolo",
+        ] {
+            assert!(matches!(
+                registry.classify(registry.submit(input, InputOrigin::Typed)),
+                Dispatch::Refused { .. }
+            ));
+        }
+        for mode in ego_core::config::Mode::SELECTABLE {
+            assert_eq!(
+                registry.classify(registry.submit(format!("/mode {mode}"), InputOrigin::Typed)),
+                Dispatch::Mode(mode)
+            );
+        }
+    }
 
     // Catches: literal slash text is refused even when its origin or leading space escapes it.
     #[test]

@@ -151,7 +151,10 @@ pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> Strin
         .into_iter()
         .filter(|key| !key.hint.is_empty())
         .map(|key| format!("{} {}", key.label, key.hint))
-        .chain([format!("/{}", registry.help(ActionId::Help).name())]);
+        .chain([
+            "Shift+Tab mode".to_owned(),
+            format!("/{}", registry.help(ActionId::Help).name()),
+        ]);
     let mut rows: Vec<String> = Vec::new();
     for item in items {
         match rows.last_mut() {
@@ -224,6 +227,14 @@ fn submit_busy_line(
         return None;
     }
     match dispatch {
+        Dispatch::Mode(mode) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((
+                Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode))),
+                false,
+            ));
+        }
         Dispatch::Action(action) => {
             let (handled, interrupted) =
                 execute_action_and_modal(editor, phase, status, ingress, action, true);
@@ -350,6 +361,26 @@ pub(super) fn surface_line(
             });
         }
         let signal = editor.read_line(prompt);
+        if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == MODE_CYCLE_COMMAND)
+        {
+            let mode = {
+                let current = status.lock().expect("surface status lock");
+                current
+                    .selected_mode
+                    .or_else(|| current.status_base.as_ref().map(|base| base.mode))
+            };
+            if let Some(mode) = mode {
+                return (
+                    Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(
+                        mode.next(),
+                    ))),
+                    false,
+                );
+            }
+            status.lock().expect("surface status lock").notice =
+                Some("effective permission mode is unavailable".into());
+            continue;
+        }
         // Reject blank input before Reedline commits it to history or clears
         // the composer, for both idle submission and busy queue admission.
         let signal = if matches!(
@@ -503,6 +534,12 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Config(arguments) => {
                     return (Line::HostCommand(HostCommand::Config(arguments)), failed);
+                }
+                Dispatch::Mode(mode) => {
+                    return (
+                        Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode))),
+                        failed,
+                    );
                 }
                 Dispatch::Fast(enabled) => {
                     return (Line::HostCommand(HostCommand::Fast(enabled)), failed);

@@ -799,6 +799,7 @@ pub struct PermissionRequest {
     presentation: Option<Box<PermissionPresentation>>,
     child_name: Option<String>,
     explicit_answer: bool,
+    workspace: Option<CanonPath>,
 }
 
 /// Display-only facts retained for a human permission decision.
@@ -878,6 +879,7 @@ impl PermissionRequest {
             presentation: None,
             child_name: None,
             explicit_answer: false,
+            workspace: None,
         }
     }
 
@@ -905,6 +907,53 @@ impl PermissionRequest {
         self.explicit_answer
     }
 
+    /// True only for canonical tool calls that reached the manual human seat.
+    pub fn is_manual(&self) -> bool {
+        matches!(
+            self.why,
+            Escalation::ModeAsks {
+                mode: Mode::Manual,
+                ..
+            } | Escalation::ModeAsksSubject {
+                mode: Mode::Manual,
+                ..
+            }
+        )
+    }
+
+    /// Session reuse needs fully captured process identity and environment.
+    pub fn session_reusable(&self) -> bool {
+        self.is_manual()
+            && !self.explicit_answer
+            && self.workspace.is_some()
+            && !self.ops.is_empty()
+            && self.ops.iter().all(|op| match op {
+                Op::Spawn { spec } => {
+                    spec.cwd().is_some()
+                        && matches!(spec.env_policy(), super::EnvPolicy::Exact { .. })
+                        && spec.identity().is_some_and(|identity| identity.complete())
+                }
+                Op::SecretEgress { .. } | Op::ProtocolConnect { .. } => false,
+                _ => true,
+            })
+    }
+
+    /// Full scope shown before a session grant. Debug implementations redact secrets.
+    pub fn session_scope_description(&self) -> String {
+        format!(
+            "Exact tool: {}\nWorkspace: {:?}\nCanonical effects (including process argv, cwd, environment and executable identity): {:?}\nParameters: {}\nOnly this session; no config is written.",
+            TerminalSafe(&self.tool),
+            self.workspace,
+            self.ops,
+            TerminalSafe(
+                &self
+                    .presentation
+                    .as_ref()
+                    .map_or_else(|| "none".into(), |p| p.parameters.to_string())
+            )
+        )
+    }
+
     pub fn tool(&self) -> &str {
         &self.tool
     }
@@ -922,6 +971,37 @@ impl PermissionRequest {
 
     pub fn presentation(&self) -> Option<&PermissionPresentation> {
         self.presentation.as_deref()
+    }
+}
+
+/// In-memory exact grants. The adapter owns one instance per live session.
+/// This cache cannot mint permits and is consulted only after policy checks.
+#[derive(Debug, Default)]
+pub struct SessionPermissions {
+    allowed: Vec<PermissionRequest>,
+}
+
+impl SessionPermissions {
+    pub fn allows(&self, request: &PermissionRequest) -> bool {
+        request.session_reusable()
+            && self.allowed.iter().any(|allowed| {
+                allowed.tool == request.tool
+                    && allowed.ops == request.ops
+                    && allowed.workspace == request.workspace
+                    && allowed.child_name == request.child_name
+                    && allowed.presentation.as_ref().map(|p| &p.parameters)
+                        == request.presentation.as_ref().map(|p| &p.parameters)
+            })
+    }
+
+    pub fn allow(&mut self, request: &PermissionRequest) -> bool {
+        if !request.session_reusable() {
+            return false;
+        }
+        if !self.allows(request) {
+            self.allowed.push(request.clone());
+        }
+        true
     }
 }
 
@@ -1452,6 +1532,17 @@ impl PolicyEngine {
                 return Classification::Settled(Err(*denied));
             }
         }
+        // Manual asks even when an allow rule covers the entire canonical call.
+        // All hard boundaries and denies above have already been checked.
+        if self.mode == Mode::Manual {
+            let op = &call.ops()[0];
+            let why = Escalation::ModeAsksSubject {
+                mode: self.mode,
+                op: op.name(),
+                subject: op.subject(&self.workspace),
+            };
+            return Classification::Ask(self.pending(call, why));
+        }
         // High belongs to the human, even with an allow rule or yolo mode.
         if self.coordinator_high(&call) {
             let op = &call.ops()[0];
@@ -1548,7 +1639,7 @@ impl PolicyEngine {
             return Resolution::Ask(pending);
         }
         if self.coordinator
-            && self.mode != Mode::Plan
+            && !matches!(self.mode, Mode::Plan | Mode::Manual)
             && self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
         {
             let call = pending.call;
@@ -1693,6 +1784,7 @@ impl PolicyEngine {
                 presentation: None,
                 child_name: None,
                 explicit_answer: false,
+                workspace: Some(self.workspace.clone()),
             },
             call,
         }
@@ -2369,6 +2461,7 @@ mod tests {
             presentation: None,
             child_name: None,
             explicit_answer: false,
+            workspace: None,
         };
 
         assert_eq!(
@@ -2413,6 +2506,7 @@ mod tests {
             presentation: None,
             child_name: None,
             explicit_answer: false,
+            workspace: None,
         };
 
         assert_eq!(

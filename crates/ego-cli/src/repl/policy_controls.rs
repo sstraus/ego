@@ -21,13 +21,7 @@ use ego_core::turn::{
 pub use crate::rules::{RememberPreview, RememberRequest, RuleMutationReceipt};
 use crate::rules::{RuleApplication, RuleApplicationError, RuleChange, RuleReadAuthority};
 
-const MODE_OPTIONS: [Mode; 5] = [
-    Mode::Plan,
-    Mode::Default,
-    Mode::Auto,
-    Mode::Edits,
-    Mode::Yolo,
-];
+const MODE_OPTIONS: [Mode; 5] = Mode::SELECTABLE;
 
 /// A read-only operation over the generation's admitted permission rules.
 #[derive(Debug, Clone, PartialEq, Eq)]

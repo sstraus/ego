@@ -111,7 +111,7 @@ async fn resolve_invocation_phase(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?;
-            if settings.effective.mode.unwrap_or(Mode::Default) == Mode::Auto {
+            if settings.effective.mode.unwrap_or(Mode::Manual) == Mode::Auto {
                 auto_preflight.validate_startup()?;
             }
             Ok(ResolvedInvocation {
@@ -178,7 +178,7 @@ async fn open_scope_phase(
         let effective = &settings.effective;
         host.diagnostics.note(&format!(
             "model {model}\nmode {} ({}) · sandbox {} ({})\n{}",
-            effective.mode.unwrap_or(Mode::Default),
+            effective.mode.unwrap_or(Mode::Manual),
             effective.mode_provenance,
             settings.confinement.level(),
             effective.sandbox_provenance,
@@ -265,7 +265,7 @@ fn prepare_resume_phase<'store>(
     } else {
         None
     };
-    let mode = settings.effective.mode.unwrap_or(Mode::Default);
+    let mode = settings.effective.mode.unwrap_or(Mode::Manual);
     let human: Option<Arc<dyn HumanApprover>> = match &host.driver {
         Driver::Interactive { seat, .. } if seat.has_human() => Some(Arc::new(SeatApprover {
             seat: Arc::clone(seat),

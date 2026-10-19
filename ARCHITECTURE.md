@@ -339,9 +339,25 @@ second human-input boundary.
 
 
 
-1. **Mode** — `plan` (read-only, ends in an approval gate) · `default`
-   (reviews unresolved sensitive actions) · **`auto`** (judge model, below) ·
-   `edits` (auto-approves workspace writes) · `yolo` (bypass).
+1. **Mode** — `plan` (read-only, ends in an approval gate) · `manual`
+   (human approval for every eligible tool call, including reads and allow-covered
+   calls) · **`auto`** (bounded analysis/judge, below) · `accept-edits`
+   (auto-approves workspace file writes, not execution, network, opaque tools or
+   writes outside the workspace) · `yolo` (bypass ordinary approvals).
+   Explicit legacy `default` retains its old deterministic-read/sensitive-action
+   policy; legacy `edits` decodes as `accept-edits`, never wider. Absent mode uses
+   manual unless the existing trusted-interactive auto default applies.
+   Direct `/mode <name>`, the picker and Shift+Tab stage the same generation-owned
+   selection. Cycle order is plan, manual, auto, accept-edits, yolo; modals ignore
+   Shift+Tab, and busy selections wait until the turn boundary without losing drafts.
+   System max_mode and fixed confinement are unchanged by these controls.
+   Manual's in-memory session grants compare canonical effects, input, workspace,
+   executable identity/bytes, argv, cwd and exact environment. They run only after
+   deny and hard-boundary checks, never persist, and end on session switch/restart
+   or ACP close/load/resume. Incomplete process contexts, secret release and open
+   protocol connections allow once only. Internal session evidence and owned-process
+   controls keep their pre-existing internal authority; non-tool UI operations are
+   not tool permission requests.
 2. **Rules** — persistent, scoped (project/user), with **stable IDs**,
    listable and revocable without the original context, storable without
    executing (`rules remember`). fx's contract verbatim (`ARCHITECTURE.md`

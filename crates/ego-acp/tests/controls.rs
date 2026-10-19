@@ -179,7 +179,7 @@ fn the_offered_values_are_exactly_the_ones_core_says_are_available() {
     );
     assert_eq!(
         values(option(&options, controls::MODE)),
-        vec!["plan", "default", "edits"]
+        vec!["plan", "default", "accept-edits"]
     );
 }
 

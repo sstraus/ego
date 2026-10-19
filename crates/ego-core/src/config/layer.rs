@@ -39,12 +39,34 @@ impl std::fmt::Display for ModelRef {
 pub enum Mode {
     Plan,
     Default,
+    Manual,
     Auto,
+    #[serde(rename = "accept-edits", alias = "edits")]
     Edits,
     Yolo,
 }
 
 impl Mode {
+    /// Public selection and cycle order. Legacy `default` is a compatibility policy, not a public choice.
+    pub const SELECTABLE: [Self; 5] = [
+        Self::Plan,
+        Self::Manual,
+        Self::Auto,
+        Self::Edits,
+        Self::Yolo,
+    ];
+
+    pub fn parse_selection(value: &str) -> Option<Self> {
+        Self::SELECTABLE
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::SELECTABLE.iter().position(|mode| *mode == self);
+        Self::SELECTABLE[index.map_or(1, |index| (index + 1) % Self::SELECTABLE.len())]
+    }
+
     /// Whether this mode stays under the approved system maximum.
     pub const fn within(self, maximum: Self) -> bool {
         self.ceiling_rank() <= maximum.ceiling_rank()
@@ -53,10 +75,11 @@ impl Mode {
     const fn ceiling_rank(self) -> u8 {
         match self {
             Self::Plan => 0,
-            Self::Default => 1,
-            Self::Edits => 2,
-            Self::Auto => 3,
-            Self::Yolo => 4,
+            Self::Manual => 1,
+            Self::Default => 2,
+            Self::Edits => 3,
+            Self::Auto => 4,
+            Self::Yolo => 5,
         }
     }
 
@@ -64,8 +87,9 @@ impl Mode {
         match self {
             Mode::Plan => "plan",
             Mode::Default => "default",
+            Mode::Manual => "manual",
             Mode::Auto => "auto",
-            Mode::Edits => "edits",
+            Mode::Edits => "accept-edits",
             Mode::Yolo => "yolo",
         }
     }

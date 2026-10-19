@@ -48,7 +48,7 @@ pub use fs::{
 pub(crate) use grant::PermissionPresentationInput;
 pub use grant::{
     Authorized, Classification, Escalation, Pending, PermissionPresentation, PermissionRequest,
-    Permit, PermitDenied, PolicyDenied, PolicyEngine, Resolution,
+    Permit, PermitDenied, PolicyDenied, PolicyEngine, Resolution, SessionPermissions,
 };
 pub use path::CanonPath;
 pub use prepared_call::{
