@@ -3121,6 +3121,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         run_deadline,
         state,
         diagnostics,
+        last,
         session_journal,
         status,
         selection,
@@ -3156,7 +3157,9 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     if !automatic_compaction && !seat.confirm_compaction(active.id()) {
         return Ok(CommandOutcome::Continue);
     }
-    // One automatic attempt per source epoch; failure remains visible.
+    // Required pressure recovery cannot return to a prompt that cannot run.
+    let required_compaction = automatic_compaction && ego_core::turn::compaction_due(state.context);
+    // One automatic attempt per source epoch; operator cancellation stays idle.
     *automatic_compaction_failed = automatic_compaction;
     seat.busy();
     seat.set_compaction_availability(repl::actions::Availability::BusyWithReason {
@@ -3176,11 +3179,15 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     )
     .await
     {
-        diagnostics.note(&format!(
-            "compaction was blocked before preparation: {}",
-            error.exit_reason()
+        return Ok(compaction_failure_outcome(
+            last,
+            diagnostics,
+            required_compaction,
+            format!(
+                "compaction was blocked before preparation: {}",
+                error.exit_reason()
+            ),
         ));
-        return Ok(CommandOutcome::Continue);
     }
     let compaction_cancel = CancelToken::new();
     let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
@@ -3233,7 +3240,6 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     let receipt = match receipt {
         Ok(receipt) => receipt,
         Err(error) => {
-            diagnostics.note(&format!("compaction failed: {error}"));
             if model_compaction {
                 session_journal
                     .append(TurnId::new(), None, None, EventKind::ContextRequestConsumed)
@@ -3248,7 +3254,16 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
             {
                 status.seat.refresh_status(state, selected);
             }
-            return Ok(CommandOutcome::Continue);
+            let cancelled = matches!(
+                &error,
+                CompactionTransitionError::Preparation(CompactionError::Cancelled(_))
+            );
+            return Ok(compaction_failure_outcome(
+                last,
+                diagnostics,
+                required_compaction && !cancelled,
+                format!("compaction failed: {error}"),
+            ));
         }
     };
     if model_compaction {
@@ -3263,18 +3278,24 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     let target_opened = match session::open_candidate(jsonl_store.as_ref(), &target, clock) {
         Ok(opened) => Opened::Durable(Box::new(opened)),
         Err(error) => {
-            diagnostics.note(&format!("compaction target could not be opened: {error}"));
-            return Ok(CommandOutcome::Continue);
+            return Ok(compaction_failure_outcome(
+                last,
+                diagnostics,
+                required_compaction,
+                format!("compaction target could not be opened: {error}"),
+            ));
         }
     };
     let target_state = target_opened.state();
     let target_owner = match ActiveSession::durable(target_opened, target_state, EVIDENCE_CAP) {
         Ok(owner) => owner,
         Err(error) => {
-            diagnostics.note(&format!(
-                "compaction target evidence could not be opened: {error}"
+            return Ok(compaction_failure_outcome(
+                last,
+                diagnostics,
+                required_compaction,
+                format!("compaction target evidence could not be opened: {error}"),
             ));
-            return Ok(CommandOutcome::Continue);
         }
     };
     let diagnostic = receipt.publication.diagnostic().map(str::to_string);
@@ -3282,8 +3303,12 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         &receipt.publication,
         ego_core::session::TargetPublication::NotPublished { .. }
     ) {
-        diagnostics.note("compaction target was not published");
-        return Ok(CommandOutcome::Continue);
+        return Ok(compaction_failure_outcome(
+            last,
+            diagnostics,
+            required_compaction,
+            "compaction target was not published".to_owned(),
+        ));
     }
     let runtime = target_runtime
         .lock()
@@ -3300,6 +3325,23 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
             request: request_id,
         },
     )))
+}
+
+fn compaction_failure_outcome<'store>(
+    last: &mut Ended,
+    diagnostics: &dyn Diagnostics,
+    required_compaction: bool,
+    message: String,
+) -> CommandOutcome<'store> {
+    if required_compaction {
+        let message = format!("automatic compaction failed; session stopped: {message}");
+        diagnostics.note(&message);
+        last.termination = RunTermination::Failed { message };
+        CommandOutcome::Transition(Box::new(EpochTransition::Exit))
+    } else {
+        diagnostics.note(&message);
+        CommandOutcome::Continue
+    }
 }
 
 async fn end_session_epoch(

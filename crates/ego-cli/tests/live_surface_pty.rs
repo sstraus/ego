@@ -9380,6 +9380,89 @@ fn context_pressure_compacts_and_continues_without_operator_input() {
     );
 }
 
+// Catches: the recorded HTTP body failure leaves automatic compaction latched
+// off while every subsequent managed prompt is refused at context pressure.
+#[test]
+fn failed_compaction_preparation_does_not_loop_refusals() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("REGRESSION-MARKER", 245352, 4)),
+            Reply::TruncatedSse,
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# failed checkpoint fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (mut session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "compaction preparation failed");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        if session.child.try_wait().expect("child status").is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(20)) {
+            output.extend(bytes);
+        }
+    };
+    // Reap the pre-fix refusal loop too, without leaving a fixture process.
+    if !exited {
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+    }
+    let status = session.quit(input);
+    let shown = normalized(&output);
+    assert!(
+        exited,
+        "failed required compaction must terminate, not await another doomed prompt: {shown}"
+    );
+    assert!(
+        !status.success(),
+        "the parent must observe a failed process"
+    );
+    assert!(
+        shown.contains("automatic compaction failed; session stopped"),
+        "{shown}"
+    );
+    assert!(shown.contains("compaction stopped with Error"), "{shown}");
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "no retry storm or ordinary generation"
+    );
+    let journal = std::fs::read_to_string(
+        places
+            .home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        journal.contains("HTTP response body failed"),
+        "the fixture must replay the recorded transport failure"
+    );
+}
+
 // Catches: a wake accepted during checkpoint generation leaves source work
 // pending forever instead of being delivered after automatic compaction.
 #[test]
