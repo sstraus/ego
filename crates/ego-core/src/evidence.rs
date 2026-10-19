@@ -999,7 +999,9 @@ fn canonical_digest<T: Serialize>(value: &T) -> Result<EvidenceDigest, Canonical
 /// Evidence projection held by the rebuildable session manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestEvidence {
+    #[serde(default)]
     run_contexts: Vec<RunContextEvidence>,
+    #[serde(default)]
     generations: Vec<GenerationAdmissionEvidence>,
 }
 
