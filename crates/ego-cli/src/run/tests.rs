@@ -3378,6 +3378,7 @@ async fn background_task_completion_during_another_parent_turn_waits_for_boundar
             Some(ItemId::new()),
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "another parent turn".to_owned(),
                 images: vec![],
                 queued_prompt: None,

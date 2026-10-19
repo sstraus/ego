@@ -604,7 +604,12 @@ fn apply_intent(
                 turn,
                 None,
                 None,
-                EventKind::PromptQueued { id, text, images },
+                EventKind::PromptQueued {
+                    audio: Vec::new(),
+                    id,
+                    text,
+                    images,
+                },
             ) {
                 Ok(_) => {
                     control.refresh(
@@ -2290,7 +2295,20 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         prompt: &str,
         images: Vec<crate::generator::types::ImageRef>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
-        self.run_prompts(vec![(prompt.to_string(), images, None)])
+        self.run_with_media(prompt, images, Vec::new()).await
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "durable turn state is returned on abandonment"
+    )]
+    pub async fn run_with_media(
+        &mut self,
+        prompt: &str,
+        images: Vec<crate::generator::types::ImageRef>,
+        audio: Vec<crate::generator::audio::AudioRef>,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
+        self.run_prompts(vec![(prompt.to_string(), images, audio, None)])
             .await
     }
 
@@ -3210,6 +3228,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 (
                     prompt.text().to_string(),
                     prompt.images().to_vec(),
+                    prompt.audio().to_vec(),
                     Some(prompt.id()),
                 )
             })
@@ -3230,6 +3249,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         prompts: Vec<(
             String,
             Vec<crate::generator::types::ImageRef>,
+            Vec<crate::generator::audio::AudioRef>,
             Option<crate::event::id::QueuedPromptId>,
         )>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
@@ -3855,6 +3875,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         prompts: &[(
             String,
             Vec<crate::generator::types::ImageRef>,
+            Vec<crate::generator::audio::AudioRef>,
             Option<crate::event::id::QueuedPromptId>,
         )],
     ) -> Result<DriveOutcome, StoreError> {
@@ -4228,16 +4249,18 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         prompts: &[(
             String,
             Vec<crate::generator::types::ImageRef>,
+            Vec<crate::generator::audio::AudioRef>,
             Option<QueuedPromptId>,
         )],
     ) -> Result<Option<DriveOutcome>, StoreError> {
-        for (index, (text, images, queued_prompt)) in prompts.iter().enumerate() {
+        for (index, (text, images, audio, queued_prompt)) in prompts.iter().enumerate() {
             let item = ItemId::new();
             let admitted = self.journal.append(
                 turn,
                 Some(item),
                 None,
                 EventKind::UserPrompt {
+                    audio: audio.clone(),
                     text: text.clone(),
                     images: images.clone(),
                     queued_prompt: *queued_prompt,
@@ -4362,15 +4385,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     prompt.id(),
                     prompt.text().to_string(),
                     prompt.images().to_vec(),
+                    prompt.audio().to_vec(),
                 )
             })
             .collect();
-        for (id, text, images) in &pending {
+        for (id, text, images, audio) in &pending {
             self.journal.append(
                 turn,
                 Some(ItemId::new()),
                 None,
                 EventKind::UserPrompt {
+                    audio: audio.clone(),
                     text: text.clone(),
                     images: images.clone(),
                     queued_prompt: Some(*id),

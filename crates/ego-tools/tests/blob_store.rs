@@ -33,6 +33,7 @@ fn image_prompt(reference: &str) -> DomainEvent {
             producer: Producer::Main,
         },
         kind: EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "describe".to_string(),
             images: vec![image],
             queued_prompt: None,
@@ -171,4 +172,34 @@ fn replay_hydration_fails_for_missing_or_corrupt_referenced_image_blobs() {
             "replay resumed after {damage} referenced image blob"
         );
     }
+}
+
+// Catches durable audio references surviving while their bytes are dropped or rewritten.
+#[test]
+fn committed_audio_replays_exactly_after_session_reopen_and_refuses_missing_blob() {
+    use ego_core::generator::audio::{AudioMediaType, AudioRef};
+    use ego_core::generator::types::ContentBlock;
+    let (root, session, store) = fixture();
+    let bytes = include_bytes!("../../ego-core/tests/fixtures/audio/pcm16-mono.wav");
+    let mut writer = store.begin().unwrap();
+    writer.append(bytes).unwrap();
+    let reference = writer.commit().unwrap();
+    let mut event = image_prompt(&reference.to_string());
+    event.kind = EventKind::UserPrompt {
+        text: String::new(),
+        images: Vec::new(),
+        audio: vec![AudioRef::new(reference.clone(), AudioMediaType::Wav).unwrap()],
+        queued_prompt: None,
+    };
+    let mut state = SessionState::default();
+    state.apply(&event);
+    drop(store);
+    let reopened = SessionBlobStore::open(root.path(), session, 64 * 1024).unwrap();
+    let (conversation, _) = conversation_from_with_blobs(&state, &reopened).unwrap();
+    assert!(
+        matches!(&conversation.messages()[0].content[0], ContentBlock::Audio { audio } if audio.bytes() == bytes)
+    );
+    let (_, _, empty) = fixture();
+    assert!(conversation_from_with_blobs(&state, &empty).is_err());
+    assert!(state.blob_references().contains(&reference));
 }

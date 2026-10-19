@@ -4117,6 +4117,7 @@ mod pid_index_tests {
                         },
                         kind: if unfinished {
                             EventKind::PromptQueued {
+                                audio: Vec::new(),
                                 id: ego_core::event::id::QueuedPromptId::new(),
                                 text: "unfinished prompt".into(),
                                 images: Vec::new(),

@@ -167,12 +167,16 @@ pub enum Inexpressible {
     /// signature. Dropping it silently would be
     /// [`ReasoningCarryover::Unsupported`](ego_core::generator::capabilities::ReasoningCarryover::Unsupported)
     /// pretending to be support.
+    AudioNotSupported,
     ReasoningStateNotCarriable,
 }
 
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Inexpressible::AudioNotSupported => {
+                f.write_str("audio input is not supported by this exact model/wire contract")
+            }
             Inexpressible::ReasoningStateNotCarriable => write!(
                 f,
                 "openai-completions has no field for reasoning state, so \
@@ -220,7 +224,8 @@ pub(crate) struct CommonRequest<'a> {
     /// reasoning tokens they refused. A provider that rejects the field is a
     /// provider row that needs a different mapping, not a reason for this one
     /// to send a value nobody asked for.
-    reasoning_effort: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
     /// Omitted when empty, together with `parallel_tool_calls`, which OpenAI
     /// rejects when there are no tools to parallelise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -295,7 +300,14 @@ enum WireContent {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireContentPart {
     ImageUrl { image_url: WireImageUrl },
+    InputAudio { input_audio: WireInputAudio },
     Text { text: String },
+}
+
+#[derive(Debug, Serialize)]
+struct WireInputAudio {
+    data: String,
+    format: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -387,7 +399,26 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
                 // nowhere to put it. Dropped rather than refused a second
                 // time so that the refusal stays in one place.
                 ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. } => {}
-                ContentBlock::Image { image } => images.push(image_data_url(image)),
+                ContentBlock::Image { image } => images.push(WireContentPart::ImageUrl {
+                    image_url: WireImageUrl {
+                        url: image_data_url(image),
+                    },
+                }),
+                ContentBlock::Audio { audio } => {
+                    flush(&mut wire, role, &mut images, &mut text, &mut tool_calls);
+                    wire.push(WireMessage {
+                        role,
+                        content: Some(WireContent::Parts(vec![WireContentPart::InputAudio {
+                            input_audio: WireInputAudio {
+                                data: base64::engine::general_purpose::STANDARD
+                                    .encode(audio.bytes()),
+                                format: "wav",
+                            },
+                        }])),
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                    });
+                }
                 ContentBlock::Text { text: chunk } => {
                     if !text.is_empty() {
                         text.push('\n');
@@ -433,7 +464,7 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
 fn flush<'a>(
     wire: &mut Vec<WireMessage<'a>>,
     role: &'static str,
-    images: &mut Vec<String>,
+    images: &mut Vec<WireContentPart>,
     text: &mut String,
     tool_calls: &mut Vec<WireToolCall<'a>>,
 ) {
@@ -444,13 +475,7 @@ fn flush<'a>(
         (!text.is_empty() || tool_calls.is_empty()).then(|| WireContent::Text(std::mem::take(text)))
     } else {
         let mut parts = Vec::with_capacity(images.len() + if text.is_empty() { 0 } else { 1 });
-        parts.extend(
-            std::mem::take(images)
-                .into_iter()
-                .map(|url| WireContentPart::ImageUrl {
-                    image_url: WireImageUrl { url },
-                }),
-        );
+        parts.extend(std::mem::take(images));
         if !text.is_empty() {
             parts.push(WireContentPart::Text {
                 text: std::mem::take(text),
@@ -481,6 +506,9 @@ pub(crate) fn image_data_url(image: &Image) -> String {
 /// URL or a credential in it — the body is the contract with the provider;
 /// the endpoint and the auth header are the provider row's business.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) && req.model != "gpt-audio-1.5" {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     let wire = WireRequest {
         common: common_request(req)?,
         max_completion_tokens: req.max_output_tokens,
@@ -490,6 +518,9 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
 
 /// Provider-specific fields stay out of the generic compatible mapping.
 pub fn openrouter_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     let mut body: serde_json::Value =
         serde_json::from_slice(&request_body(req)?).expect("request JSON");
     if req.thinking == ThinkingLevel::Off {
@@ -614,7 +645,7 @@ pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Inex
         stream_options: StreamOptions {
             include_usage: true,
         },
-        reasoning_effort: reasoning_effort(req.thinking),
+        reasoning_effort: (req.model != "gpt-audio-1.5").then(|| reasoning_effort(req.thinking)),
         tools,
         parallel_tool_calls,
     })
@@ -631,6 +662,11 @@ pub fn build_request(
     target: &RequestTarget<'_>,
     req: &GenRequest,
 ) -> Result<HttpRequest, Inexpressible> {
+    if super::request_has_audio(req)
+        && target.url(PATH).as_str() != "https://api.openai.com/v1/chat/completions"
+    {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     Ok(target.post_json(PATH, request_body(req)?))
 }
 

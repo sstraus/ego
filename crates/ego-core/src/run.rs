@@ -1099,6 +1099,7 @@ pub enum RunAppend {
 pub struct RunPrompt {
     text: String,
     images: Vec<Image>,
+    audio: Vec<crate::generator::audio::Audio>,
 }
 
 impl RunPrompt {
@@ -1106,11 +1107,21 @@ impl RunPrompt {
         Self {
             text: text.into(),
             images,
+            audio: Vec::new(),
         }
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn with_audio(mut self, audio: Vec<crate::generator::audio::Audio>) -> Self {
+        self.audio = audio;
+        self
+    }
+
+    pub fn audio(&self) -> &[crate::generator::audio::Audio] {
+        &self.audio
     }
 
     pub fn images(&self) -> &[Image] {

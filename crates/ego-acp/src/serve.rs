@@ -860,7 +860,7 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
         .prompt_capabilities(
             v1::PromptCapabilities::new()
                 .image(true)
-                .audio(false)
+                .audio(lifecycle)
                 .embedded_context(true),
         )
         .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(true).acp(true));
@@ -1809,6 +1809,8 @@ fn prompt_content(blocks: &[v1::ContentBlock]) -> Result<RunPrompt, String> {
     let mut text = String::new();
     let mut images = Vec::new();
     let mut total_image_bytes = 0_u64;
+    let mut audio = Vec::new();
+    let mut total_audio_bytes = 0usize;
     for block in blocks {
         let part = match block {
             v1::ContentBlock::Text(part) => Some(part.text.clone()),
@@ -1875,7 +1877,35 @@ fn prompt_content(blocks: &[v1::ContentBlock]) -> Result<RunPrompt, String> {
                     None
                 }
             }
-            v1::ContentBlock::Audio(_) => return Err(unsupported_block("audio")),
+            v1::ContentBlock::Audio(part) => {
+                use ego_core::generator::audio::{
+                    Audio, AudioMediaType, MAX_AUDIO_BYTES, MAX_AUDIO_PER_PROMPT,
+                };
+                if part.mime_type != "audio/wav" {
+                    return Err(
+                        "audio requires explicit media type audio/wav; no transcoding is performed"
+                            .into(),
+                    );
+                }
+                if audio.len() >= MAX_AUDIO_PER_PROMPT
+                    || part.data.len() > MAX_AUDIO_BYTES.div_ceil(3) * 4
+                {
+                    return Err("audio prompt exceeds the 4-clip or 10 MiB product bound".into());
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&part.data)
+                    .map_err(|_| "audio content is not valid base64".to_owned())?;
+                total_audio_bytes = total_audio_bytes
+                    .checked_add(bytes.len())
+                    .filter(|total| *total <= MAX_AUDIO_BYTES)
+                    .ok_or_else(|| {
+                        "audio prompt exceeds the 10 MiB aggregate product bound".to_owned()
+                    })?;
+                audio.push(
+                    Audio::new(bytes, AudioMediaType::Wav)?.with_text_offset(Some(text.len())),
+                );
+                None
+            }
             _ => return Err(unsupported_block("a content block this build cannot read")),
         };
         if let Some(part) = part {
@@ -1889,7 +1919,10 @@ fn prompt_content(blocks: &[v1::ContentBlock]) -> Result<RunPrompt, String> {
             }
         }
     }
-    Ok(RunPrompt::new(text, images))
+    if !audio.is_empty() && !images.is_empty() {
+        return Err("no admitted model contract accepts mixed audio and image input".into());
+    }
+    Ok(RunPrompt::new(text, images).with_audio(audio))
 }
 
 fn append_prompt_text(text: &mut String, part: &str) -> Result<(), String> {
@@ -4381,4 +4414,50 @@ where
             },
             on_receive_request!(),
         )
+}
+
+#[cfg(test)]
+mod audio_admission_tests {
+    use super::*;
+    use base64::Engine as _;
+    const WAV: &[u8] = include_bytes!("../../ego-core/tests/fixtures/audio/pcm16-mono.wav");
+    fn block(mime: &str, data: String) -> v1::ContentBlock {
+        serde_json::from_value(serde_json::json!({"type":"audio", "mimeType":mime, "data":data}))
+            .unwrap()
+    }
+    // Catches admission dropping valid audio or requiring an unrelated text payload.
+    #[test]
+    fn audio_only_and_text_positions_survive_acp_admission() {
+        let audio = block(
+            "audio/wav",
+            base64::engine::general_purpose::STANDARD.encode(WAV),
+        );
+        let prompt = prompt_content(&[audio.clone()]).unwrap();
+        assert!(prompt.text().is_empty());
+        assert_eq!(prompt.audio()[0].bytes(), WAV);
+        let text: v1::ContentBlock =
+            serde_json::from_value(serde_json::json!({"type":"text", "text":"é"})).unwrap();
+        let prompt = prompt_content(&[text, audio]).unwrap();
+        assert_eq!(prompt.audio()[0].text_offset(), Some(2));
+        assert!(capabilities(false, true).prompt_capabilities.audio);
+        assert!(!capabilities(false, false).prompt_capabilities.audio);
+    }
+    // Catches unbounded decoding, inferred MIME, malformed base64 or too many clips.
+    #[test]
+    fn invalid_and_over_limit_acp_audio_is_refused() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(WAV);
+        for blocks in [
+            vec![block("audio/mp3", encoded.clone())],
+            vec![block("", encoded.clone())],
+            vec![block("audio/wav", "%%%".into())],
+            vec![block("audio/wav", "aGk=".into())],
+            vec![block(
+                "audio/wav",
+                "A".repeat(ego_core::generator::audio::MAX_AUDIO_BYTES.div_ceil(3) * 4 + 1),
+            )],
+            vec![block("audio/wav", encoded); 5],
+        ] {
+            assert!(prompt_content(&blocks).is_err());
+        }
+    }
 }

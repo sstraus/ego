@@ -30,7 +30,6 @@ use crate::wire::github_copilot_completions::GithubCopilotCompletions;
 use crate::wire::minimax_anthropic::MiniMaxAnthropic;
 use crate::wire::nous_portal::NousPortal;
 use crate::wire::openai_codex_responses::OpenAiCodexResponses;
-use crate::wire::openai_responses::OpenAiResponses;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
 
@@ -461,8 +460,8 @@ pub const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
 const READ_ON: &str = "2026-08-21";
 const XAI_RESPONSES_READ_ON: &str = "2026-08-24";
 
-/// OpenAI's own row, which speaks the public Responses contract.
-static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiResponses);
+/// OpenAI's public row selects its exact model contract.
+static OPENAI_SUPPLIED: crate::resolver::OpenAiSupplied = crate::resolver::OpenAiSupplied;
 
 /// Gateways that publish an OpenAI-*compatible* chat-completions surface.
 ///

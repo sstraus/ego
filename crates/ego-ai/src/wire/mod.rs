@@ -52,6 +52,14 @@ pub(crate) fn request_has_images(req: &GenRequest) -> bool {
         .any(|block| matches!(block, ContentBlock::Image { .. }))
 }
 
+pub(crate) fn request_has_audio(req: &GenRequest) -> bool {
+    req.messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .any(|block| matches!(block, ContentBlock::Audio { .. }))
+}
+
 /// One API shape: how a [`GenRequest`] becomes bytes, and how the bytes become
 /// [`AiEvent`]s.
 ///

@@ -94,6 +94,11 @@ impl WireFormat for AnthropicMessages {
         target: &RequestTarget<'_>,
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused> {
+        if super::request_has_audio(req) {
+            return Err(RequestRefused::new(
+                "this wire contract does not support audio input",
+            ));
+        }
         build_request(target, req).map_err(RequestRefused::from)
     }
 
@@ -144,6 +149,7 @@ pub const DIALECT: &str = "anthropic-messages";
 /// can tell it happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
+    AudioNotSupported,
     /// `max_tokens` is required and the request set no ceiling.
     ///
     /// A number invented here would be a silent choice about what the caller
@@ -153,13 +159,17 @@ pub enum Inexpressible {
     ///
     /// Only `Minimal` reaches this. Substituting the nearest published level
     /// would bill for reasoning at a depth nobody asked for, silently.
-    ThinkingLevelUnavailable { level: ThinkingLevel },
+    ThinkingLevelUnavailable {
+        level: ThinkingLevel,
+    },
     /// Reasoning state another protocol minted.
     ///
     /// It cannot be posted into a `content` array that has no shape for it,
     /// and dropping it produces the documented `400` on the next turn rather
     /// than on this one — which is the worst of both.
-    ReasoningStateFromAnotherDialect { dialect: String },
+    ReasoningStateFromAnotherDialect {
+        dialect: String,
+    },
     /// Reasoning state this mapping minted and cannot read back.
     ///
     /// Unreachable from a stream decoded here and reachable from a durable log
@@ -171,7 +181,9 @@ pub enum Inexpressible {
     /// mid-stream survives as *evidence about the stream*; `tool_use.input` is
     /// an object, so this is the seam at which that evidence stops being
     /// sendable.
-    ArgumentsNotJson { call_id: String },
+    ArgumentsNotJson {
+        call_id: String,
+    },
     /// A system turn carrying something other than text.
     ///
     /// [`Conversation`](ego_core::generator::types::Conversation) permits a
@@ -184,6 +196,9 @@ pub enum Inexpressible {
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AudioNotSupported => {
+                f.write_str("this wire contract does not support audio input")
+            }
             Inexpressible::CeilingRequired => write!(
                 f,
                 "anthropic-messages requires max_tokens on every request, and \
@@ -428,6 +443,7 @@ fn project(messages: &[Message]) -> Result<(Option<String>, Vec<WireMessage<'_>>
 fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
     Ok(match block {
         ContentBlock::Text { text } => WireBlock::Text { kind: "text", text },
+        ContentBlock::Audio { .. } => unreachable!("audio is refused before wire serialization"),
         ContentBlock::Image { image } => WireBlock::Image {
             kind: "image",
             source: ImageSource {
@@ -480,6 +496,9 @@ fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
 /// or a credential in it — the body is the contract with the provider; the
 /// endpoint and the auth header are the provider row's business.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     let max_tokens = req
         .max_output_tokens
         .ok_or(Inexpressible::CeilingRequired)?;

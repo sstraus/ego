@@ -198,7 +198,7 @@ fn user_row_for_ollama_does_not_replace_the_daemon_facts_the_run_resolves() {
         home.path().join("models.toml"),
         r#"
 [model."ollama/qwen3".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 12345
 max_output_tokens = 4096
 supports_parallel_tool_calls = true
@@ -272,7 +272,7 @@ fn provider_filter_excludes_unadmitted_supplied_sources() {
         "models.toml",
         r#"
 [model."gemini/gemini-2.5-pro".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 65536
 max_tools = 128
@@ -635,7 +635,7 @@ fn builtin_rows_are_listed_as_builtin_until_a_file_overrides_one() {
         format!(
             r#"
 [model."{overridden}".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 12345
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -881,7 +881,7 @@ fn openrouter_row_without_stated_limits_lists_no_limit() {
 
 const OPENROUTER_USER_ROWS: &str = r#"
 [model."openrouter/vendor/bare".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 50000
 max_output_tokens = 4000
 max_tools = 16
@@ -894,7 +894,7 @@ cache = "none"
 transport = "sse"
 
 [model."openrouter/vendor/absent".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 50000
 max_output_tokens = 4000
 max_tools = 16

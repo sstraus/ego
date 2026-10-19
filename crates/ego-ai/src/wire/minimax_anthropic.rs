@@ -21,6 +21,11 @@ impl WireFormat for MiniMaxAnthropic {
         target: &RequestTarget<'_>,
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused> {
+        if super::request_has_audio(req) {
+            return Err(RequestRefused::new(
+                "this wire contract does not support audio input",
+            ));
+        }
         if request_has_images(req) {
             return Err(RequestRefused::new(
                 "image input is unsupported by the current MiniMax Anthropic-compatible contract",

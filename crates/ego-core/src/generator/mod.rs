@@ -8,6 +8,7 @@
 //! in edition 2024.
 
 pub mod attempt;
+pub mod audio;
 pub mod capabilities;
 pub mod fake;
 pub mod history;

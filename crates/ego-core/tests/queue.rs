@@ -59,6 +59,7 @@ fn queued_prompt_id_is_a_stable_serde_newtype() {
 fn prompt_queued_has_the_final_durable_shape() {
     let id = QueuedPromptId::new();
     let encoded = serde_json::to_value(EventKind::PromptQueued {
+        audio: Vec::new(),
         id,
         text: "inspect the failing test".to_owned(),
         images: Vec::new(),
@@ -93,6 +94,7 @@ fn expedited_intent_names_the_fifo_tail_and_is_not_a_boolean() {
 #[test]
 fn ordinary_user_prompts_carry_no_queue_correlation() {
     let kind = EventKind::UserPrompt {
+        audio: Vec::new(),
         text: "ordinary prompt".to_owned(),
         images: Vec::new(),
         queued_prompt: None,
@@ -108,6 +110,7 @@ fn ordinary_user_prompts_carry_no_queue_correlation() {
 fn delivered_user_prompts_carry_exactly_one_queue_id() {
     let id = QueuedPromptId::new();
     let kind = EventKind::UserPrompt {
+        audio: Vec::new(),
         text: "steer now".to_owned(),
         images: Vec::new(),
         queued_prompt: Some(id),
@@ -125,11 +128,13 @@ fn replay_preserves_multiple_acceptances_in_fifo_sequence_order() {
     let second = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: first,
             text: "first steer".to_owned(),
             images: Vec::new(),
         },
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: second,
             text: "second steer".to_owned(),
             images: Vec::new(),
@@ -150,6 +155,7 @@ fn replay_preserves_multiple_acceptances_in_fifo_sequence_order() {
 fn replay_does_not_invent_a_pending_or_queued_class() {
     let id = QueuedPromptId::new();
     let state = replay([EventKind::PromptQueued {
+        audio: Vec::new(),
         id,
         text: "idle prompt".to_owned(),
         images: Vec::new(),
@@ -174,11 +180,13 @@ fn expedited_tail_is_monotonic_and_repeated_esc_is_idempotent() {
     let second = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: first,
             text: "first".to_owned(),
             images: Vec::new(),
         },
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: second,
             text: "second".to_owned(),
             images: Vec::new(),
@@ -199,16 +207,19 @@ fn crash_before_correlated_ack_replays_the_prompt_once() {
     let second = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: first,
             text: "first".to_owned(),
             images: Vec::new(),
         },
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: second,
             text: "second".to_owned(),
             images: Vec::new(),
         },
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "first".to_owned(),
             images: Vec::new(),
             queued_prompt: Some(first),
@@ -230,16 +241,19 @@ fn crash_after_correlated_ack_does_not_replay_the_prompt() {
     let id = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id,
             text: "once".to_owned(),
             images: Vec::new(),
         },
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "once".to_owned(),
             images: Vec::new(),
             queued_prompt: Some(id),
         },
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "once".to_owned(),
             images: Vec::new(),
             queued_prompt: Some(id),
@@ -256,21 +270,25 @@ fn a_delivery_batch_keeps_each_prompt_correlated_and_fifo() {
     let second = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: first,
             text: "first".to_owned(),
             images: Vec::new(),
         },
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: second,
             text: "second".to_owned(),
             images: Vec::new(),
         },
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "first".to_owned(),
             images: Vec::new(),
             queued_prompt: Some(first),
         },
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "second".to_owned(),
             images: Vec::new(),
             queued_prompt: Some(second),
@@ -293,6 +311,7 @@ fn queue_text_is_not_a_tool_result_or_a_call_result_boundary() {
         (
             None,
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id,
                 text: "follow up".to_owned(),
                 images: Vec::new(),
@@ -316,6 +335,7 @@ fn queue_text_is_not_a_tool_result_or_a_call_result_boundary() {
         (
             Some(prompt_item),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "follow up".to_owned(),
                 images: Vec::new(),
                 queued_prompt: Some(id),
@@ -343,6 +363,7 @@ fn a_no_tool_final_still_leaves_the_follow_up_replayable_until_consumed() {
     let id = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id,
             text: "answer this next".to_owned(),
             images: Vec::new(),
@@ -368,6 +389,7 @@ fn the_prompt_ledger_retains_accounting_across_labelled_interruption_phases() {
         let id = QueuedPromptId::new();
         let state = replay([
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id,
                 text: format!("interrupt during {phase}"),
                 images: Vec::new(),
@@ -400,6 +422,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
             active_turn,
             Some(ItemId::new()),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "initial prompt".to_owned(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -410,6 +433,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
             active_turn,
             None,
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: expedited_id,
                 text: "busy steer".to_owned(),
                 images: Vec::new(),
@@ -437,6 +461,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
             completed_turn,
             None,
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: ordinary_id,
                 text: "idle prompt".to_owned(),
                 images: Vec::new(),
@@ -470,6 +495,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
         completed_turn,
         Some(ItemId::new()),
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "busy steer".to_owned(),
             images: Vec::new(),
             queued_prompt: Some(expedited_id),
@@ -594,11 +620,13 @@ fn retracted_prompt_is_absent_on_replay_and_preserves_other_input() {
     let last = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: first,
             text: "keep".into(),
             images: vec![],
         },
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: last,
             text: "withdraw".into(),
             images: vec![],
@@ -622,11 +650,13 @@ fn retraction_cannot_remove_a_non_tail_prompt() {
     let last = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: first,
             text: "first".into(),
             images: vec![],
         },
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id: last,
             text: "last".into(),
             images: vec![],
@@ -642,11 +672,13 @@ fn retraction_does_not_remove_consumed_conversation_text() {
     let id = QueuedPromptId::new();
     let state = replay([
         EventKind::PromptQueued {
+            audio: Vec::new(),
             id,
             text: "delivered".into(),
             images: vec![],
         },
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "delivered".into(),
             images: vec![],
             queued_prompt: Some(id),

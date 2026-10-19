@@ -45,6 +45,7 @@ fn live_and_replay_replace_the_same_plan_including_clear_and_blocked_metadata() 
             &state,
             &ModelCapabilities {
                 schema_version: ModelCapabilities::SCHEMA_VERSION,
+                audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
                 max_context_tokens: None,
                 max_output_tokens: None,
                 max_tools: None,

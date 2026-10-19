@@ -164,6 +164,56 @@ fn conversation_from_inner(
                 }
             }
             ItemKind::UserPrompt => {
+                let total = item
+                    .audio
+                    .iter()
+                    .try_fold(0_u64, |sum, audio| sum.checked_add(audio.reference().bytes));
+                if item.audio.len() > super::audio::MAX_AUDIO_PER_PROMPT
+                    || total.is_none_or(|total| total > super::audio::MAX_AUDIO_BYTES as u64)
+                {
+                    return Err(HistoryError::AudioUnavailable {
+                        cause: "audio prompt exceeds product count or aggregate byte bound".into(),
+                    });
+                }
+                let mut audio_text_cursor = 0;
+                for durable in &item.audio {
+                    let offset = durable.text_offset().unwrap_or(0);
+                    let text = item.text.get(audio_text_cursor..offset).ok_or_else(|| {
+                        HistoryError::AudioUnavailable {
+                            cause: "audio offsets are not ordered UTF-8 boundaries".into(),
+                        }
+                    })?;
+                    if !text.is_empty() {
+                        push(&mut messages, Role::User, text_block(text));
+                    }
+                    audio_text_cursor = offset;
+                    let read = read_blob.ok_or_else(|| HistoryError::AudioUnavailable {
+                        cause: "audio replay requires the session blob store".into(),
+                    })?;
+                    let bytes = read(durable.reference()).map_err(|error| {
+                        HistoryError::AudioUnavailable {
+                            cause: error.to_string(),
+                        }
+                    })?;
+                    let audio = durable
+                        .hydrate(bytes)
+                        .map_err(|cause| HistoryError::AudioUnavailable { cause })?;
+                    push(&mut messages, Role::User, ContentBlock::Audio { audio });
+                }
+                if !item.audio.is_empty() {
+                    if !item.images.is_empty() {
+                        return Err(HistoryError::AudioUnavailable {
+                            cause: "no admitted model contract accepts mixed audio and images"
+                                .into(),
+                        });
+                    }
+                    let tail = &item.text[audio_text_cursor..];
+                    if !tail.is_empty() {
+                        push(&mut messages, Role::User, text_block(tail));
+                    }
+                    continue;
+                }
+
                 if item.images.len() > super::types::MAX_IMAGES_PER_PROMPT {
                     return Err(HistoryError::ImagePromptInvalid {
                         cause: format!(
@@ -471,6 +521,7 @@ mod ordered_prompt_tests {
                     producer: Producer::Main,
                 },
                 kind: EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "é".to_owned(),
                     images,
                     queued_prompt: None,
@@ -484,5 +535,59 @@ mod ordered_prompt_tests {
             .unwrap_err();
             assert!(matches!(error, HistoryError::ImagePromptInvalid { .. }));
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_replay_tests {
+    use super::*;
+    use crate::event::domain::{DomainEvent, Envelope, EventKind};
+    use crate::event::id::{EventId, ItemId, Producer, Seq, TurnId};
+    use crate::event::time::Timestamp;
+    use crate::generator::audio::{AudioMediaType, AudioRef};
+    use crate::store::blob::BlobId;
+
+    // Catches audio disappearing from the reducer, GC roots or rebuilt message ordering.
+    #[test]
+    fn durable_audio_rebuilds_exact_bytes_between_text_and_fails_if_missing() {
+        let bytes = include_bytes!("../../tests/fixtures/audio/pcm16-mono.wav");
+        let reference = BlobRef::new(BlobId::parse("0".repeat(64)).unwrap(), bytes.len() as u64);
+        let audio = AudioRef::new(reference.clone(), AudioMediaType::Wav)
+            .unwrap()
+            .with_text_offset(Some(2));
+        let event = DomainEvent {
+            env: Envelope {
+                seq: Seq::ZERO.next(),
+                id: EventId::new(),
+                turn: TurnId::new(),
+                item: Some(ItemId::new()),
+                parent: None,
+                ts: Timestamp::from_millis(0),
+                producer: Producer::Main,
+            },
+            kind: EventKind::UserPrompt {
+                text: "éafter".into(),
+                images: Vec::new(),
+                audio: vec![audio],
+                queued_prompt: None,
+            },
+        };
+        assert_eq!(event.kind.blob_references(), vec![reference.clone()]);
+        let encoded = serde_json::to_vec(&event).unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains("RIFF"));
+        let mut state = SessionState::default();
+        state.apply(&serde_json::from_slice::<DomainEvent>(&encoded).unwrap());
+        assert!(state.blob_references().contains(&reference));
+        let (conversation, _) = conversation_from_with_blob_reader(&state, &|got| {
+            assert_eq!(got, &reference);
+            Ok(bytes.to_vec())
+        })
+        .unwrap();
+        let content = &conversation.messages()[0].content;
+        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "é"));
+        assert!(matches!(&content[1], ContentBlock::Audio { audio } if audio.bytes() == bytes));
+        assert!(matches!(&content[2], ContentBlock::Text { text } if text == "after"));
+        assert!(conversation_from(&state).is_err());
+        assert!(conversation_from_with_blob_reader(&state, &|_| Ok(vec![0; bytes.len()])).is_err());
     }
 }

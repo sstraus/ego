@@ -520,6 +520,7 @@ mod regression_case_tests {
                 None,
                 None,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "ordinary".into(),
                     images: Vec::new(),
                     queued_prompt: None,

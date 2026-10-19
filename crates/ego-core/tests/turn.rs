@@ -1608,6 +1608,7 @@ mod turn {
     fn caps() -> ModelCapabilities {
         ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens: Some(200_000),
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -4146,11 +4147,13 @@ mod turn {
         };
         let durable = vec![
             seeded(EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: first,
                 text: "first recovery prompt".to_owned(),
                 images: Vec::new(),
             }),
             seeded(EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: second,
                 text: "second recovery prompt".to_owned(),
                 images: Vec::new(),
@@ -4834,17 +4837,20 @@ mod turn {
         };
         let durable = vec![
             seeded(EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: first,
                 text: "first remains pending".to_owned(),
                 images: Vec::new(),
             }),
             seeded(EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: second,
                 text: "second was delivered".to_owned(),
                 images: Vec::new(),
             }),
             seeded(EventKind::PromptDeliveryExpedited { through: second }),
             seeded(EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "second was delivered".to_owned(),
                 images: Vec::new(),
                 queued_prompt: Some(second),

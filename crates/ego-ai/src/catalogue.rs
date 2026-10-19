@@ -35,6 +35,24 @@ use crate::resolver::{Resolution, StaticResolution};
 use crate::wire::WireFormat;
 use crate::wire::provider_cost::ProviderCost;
 
+fn admitted_capabilities(
+    provider: &str,
+    model: &str,
+    row: &ProviderRow,
+    supplied: &ModelCapabilities,
+) -> ModelCapabilities {
+    let mut caps = supplied.clone();
+    caps.audio_input = if provider == "openai"
+        && model == "gpt-audio-1.5"
+        && row.base().as_str() == "https://api.openai.com/v1/"
+    {
+        ego_core::generator::capabilities::AudioInputSupport::SupportedWav
+    } else {
+        ego_core::generator::capabilities::AudioInputSupport::Unsupported
+    };
+    caps
+}
+
 /// The provider id of the hosted row this milestone ships.
 pub const OPENAI: &str = "openai";
 /// The provider id of the local daemon this milestone ships.
@@ -1205,8 +1223,14 @@ impl Catalogue {
             .get(&key)
             .ok_or(ResolveError::HostedModelNotConfigured { slug: key })?;
         Ok(StaticRequestProfile::new(
+            self.row(&slug.provider)?.base().clone(),
             slug.model.clone(),
-            hosted.capabilities.clone(),
+            admitted_capabilities(
+                &slug.provider,
+                &slug.model,
+                self.row(&slug.provider)?,
+                &hosted.capabilities,
+            ),
             wire,
         ))
     }
@@ -1275,9 +1299,19 @@ impl Catalogue {
             model: slug.model.clone(),
             row: row.clone(),
             wire,
-            capabilities: hosted.capabilities.clone(),
+            capabilities: admitted_capabilities(
+                &slug.provider,
+                &slug.model,
+                &row,
+                &hosted.capabilities,
+            ),
             metering: hosted.metering.clone(),
-            rates: hosted.rates.clone(),
+            // Text-token quotes cannot price the model's audio token categories.
+            rates: if slug.provider == "openai" && slug.model == "gpt-audio-1.5" {
+                None
+            } else {
+                hosted.rates.clone()
+            },
         })
     }
 
@@ -1307,8 +1341,14 @@ impl Catalogue {
             .map(|(slug, hosted)| {
                 let slug = ModelSlug::parse(slug).map_err(|error| error.to_string())?;
                 Ok(ModelDiscoveryEntry {
-                    slug,
-                    capabilities: hosted.capabilities.clone(),
+                    slug: slug.clone(),
+                    capabilities: admitted_capabilities(
+                        &slug.provider,
+                        &slug.model,
+                        self.row(&slug.provider)
+                            .map_err(|error| error.to_string())?,
+                        &hosted.capabilities,
+                    ),
                     metering: metering.unwrap_or_else(|| metering_kind(&hosted.metering)),
                     provenance: ModelFactProvenance::supplied(hosted.authority),
                 })

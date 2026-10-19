@@ -186,6 +186,7 @@ mod reducer {
         push!(
             Some(msg_item),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "list the files".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -444,6 +445,7 @@ mod reducer {
             None,
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "hi".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -530,6 +532,7 @@ mod reducer {
             None,
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "primer".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -550,6 +553,7 @@ mod reducer {
             (
                 "user_prompt",
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: String::new(),
                     images: Vec::new(),
                     queued_prompt: None,

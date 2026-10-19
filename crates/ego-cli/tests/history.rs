@@ -53,6 +53,7 @@ fn history_tools_search_and_open_conversation_from_another_root() {
         (
             Some(ItemId::new()),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "acp trust user observation".into(),
                 images: Vec::new(),
                 queued_prompt: None,
