@@ -2066,8 +2066,8 @@ explicit `--offline` invocation.
 `--read-only-dir DIR` grants reads of one session upload directory at launch.
 It is available to interactive runs, `run`, `resume`, and served protocols.
 DIR must be an existing canonical absolute directory: relative paths, `..`,
-symlink aliases, home/administrator ancestors, and directories beneath a
-writable workspace or root are refused. This launch grant does not make
+symlink aliases and home/administrator ancestors are refused. Nested directories
+beneath a writable workspace or root follow the platform rules below. This launch grant does not make
 configuration `roots` writable from flags. System and host profile ceilings
 still bind; credential denials remain in force. The grant adds neither writes
 nor executable uploads. It does not change the selected sandbox level. On Linux, confined read roots
