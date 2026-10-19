@@ -479,6 +479,24 @@ mod registration {
         );
     }
 
+    // Catches: the model-facing schema hides bulk mode or makes safe omitted mode invalid.
+    #[test]
+    fn replace_all_descriptor_exposes_an_optional_false_default_boolean() {
+        let ws = Workspace::new();
+        let descriptor = ws.tool("edit").descriptor();
+        let schema = descriptor.schema.to_value();
+        assert_eq!(schema["properties"]["replace_all"]["type"], "boolean");
+        assert_eq!(schema["properties"]["replace_all"]["default"], false);
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("replace_all"))
+        );
+        assert!(descriptor.description.contains("replace_all=true"));
+        assert!(descriptor.description.contains("original non-overlapping"));
+    }
+
     #[test]
     fn each_builtin_describes_its_parameters_as_a_json_schema() {
         // What the model is shown. A tool with no schema is a tool the model
@@ -1148,6 +1166,122 @@ mod edit {
         );
     }
 
+    // Catches: explicit bulk edits are rejected as ambiguous instead of replacing original matches.
+    #[test]
+    fn replace_all_edits_original_non_overlapping_matches_and_reports_lines() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        ws.file("src/main.rs", "aaaa\naaaa\n");
+        let tool = ws.tool("edit");
+        let call = ws.prepare("edit", json!({
+            "path": "src/main.rs", "old_string": "aa", "new_string": "aaa", "replace_all": true
+        })).unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &ws.fs,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        let ToolExecution::Complete(result) = block_on(tool.execute(call, &guarded)).unwrap()
+        else {
+            panic!("edit must complete");
+        };
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "aaaaaa\naaaaaa\n"
+        );
+        assert_eq!(
+            result.line_change(),
+            Some(ego_core::permit::LineChange {
+                added: 2,
+                removed: 2
+            })
+        );
+        assert!(result.model_text().contains("replaced 4 occurrences"));
+    }
+
+    // Catches: false mode silently inherits bulk behavior or absent text creates content.
+    #[test]
+    fn replace_all_keeps_default_unique_safety_and_rejects_invalid_text() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "old old\n");
+        for params in [
+            json!({"old_string":"old", "new_string":"new"}),
+            json!({"old_string":"old", "new_string":"new", "replace_all":false}),
+            json!({"old_string":"missing", "new_string":"new", "replace_all":true}),
+            json!({"old_string":"", "new_string":"new", "replace_all":true}),
+            json!({"old_string":"old", "new_string":"old", "replace_all":true}),
+        ] {
+            let mut params = params;
+            params["path"] = json!("src/main.rs");
+            assert!(ws.call("edit", params).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), "old old\n");
+        }
+        fs::write(&path, [0xff, b'o', b'l', b'd']).unwrap();
+        assert!(ws.call("edit", json!({"path":"src/main.rs", "old_string":"old", "new_string":"new", "replace_all":true})).is_err());
+        assert_eq!(fs::read(&path).unwrap(), [0xff, b'o', b'l', b'd']);
+    }
+
+    // Catches: bulk mode bypasses explicit read or write denies through write support authority.
+    #[test]
+    fn replace_all_respects_read_and_write_denials() {
+        for deny in ["read(src/**)", "write(src/**)"] {
+            let rules = Ruleset::from_layer(
+                PermCfg {
+                    judge: None,
+                    allow: vec![Rule::load("write(src/**)").unwrap()],
+                    deny: vec![Rule::load(deny).unwrap()],
+                },
+                Source::Project,
+            );
+            let ws = Workspace::with_rules(Mode::Edits, rules);
+            let path = ws.file("src/main.rs", "old old\n");
+            let call = ws.prepare("edit", json!({"path":"src/main.rs", "old_string":"old", "new_string":"new", "replace_all":true})).unwrap();
+            assert!(ws.authorize(call).is_err(), "{deny}");
+            assert_eq!(fs::read_to_string(path).unwrap(), "old old\n");
+        }
+    }
+
+    // Catches: bulk preparation reads content before authorization or loses mode in the pending call.
+    #[test]
+    fn replace_all_prepares_without_reading_file_contents_and_exposes_mode() {
+        let ws = Workspace::in_mode(Mode::Default);
+        let path = ws.file("src/main.rs", "old old\n");
+        fs::write(&path, [0xff]).unwrap();
+        let prepare = |mode| {
+            ws.prepare("edit", json!({"path":"src/main.rs", "old_string":"old", "new_string":"new", "replace_all":mode})).unwrap()
+        };
+        let bulk = prepare(true);
+        let unique = prepare(false);
+        assert_ne!(bulk.authority_fingerprint(), unique.authority_fingerprint());
+        let Classification::Ask(pending) = ws.policy.classify(bulk) else {
+            panic!("default mode asks");
+        };
+        let Resolution::Ask(request) = block_on(ws.policy.settle(pending)) else {
+            panic!("permission stays open");
+        };
+        assert!(
+            request
+                .request()
+                .to_string()
+                .contains("all original non-overlapping occurrences")
+        );
+        assert_eq!(fs::read(path).unwrap(), [0xff]);
+    }
+
+    // Catches: replacement deletions or Unicode multiline boundaries corrupt unaffected content.
+    #[test]
+    fn replace_all_handles_unicode_multiline_and_deletion() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "head\nα\nβ\nkeep\nα\nβ\ntail\n");
+        let result = ws.call("edit", json!({"path":"src/main.rs", "old_string":"α\nβ\n", "new_string":"", "replace_all":true})).unwrap();
+        assert!(result.contains("replaced 2 occurrences"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "head\nkeep\ntail\n");
+    }
+
     #[test]
     fn edit_refuses_text_that_is_not_in_the_file_and_changes_nothing() {
         // The whole reason `edit` is not `write`: it may only land where the
@@ -1227,6 +1361,7 @@ mod edit {
                 Op::Write {
                     path,
                     change: Change::Replace {
+                        replace_all: false,
                         old_string: "todo!()".to_string(),
                         new_string: "ok()".to_string(),
                     },
