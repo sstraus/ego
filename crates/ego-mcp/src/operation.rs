@@ -1680,11 +1680,7 @@ fn search_inline_definition(result: &CallToolResult) -> Result<Option<(String, V
         Ok(content) => content,
         Err(_) => return Ok(None),
     };
-    let Some(top) = content
-        .get("results")
-        .and_then(Value::as_array)
-        .and_then(|hits| hits.first())
-    else {
+    let Some(top) = content.get("top_schema") else {
         return Ok(None);
     };
     if top.get("inputSchema").is_none() {
@@ -1700,17 +1696,19 @@ fn search_inline_definition(result: &CallToolResult) -> Result<Option<(String, V
         .and_then(Value::as_str)
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| protocol("collapsed search inline schema has no tool name"))?;
-    // Search metadata (summary, score) is not part of a complete tool definition.
-    let description = top
-        .get("description")
-        .and_then(Value::as_str)
-        .ok_or_else(|| protocol("collapsed search inline schema has no description"))?;
-    Ok(Some((
-        name.to_owned(),
-        serde_json::json!({
-            "name": name, "description": description, "inputSchema": top["inputSchema"]
-        }),
-    )))
+    let top_name = content
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|hits| hits.first())
+        .and_then(|hit| hit.get("name"))
+        .and_then(Value::as_str);
+    if top_name != Some(name) {
+        return Err(protocol(
+            "collapsed search inline schema does not match the top result",
+        ));
+    }
+    // Preserve the complete definition, including optional MCP tool metadata.
+    Ok(Some((name.to_owned(), top.clone())))
 }
 
 fn schema_lookup_content(result: &CallToolResult) -> Result<Value, McpError> {
@@ -2436,12 +2434,55 @@ mod stdio_fingerprint_tests {
         result
     }
 
+    fn tuic_search_content() -> Value {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/tuic-search-top-schema.json"
+        ))
+        .unwrap()
+    }
+
+    // Source-derived fixture: TUIC 49f31508b1 handle_search_tools_for_session and
+    // catalogue_schema_reuse_avoids_second_discovery_hop (the needle definition).
+    // Catches: reading only results[0].inputSchema forces a second describe call.
+    #[test]
+    fn collapsed_search_tuic_top_schema_admits_without_describe() {
+        let content: Value = tuic_search_content();
+        for result in [
+            inline_search_result(content.clone()),
+            CallToolResult::success(vec![ContentBlock::text(content.to_string())]),
+        ] {
+            let (name, definition) = search_inline_definition(&result)
+                .unwrap()
+                .expect("TUIC search alone must supply the admission definition");
+            assert_eq!(name, "needle");
+            assert_eq!(definition, content["top_schema"]);
+            let management = [
+                ("search_tools", serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]})),
+                ("get_tool_schema", serde_json::json!({"type":"object","properties":{"tool_name":{"type":"string"}},"required":["tool_name"]})),
+                ("call_tool", serde_json::json!({"type":"object","properties":{"tool_name":{"type":"string"},"arguments":{"type":"object"}},"required":["tool_name","arguments"]})),
+            ].into_iter().map(|(name, parameters)| ego_core::generator::types::ToolDescriptor {
+                name: name.into(), description: name.into(), parameters,
+            }).collect();
+            let bootstrap = McpCollapsedBootstrap::new(management).unwrap();
+            let catalogue = crate::McpCollapsedCatalogue::from_schema_response(
+                bootstrap,
+                &name,
+                serde_json::json!({"structuredContent":definition}),
+            )
+            .expect("search definition must admit the callable tool without a describe response");
+            assert_eq!(
+                catalogue.tool_names().collect::<Vec<_>>(),
+                ["call_tool", "needle"]
+            );
+        }
+    }
+
     /// Catches: an oversized inline definition bypasses the bounded schema surface.
     #[test]
     fn collapsed_search_inline_schema_rejects_excess_bytes() {
         let top = serde_json::json!({"name":"weather","description":"x".repeat(INLINE_SEARCH_SCHEMA_MAX_BYTES),"inputSchema":{"type":"object"}});
         let error =
-            search_inline_definition(&inline_search_result(serde_json::json!({"results":[top]})))
+            search_inline_definition(&inline_search_result(serde_json::json!({"results":[{"name":"weather","summary":"Weather"}],"top_schema":top})))
                 .unwrap_err();
         assert!(error.to_string().contains("16384-byte cap"));
     }
@@ -2466,11 +2507,46 @@ mod stdio_fingerprint_tests {
             serde_json::json!({"name":"weather","description":"","inputSchema":{"type":"object"}});
         let padding = INLINE_SEARCH_SCHEMA_MAX_BYTES - serde_json::to_vec(&top).unwrap().len();
         top["description"] = Value::String("x".repeat(padding));
-        let result = inline_search_result(serde_json::json!({"results":[top]}));
+        let result = inline_search_result(
+            serde_json::json!({"results":[{"name":"weather","summary":"Weather"}],"top_schema":top}),
+        );
         assert_eq!(
             search_inline_definition(&result).unwrap().unwrap().0,
             "weather"
         );
+    }
+
+    // Catches: a sibling schema for a non-top hit grants unintended authority.
+    #[test]
+    fn collapsed_search_inline_schema_rejects_mismatched_top_hit() {
+        let mut content: Value = tuic_search_content();
+        for results in [serde_json::json!([]), serde_json::json!([{"name":"other"}])] {
+            content["results"] = results;
+            assert!(search_inline_definition(&inline_search_result(content.clone())).is_err());
+        }
+    }
+
+    // Catches: failed or incomplete searches grant inline schema authority.
+    #[test]
+    fn collapsed_search_inline_schema_requires_successful_complete_result() {
+        let content: Value = tuic_search_content();
+        let mut failed = inline_search_result(content.clone());
+        failed.is_error = Some(true);
+        assert!(search_inline_definition(&failed).unwrap().is_none());
+        let mut incomplete = inline_search_result(content);
+        incomplete.result_type = None;
+        assert!(search_inline_definition(&incomplete).unwrap().is_none());
+    }
+
+    // Catches: inline admission strips optional metadata before schema validation.
+    #[test]
+    fn collapsed_search_inline_schema_preserves_optional_metadata() {
+        let mut content: Value = tuic_search_content();
+        content["top_schema"]["annotations"] = serde_json::json!({"readOnlyHint":true});
+        let (_, definition) = search_inline_definition(&inline_search_result(content.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(definition, content["top_schema"]);
     }
 
     struct RejectSchemaPublication;
@@ -2533,6 +2609,35 @@ mod stdio_fingerprint_tests {
             ),
         )
         .unwrap();
+        let search = prepare_http(
+            &config,
+            McpOperation::captured(
+                McpSubject::Tool {
+                    server: "fixture".into(),
+                    name: "search_tools".into(),
+                },
+                McpOperationKind::CallTool,
+                McpAdmissionFingerprint::new("capture", "fixture/search_tools", "schema").unwrap(),
+                serde_json::json!({"query":"needle"}),
+                vec![],
+            ),
+        )
+        .unwrap();
+        let outcome = OperationOutcome::Complete(CompleteResult::Tool(inline_search_result(
+            tuic_search_content(),
+        )));
+        assert!(
+            tool_schema_command(
+                &outcome,
+                search.mcp_envelope().unwrap(),
+                admission.clone(),
+                "generation",
+                Some(&collapsed),
+            )
+            .unwrap()
+            .is_some(),
+            "search response must mint admission without a describe call"
+        );
         let envelope = call.mcp_envelope().unwrap();
         for failed in [true, false] {
             let mut result = CallToolResult::success(vec![ContentBlock::text(
