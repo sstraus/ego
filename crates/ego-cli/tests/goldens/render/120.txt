@@ -1,12 +1,10 @@
 The renderer
 
-A paragraph with strong weight, emphasis, a retraction and inline_code() in it, long enough that it has to wrap at every
-width this document is rendered at.
+A paragraph with strong weight, emphasis, a retraction and inline_code() in it, long enough that it has to wrap at every width this document is rendered at.
 
 Two axes
 
-Syntax highlighting writes a foreground; a diff writes a background. They compose on one cell grid. See the decision
-record.
+Syntax highlighting writes a foreground; a diff writes a background. They compose on one cell grid. See the decision record.
 
 ─── Rules
 

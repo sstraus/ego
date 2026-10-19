@@ -13,11 +13,13 @@ Reasoning selection refuses unsupported values rather than silently substituting
 | Task | Actions |
 | --- | --- |
 | Help and identity | `/help`, `/version`, `/quit` |
-| Model and reasoning | `/model`, `/thinking`; model-picker shortcuts are shown by `/help` |
+| Model and reasoning | `/model`, `/thinking`, `/fast on\|off`; model-picker shortcuts are shown by `/help` |
 | Policy | `/mode`, `/plan`, `/yolo`, `/permissions` |
 | State and health | `/config`, `/config perimeter`, `/config set KEY TOML_VALUE`, `/doctor`, `/usage`, `/statusline` |
 | Conversation | `/sessions`, `/history`, `/new`, `/name`, `/goal`, `/fork [message-id]`, `/compact`, `/refresh` |
 | Tools and extensions | `/tools`, `/expand`, `/mcp`, `/skills`, `/hooks` |
+| Instructions and memory | `/init`, `/memory`; see [instructions and memory](memory.md) |
+| Background execution and retry | `/tasks [ID \| cancel ID]`, `/retry` |
 | Local presentation/export | `/clear`, `/export [local\|sanitized] [md\|json\|jsonl]` |
 
 Some actions require idle state or a registered owner; a disabled action names
@@ -45,8 +47,9 @@ Add a leading space to send literal prompt text that starts with `/`.
 
 The live composer preserves drafts and queues accepted prompts. Steering and
 ordinary queued prompts are distinct. Up on an empty busy composer withdraws
-the last queued text for editing. Enter queues the edited text again. Withdrawal
-is durable, so resume does not deliver the old text. Local inspection and model-picker actions
+the last queued prompt, including its images, for editing. Enter queues the
+complete edited prompt again. Withdrawal is durable, so resume does not deliver
+the old prompt. Local inspection and model-picker actions
 can remain responsive during streaming; model changes take effect at a generation
 boundary, never by mutating an already-sent request. `/help` answers during a turn.
 Local commands that need the coordinator show a persistent pending receipt and
@@ -57,6 +60,26 @@ Ctrl+D exits from the idle driver. Pending permission/question selectors own
 Enter/Escape until answered and preserve the underlying draft/queue.
 Use the shortcuts shown by this binary's `/help`; terminal Meta/function key
 support differs across platforms.
+
+## Image drafts
+
+Ctrl+V reads the OS pasteboard. An image adds a removable chip to the unsent
+draft; text inserts at the cursor. An entire bracketed paste that names an
+existing supported image file also adds a chip. Image drafting remains available
+while work runs and does not change the active provider request.
+
+Enter admits text and images as one prompt. A refused image leaves the draft
+available for correction and resubmission, without queueing a text-only partial
+prompt. Images follow their text through saved drafts, session changes and queue
+recall. Idle Escape removes the newest image before its other idle behavior;
+while busy, Escape remains the interruption action. Slow image admission or
+model discovery can delay keyboard handling, including Escape. Permission and
+question controls can still be serviced during that wait.
+
+The model's image capability and size/count limits apply before submission.
+Each draft also has product limits of 100 images and 64 MiB of encoded image
+bytes. File size is checked at paste time and exact bytes are checked again at
+submission. A missing or unsupported image path remains ordinary text.
 
 ## Setup model authority
 
@@ -79,7 +102,18 @@ session confinement; they do not grant new process or network authority.
 The width-aware status row shows selected model/effort/mode, context occupancy,
 queue/drafts/interrupt, workspace/Git, and trust as configured. It uses whole
 segments under width pressure. A missing monetary rate is not a zero-cost run.
-An explicitly empty status segment list disables the row.
+Configure `ui.statusline.template` with MiniJinja to place status above or below
+the editor. The template must render `{{ prompt }}` once on its own line.
+`/statusline` offers presets; its Off preset stores only `{{ prompt }}`.
+Active queue, draft and interrupt state remains visible even with optional
+status disabled. The old `segments` configuration key is not supported.
+The `●` after the Git branch means there are local changes, untracked files, or
+conflicts; it is not an activity indicator. An approximate subscription cost is
+an API-equivalent estimate, not a charge to the subscription account.
+
+Successful cache hits do not print a notice on every generation. A warning can
+appear when a provider previously reported reuse for the same marked input but
+then reports no reused input. Missing usage data is not treated as a cache miss.
 
 `/config` reports captured startup sources and clamps. `/config set` writes user
 defaults for future sessions, preserving the current session's independent live

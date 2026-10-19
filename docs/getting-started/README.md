@@ -28,8 +28,12 @@ With a running Ollama daemon and an installed completion model:
 ```sh
 ego models --provider ollama --refresh
 ego config set 'roots=[]'
-ego -m ollama/gemma4:e4b-mlx --thinking off
+ego -m ollama/gemma4:e4b-mlx --thinking off --sandbox workspace
 ```
+
+`roots=[]` clears configured extra roots; `--sandbox workspace` makes the example's
+confinement explicit instead of accepting the platform default. Inspect
+`/config perimeter` for admitted roots and backend facts.
 
 Replace the slug with a model your catalogue lists. An embedding-only model is
 not a completion model. `--thinking off` is explicit; a different model may

@@ -13759,6 +13759,38 @@ mod turn {
         }
 
         #[test]
+        fn task_without_named_definitions_does_not_offer_an_agent_role() {
+            // Catches: advertising an unrestricted agent string and prompting guessed role names.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "guessed",
+                        "task",
+                        json!({"name":"audit", "agent":"sonnet", "prompt":"Inspect"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let (_, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
+            let task = generator.calls()[0]
+                .tools
+                .iter()
+                .find(|tool| tool.name == "task")
+                .unwrap()
+                .clone();
+            assert!(task.parameters["properties"].get("agent").is_none());
+            let rejected = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(rejected.ok, Some(false));
+            assert!(tool_result_text(rejected).contains("omit agent"));
+        }
+
+        #[test]
         fn named_task_intersects_tools_and_injects_definition_without_child_delegation() {
             // Catches: named tool ceilings only changing the prompt, not executable tools.
             let fx = Fixture::new(vec![]).with_write_tool();

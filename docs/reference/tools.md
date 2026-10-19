@@ -1,3 +1,7 @@
+# Web search reference
+
+Use [tools](../guides/tools.md) for the complete built-in tool overview and
+[permissions](../guides/permissions.md) for authority and network boundaries.
 
 ## Provider-hosted web search
 

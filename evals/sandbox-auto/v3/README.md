@@ -4,8 +4,8 @@ Design fixture for regression case, revised after Fable review. Offline
 consumers: `ego-core/tests/judge_eval_set.rs` (set shape and gates),
 `ego-tools` `the_v3_parser_suite_matches_the_production_parser`, and
 `adaptive_residual::every_v3_attack_path_fails_the_recheck_under_a_forced_write`.
-The [2026-10-14 paid prompt evaluation](results/2026-10-14-openrouter-luna/README.md)
-records raw model safety separately from production runtime evidence.
+Paid prompt evaluations are local results, separate from production runtime
+evidence.
 V1 is superseded in Git history.
 
 ## Why v3

@@ -481,16 +481,6 @@ struct StartedCall {
     args: String,
 }
 
-fn compact_tokens(count: u64) -> String {
-    if count < 1_000 {
-        count.to_string()
-    } else if count < 100_000 {
-        format!("{:.1}K", count as f64 / 1_000.0)
-    } else {
-        format!("{}K", count / 1_000)
-    }
-}
-
 /// The state of the answer currently being written.
 struct Streaming {
     answer: Answer,
@@ -776,17 +766,6 @@ impl EventSink for TextSink<'_> {
                     .expect("turn clock lock")
                     .insert(*turn, Instant::now());
             }
-            PublicEvent::UsageUpdated { usage_delta, .. }
-                if self.capabilities.on_screen()
-                    && !self.quiet
-                    && usage_delta.cache_read_tokens > 0 =>
-            {
-                self.finish();
-                self.out.note(&format!(
-                    "cache hit: {} tokens",
-                    compact_tokens(usage_delta.cache_read_tokens)
-                ));
-            }
             PublicEvent::TurnCompleted { turn, ok, .. }
                 if self.capabilities.on_screen() && !self.quiet =>
             {
@@ -805,7 +784,7 @@ impl EventSink for TextSink<'_> {
                     let elapsed = tool_row::duration(started.elapsed());
                     let clock = chrono::Local::now().format("%-I:%M %p");
                     let outcome = if *ok { "done" } else { "stopped" };
-                    let mut receipt = format!("✻ Turn elapsed {elapsed} · {outcome} {clock}");
+                    let mut receipt = format!("Turn elapsed {elapsed} · {outcome} {clock}");
                     if let Some(lines) = lines {
                         let (green, red, reset) = if self.capabilities.coloured() {
                             ("\x1b[32m", "\x1b[31m", "\x1b[0m")
@@ -1288,10 +1267,9 @@ mod tests {
         }
     }
 
-    /// Catches: reporting a cache hit as a raw token count or dropping it from
-    /// the interactive transcript after a provider reports reused input.
+    /// Catches: successful cache hits adding a notice for every generation.
     #[test]
-    fn interactive_usage_reports_compact_cache_hits_only_when_read_tokens_exist() {
+    fn interactive_usage_keeps_successful_cache_hits_silent() {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
@@ -1314,7 +1292,7 @@ mod tests {
                 &state,
             );
         }
-        assert_eq!(*out.notes.lock().unwrap(), ["cache hit: 18.4K tokens"]);
+        assert!(out.notes.lock().unwrap().is_empty());
     }
 
     /// Catches: treating a first miss or a different cache prefix as a reset,
@@ -1425,7 +1403,7 @@ mod tests {
         headless.publish(&end, &state);
         let notes = out.notes.lock().unwrap();
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].starts_with("✻ Turn elapsed "), "{notes:?}");
+        assert!(notes[0].starts_with("Turn elapsed "), "{notes:?}");
         assert!(notes[0].contains(" · done "), "{notes:?}");
     }
 
@@ -1565,10 +1543,8 @@ mod tests {
         }
     }
 
-    // Catches: separate notes insert blank lines and expose Debug status names.
-    #[test]
-    fn plan_block_compact() {
-        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+    fn plan_fixture() -> SessionState {
+        use ego_core::plan::{PlanStep, StepStatus};
         let mut state = SessionState::default();
         state.plan.steps = [
             (StepStatus::Completed, "Read the current output path"),
@@ -1587,6 +1563,39 @@ mod tests {
             status,
         })
         .collect();
+        state
+    }
+
+    #[test]
+    #[ignore = "writes the plan goldens; run deliberately after reading the diff"]
+    fn regenerate_plan_goldens() {
+        for width in [40, 80, 120] {
+            for (depth, extension) in [
+                (crate::render::Depth::None, "txt"),
+                (crate::render::Depth::TrueColor, "ansi"),
+            ] {
+                let mut caps = Capabilities::plain();
+                caps.width = width;
+                caps.depth = depth;
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("tests/goldens/plan/{width}.{extension}"));
+                std::fs::write(
+                    path,
+                    format!(
+                        "{DISPLAY_NAME}: {}\n",
+                        plan_block(&plan_fixture().plan, caps)
+                    ),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    // Catches: separate notes insert blank lines and expose Debug status names.
+    #[test]
+    fn plan_block_compact() {
+        use ego_core::plan::PlanUpdate;
+        let state = plan_fixture();
         let event = PublicEvent::PlanUpdated {
             turn: TurnId::new(),
             update: PlanUpdate::Replace { steps: vec![] },
