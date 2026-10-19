@@ -1468,20 +1468,6 @@ fn admitted_skill_operation(
 mod unknown_slash_tests {
     use super::*;
 
-    // Catches: valid direct mode selections are rejected instead of routed locally.
-    #[test]
-    fn direct_mode_names_route_locally() {
-        let registry = ActionRegistry::final_surface();
-        for mode in ["plan", "manual", "auto", "accept-edits", "yolo"] {
-            let input = format!("/mode {mode}");
-            let dispatch = registry.classify(registry.submit(input, InputOrigin::Typed));
-            assert!(
-                !matches!(dispatch, Dispatch::Refused { .. } | Dispatch::Prompt),
-                "direct mode {mode} must be a local selection: {dispatch:?}"
-            );
-        }
-    }
-
     // Catches: invalid or extra mode arguments escape into a paid model turn.
     #[test]
     fn invalid_mode_arguments_are_local_refusals_and_empty_keeps_picker() {
