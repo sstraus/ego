@@ -2483,8 +2483,12 @@ instructions, tool definitions, accounting, and auditable lineage use the same
 transition as `/compact`.
 
 Pending prompts, questions, or live attempts prevent the transition. A failed
-automatic compaction is shown and is not automatically retried in that source
-epoch. Unknown occupancy is not estimated. A known full context still refuses
+automatic compaction at measured context pressure stops the session with an
+explicit diagnostic and a nonzero process exit, so managed parents can observe
+the failure instead of sending prompts that cannot run. The durable source is
+retained for resume; no automatic retry loop runs in that source epoch. Explicit
+operator cancellation and failed manual compaction remain interactive. Unknown
+occupancy is not estimated. A known full context still refuses
 before any request, including a compaction request: automatic recovery must
 start before exhaustion, and the threshold is not an exact fit guarantee for
 unsent growth. A 272000-token window triggers at 244800 measured tokens.
