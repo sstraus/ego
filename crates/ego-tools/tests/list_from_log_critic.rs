@@ -320,3 +320,84 @@ fn an_unterminated_header_is_skipped_without_failing_siblings() {
 
     assert_eq!(ids, vec![id]);
 }
+
+// Catches: an absent optional evidence collection rejects a durable append
+// even though an entirely absent evidence cache already defaults to empty.
+#[test]
+fn manifest_missing_evidence_collections_still_loads() {
+    for field in ["run_contexts", "generations"] {
+        let w = World::new();
+        let id = w.session(0);
+        let path = w.manifest(&id);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["evidence"].as_object_mut().unwrap().remove(field);
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let mut seq = Seq::ZERO;
+        for _ in 0..3 {
+            seq.next();
+        }
+        w.store
+            .append(
+                &id,
+                &ev(
+                    seq.next(),
+                    TurnId::new(),
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                    4,
+                ),
+            )
+            .unwrap_or_else(|error| panic!("missing evidence.{field}: {error}"));
+        assert_eq!(w.listed()[0].updated, Timestamp::from_millis(4));
+        let (state, _) = w.store.resume(&id).unwrap();
+        assert_eq!(state.last_seq, seq);
+        assert_eq!(state.known_events.len(), 4);
+    }
+}
+
+// Catches: one unusable manifest and log abort catalogue enumeration instead
+// of identifying that session and preserving the other session's resume.
+#[test]
+fn one_bad_manifest_does_not_hide_other_sessions() {
+    let w = World::new();
+    let healthy = w.session(0);
+    let broken = w.session(10_000);
+    std::fs::write(w.manifest(&broken), b"{}").unwrap();
+    std::fs::write(w.log(&broken), b"not a log\n").unwrap();
+    let mut errors = Vec::new();
+    let listed = w
+        .store
+        .list_readable(&mut |id, error| errors.push((id, error.to_string())))
+        .unwrap();
+    assert_eq!(
+        listed.iter().map(|meta| meta.id).collect::<Vec<_>>(),
+        vec![healthy]
+    );
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].0, broken);
+    assert!(!errors[0].1.is_empty());
+    w.store.resume(&healthy).unwrap();
+}
+
+// Catches: making absent collections optional also accepts null, wrong types,
+// or incomplete evidence records as an empty cache.
+#[test]
+fn manifest_evidence_defaults_do_not_accept_malformed_present_collections() {
+    for field in ["run_contexts", "generations"] {
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([{}]),
+        ] {
+            let mut projection = serde_json::json!({"run_contexts": [], "generations": []});
+            projection[field] = invalid;
+            assert!(
+                serde_json::from_value::<ego_core::evidence::ManifestEvidence>(projection).is_err(),
+                "malformed {field} must not be defaulted"
+            );
+        }
+    }
+}
