@@ -96,9 +96,17 @@ permission mode does not remove a sandbox or an administrator's ceilings.
 
 ## Status and platforms
 
-This is an unreleased project; there is no stable release yet. `ego-cli` currently
-has version `0.1.2` and workspace packages are not published. The command references
+This is an unreleased project; there is no stable release yet. The version is
+defined once in
+`[workspace.package]` in `Cargo.toml`; all workspace packages inherit it and are
+not published. Every landing to `master` increments the patch version by one
+(`0.0.1`). Run `ego --version` to identify an installed build. The command references
 describe this checkout, not a promise about a future release.
+
+Recorded SSE comments, raw PTY captures, and dated validation reports retain
+the version of the observed build. They are historical evidence, not version
+declarations. SSE decoders ignore provenance comments; launch golden comparisons
+normalize the banner version. Do not rewrite these records for a version bump.
 
 macOS uses Seatbelt and Linux uses its confinement backends when the host can prove
 the requested guarantee. Windows transport and private-state support exist, but

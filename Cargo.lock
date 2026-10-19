@@ -1211,7 +1211,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ego-a2a"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "a2a-lf",
  "ego-core",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "ego-acp"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-http",
@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "ego-ai"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "ego-core"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "ego-ai",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "ego-listen"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "ego-core",
  "fd-lock",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "ego-mcp"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "ego-core",
  "futures",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "ego-tools"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "async-tungstenite",
  "chrono",

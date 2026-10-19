@@ -257,7 +257,14 @@ fn the_scan_catches_every_client_it_names_and_lets_ego_through() {
     assert_eq!(caught.len(), 3, "{caught:?}");
 
     assert!(
-        breaches(&[HttpHeader::new("user-agent", b"ego/0.1.0".to_vec()).unwrap()]).is_empty(),
+        breaches(&[HttpHeader::new(
+            "user-agent",
+            concat!("ego/", env!("CARGO_PKG_VERSION"))
+                .as_bytes()
+                .to_vec()
+        )
+        .unwrap()])
+        .is_empty(),
         "ego naming itself is not impersonation"
     );
 }
