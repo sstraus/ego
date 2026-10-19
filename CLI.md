@@ -960,6 +960,26 @@ changed nothing, so the refusal is returned to the model as a failed tool
 result and the turn continues (regression case). Writes and spawns outside the
 workspace still end the run.
 
+### Host PID-to-session index
+
+While ego holds a session writer lease, it atomically publishes
+`$EGO_HOME/pids/<pid>.json` (default `~/.ego/pids/<pid>.json`):
+
+```json
+{"pid":12345,"session_id":"01900000-0000-7000-8000-000000000001","cwd":"/absolute/workspace"}
+```
+
+`pid` is the process ID, `session_id` is the leased session UUID, and `cwd` is
+its absolute workspace path. Publication writes a temporary file beside the
+index, then renames it into place. Acquiring a replacement session lease
+replaces the binding. Releasing the last owner of that lease removes its
+binding; releasing an older session does not remove a newer binding. Normal
+exit releases these owners. A crash or forced termination can leave an index.
+The index is only a lookup hint, not a liveness or ownership guarantee: hosts
+must verify that the selected session's `lease` records the same PID and that
+the process is live. The session lease remains the source of truth. A custom
+`--session-dir` does not move this index out of `$EGO_HOME/pids`.
+
 ### 4.5 Parse and lifecycle contract (normative before release)
 
 The grammar ships with: a command × flag **applicability matrix** (no flag

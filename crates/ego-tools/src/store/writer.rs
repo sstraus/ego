@@ -319,7 +319,7 @@ impl JsonlStore {
         id: &SessionId,
         lease: LeaseInputs<'_>,
     ) -> Result<OpenSession<'_>, OpenError> {
-        let held = Lease::acquire(
+        let mut held = Lease::acquire(
             &self.lease_path(id),
             lease.pid,
             lease.now,
@@ -327,6 +327,9 @@ impl JsonlStore {
             lease.is_alive,
         )
         .map_err(OpenError::Lease)?;
+
+        self.index_lease(&mut held, id, lease.pid)
+            .map_err(|error| OpenError::Lease(LeaseError::Io(error)))?;
 
         let repair = self.recover(id).map_err(OpenError::Recover)?;
 

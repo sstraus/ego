@@ -81,11 +81,16 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use ego_core::event::time::Timestamp;
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
+
+// One process owns each PID path. Serialize its publish/remove operations so
+// an older lease cannot unlink a replacement between checking and removing it.
+static PID_INDEX_LOCK: Mutex<()> = Mutex::new(());
 
 /// The lock file's on-disk contents: the writer's PID and the wall-clock
 /// time it last confirmed its own liveness. JSON, exactly two fields —
@@ -147,11 +152,9 @@ impl From<io::Error> for LeaseError {
 /// durability protocol this implements and its documented limits.
 ///
 /// Released by dropping: this struct owns the locked [`File`], and closing
-/// its descriptor is what releases the OS-level lock — the kernel does
-/// this unconditionally on close, so there is nothing for a manual
-/// [`Drop`] impl to do or to fail at (`Drop::drop` has no error channel to
-/// report through in any case; this is the same posture `std::fs::File`
-/// itself takes on a close error). The lock file itself is deliberately
+/// its descriptor releases the OS-level lock. Drop also removes this holder
+/// from the optional host PID index, unless a newer binding replaced it.
+/// The lock file itself is deliberately
 /// left in place on release rather than removed: an unlink here could race
 /// a *new* holder that has already taken the path over (see
 /// [`Lease::acquire`]'s takeover path, which replaces rather than rewrites
@@ -164,6 +167,7 @@ pub struct Lease {
     #[allow(dead_code)]
     lock: RwLock<File>,
     path: PathBuf,
+    pid_index: Option<(PathBuf, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for Lease {
@@ -174,7 +178,44 @@ impl std::fmt::Debug for Lease {
     }
 }
 
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let _guard = PID_INDEX_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((path, contents)) = &self.pid_index
+            // A new lease for this PID may already have replaced the binding.
+            && fs::read(path).is_ok_and(|current| current == *contents)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 impl Lease {
+    pub(super) fn publish_pid_index(
+        &mut self,
+        home: &Path,
+        pid: u32,
+        session_id: &ego_core::event::id::SessionId,
+        cwd: &Path,
+        io: &dyn super::io::StoreIo,
+    ) -> io::Result<()> {
+        let _guard = PID_INDEX_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let path = home.join("pids").join(format!("{pid}.json"));
+        let contents = serde_json::to_vec(&serde_json::json!({
+            "pid": pid,
+            "session_id": session_id,
+            "cwd": cwd,
+        }))?;
+        // Register cleanup before publication: a directory fsync error can be
+        // reported after the rename has already made the binding visible.
+        self.pid_index = Some((path.clone(), contents.clone()));
+        io.replace_atomic(&path, &contents)
+    }
+
     /// Hold the same exclusive kernel lock as a writer without changing the
     /// lease contents. `None` means a live holder already owns it.
     pub(crate) fn probe(path: &Path) -> io::Result<Option<Self>> {
@@ -196,6 +237,7 @@ impl Lease {
         Ok(Some(Self {
             lock,
             path: path.to_path_buf(),
+            pid_index: None,
         }))
     }
 
@@ -282,6 +324,7 @@ impl Lease {
             return Ok(Lease {
                 lock,
                 path: path.to_path_buf(),
+                pid_index: None,
             });
         }
 
@@ -404,6 +447,7 @@ fn take_over(
     Ok(Lease {
         lock: tmp_lock,
         path: path.to_path_buf(),
+        pid_index: None,
     })
 }
 

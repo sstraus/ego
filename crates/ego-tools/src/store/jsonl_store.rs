@@ -508,6 +508,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
 pub struct JsonlStore {
     root: PathBuf,
     workspace: PathBuf,
+    pid_index_home: Option<PathBuf>,
     pub(super) io: Arc<dyn StoreIo>,
 }
 
@@ -540,8 +541,27 @@ impl JsonlStore {
         Self {
             root: root.into(),
             workspace: workspace.into(),
+            pid_index_home: None,
             io: Arc::from(io),
         }
+    }
+
+    /// Publish a host PID index for writer leases under this ego home.
+    pub fn with_pid_index(mut self, home: PathBuf) -> Self {
+        self.pid_index_home = Some(home);
+        self
+    }
+
+    pub(super) fn index_lease(
+        &self,
+        lease: &mut Lease,
+        id: &SessionId,
+        pid: u32,
+    ) -> std::io::Result<()> {
+        if let Some(home) = &self.pid_index_home {
+            lease.publish_pid_index(home, pid, id, &self.workspace, self.io.as_ref())?;
+        }
+        Ok(())
     }
 
     /// Open the immutable evidence CAS without leasing or replaying the session writer.

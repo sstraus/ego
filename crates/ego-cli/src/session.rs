@@ -138,7 +138,11 @@ pub fn open<'a>(
 /// equal to itself. Resolving it a second time here would be the second
 /// canonicaliser `AGENTS.md`'s reuse-first rule exists to prevent.
 pub fn jsonl(root: PathBuf, workspace: PathBuf) -> JsonlStore {
-    JsonlStore::new(root, workspace, Box::new(OsIo))
+    let store = JsonlStore::new(root, workspace, Box::new(OsIo));
+    match crate::config::ego_home() {
+        Some(home) => store.with_pid_index(home),
+        None => store,
+    }
 }
 
 /// The state a durable run starts from, and the writer it owns.
