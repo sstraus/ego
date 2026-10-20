@@ -52,6 +52,7 @@ pub mod orchestrator;
 pub mod output;
 pub mod perimeter;
 pub mod prompt;
+pub(crate) mod prompt_context;
 pub mod provider_http;
 pub mod reference;
 pub mod render;

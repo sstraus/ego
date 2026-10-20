@@ -538,6 +538,7 @@ impl CliPrepared {
                 gate,
                 hook_layers: self.profile_layers.as_deref(),
                 hook_trust: self.trust,
+                mdkb_prompt_command: self.effective.mdkb_prompt_command.clone(),
                 policy_source,
                 judge_available,
             },

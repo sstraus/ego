@@ -466,6 +466,11 @@ operations, widenings and exact parameters behind a details key (`CLI.md` §6).
   stable identity, source/digest, and typed start/settlement evidence only; M4
   builds the strict catalogue, runner, four adapters, and inspection surfaces.
   See `ARCHITECTURE.md` and the accepted hook ADR.
+  Optional mdkb warmup, recall, tool hints and Stop episodes use a separate
+  guarded data source. It does not change hook decisions or permissions;
+  bounded returned context enters as user-role data and source failure cannot
+  veto a turn. See
+  `ARCHITECTURE.md`.
 
 ### 3.6 Extensibility posture (plugins without a plugin system)
 

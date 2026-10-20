@@ -2,7 +2,9 @@
 
 Hooks add lifecycle checks and source-tagged feedback. They are subtractive:
 a hook can block or escalate work, but cannot grant a permit or relax a sandbox,
-system deny, offline boundary, or budget.
+system deny, offline boundary, or budget. mdkb session warmup and prompt-specific recall use a
+separate context source, not a `SessionStart` or `UserPromptSubmit` hook result. See
+[the prompt-context decision](../internals/decisions/2026-10-17-prompt-recall-context.md).
 
 `ego hooks ls` inspects system/user hooks without loading project configuration.
 `/hooks` inspects the active session's admitted catalogue, including trusted
@@ -54,7 +56,8 @@ Admission validates a complete bounded candidate and retains last-good on reload
 failure. Pre-effect handler failure/malformed response/timeout blocks rather than
 letting work proceed. Post-effect failure cannot undo an effect that already ran;
 it becomes evidence. Durable started/settled records prevent blind replay after
-ambiguous delivery.
+ambiguous delivery for lifecycle hooks. The separate mdkb context source is
+best effort: it has no durable external-delivery receipt or cross-process deduplication.
 
 `once=true` is meaningful only for invocation-scoped skill hooks. It is consumed
 at durable invocation start, including failure, timeout, or uncertainty; it is

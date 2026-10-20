@@ -454,6 +454,9 @@ pub struct ItemState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_content: Option<ReasoningState>,
     pub completed: bool,
+    /// Observation time of the applied `ToolCallCompleted` event, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<Timestamp>,
     pub ok: Option<bool>,
     /// The generation this item came out of, when the log says which.
     ///
@@ -492,6 +495,7 @@ impl ItemState {
             reasoning_state: None,
             provider_content: None,
             completed: false,
+            completed_at: None,
             ok: None,
             generation: None,
         }
@@ -2082,6 +2086,7 @@ impl SessionState {
                     item.text.clear();
                     item.tool_result = Some(result.clone());
                     item.completed = true;
+                    item.completed_at = Some(ev.env.ts);
                     item.ok = Some(*ok);
                 }
             }

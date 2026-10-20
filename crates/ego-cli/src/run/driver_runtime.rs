@@ -411,6 +411,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                     gate: gate.clone(),
                     hook_layers: skill_profile_layers.as_deref(),
                     hook_trust: skill_trust,
+                    mdkb_prompt_command: effective.mdkb_prompt_command.clone(),
                     policy_source: Arc::clone(&policy_source),
                     judge_available,
                 },
@@ -1797,6 +1798,13 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     )
     .with_secret_values(ego_tools::secrets::from_env())
     .with_cancel(cancel.clone());
+    let prompt_context = effective.mdkb_prompt_command.as_ref().map(|binary| {
+        Arc::new(crate::prompt_context::MdkbPromptContext::new(
+            binary.clone(),
+            Arc::clone(&policy_source),
+            effect_ports.clone(),
+        )) as Arc<dyn ego_core::turn::PromptContextSource>
+    });
     let tools = match admitted_tools.as_ref() {
         Some(source) => Tools::from_registry_with_source(
             registry,
@@ -1844,6 +1852,10 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         message: error.to_string(),
     })?;
 
+    let loop_ = match prompt_context {
+        Some(source) => loop_.with_prompt_context(source),
+        None => loop_,
+    };
     let loop_ = loop_
         .with_provider_recovery(
             args.provider_recovery

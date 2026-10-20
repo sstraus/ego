@@ -74,8 +74,9 @@ use ego_core::subagent::{ChildWait, ChildWaitResult};
 use ego_core::suspension::ResumeFloor;
 use ego_core::turn::{
     CancelToken, ControlError, GenerationPolicyCapture, GenerationPolicySnapshot,
-    GenerationPolicySource, GenerationRuntime, Journal, JudgeContext, PauseToken, RegisteredTool,
-    Session, SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
+    GenerationPolicySource, GenerationRuntime, Journal, JudgeContext, PauseToken,
+    PromptContextSource, RegisteredTool, Session, SharedJournal, ToolEffectPorts, Tools,
+    TurnConfig, TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -7169,6 +7170,277 @@ mod turn {
             vec![ContentBlock::Text {
                 text: "the only thing said so far".to_string()
             }]
+        );
+    }
+
+    struct StaticRecall {
+        response: Result<Option<String>, String>,
+        warmup: Result<Option<String>, String>,
+        seen: Mutex<Vec<(String, String, SessionId)>>,
+        warmup_sessions: Mutex<Vec<SessionId>>,
+        stops: Mutex<Vec<(SessionId, Vec<ego_core::turn::EpisodeItem>)>>,
+        tools: Mutex<Vec<(String, String, bool)>>,
+    }
+
+    impl PromptContextSource for StaticRecall {
+        fn warmup<'a>(
+            &'a self,
+            _cwd: &'a Path,
+            session: SessionId,
+        ) -> BoxFuture<'a, Result<Option<String>, String>> {
+            self.warmup_sessions.lock().unwrap().push(session);
+            Box::pin(async { self.warmup.clone() })
+        }
+
+        fn recall<'a>(
+            &'a self,
+            prompt: &'a str,
+            cwd: &'a Path,
+            session: SessionId,
+        ) -> BoxFuture<'a, Result<Option<String>, String>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((prompt.to_owned(), cwd.display().to_string(), session));
+            Box::pin(async { self.response.clone() })
+        }
+
+        fn tool<'a>(
+            &'a self,
+            _cwd: &'a Path,
+            _session: SessionId,
+            name: &'a str,
+            args: &'a str,
+            ok: bool,
+            _result: &'a str,
+        ) -> BoxFuture<'a, Result<Option<String>, String>> {
+            self.tools
+                .lock()
+                .unwrap()
+                .push((name.into(), args.into(), ok));
+            Box::pin(async { Ok(Some("Use the indexed definition".into())) })
+        }
+
+        fn stop<'a>(
+            &'a self,
+            _cwd: &'a Path,
+            session: SessionId,
+            _occurrence: EventId,
+            items: Vec<ego_core::turn::EpisodeItem>,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            self.stops.lock().unwrap().push((session, items));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn run_with_context(
+        response: Result<Option<String>, String>,
+        warmup: Result<Option<String>, String>,
+        prompts: &[&str],
+    ) -> (Fixture, Arc<StaticRecall>) {
+        let fx = Fixture::new(
+            prompts
+                .iter()
+                .map(|_| vec![AiEvent::Stop(StopReason::Stop)])
+                .collect(),
+        );
+        let recall = Arc::new(StaticRecall {
+            response,
+            warmup,
+            seen: Mutex::new(Vec::new()),
+            warmup_sessions: Mutex::new(Vec::new()),
+            stops: Mutex::new(Vec::new()),
+            tools: Mutex::new(Vec::new()),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        )
+        .with_prompt_context(Arc::clone(&recall) as Arc<dyn PromptContextSource>);
+        for prompt in prompts {
+            block_on(turn.run(prompt)).unwrap();
+        }
+        drop(turn);
+        drop(gate);
+        (fx, recall)
+    }
+
+    fn run_with_recall(response: Result<Option<String>, String>) -> (Fixture, Arc<StaticRecall>) {
+        run_with_context(response, Ok(None), &["find the relevant decision"])
+    }
+
+    // Catches: SessionStart returns warmup, but ego discards it before generation.
+    #[test]
+    fn warmup_uses_the_stable_session_and_enters_durable_user_context() {
+        let (fx, source) = run_with_context(
+            Ok(None),
+            Ok(Some("A warmup entry".into())),
+            &["find the relevant decision"],
+        );
+        let warmup_sessions = source.warmup_sessions.lock().unwrap();
+        assert_eq!(warmup_sessions.len(), 1);
+        assert_eq!(warmup_sessions[0], source.seen.lock().unwrap()[0].2);
+        let messages = fx.generator.calls()[0].messages.messages().to_vec();
+        assert!(messages.iter().any(|message| message.role == Role::User
+            && format!("{:?}", message.content).contains("A warmup entry")));
+        assert!(!messages.iter().any(|message| message.role == Role::System
+            && format!("{:?}", message.content).contains("A warmup entry")));
+        assert!(fx.store.events().iter().any(|event| matches!(&event.kind,
+            EventKind::HostContextAppended { text } if text.starts_with("mdkb session warmup data")
+                && text.contains("A warmup entry"))));
+    }
+
+    // Catches: a tool hint arrives after execution but is lost before the next generation.
+    #[test]
+    fn settled_tool_hint_is_durable_user_data_in_the_next_generation() {
+        let fx = Fixture::new(reading("/ws/guide")).with_read_tool();
+        fx.fs.file("/ws/guide", "guide contents");
+        let source = Arc::new(StaticRecall {
+            response: Ok(None),
+            warmup: Ok(None),
+            seen: Mutex::new(Vec::new()),
+            warmup_sessions: Mutex::new(Vec::new()),
+            stops: Mutex::new(Vec::new()),
+            tools: Mutex::new(Vec::new()),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        )
+        .with_prompt_context(Arc::clone(&source) as Arc<dyn PromptContextSource>);
+        block_on(turn.run("read the guide")).unwrap();
+        assert_eq!(
+            source.tools.lock().unwrap().as_slice(),
+            &[("read".into(), r#"{"path":"/ws/guide"}"#.into(), true)]
+        );
+        let messages = fx.generator.calls()[1].messages.messages().to_vec();
+        assert!(messages.iter().any(|message| message.role == Role::User
+            && format!("{:?}", message.content).contains("Use the indexed definition")));
+        assert!(!messages.iter().any(|message| message.role == Role::System
+            && format!("{:?}", message.content).contains("Use the indexed definition")));
+        assert!(fx.store.events().iter().any(|event| matches!(&event.kind,
+            EventKind::HostContextAppended { text } if text.starts_with("mdkb tool hint data"))));
+    }
+
+    // Catches: Stop runs as a pre-effect gate but the episode observer is never notified.
+    #[test]
+    fn completed_stop_observes_a_durable_prompt_under_the_same_session() {
+        let (_fx, source) = run_with_recall(Ok(None));
+        let stops = source.stops.lock().unwrap();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0].0, source.warmup_sessions.lock().unwrap()[0]);
+        assert!(stops[0].1.iter().any(|item| matches!(item,
+            ego_core::turn::EpisodeItem::User(text) if text == "find the relevant decision")));
+    }
+
+    // Catches: the second prompt resets mdkb's session-start state and re-injects warmup.
+    #[test]
+    fn warmup_is_not_requested_again_after_its_durable_context_is_admitted() {
+        let (fx, source) = run_with_context(
+            Ok(None),
+            Ok(Some("One warmup entry".into())),
+            &["first prompt", "second prompt"],
+        );
+        assert_eq!(fx.generator.calls().len(), 2);
+        assert_eq!(source.warmup_sessions.lock().unwrap().len(), 1);
+        assert_eq!(source.seen.lock().unwrap().len(), 2);
+        assert_eq!(fx.store.events().iter().filter(|event| matches!(&event.kind,
+            EventKind::HostContextAppended { text } if text.starts_with("mdkb session warmup data"))).count(), 1);
+    }
+
+    // Catches: empty warmup resets mdkb's recall deduplication on every prompt.
+    #[test]
+    fn empty_warmup_is_attempted_only_once_per_run() {
+        let (_fx, source) =
+            run_with_context(Ok(None), Ok(None), &["first prompt", "second prompt"]);
+        assert_eq!(source.warmup_sessions.lock().unwrap().len(), 1);
+        assert_eq!(source.seen.lock().unwrap().len(), 2);
+    }
+
+    // Catches: an unavailable SessionStart source blocks the first generation.
+    #[test]
+    fn failed_warmup_does_not_block_prompt_recall() {
+        let (fx, _) = run_with_context(
+            Ok(Some("Recall still works".into())),
+            Err("unavailable".into()),
+            &["find the relevant decision"],
+        );
+        assert_eq!(fx.generator.calls().len(), 1);
+        let messages = fx.generator.calls()[0].messages.messages().to_vec();
+        assert!(messages.iter().any(|message| message.role == Role::User
+            && format!("{:?}", message.content).contains("Recall still works")));
+    }
+
+    // Catches: prompt recall is computed but never included in the provider request.
+    #[test]
+    fn recalled_prompt_data_is_visible_as_durable_user_context() {
+        let (fx, recall) = run_with_recall(Ok(Some("A prior decision".into())));
+        assert_eq!(
+            recall.seen.lock().unwrap().as_slice(),
+            &[(
+                "find the relevant decision".into(),
+                "/ws".into(),
+                recall.warmup_sessions.lock().unwrap()[0]
+            )]
+        );
+        let messages = fx.generator.calls()[0].messages.messages().to_vec();
+        assert!(messages.iter().any(|message| message.role == Role::User
+            && format!("{:?}", message.content).contains("A prior decision")));
+        assert!(!messages.iter().any(|message| message.role == Role::System
+            && format!("{:?}", message.content).contains("A prior decision")));
+        assert!(fx.store.events().iter().any(|event| matches!(&event.kind, EventKind::HostContextAppended { text } if text.contains("A prior decision"))));
+    }
+
+    // Catches: an unavailable external recall source blocks a valid user prompt.
+    #[test]
+    fn failed_prompt_recall_does_not_block_generation() {
+        let (fx, _) = run_with_recall(Err("unavailable".into()));
+        assert_eq!(fx.generator.calls().len(), 1);
+        assert!(
+            !fx.store
+                .events()
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::HostContextAppended { .. }))
         );
     }
 

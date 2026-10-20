@@ -30,6 +30,19 @@ fn fresh_config_resolves_to_adaptive_instead_of_legacy_workspace() {
     assert_eq!(effective.sandbox_provenance, SettingProvenance::Default);
 }
 
+// Catches: prompt-only setup creates a pre-effect hook in ego's catalogue.
+#[test]
+fn mdkb_prompt_setup_does_not_register_a_hook() {
+    let layer =
+        ConfigLayer::parse(Source::User, "mdkb_prompt_command = '/usr/bin/mdkb'\n").unwrap();
+    assert!(layer.value.hooks.is_empty());
+    let effective = resolve(&[layer], Trust::Untrusted, None).unwrap();
+    assert_eq!(
+        effective.mdkb_prompt_command.as_deref(),
+        Some(std::path::Path::new("/usr/bin/mdkb"))
+    );
+}
+
 // Catches: a layer that sets mode is not the one reported, or a profile in a
 // lower layer is credited to the higher layer that only set the other field.
 #[test]
@@ -260,6 +273,20 @@ fn auth_precedence_merges_command_and_headers_per_field_and_name() {
         auth.headers.get("x-client").map(String::as_str),
         Some("ego")
     );
+}
+
+// Catches: project configuration silently executes a recall binary on a user prompt.
+#[test]
+fn prompt_recall_executable_requires_explicit_user_authority() {
+    let user =
+        ConfigLayer::parse(Source::User, "mdkb_prompt_command = '/usr/local/bin/mdkb'").unwrap();
+    let effective = resolve(&[user], Trust::Untrusted, None).unwrap();
+    assert_eq!(
+        effective.mdkb_prompt_command.as_deref(),
+        Some(std::path::Path::new("/usr/local/bin/mdkb"))
+    );
+    assert!(ConfigLayer::parse(Source::Project, "mdkb_prompt_command = '/usr/bin/mdkb'").is_err());
+    assert!(ConfigLayer::parse(Source::User, "mdkb_prompt_command = 'mdkb'").is_err());
 }
 
 #[test]
