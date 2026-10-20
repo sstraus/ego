@@ -401,6 +401,10 @@ mod store {
     }
 
     impl StoreIo for ReadCountingIo {
+        fn list_files(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.list_files(path)
+        }
+
         fn file_revision(
             &self,
             path: &std::path::Path,
@@ -636,6 +640,105 @@ mod store {
         assert_eq!(entries.len(), 9);
         assert!(entries.iter().all(Result::is_ok));
         assert_eq!(store.list().unwrap()[0].summary_failures, 4);
+    }
+
+    // Catches: reopening an unchanged, locally indexed writer replays recovery,
+    // resume, evidence indexing and blob reachability instead of using validated facts.
+    #[test]
+    fn indexed_writer_reopen_and_evidence_store_do_not_replay_log() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        store
+            .compare_and_append_run(
+                &session,
+                None,
+                admitted_run_transaction(&session, 1, None, true),
+            )
+            .unwrap();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        opened
+            .writer
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(1)),
+                admitted_run_transaction(&session, 2, Some(1), false),
+            )
+            .unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::SessionTitleChanged {
+                        title: Some("Indexed session".to_owned()),
+                    },
+                ),
+            )
+            .unwrap();
+        let invocation = RunInvocationId::new();
+        let context = RunContextEvidence::new(
+            session,
+            invocation,
+            RunId::new(session, invocation.uuid()),
+            ConfigProvenance::default(),
+        );
+        EvidenceAdmissionService::new()
+            .admit_run_context(&opened.writer, context.clone())
+            .unwrap();
+        drop(opened);
+        reads.lock().unwrap().clear();
+        let reopened = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(reopened.repair.truncated_bytes, 0);
+        assert_eq!(reopened.repair.dropped_lines, 0);
+        assert_eq!(reopened.state.title.as_deref(), Some("Indexed session"));
+        reopened.writer.evidence_store(1024 * 1024).unwrap();
+        EvidenceAdmissionService::new()
+            .admit_run_context(&reopened.writer, context)
+            .unwrap();
+        reopened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "indexed reopen and evidence-store opening must not replay the whole log"
+        );
+        assert_eq!(
+            store.list().unwrap()[0].title.as_deref(),
+            Some("Indexed session")
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().all(Result::is_ok));
     }
 
     // Catches: a lease-held append reopens the header and tail for every event.
