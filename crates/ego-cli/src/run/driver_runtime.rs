@@ -1933,7 +1933,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     let prompt_context = effective.mdkb_prompt_command.as_ref().map(|binary| {
         Arc::new(crate::prompt_context::MdkbPromptContext::new(
             binary.clone(),
-            Arc::clone(&policy_source),
+            Arc::clone(policy_source),
             effect_ports.clone(),
             ports.process(),
         )) as Arc<dyn ego_core::turn::PromptContextSource>
