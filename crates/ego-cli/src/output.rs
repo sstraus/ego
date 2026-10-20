@@ -754,15 +754,11 @@ impl EventSink for TextSink<'_> {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.goal_receipts(event, state);
         // Only adjacent completed top-level exec calls share the live row.
-        // Settle before prose (even buffered prose), another tool, or a turn boundary.
+        // Prose settles through write_answer/begin_block when it becomes visible;
+        // do not acquire the surface lock a second time for every streamed delta.
         if matches!(
             event,
-            PublicEvent::TurnStarted { .. }
-                | PublicEvent::TurnCompleted { .. }
-                | PublicEvent::ItemDelta {
-                    kind: ItemKind::AgentMessage,
-                    ..
-                }
+            PublicEvent::TurnStarted { .. } | PublicEvent::TurnCompleted { .. }
         ) || matches!(event, PublicEvent::ItemStarted { kind: ItemKind::Tool, name: Some(name), .. } if name != "exec")
         {
             self.out.settle_shell();
