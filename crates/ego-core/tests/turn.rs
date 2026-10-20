@@ -7561,7 +7561,6 @@ mod turn {
         warmup: Result<Option<String>, String>,
         seen: Mutex<Vec<(String, String, SessionId)>>,
         warmup_sessions: Mutex<Vec<SessionId>>,
-        stops: Mutex<Vec<(SessionId, Vec<ego_core::turn::EpisodeItem>)>>,
         tools: Mutex<Vec<(String, String, bool)>>,
     }
 
@@ -7603,17 +7602,6 @@ mod turn {
                 .push((name.into(), args.into(), ok));
             Box::pin(async { Ok(Some("Use the indexed definition".into())) })
         }
-
-        fn stop<'a>(
-            &'a self,
-            _cwd: &'a Path,
-            session: SessionId,
-            _occurrence: EventId,
-            items: Vec<ego_core::turn::EpisodeItem>,
-        ) -> BoxFuture<'a, Result<(), String>> {
-            self.stops.lock().unwrap().push((session, items));
-            Box::pin(async { Ok(()) })
-        }
     }
 
     fn run_with_context(
@@ -7632,7 +7620,6 @@ mod turn {
             warmup,
             seen: Mutex::new(Vec::new()),
             warmup_sessions: Mutex::new(Vec::new()),
-            stops: Mutex::new(Vec::new()),
             tools: Mutex::new(Vec::new()),
         });
         let mut gate = fx.gate.borrow_mut();
@@ -7703,7 +7690,6 @@ mod turn {
             warmup: Ok(None),
             seen: Mutex::new(Vec::new()),
             warmup_sessions: Mutex::new(Vec::new()),
-            stops: Mutex::new(Vec::new()),
             tools: Mutex::new(Vec::new()),
         });
         let mut gate = fx.gate.borrow_mut();
@@ -7743,17 +7729,6 @@ mod turn {
             && format!("{:?}", message.content).contains("Use the indexed definition")));
         assert!(fx.store.events().iter().any(|event| matches!(&event.kind,
             EventKind::HostContextAppended { text } if text.starts_with("mdkb tool hint data"))));
-    }
-
-    // Catches: Stop runs as a pre-effect gate but the episode observer is never notified.
-    #[test]
-    fn completed_stop_observes_a_durable_prompt_under_the_same_session() {
-        let (_fx, source) = run_with_recall(Ok(None));
-        let stops = source.stops.lock().unwrap();
-        assert_eq!(stops.len(), 1);
-        assert_eq!(stops[0].0, source.warmup_sessions.lock().unwrap()[0]);
-        assert!(stops[0].1.iter().any(|item| matches!(item,
-            ego_core::turn::EpisodeItem::User(text) if text == "find the relevant decision")));
     }
 
     // Catches: the second prompt resets mdkb's session-start state and re-injects warmup.

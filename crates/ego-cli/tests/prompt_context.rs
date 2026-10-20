@@ -93,3 +93,130 @@ esac
         assert_eq!(input["session_id"], support::FIXTURE_SESSION_ID);
     }
 }
+
+/// Catches: malformed, wrong-event, failed, oversized or stalled source output vetoes a prompt.
+#[test]
+fn unusable_mdkb_context_is_absent_without_blocking_headless_generation() {
+    let wrong_event = RECALL.replace("UserPromptSubmit", "Stop");
+    let oversized = serde_json::json!({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit", "additionalContext": "x".repeat(64 * 1024)
+    }})
+    .to_string();
+    for (case, output, exit, stall) in [
+        ("malformed", "not json", 0, false),
+        ("wrong event", wrong_event.as_str(), 0, false),
+        ("failed process", RECALL, 1, false),
+        ("oversized", oversized.as_str(), 0, false),
+        ("timeout", RECALL, 0, true),
+    ] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub);
+        let script = ego.file("mdkb-fixture", &format!(
+            "#!/bin/sh\ncat > /dev/null\nif [ \"$2\" != user-prompt-submit ]; then printf '{{}}\\n'; exit 0; fi\n{}\nprintf '%s\\n' '{}'\nexit {}\n",
+            if stall { "/bin/sleep 5" } else { ":" }, output, exit,
+        ));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ego.home_file(
+            "config.toml",
+            &format!("mdkb_prompt_command = {:?}\n", script),
+        );
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--mode",
+                "yolo",
+                "--sandbox",
+                "off",
+                "Continue without recall",
+            ])
+            .run();
+        assert_eq!(finished.code, Some(0), "{case}: {}", finished.stderr);
+        let requests = stub.generations();
+        assert_eq!(requests.len(), 1, "{case}");
+        assert!(
+            !requests[0].to_string().contains("mdkb recall data"),
+            "{case}: {}",
+            requests[0]
+        );
+    }
+}
+
+/// Catches: settled tool results never reach mdkb, or failure is reported as success.
+#[test]
+fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
+    use support::{Reply, text, tool_call};
+    for exists in [true, false] {
+        let stub = Stub::start(Plan {
+            completions: vec![
+                Reply::Sse(tool_call("call_read", "read", r#"{"path":"notes.md"}"#)),
+                Reply::Sse(text("Done")),
+            ],
+            ..Plan::default()
+        });
+        let ego = Ego::against(&stub);
+        if exists {
+            ego.file("notes.md", "Known tool observation content");
+        }
+        let log = ego.workspace_path().join("mdkb-inputs.jsonl");
+        let script = ego.file(
+            "mdkb-fixture",
+            &format!(
+                "#!/bin/sh\ncat >> '{}'\nprintf '\\n' >> '{}'\nprintf '{{}}\\n'\n",
+                log.display(),
+                log.display()
+            ),
+        );
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ego.home_file(
+            "config.toml",
+            &format!("mdkb_prompt_command = {:?}\n", script),
+        );
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--mode",
+                "yolo",
+                "--sandbox",
+                "off",
+                "Read notes.md",
+            ])
+            .run();
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        let inputs: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            inputs.len(),
+            3,
+            "warmup, recall and post-tool only: {inputs:?}"
+        );
+        let observation = &inputs[2];
+        assert_eq!(
+            observation["hook_event_name"],
+            if exists {
+                "PostToolUse"
+            } else {
+                "PostToolUseFailure"
+            }
+        );
+        assert_eq!(observation["tool_name"], "Read");
+        assert_eq!(observation["tool_input"]["path"], "notes.md");
+        let result = observation["tool_response"]
+            .as_str()
+            .expect("settled model-visible result");
+        assert!(!result.is_empty());
+        if exists {
+            assert!(
+                result.contains("Known tool observation content"),
+                "{result}"
+            );
+            assert!(observation.get("error").is_none());
+        } else {
+            assert_eq!(observation["error"], observation["tool_response"]);
+        }
+    }
+}

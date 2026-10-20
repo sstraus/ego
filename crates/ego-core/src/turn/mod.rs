@@ -1227,21 +1227,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
     }
 }
 
-/// A bounded episode projection from durable item state, not an ego JSONL export.
-#[derive(Debug, Clone)]
-pub enum EpisodeItem {
-    User(String),
-    Tool {
-        id: ItemId,
-        name: String,
-        args: String,
-        ok: bool,
-        result: String,
-        completed_at: Option<crate::event::time::Timestamp>,
-    },
-}
-
-/// Optional, non-authoritative external context and episode observations.
+/// Optional, non-authoritative external prompt and tool context.
 /// Failures mean no context; they never become hook decisions.
 pub trait PromptContextSource: Send + Sync {
     /// Session warmup is data, not a lifecycle hook decision.
@@ -1271,17 +1257,6 @@ pub trait PromptContextSource: Send + Sync {
         _result: &'a str,
     ) -> futures::future::BoxFuture<'a, Result<Option<String>, String>> {
         Box::pin(async { Ok(None) })
-    }
-
-    /// A completed Stop is observational: failure cannot change its outcome.
-    fn stop<'a>(
-        &'a self,
-        _cwd: &'a std::path::Path,
-        _session: SessionId,
-        _occurrence: EventId,
-        _items: Vec<EpisodeItem>,
-    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
-        Box::pin(async { Ok(()) })
     }
 }
 
@@ -4064,60 +4039,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     {
                         continue;
                     }
-                    if let Some(source) = &self.prompt_context {
-                        let items = self.journal.inspect(|state| {
-                            let mut ordered: Vec<_> = state
-                                .items
-                                .iter()
-                                .filter(|(_, item)| {
-                                    matches!(
-                                        item.kind,
-                                        crate::state::ItemKind::UserPrompt
-                                            | crate::state::ItemKind::ToolCall
-                                    )
-                                })
-                                .collect();
-                            ordered.sort_by_key(|(_, item)| item.seq);
-                            ordered
-                                .into_iter()
-                                .rev()
-                                .take(400)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
-                                .filter_map(|(id, item)| match item.kind {
-                                    crate::state::ItemKind::UserPrompt => {
-                                        Some(EpisodeItem::User(item.text.clone()))
-                                    }
-                                    crate::state::ItemKind::ToolCall => Some(EpisodeItem::Tool {
-                                        id: *id,
-                                        name: item.tool_name.clone()?,
-                                        args: item.args.clone(),
-                                        ok: item.ok?,
-                                        result: item.tool_result.as_ref()?.model_text(),
-                                        completed_at: item.completed_at,
-                                    }),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                        });
-                        match items {
-                            Ok(items) => {
-                                if let Err(error) = source
-                                    .stop(
-                                        self.tools.cwd().as_path(),
-                                        self.session_id,
-                                        terminal,
-                                        items,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(%error, "mdkb Stop observation unavailable");
-                                }
-                            }
-                            Err(error) => tracing::warn!(%error, "episode projection unavailable"),
-                        }
-                    }
+                    // DEFERRED (2026-10-20) — episode settlement/mining waits for an
+                    // mdkb endpoint that accepts the episode inline. The existing
+                    // Stop hook reads a transcript path asynchronously instead.
                 } else if exit != ExitReason::Completed {
                     let _ = self
                         .dispatch_hook(
