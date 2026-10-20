@@ -2388,6 +2388,11 @@ Only supplied rows come from this file, and they are rebuilt on every
 invocation rather than cached at all; the cache holds only *discovered* rows,
 from providers that enumerate themselves.
 
+An obsolete discovery-cache schema is ignored at startup. Supplied facts and
+bounded local discovery remain available, and an ordinary catalogue read can
+rebuild the cache without `--refresh`. Startup does not replace the old bytes.
+A corrupt or newer-schema cache still reports an error and is not overwritten.
+
 ### Interactive session picker
 
 On a human terminal, `/sessions` and `ego resume` without an ID open the saved
