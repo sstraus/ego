@@ -481,6 +481,106 @@ mod store {
         }
     }
 
+    // Catches: run CAS rereads the complete log and discards the domain projection.
+    #[test]
+    fn leased_run_cas_between_domain_appends_does_not_replay_log() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        store
+            .compare_and_append_run(
+                &session,
+                None,
+                admitted_run_transaction(&session, 1, None, true),
+            )
+            .unwrap();
+        let opened = store
+            .open_writer(
+                &session,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::EPOCH,
+                    stale_after: Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        let completed = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            )
+        };
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        opened
+            .writer
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(1)),
+                admitted_run_transaction(&session, 2, Some(1), false),
+            )
+            .unwrap();
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        reads.lock().unwrap().clear();
+        let transaction = admitted_run_transaction(&session, 3, Some(2), false);
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(&session, Some(RunRevision::new(2)), transaction.clone())
+                .unwrap(),
+            RunAppend::Committed {
+                revision: RunRevision::new(3)
+            }
+        );
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(&session, Some(RunRevision::new(2)), transaction)
+                .unwrap(),
+            RunAppend::Conflict {
+                actual: RunRevision::new(3)
+            }
+        );
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state run CAS and following domain append must not replay the log"
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 6);
+        assert!(entries.iter().all(Result::is_ok));
+        assert_eq!(store.list().unwrap()[0].summary_failures, 3);
+    }
+
     // Catches: a lease-held append reopens the header and tail for every event.
     #[test]
     fn leased_append_does_not_reread_log_per_event() {
