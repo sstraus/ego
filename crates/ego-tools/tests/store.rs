@@ -401,6 +401,20 @@ mod store {
     }
 
     impl StoreIo for ReadCountingIo {
+        fn file_revision(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Option<ego_tools::store::FileRevision>> {
+            self.inner.file_revision(path)
+        }
+        fn read_from(
+            &self,
+            path: &std::path::Path,
+            offset: u64,
+        ) -> std::io::Result<Option<Vec<u8>>> {
+            self.inner.read_from(path, offset)
+        }
+
         fn open_session_log(
             &self,
             path: &std::path::Path,
@@ -542,6 +556,18 @@ mod store {
             .append(&session, &completed(seq.next()))
             .unwrap();
         reads.lock().unwrap().clear();
+        let invocation = RunInvocationId::new();
+        EvidenceAdmissionService::new()
+            .admit_run_context(
+                &opened.writer,
+                RunContextEvidence::new(
+                    session,
+                    invocation,
+                    RunId::new(session, invocation.uuid()),
+                    ConfigProvenance::default(),
+                ),
+            )
+            .unwrap();
         let transaction = admitted_run_transaction(&session, 3, Some(2), false);
         assert_eq!(
             opened
@@ -576,9 +602,40 @@ mod store {
             "steady-state run CAS and following domain append must not replay the log"
         );
         let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
-        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.len(), 7);
         assert!(entries.iter().all(Result::is_ok));
         assert_eq!(store.list().unwrap()[0].summary_failures, 3);
+
+        // Catches: a cached revision accepts a stale CAS after another store writes.
+        let other = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        other
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(3)),
+                admitted_run_transaction(&session, 4, Some(3), false),
+            )
+            .unwrap();
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(
+                    &session,
+                    Some(RunRevision::new(3)),
+                    admitted_run_transaction(&session, 4, Some(3), false)
+                )
+                .unwrap(),
+            RunAppend::Conflict {
+                actual: RunRevision::new(4)
+            }
+        );
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 9);
+        assert!(entries.iter().all(Result::is_ok));
+        assert_eq!(store.list().unwrap()[0].summary_failures, 4);
     }
 
     // Catches: a lease-held append reopens the header and tail for every event.

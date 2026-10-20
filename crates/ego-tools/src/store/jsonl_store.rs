@@ -85,6 +85,7 @@ impl RunManifest {
     }
 }
 
+#[derive(Clone)]
 struct LogManifestFacts {
     profiles: SessionProfiles,
     created: Timestamp,
@@ -397,28 +398,107 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
 /// every physical line here is checksummed. Payload decoding is deliberately
 /// stricter: an unknown typed entry refuses projection so recovery never
 /// rewrites cache state from an authority this build cannot interpret.
+#[derive(Clone)]
+struct ManifestProjection {
+    facts: LogManifestFacts,
+    state: SessionState,
+    evidence_records: Vec<EvidenceRecord>,
+}
+
+impl ManifestProjection {
+    fn new(header: &Header) -> Self {
+        Self {
+            facts: LogManifestFacts {
+                profiles: header.profiles.clone(),
+                created: header.created,
+                workspace_root: header.workspace_root.clone(),
+                last_ts: None,
+                model: None,
+                lineage: None,
+                execution: None,
+                hooks: HookCatalogueEvidence::default(),
+                evidence: ManifestEvidence::default(),
+                title: None,
+                summary: None,
+                summary_failures: 0,
+                deleted: false,
+            },
+            state: SessionState::default(),
+            evidence_records: Vec::new(),
+        }
+    }
+
+    fn apply(&mut self, entry: SessionEntry) {
+        match entry {
+            SessionEntry::Event(event) => {
+                self.facts.last_ts = Some(event.env.ts);
+                self.state.apply(&event);
+                match event.kind {
+                    EventKind::SessionDeleted => self.facts.deleted = true,
+                    EventKind::CompactionSeeded {
+                        source,
+                        source_seq,
+                        prompt_revision,
+                        ..
+                    } => {
+                        self.facts.lineage = Some(SessionLineage::Compaction {
+                            source,
+                            source_seq,
+                            prompt_revision,
+                        })
+                    }
+                    EventKind::Forked { source, at_seq, .. } => {
+                        self.facts.lineage = Some(SessionLineage::Fork { source, at_seq })
+                    }
+                    EventKind::ExecutionObserved { observation, .. } => {
+                        self.facts.execution = Some(observation)
+                    }
+                    EventKind::HookCatalogueAdmitted { descriptors } => {
+                        self.facts.hooks = descriptors
+                    }
+                    _ => {}
+                }
+            }
+            SessionEntry::ModelSelected(_) => {}
+            SessionEntry::NoticeDelivered(notice) => {
+                self.facts.last_ts = Some(notice.delivered_at);
+            }
+            SessionEntry::RunTransaction(transaction) => {
+                self.facts.last_ts = Some(transaction.observed_at());
+            }
+            SessionEntry::Evidence(record) => {
+                self.facts.last_ts.get_or_insert(self.facts.created);
+                if let EvidenceRecord::GenerationAdmission(admission) = &record
+                    && admission.role() == GenerationRole::Main
+                {
+                    self.facts.model = Some(admission.target().canonical_model().0.clone());
+                }
+                self.evidence_records.push(record);
+            }
+        }
+    }
+
+    fn facts(&self) -> Result<LogManifestFacts, StoreError> {
+        let mut facts = self.facts.clone();
+        facts.evidence = ManifestEvidence::from_records(&self.evidence_records)
+            .map_err(|error| invalid_log(error.to_string()))?;
+        facts.title = self.state.title.clone();
+        facts.summary = self.state.summary.clone();
+        facts.summary_failures = self.state.summary_failures;
+        Ok(facts)
+    }
+}
+
 fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
     let mut lines = split_lines(log).into_iter();
     let Some(header_line) = lines.next() else {
         return Ok(None);
     };
-    let (session, created, workspace_root, profiles) = match decode_line(header_line) {
-        Ok(StoreLine::Header(header)) => (
-            header.session,
-            header.created,
-            header.workspace_root,
-            header.profiles,
-        ),
+    let header = match decode_line(header_line) {
+        Ok(StoreLine::Header(header)) => header,
         _ => return Ok(None),
     };
-    let mut last_ts = None;
-    let mut model = None;
-    let mut lineage = None;
-    let mut execution = None;
-    let mut hooks = HookCatalogueEvidence::default();
-    let mut evidence_records = Vec::new();
-    let mut state = SessionState::default();
-    let mut deleted = false;
+    let mut projection = ManifestProjection::new(&header);
     for line in lines {
         let record = match decode_line(line)? {
             StoreLine::Record(record) => record,
@@ -431,75 +511,60 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                 ));
             }
         };
-        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
-            invalid_log(format!(
-                "session {session} has an unknown payload in the valid session prefix at record {} (unsupported schema or invalid payload)",
-                record.seq
-            ))
-        })?;
-        match entry {
-            SessionEntry::Event(event) => {
-                last_ts = Some(event.env.ts);
-                state.apply(&event);
-                match event.kind {
-                    EventKind::SessionDeleted => deleted = true,
-                    EventKind::CompactionSeeded {
-                        source,
-                        source_seq,
-                        prompt_revision,
-                        ..
-                    } => {
-                        lineage = Some(SessionLineage::Compaction {
-                            source,
-                            source_seq,
-                            prompt_revision,
-                        })
-                    }
-                    EventKind::Forked { source, at_seq, .. } => {
-                        lineage = Some(SessionLineage::Fork { source, at_seq })
-                    }
-                    EventKind::ExecutionObserved { observation, .. } => {
-                        execution = Some(observation)
-                    }
-                    EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
-                    _ => {}
-                }
-            }
-            SessionEntry::ModelSelected(_) => {}
-            SessionEntry::NoticeDelivered(notice) => {
-                last_ts = Some(notice.delivered_at);
-            }
-            SessionEntry::RunTransaction(transaction) => {
-                last_ts = Some(transaction.observed_at());
-            }
-            SessionEntry::Evidence(record) => {
-                last_ts.get_or_insert(created);
-                if let EvidenceRecord::GenerationAdmission(admission) = &record
-                    && admission.role() == GenerationRole::Main
-                {
-                    model = Some(admission.target().canonical_model().0.clone());
-                }
-                evidence_records.push(record);
-            }
-        }
+        let entry =
+            serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|error| {
+                invalid_log(format!(
+                    "unknown payload in the valid session prefix: {error}"
+                ))
+            })?;
+        projection.apply(entry);
     }
-    let evidence = ManifestEvidence::from_records(&evidence_records)
-        .map_err(|error| invalid_log(error.to_string()))?;
-    Ok(Some(LogManifestFacts {
-        profiles,
-        created,
-        workspace_root,
-        last_ts,
-        model,
-        lineage,
-        execution,
-        hooks,
-        evidence,
-        title: state.title,
-        summary: state.summary,
-        summary_failures: state.summary_failures,
-        deleted,
-    }))
+    projection.facts().map(Some)
+}
+
+/// Validated prefix retained only under a live writer lease. Local appends
+/// advance its file signature; unobserved changes force an authoritative scan.
+struct RunCursor {
+    signature: super::FileRevision,
+    offset: u64,
+    header: Header,
+    run: RunLogState,
+    projection: ManifestProjection,
+}
+
+impl RunCursor {
+    fn reduce_suffix(&mut self, bytes: &[u8]) -> Result<(), StoreError> {
+        if !bytes.is_empty() && bytes.last() != Some(&b'\n') {
+            return Err(invalid_log("session log has a torn tail"));
+        }
+        for line in split_lines(bytes) {
+            let record = match decode_line(line)? {
+                StoreLine::Record(record) => record,
+                _ => {
+                    return Err(invalid_log(
+                        "cannot compare a run revision across an unknown record",
+                    ));
+                }
+            };
+            accept_physical_position(&mut self.run.last_position, record.seq)?;
+            let entry: SessionEntry = serde_json::from_str(record.payload.get())
+                .map_err(|error| invalid_log(error.to_string()))?;
+            if let SessionEntry::RunTransaction(transaction) = &entry {
+                let expected = self
+                    .run
+                    .revision
+                    .map(RunRevision::next)
+                    .unwrap_or(RunRevision::new(1));
+                if transaction.revision() != expected {
+                    return Err(invalid_log("run transaction revisions are not contiguous"));
+                }
+                self.run.revision = Some(transaction.revision());
+            }
+            self.projection.apply(entry);
+        }
+        self.offset += bytes.len() as u64;
+        Ok(())
+    }
 }
 
 /// Exists only while the session writer lease is held. The mutex orders local
@@ -517,6 +582,7 @@ enum ProjectionInvalidation {
 
 #[derive(Default)]
 struct AppendCursor {
+    run: Option<RunCursor>,
     next: Option<Seq>,
     log: Option<Box<dyn SessionLogWriter>>,
     // Derived by the existing reducer, never an authority separate from the log.
@@ -703,6 +769,30 @@ impl JsonlStore {
             .and_then(Weak::upgrade))
     }
 
+    fn validate_run_cursor(&self, id: &SessionId, cursor: &mut AppendCursor) {
+        if let Some(run) = &cursor.run {
+            if self
+                .io
+                .file_revision(&self.log_path(id))
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(&run.signature)
+            {
+                *cursor = AppendCursor::default();
+            }
+        }
+    }
+
+    fn advance_run_signature(&self, id: &SessionId, cursor: &mut AppendCursor) {
+        if let Some(run) = &mut cursor.run {
+            match self.io.file_revision(&self.log_path(id)) {
+                Ok(Some(signature)) => run.signature = signature,
+                _ => cursor.run = None,
+            }
+        }
+    }
+
     /// Serialize one complete log mutation and its manifest projection.
     /// This is deliberately distinct from the long-held session writer lease.
     fn with_events_lock<T>(
@@ -715,15 +805,24 @@ impl JsonlStore {
             let mut state = state
                 .lock()
                 .map_err(|_| invalid_log("session appender poisoned"))?;
+            let AppendState { lock, cursor } = &mut *state;
+            let _guard = lock.write()?;
+            self.validate_run_cursor(id, cursor);
             // Every mutation can change the inode or physical position. Only
             // evidence-only writes are known to leave the domain reducer intact.
-            state.cursor.next = None;
-            state.cursor.log = None;
+            cursor.next = None;
+            cursor.log = None;
             if matches!(projection, ProjectionInvalidation::Discard) {
-                state.cursor.state = None;
+                cursor.state = None;
+                cursor.run = None;
             }
-            let _guard = state.lock.write()?;
-            operation()
+            let result = operation();
+            if result.is_ok() {
+                self.advance_run_signature(id, cursor);
+            } else {
+                cursor.run = None;
+            }
+            result
         } else {
             let mut lock = self.open_events_lock(id)?;
             let _guard = lock.write()?;
@@ -1223,6 +1322,18 @@ impl JsonlStore {
         let Some(facts) = self.catalogue_facts(log)? else {
             return Ok(false);
         };
+
+        self.rebuild_manifest_from_facts(id, facts)
+    }
+
+    fn rebuild_manifest_from_facts(
+        &self,
+        id: &SessionId,
+        mut facts: LogManifestFacts,
+    ) -> Result<bool, StoreError> {
+        if facts.model.is_none() {
+            facts.model = self.inherited_model(facts.lineage)?;
+        }
 
         // A manifest that fails to parse is treated exactly like a missing
         // one — it is a derived cache, and the log can regenerate it — but
@@ -1983,6 +2094,126 @@ impl JsonlStore {
         Ok(std::ops::ControlFlow::Continue(committed))
     }
 
+    fn compare_and_append_run_leased(
+        &self,
+        session: &SessionId,
+        expected_revision: Option<RunRevision>,
+        transaction: RunTransaction,
+        cursor: &mut AppendCursor,
+    ) -> Result<RunAppend, StoreError> {
+        if transaction.run_id().session_id() != *session {
+            return Err(StoreError::WrongSession {
+                expected: transaction.run_id().session_id(),
+                asked: *session,
+            });
+        }
+        self.validate_run_cursor(session, cursor);
+        let path = self.log_path(session);
+        let Some(signature) = self.io.file_revision(&path).ok().flatten() else {
+            // Non-filesystem adapters and an initial publication keep the original path.
+            cursor.run = None;
+            cursor.next = None;
+            cursor.log = None;
+            return self.compare_and_append_run_already_locked(
+                session,
+                expected_revision,
+                transaction,
+            );
+        };
+        let mut run = match cursor.run.take() {
+            Some(mut run) => {
+                if run.offset != signature.length {
+                    let suffix = self
+                        .io
+                        .read_from(&path, run.offset)?
+                        .ok_or(StoreError::NotFound)?;
+                    run.reduce_suffix(&suffix)?;
+                }
+                run
+            }
+            None => {
+                let bytes = self.io.read(&path)?.ok_or(StoreError::NotFound)?;
+                let (header, offset) = decoded_header(&bytes)?.ok_or(StoreError::MissingHeader)?;
+                if header.v != CODEC_VERSION {
+                    return Err(StoreError::UnsupportedLog { found: header.v });
+                }
+                let mut run = RunCursor {
+                    signature,
+                    offset: offset as u64,
+                    projection: ManifestProjection::new(&header),
+                    header,
+                    run: RunLogState {
+                        revision: None,
+                        last_position: Seq::ZERO,
+                    },
+                };
+                run.reduce_suffix(&bytes[offset..])?;
+                run
+            }
+        };
+        if run.header.session != *session {
+            return Err(StoreError::WrongSession {
+                expected: run.header.session,
+                asked: *session,
+            });
+        }
+        if run.header.workspace_root.as_path() != transaction.root().as_path() {
+            return Err(invalid_log(
+                "run transaction root does not match the session header",
+            ));
+        }
+        if let std::ops::ControlFlow::Break(outcome) =
+            Self::run_successor(&run.run, expected_revision, &transaction)?
+        {
+            cursor.run = Some(run);
+            return Ok(outcome);
+        }
+        let position = run.run.last_position.next();
+        let entry = SessionEntry::RunTransaction(transaction.clone());
+        let line = encode_record(position, &entry)?;
+        if cursor.log.is_none() {
+            cursor.log = self.io.open_session_log(&path)?;
+        }
+        match cursor.log.as_mut() {
+            Some(log) => log.append_line(&line)?,
+            None => self.io.append_line(&path, &line)?,
+        }
+        run.run.revision = Some(transaction.revision());
+        run.projection.apply(entry);
+        run.offset += line.len() as u64 + 1;
+        let mut next = position;
+        cursor.next = Some(next.next());
+        // Run transactions are not domain events. Preserve the exact reducer
+        // retained by the writer, including a validated snapshot's seed state.
+        if cursor.state.is_none() {
+            cursor.state = Some(run.projection.state.clone());
+        }
+        let durability = match cursor.log.as_ref() {
+            Some(log) => log.fsync(),
+            None => self.io.fsync(&path),
+        };
+        let projection = run
+            .projection
+            .facts()
+            .and_then(|facts| self.rebuild_manifest_from_facts(session, facts));
+        if let Err(error) = projection {
+            tracing::warn!(session = %session_dir_name(session), error = %error,
+                "run transaction committed but its manifest projection failed");
+        }
+        if let Ok(Some(signature)) = self.io.file_revision(&path) {
+            run.signature = signature;
+            cursor.run = Some(run);
+        }
+        match durability {
+            Ok(()) => Ok(RunAppend::Committed {
+                revision: transaction.revision(),
+            }),
+            Err(error) => Ok(RunAppend::CommittedDurabilityUncertain {
+                diagnostic: error.to_string(),
+            }),
+        }
+    }
+
     fn compare_and_append_run_already_locked(
         &self,
         session: &SessionId,
@@ -2119,6 +2350,7 @@ impl SessionStore for JsonlStore {
                 .map_err(|_| invalid_log("session appender poisoned"))?;
             let AppendState { lock, cursor } = &mut *state;
             let _guard = lock.write()?;
+            self.validate_run_cursor(id, cursor);
             if cursor.state.is_none() {
                 cursor.state = Some(match self.resume(id) {
                     Ok((state, _)) => state,
@@ -2131,6 +2363,8 @@ impl SessionStore for JsonlStore {
                 // A failed write may have left a torn tail. Revalidate before
                 // any retry instead of advancing a speculative cached cursor.
                 *cursor = AppendCursor::default();
+            } else {
+                self.advance_run_signature(id, cursor);
             }
             result
         } else {
@@ -2191,9 +2425,23 @@ impl SessionStore for JsonlStore {
         expected_revision: Option<RunRevision>,
         transaction: RunTransaction,
     ) -> Result<RunAppend, StoreError> {
-        self.with_events_lock(session, ProjectionInvalidation::Discard, || {
-            self.compare_and_append_run_already_locked(session, expected_revision, transaction)
-        })
+        if let Some(appender) = self.appender(session)? {
+            let mut state = appender
+                .lock()
+                .map_err(|_| invalid_log("session appender poisoned"))?;
+            let AppendState { lock, cursor } = &mut *state;
+            let _guard = lock.write()?;
+            let result =
+                self.compare_and_append_run_leased(session, expected_revision, transaction, cursor);
+            if result.is_err() {
+                *cursor = AppendCursor::default();
+            }
+            result
+        } else {
+            self.with_events_lock(session, ProjectionInvalidation::Discard, || {
+                self.compare_and_append_run_already_locked(session, expected_revision, transaction)
+            })
+        }
     }
 
     /// Inspect each authoritative log independently, without trusting or changing manifests.
