@@ -49,6 +49,28 @@ fn file_tools_expose_absolute_locations_and_appropriate_kinds() {
     }
 }
 
+// Catches: glob/grep falling through to Other in either live or replay projection.
+#[test]
+fn search_tools_keep_search_kind_on_the_live_and_replay_wire() {
+    for name in ["glob", "grep"] {
+        let event = started(name, r#"{"path":"src","query":"needle"}"#);
+        let live = project_updates_v1(&event, Path::new("/workspace"));
+        let replay = project_replay_v1(
+            &[ReplayFrame {
+                event,
+                state: SessionState::default(),
+                inherited: false,
+            }],
+            None,
+            Path::new("/workspace"),
+        );
+        for (source, updates) in [("live", live), ("replay", replay)] {
+            let wire = serde_json::to_value(&updates[0]).unwrap();
+            assert_eq!(wire["kind"], "search", "{name} {source}");
+        }
+    }
+}
+
 #[test]
 fn relative_file_path_uses_the_admitted_session_root() {
     let update = project_v1_at(

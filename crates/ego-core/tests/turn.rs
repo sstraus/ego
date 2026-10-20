@@ -546,6 +546,13 @@ mod turn {
         let (_, _, state) = run(&fx, SessionState::default(), "start a long command");
         assert_eq!(state.unsettled_detached_execs().len(), 1);
         let events = fx.store.events();
+        // Catches: a running snapshot being journaled as settled at each generation.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::DetachedExecSettled { .. })),
+            "a live process must not publish a terminal settlement"
+        );
         let start = events
             .iter()
             .position(|event| matches!(event.kind, EventKind::DetachedExecStarted { .. }))
