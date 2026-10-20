@@ -1678,6 +1678,16 @@ In interactive mode reedline is therefore the terminal writer. In headless
 modes the existing renderer remains the writer. There is never one of each
 writing the same terminal.
 
+The default interactive presentation uses one live row for consecutive successful
+shell commands (`exec`) that produce no output in the same turn. Each such
+completion replaces the live row. Before a failed command, command output,
+another tool, agent prose, or the end of the turn, the last live command becomes
+a transcript row. Failed commands and output previews remain visible. Nested
+child-tool rows keep their existing grouping. `--plain`, `TERM=dumb`, and
+headless output remain append-only; `--no-color` only removes colour. This
+presentation does not change durable events, transcript replay/export, or the
+bounded tool-detail history used by the expand key.
+
 `Ctrl-S` with a non-empty composer pushes the exact multiline buffer onto a
 session-local LIFO draft stash and clears the composer. `Ctrl-S` with an empty
 composer restores the newest stash immediately. After the next ordinary prompt

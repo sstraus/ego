@@ -1634,7 +1634,7 @@ fn status_right(status: &SharedStatus) -> String {
 
 fn status_row(status: &SurfaceStatus) -> String {
     let ephemeral = activity_or_status_row(status);
-    if status.activity || status.retry.is_some() {
+    if status.activity || status.retry.is_some() || status.shell.is_some() {
         // The compact default keeps 524's single Working row. Critical state
         // still survives there; custom layouts retain all their configured rows.
         let template = if status.template.is_compact() {
@@ -1680,6 +1680,13 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
             message,
             crate::render::style::Style::fg(crate::render::style::Palette::ERROR),
         ));
+        return format!(
+            "{}\n",
+            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
+                .render(status.permission_capabilities.depth)
+        );
+    }
+    if let Some(line) = &status.shell {
         return format!(
             "{}\n",
             line.truncate_to(status.permission_capabilities.width.saturating_sub(1))

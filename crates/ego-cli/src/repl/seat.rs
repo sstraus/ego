@@ -456,6 +456,7 @@ struct SurfaceStatus {
     modal_waited: std::time::Duration,
     reply_started: Arc<AtomicBool>,
     retry: Option<(String, Instant, u64)>,
+    shell: Option<crate::render::Line>,
     notice: Option<String>,
     image_chips: Vec<String>,
     images: super::ImageDraft,
@@ -559,6 +560,7 @@ impl Default for SurfaceStatus {
             modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
             retry: None,
+            shell: None,
             notice: None,
             image_chips: Vec::new(),
             images: super::ImageDraft::default(),
@@ -811,6 +813,7 @@ pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
+    shell: Option<String>,
     status: Option<SharedStatus>,
     answer_block: bool,
     wrote: bool,
@@ -827,6 +830,7 @@ impl SurfaceOutput {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
+            shell: None,
             status: None,
             answer_block: false,
             wrote: false,
@@ -893,6 +897,7 @@ impl SurfaceOutput {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
+                shell: None,
                 status: None,
                 answer_block: false,
                 wrote: false,
@@ -919,7 +924,10 @@ impl SurfaceOutput {
         }
     }
 
-    pub(crate) fn retry_status(&self, message: Option<(&str, u64)>) {
+    pub(crate) fn retry_status(&mut self, message: Option<(&str, u64)>) {
+        if message.is_some() {
+            let _ = self.settle_shell();
+        }
         if let Some(status) = &self.status {
             status.lock().expect("surface status lock").retry =
                 message.map(|(text, delay)| (text.to_string(), Instant::now(), delay));
@@ -935,10 +943,37 @@ impl SurfaceOutput {
     }
 
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         self.write_with_kind(text, false)
     }
 
+    pub(crate) fn write_shell(
+        &mut self,
+        rows: &str,
+        live: crate::render::Line,
+    ) -> Result<(), SendError<String>> {
+        let Some(status) = &self.status else {
+            return self.write_tool(rows);
+        };
+        self.shell = Some(rows.to_owned());
+        status.lock().expect("surface status lock").shell = Some(live);
+        repaint_status(status);
+        Ok(())
+    }
+
+    pub(crate) fn settle_shell(&mut self) -> Result<(), SendError<String>> {
+        if let Some(rows) = self.shell.take() {
+            if let Some(status) = &self.status {
+                status.lock().expect("surface status lock").shell = None;
+                repaint_status(status);
+            }
+            self.write_tool(&rows)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn begin_block(&mut self) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         if !self.pending.is_empty() {
             self.write_with_kind("\n", false)?;
         }
@@ -962,6 +997,7 @@ impl SurfaceOutput {
         if text.is_empty() {
             return Ok(());
         }
+        self.settle_shell()?;
         let text = if !self.answer_block {
             self.begin_block()?;
             if !self.wrote {
@@ -999,6 +1035,7 @@ impl SurfaceOutput {
     }
 
     pub fn finish(&mut self) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         self.answer_block = false;
         if !self.pending.is_empty() {
             let row = std::mem::take(&mut self.pending);

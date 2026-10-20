@@ -321,6 +321,34 @@ fn working_indicator_formats_long_elapsed_time() {
     }
 }
 
+// Catches: prose after a shell command is printed before that command's receipt
+// when earlier prose left an answer block open.
+#[test]
+fn shell_receipt_precedes_prose_after_an_existing_answer_block() {
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let (sender, rows) = crossbeam::channel::unbounded();
+    let mut output = SurfaceOutput::new(sender, CancelToken::new());
+    output.status = Some(status);
+    output.write_answer("before command\n").unwrap();
+    output
+        .write_shell(
+            "$ completed command",
+            crate::render::Line::plain("$ completed command"),
+        )
+        .unwrap();
+    output.write_answer("after command\n").unwrap();
+    let shown = rows.try_iter().collect::<String>();
+    let before = shown.find("before command").unwrap();
+    let command = shown
+        .find("$ completed command")
+        .expect("shell receipt must settle before visible prose");
+    let after = shown.find("after command").unwrap();
+    assert!(
+        before < command && command < after,
+        "receipt order: {shown}"
+    );
+}
+
 #[test]
 fn failed_answer_output_does_not_claim_a_visible_reply() {
     use crate::output::{InteractiveOutput, TextOutput};
