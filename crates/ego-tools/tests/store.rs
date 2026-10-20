@@ -401,6 +401,19 @@ mod store {
     }
 
     impl StoreIo for ReadCountingIo {
+        fn open_session_log(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Option<Box<dyn ego_tools::store::SessionLogWriter>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("open"))
+                .or_insert(0) += 1;
+            self.inner.open_session_log(path)
+        }
+
         fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
             self.inner.append_line(path, line)
         }
@@ -420,10 +433,22 @@ mod store {
         }
 
         fn read_first_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("first"))
+                .or_insert(0) += 1;
             self.inner.read_first_line(path)
         }
 
         fn read_last_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("last"))
+                .or_insert(0) += 1;
             self.inner.read_last_line(path)
         }
 
@@ -454,6 +479,262 @@ mod store {
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             self.inner.list_dirs(path)
         }
+    }
+
+    // Catches: a lease-held append reopens the header and tail for every event.
+    #[test]
+    fn leased_append_does_not_reread_log_per_event() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store
+            .open_writer(
+                &session,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::EPOCH,
+                    stale_after: Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        reads.lock().unwrap().clear();
+        for _ in 0..32 {
+            opened
+                .writer
+                .append(
+                    &session,
+                    &ev(
+                        seq.next(),
+                        turn,
+                        EventKind::TurnCompleted {
+                            ok: true,
+                            exit_reason: ExitReason::Completed,
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        let log = log_path(dir.path(), &session);
+        let counts = reads.lock().unwrap();
+        assert_eq!(
+            counts.get(&log).copied().unwrap_or(0),
+            0,
+            "turn-boundary synopsis projection must not replay the session log"
+        );
+        assert_eq!(
+            counts
+                .get(&log.with_extension("first"))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state append must not reopen the log header"
+        );
+        assert_eq!(
+            counts
+                .get(&log.with_extension("last"))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state append must not reopen the log tail"
+        );
+        drop(counts);
+        assert_eq!(
+            store.list().unwrap()[0].summary_failures,
+            33,
+            "cached synopsis must apply every completed turn exactly once"
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 33);
+        assert!(entries.iter().all(Result::is_ok));
+    }
+
+    // Catches: replacing boundary replay with a cursor drops title/summary after invalidation or reopen.
+    #[test]
+    fn leased_append_projects_synopsis_across_invalidation_and_reopen() {
+        use ego_core::config::ModelRef;
+        use ego_core::event::id::ItemId;
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let mut opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        for (index, prompt, answer) in [
+            (0, "first question", "first answer"),
+            (1, "next question", "next answer"),
+        ] {
+            if index == 1 {
+                store
+                    .record_model_selection(&session, ModelRef("ollama/first".into()))
+                    .unwrap();
+                drop(opened);
+                opened = store.open_writer(&session, evidence_lease()).unwrap();
+            }
+            let turn = TurnId::new();
+            for kind in [
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: prompt.into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+                EventKind::AssistantMessage {
+                    text: answer.into(),
+                },
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            ] {
+                let mut event = ev(seq.next(), turn, kind);
+                event.env.item = Some(ItemId::new());
+                opened.writer.append(&session, &event).unwrap();
+            }
+            let meta = store.list().unwrap().remove(0);
+            assert_eq!(meta.title.as_deref(), Some("first question"));
+            assert_eq!(
+                meta.summary.as_deref(),
+                Some(if index == 0 {
+                    "first question — first answer"
+                } else {
+                    "next question — next answer"
+                })
+            );
+            assert_eq!(meta.summary_failures, 0);
+        }
+    }
+
+    // Catches: cached physical positions ignore non-event records or survive recovery.
+    #[test]
+    fn leased_append_revalidates_after_other_records_and_recovery() {
+        use ego_core::config::ModelRef;
+        use std::io::Write as _;
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: "visible".into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            )
+        };
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        store
+            .record_model_selection(&session, ModelRef("ollama/first".into()))
+            .unwrap();
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let path = log_path(dir.path(), &session);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"torn")
+            .unwrap();
+        assert_eq!(store.recover(&session).unwrap().truncated_bytes, 4);
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let positions: Vec<_> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| match decode_line(line).unwrap() {
+                StoreLine::Record(record) => Some(record.seq.get()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, [1, 2, 3, 4]);
+        // A retained descriptor must not retain the exclusive operation lock.
+        assert!(
+            ego_core::session::ReplaySource::entries(&store, &session)
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.open_writer(&session, evidence_lease()).is_err());
+        drop(opened);
+        let resumed = store.open_writer(&session, evidence_lease()).unwrap();
+        resumed.writer.append(&session, &event(seq.next())).unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().all(Result::is_ok));
+    }
+
+    // Catches: a published append with a failed durability barrier reuses its position.
+    #[test]
+    fn leased_append_revalidates_after_failed_fsync() {
+        let dir = tempdir().unwrap();
+        let fsyncs = Arc::new(AtomicUsize::new(0));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(FailingFsyncIo {
+                inner: CountingIo {
+                    inner: OsIo,
+                    fsyncs,
+                },
+                fail_on: 1,
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            )
+        };
+        assert!(opened.writer.append(&session, &event(seq.next())).is_err());
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(Result::is_ok));
+        let bytes = std::fs::read(log_path(dir.path(), &session)).unwrap();
+        let positions: Vec<_> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| match decode_line(line).unwrap() {
+                StoreLine::Record(record) => Some(record.seq.get()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, [1, 2]);
     }
 
     /// A [`StoreIo`] that fails `read` for one specific path (simulating,
@@ -1297,6 +1578,108 @@ mod store {
             "evidence admission read the whole log {} additional times",
             reads_after - reads_before
         );
+    }
+
+    // Catches: evidence publication or an idempotent retry discards the domain
+    // projection and makes the next non-boundary event replay the whole log.
+    #[test]
+    fn evidence_between_domain_appends_preserves_synopsis_without_log_replay() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/ws",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: reads.clone(),
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let log = log_path(dir.path(), &session);
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq, kind| {
+            let mut event = ev(seq, turn, kind);
+            event.env.item = Some(ego_core::event::id::ItemId::new());
+            event
+        };
+        opened
+            .writer
+            .append(
+                &session,
+                &event(
+                    seq.next(),
+                    EventKind::UserPrompt {
+                        audio: Vec::new(),
+                        text: "first question".into(),
+                        images: Vec::new(),
+                        queued_prompt: None,
+                    },
+                ),
+            )
+            .unwrap();
+        let before = *reads.lock().unwrap().get(&log).unwrap_or(&0);
+        let service = EvidenceAdmissionService::new();
+        for _ in 0..4 {
+            let invocation = RunInvocationId::new();
+            let context = RunContextEvidence::new(
+                session,
+                invocation,
+                RunId::new(session, invocation.uuid()),
+                ConfigProvenance::default(),
+            );
+            for expected in [
+                ego_core::evidence::EvidenceWrite::Published,
+                ego_core::evidence::EvidenceWrite::AlreadyRecorded,
+            ] {
+                assert_eq!(
+                    service
+                        .admit_run_context(&opened.writer, context.clone())
+                        .unwrap(),
+                    expected
+                );
+                opened
+                    .writer
+                    .append(
+                        &session,
+                        &event(
+                            seq.next(),
+                            EventKind::AssistantMessage {
+                                text: "first answer".into(),
+                            },
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        opened
+            .writer
+            .append(
+                &session,
+                &event(
+                    seq.next(),
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            *reads.lock().unwrap().get(&log).unwrap_or(&0),
+            before,
+            "evidence interleaving must not trigger whole-log replay"
+        );
+        let meta = store.list().unwrap().remove(0);
+        assert_eq!(meta.title.as_deref(), Some("first question"));
+        assert_eq!(
+            meta.summary.as_deref(),
+            Some("first question — first answer")
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 14);
+        assert!(entries.iter().all(Result::is_ok));
     }
 
     // -- manifest / list -----------------------------------------------------

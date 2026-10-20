@@ -20,7 +20,10 @@ pub use evidence::SessionEvidenceStore;
 pub use history::{HistoryError, HistoryHit, HistoryIndex};
 #[cfg(feature = "test-support")]
 pub use io::NonDurableOsIo;
-pub use io::{AtomicReplacePublication, OsIo, PrivateLogWriter, StoreIo, tmp_path_for};
+pub use io::{
+    AtomicReplacePublication, FileRevision, OsIo, PrivateLogWriter, SessionLogWriter, StoreIo,
+    tmp_path_for,
+};
 pub use jsonl_store::{JsonlStore, Repair};
 pub use lease::{Lease, LeaseError};
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotPolicy, SnapshotRejection, validate};

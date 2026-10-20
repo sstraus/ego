@@ -1,11 +1,8 @@
 //! The catalogue: which sessions belong to a workspace, which one is "latest",
 //! and what a listing says.
 //!
-//! Tested against a store the test builds by hand rather than against
-//! `JsonlStore`. The question here is not whether a manifest round-trips —
-//! `ego-tools/tests/store.rs` owns that — it is what `ego ls` and `ego resume`
-//! *conclude* from a catalogue, and a fake lets a test state a catalogue that
-//! would take six runs to produce.
+//! Resolve tests use real persisted session logs. Formatting and ordering use
+//! literal metadata so their expected policy remains independent of the store.
 //!
 //! `ARCHITECTURE.md`.
 
@@ -15,80 +12,45 @@ use ego_cli::catalogue::{self, CATALOGUE_VERSION};
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
-use ego_core::run::{RunAppend, RunRevision, RunTransaction};
-use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
-use futures::stream::BoxStream;
+use ego_core::store::session_store::{SessionMeta, SessionStore};
 
-/// A store that knows a catalogue and nothing else.
-///
-/// `append` and `read` are unreachable from every path under test: `resolve`
-/// calls `list` and only `list`. They report rather than panic, so a future
-/// caller that starts using one gets a failing assertion about the store
-/// instead of a crash inside the harness.
-#[derive(Debug)]
-struct Catalogue(Vec<SessionMeta>);
-
-impl SessionStore for Catalogue {
-    fn append(&self, _id: &SessionId, _ev: &DomainEvent) -> Result<(), StoreError> {
-        Err(StoreError::NotFound)
+/// Real log fixtures let explicit lookup exercise per-session authority.
+fn real_catalogue(metas: Vec<SessionMeta>) -> (tempfile::TempDir, ego_tools::store::JsonlStore) {
+    use ego_core::event::domain::{Envelope, EventKind};
+    use ego_core::event::id::{EventId, Producer, Seq, TurnId};
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    let root = tempfile::tempdir().unwrap();
+    let store = JsonlStore::new(root.path(), "/ws", Box::new(OsIo));
+    for meta in metas {
+        store
+            .publish_empty_session(meta.id, &meta.workspace_root, meta.created)
+            .unwrap();
+        let mut seq = Seq::ZERO;
+        store
+            .append(
+                &meta.id,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn: TurnId::new(),
+                        item: None,
+                        parent: None,
+                        ts: meta.updated,
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::UserPrompt {
+                        text: "fixture".into(),
+                        audio: Vec::new(),
+                        images: Vec::new(),
+                        queued_prompt: None,
+                    },
+                },
+            )
+            .unwrap();
     }
-
-    fn compare_and_append_run(
-        &self,
-        _session: &SessionId,
-        _expected_revision: Option<RunRevision>,
-        _transaction: RunTransaction,
-    ) -> Result<RunAppend, StoreError> {
-        Err(StoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "this event-only fixture does not accept run transactions",
-        )))
-    }
-
-    fn read(
-        &self,
-        _id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
-        Err(StoreError::NotFound)
-    }
-
-    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
-        Ok(self.0.clone())
-    }
-}
-
-/// A store whose catalogue cannot be read at all, for the path where the
-/// refusal is about the store rather than about a session.
-#[derive(Debug)]
-struct Unreadable;
-
-impl SessionStore for Unreadable {
-    fn append(&self, _id: &SessionId, _ev: &DomainEvent) -> Result<(), StoreError> {
-        Err(StoreError::NotFound)
-    }
-
-    fn compare_and_append_run(
-        &self,
-        _session: &SessionId,
-        _expected_revision: Option<RunRevision>,
-        _transaction: RunTransaction,
-    ) -> Result<RunAppend, StoreError> {
-        Err(StoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "this event-only fixture does not accept run transactions",
-        )))
-    }
-
-    fn read(
-        &self,
-        _id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
-        Err(StoreError::NotFound)
-    }
-
-    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
-        Err(StoreError::Io(std::io::Error::other("the disk said no")))
-    }
+    (root, store)
 }
 
 /// A session id whose text order is known, so a tie-break can be asserted
@@ -149,7 +111,7 @@ fn the_first_row_is_the_one_resume_would_continue() {
         meta(2, "/ws", 9_000),
         meta(3, "/ws", 5_000),
     ];
-    let store = Catalogue(all.clone());
+    let (_root, store) = real_catalogue(all.clone());
     let listed = catalogue::in_workspace(all, here());
     let chosen = catalogue::resolve(&store, here(), None).expect("a session belongs here");
     assert_eq!(listed[0].id, chosen);
@@ -181,7 +143,7 @@ fn sessions_updated_in_the_same_millisecond_are_still_ordered() {
 /// continuing an arbitrary session from somewhere else is refused below.
 #[test]
 fn resume_with_no_id_and_nothing_here_names_the_workspace() {
-    let store = Catalogue(vec![meta(1, "/elsewhere", 9_000)]);
+    let (_root, store) = real_catalogue(vec![meta(1, "/elsewhere", 9_000)]);
     let refusal = catalogue::resolve(&store, here(), None)
         .expect_err("nothing in this workspace can be resumed")
         .to_string();
@@ -194,7 +156,7 @@ fn resume_with_no_id_and_nothing_here_names_the_workspace() {
 /// caller a new thing wearing the name of the one they asked to continue.
 #[test]
 fn resume_refuses_an_id_no_session_has_rather_than_creating_one() {
-    let store = Catalogue(vec![meta(1, "/ws", 9_000)]);
+    let (_root, store) = real_catalogue(vec![meta(1, "/ws", 9_000)]);
     let refusal = catalogue::resolve(&store, here(), Some(id(7)))
         .expect_err("no session has that id")
         .to_string();
@@ -231,7 +193,7 @@ fn names_the_id_and_nothing_rustish(refusal: &str, wanted: SessionId) {
 /// paths are named, which is all `-C` needs to fix it.
 #[test]
 fn resume_refuses_a_session_belonging_to_another_workspace_naming_both() {
-    let store = Catalogue(vec![meta(1, "/elsewhere", 9_000)]);
+    let (_root, store) = real_catalogue(vec![meta(1, "/elsewhere", 9_000)]);
     let refusal = catalogue::resolve(&store, here(), Some(id(1)))
         .expect_err("that session belongs somewhere else")
         .to_string();
@@ -249,7 +211,7 @@ fn resume_refuses_a_session_belonging_to_another_workspace_naming_both() {
 /// mistaken for the whole behaviour.
 #[test]
 fn resume_takes_the_session_it_was_named() {
-    let store = Catalogue(vec![meta(1, "/ws", 3_000), meta(2, "/ws", 9_000)]);
+    let (_root, store) = real_catalogue(vec![meta(1, "/ws", 3_000), meta(2, "/ws", 9_000)]);
     let chosen = catalogue::resolve(&store, here(), Some(id(1))).expect("it belongs here");
     assert_eq!(
         chosen,
@@ -263,11 +225,16 @@ fn resume_takes_the_session_it_was_named() {
 /// session they already have.
 #[test]
 fn a_store_that_cannot_be_listed_says_so() {
-    let refusal = catalogue::resolve(&Unreadable, here(), None)
+    let root = tempfile::tempdir().unwrap();
+    let not_directory = root.path().join("not-a-directory");
+    std::fs::write(&not_directory, "file").unwrap();
+    let store =
+        ego_tools::store::JsonlStore::new(&not_directory, here(), Box::new(ego_tools::store::OsIo));
+    let refusal = catalogue::resolve(&store, here(), None)
         .expect_err("the store failed")
         .to_string();
     assert!(refusal.contains("could not be listed"), "{refusal}");
-    assert!(refusal.contains("the disk said no"), "{refusal}");
+    assert!(refusal.to_lowercase().contains("directory"), "{refusal}");
 }
 
 // --- what a listing says ---
