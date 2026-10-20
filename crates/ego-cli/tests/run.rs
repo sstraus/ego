@@ -1150,10 +1150,10 @@ fn the_named_roots_grant_lets_a_resumed_session_read_the_file() {
         ))
     };
     let places = Places::new();
-    places
-        .0
-        .ego(&Stub::start(Plan::default()))
-        .home_file("config.toml", "sandbox='workspace'\nroots=[]\n");
+    places.0.ego(&Stub::start(Plan::default())).home_file(
+        "config.toml",
+        "mode='default'\nsandbox='workspace'\nroots=[]\n",
+    );
     let stub = Stub::start(Plan {
         completions: vec![read("call_a"), Reply::Sse(text("Refused."))],
         ..Plan::default()

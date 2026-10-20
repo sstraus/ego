@@ -96,6 +96,95 @@ fn upload_read_root_preserves_native_write_exec_and_credential_floors() {
     }
 }
 
+// Catches: a writable ancestor, deeper write grant, or ancestor rename defeats read-only uploads.
+#[test]
+fn nested_upload_deny_wins_over_workspace_and_widened_write_grants() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let scratch = base.join("scratch");
+    let writable = base.join("writable");
+    for path in [&workspace, &scratch, &writable] {
+        fs::create_dir(path).unwrap();
+    }
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    for parent in [&workspace, &writable] {
+        let ancestor = parent.join("ancestor");
+        let uploads = ancestor.join("uploads");
+        let child = uploads.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let attachment = child.join("attachment");
+        fs::write(&attachment, "UNCHANGED-UPLOAD").unwrap();
+        let executable = child.join("program");
+        fs::copy("/bin/echo", &executable).unwrap();
+        let policy = RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace))
+            .unwrap()
+            .with_roots(vec![
+                ProfileRoot::new(CanonPath::new(&writable), RootAccess::ReadWrite),
+                ProfileRoot::new(CanonPath::new(&uploads), RootAccess::Read),
+                ProfileRoot::new(CanonPath::new(&child), RootAccess::ReadWrite),
+            ]);
+        let backend = SeatbeltBackend::prepare(
+            &policy,
+            &CanonPath::new(&scratch),
+            &derived_runtime_roots().unwrap(),
+        )
+        .unwrap();
+        // Human grants must not reopen the launch restriction either.
+        let backend = backend
+            .widened(
+                &[SandboxGrant {
+                    path: CanonPath::new(&uploads),
+                    access: SandboxAccess::Write,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            run(&backend, "/bin/cat", &[attachment.as_os_str()]).stdout,
+            b"UNCHANGED-UPLOAD"
+        );
+        let write = run(
+            &backend,
+            "/bin/sh",
+            &[
+                "-c".as_ref(),
+                "printf changed > \"$1\"".as_ref(),
+                "write".as_ref(),
+                attachment.as_os_str(),
+            ],
+        );
+        assert!(!write.status.success(), "{write:?}");
+        assert_eq!(fs::read(&attachment).unwrap(), b"UNCHANGED-UPLOAD");
+        let sibling = parent.join("sibling");
+        let write = run(
+            &backend,
+            "/bin/sh",
+            &[
+                "-c".as_ref(),
+                "printf allowed > \"$1\"".as_ref(),
+                "write".as_ref(),
+                sibling.as_os_str(),
+            ],
+        );
+        assert!(write.status.success(), "{write:?}");
+        assert_eq!(fs::read(sibling).unwrap(), b"allowed");
+        assert!(
+            !run(&backend, executable.to_str().unwrap(), &[])
+                .status
+                .success()
+        );
+        let rename = run(
+            &backend,
+            "/bin/mv",
+            &[ancestor.as_os_str(), parent.join("moved").as_os_str()],
+        );
+        assert!(!rename.status.success(), "{rename:?}");
+        assert!(attachment.exists());
+    }
+}
+
 // Catches: a writable on-disk policy lets one child unconfine a later spawn,
 // including a widened backend, by overwriting or replacing the policy file.
 #[test]

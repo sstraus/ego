@@ -61,7 +61,7 @@ complete -c ego -n "__fish_ego_needs_command" -l goal-check-command -d 'Evaluato
 complete -c ego -n "__fish_ego_needs_command" -l max-turns -d 'Cap the turns this run may take' -r
 complete -c ego -n "__fish_ego_needs_command" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
 complete -c ego -n "__fish_ego_needs_command" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
-complete -c ego -n "__fish_ego_needs_command" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
+complete -c ego -n "__fish_ego_needs_command" -l mode -d 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)' -r
 complete -c ego -n "__fish_ego_needs_command" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
 complete -c ego -n "__fish_ego_needs_command" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_needs_command" -l bare -d 'No ambient discovery, even in a trusted workspace'
@@ -139,7 +139,7 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l goal-check-command -d 'E
 complete -c ego -n "__fish_ego_using_subcommand run" -l max-turns -d 'Cap the turns this run may take' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
-complete -c ego -n "__fish_ego_using_subcommand run" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l mode -d 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_using_subcommand run" -l bare -d 'No ambient discovery, even in a trusted workspace'
@@ -192,7 +192,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l goal-check-command -d
 complete -c ego -n "__fish_ego_using_subcommand resume" -l max-turns -d 'Cap the turns this run may take' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
-complete -c ego -n "__fish_ego_using_subcommand resume" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l mode -d 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l session -d 'Named session: created or attached' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l session-id -d 'A session id supplied by the caller' -r
@@ -248,7 +248,7 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -l goal-check-command 
 complete -c ego -n "__fish_ego_using_subcommand continue" -l max-turns -d 'Cap the turns this run may take' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l timeout -d 'Wall clock, e.g. \'90s\' or \'10m\'' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
-complete -c ego -n "__fish_ego_using_subcommand continue" -l mode -d 'Permission mode: plan|default|auto|edits|yolo' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l mode -d 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l session -d 'Named session: created or attached' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l session-id -d 'A session id supplied by the caller' -r

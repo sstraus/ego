@@ -1694,3 +1694,27 @@ fn session_switch_restores_text_and_attachments_as_one_draft() {
     assert_eq!(status.lock().unwrap().images.labels(), ["recalled 1"]);
     assert_eq!(drafts.active_count(), 0);
 }
+
+// Catches: Shift+Tab edits/submits a draft or changes authority behind an open modal.
+#[test]
+fn shift_tab_is_a_local_command_in_idle_and_busy_but_not_modals() {
+    for phase in [EditPhase::Idle, EditPhase::Busy, EditPhase::Modal] {
+        for vim in [false, true] {
+            let state = SurfacePhase::new(phase);
+            let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+            let mut mode = if vim {
+                vim_surface(state, status)
+            } else {
+                SurfaceEditMode::with_status(emacs_composer(), state, status)
+            };
+            assert_eq!(
+                mode.parse_event(keyboard_event(KeyCode::BackTab, KeyModifiers::SHIFT)),
+                if phase == EditPhase::Modal {
+                    ReedlineEvent::None
+                } else {
+                    ReedlineEvent::ExecuteHostCommand(MODE_CYCLE_COMMAND.into())
+                }
+            );
+        }
+    }
+}

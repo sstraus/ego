@@ -58,7 +58,7 @@ Run an agent, from one command line.
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
-- `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
+- `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
@@ -119,7 +119,7 @@ Run an agent from a prompt, headless.
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
-- `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
+- `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
@@ -180,7 +180,7 @@ Continue a stored session.
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
-- `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
+- `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
@@ -271,7 +271,7 @@ Continue a stored session.
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
-- `--mode <MODE>` — Permission mode: plan|default|auto|edits|yolo
+- `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
 - `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.

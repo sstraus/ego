@@ -248,7 +248,7 @@ fn ci_resume_permission_exits_three_or_uses_profile_preapproval_without_promptin
             ""
         };
         places.ego(&stub).home_file("config.toml", &format!(
-            "[profile.ci]\nmodel='ollama/qwen3'\nsandbox='off'\nsession_dir={sessions:?}\nartifact_dir={artifacts:?}\n{rules}"
+            "[profile.ci]\nmode='default'\nmodel='ollama/qwen3'\nsandbox='off'\nsession_dir={sessions:?}\nartifact_dir={artifacts:?}\n{rules}"
         ));
         // Exercise both explicit and environment profile selection at process entry.
         let mut ego = places.ego(&stub).subcommand("resume").args([

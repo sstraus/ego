@@ -953,6 +953,49 @@ fn __ego_internal_landlock_exec_v1() {
     panic!("the Landlock helper refused execution: {refused:?}");
 }
 
+// Catches: nested read roots abort backend admission, or the selected platform
+// silently changes which authority wins for native writes.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn nested_read_root_native_writes_follow_the_reported_platform_contract() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().canonicalize().unwrap();
+    let uploads = workspace.join("uploads");
+    std::fs::create_dir(&uploads).unwrap();
+    let attachment = uploads.join("attachment");
+    let source = workspace.join("source");
+    let sibling = workspace.join("sibling");
+    std::fs::write(&attachment, "ORIGINAL").unwrap();
+    std::fs::write(&source, "REPLACEMENT").unwrap();
+    let root = CanonPath::new(&workspace);
+    let policy = run_confinement(Confinement::Workspace, false, root.clone()).with_roots(vec![
+        ProfileRoot::new(CanonPath::new(&uploads), RootAccess::Read),
+    ]);
+    let run =
+        open_policy(policy, 1024 * 1024, 1024).expect("nested read roots must not abort startup");
+    execute(
+        &run,
+        mutation_spec("overwrite", &[&source, &sibling], root.clone()),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"REPLACEMENT");
+    let outcome = execute(
+        &run,
+        mutation_spec("overwrite", &[&source, &attachment], root),
+    );
+    #[cfg(target_os = "macos")]
+    {
+        assert!(outcome.is_err());
+        assert_eq!(std::fs::read(&attachment).unwrap(), b"ORIGINAL");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        outcome.expect("Landlock's writable ancestor wins, as the CLI warning states");
+        assert_eq!(std::fs::read(&attachment).unwrap(), b"REPLACEMENT");
+    }
+}
+
 #[test]
 fn guarded_exec_runs_the_exact_argv_without_reparse_or_mutation() {
     let workspace = cwd();

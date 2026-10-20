@@ -43,6 +43,21 @@ fn observation(
     .with_policy(ExecutionPolicy::capture(policy, Vec::new()))
 }
 
+// Catches: removing a nested read deny is mistaken for narrowing the root list.
+#[test]
+fn removing_a_nested_read_restriction_requires_readmission() {
+    let workspace = CanonPath::new("/workspace");
+    let open = RunConfinement::new(Confinement::Workspace, false, workspace.clone()).unwrap();
+    let frozen = open.clone().with_roots(vec![ProfileRoot::new(
+        CanonPath::new("/workspace/frozen"),
+        RootAccess::Read,
+    )]);
+    let open = ExecutionPolicy::capture(&open, Vec::new());
+    let frozen = ExecutionPolicy::capture(&frozen, Vec::new());
+    assert!(!open.not_more_permissive_than(&frozen));
+    assert!(frozen.not_more_permissive_than(&frozen));
+}
+
 // Catches: equal/narrower policies being refused or wider/unknown authority bypassing consent.
 #[test]
 fn changed_policy_uses_normal_permission_only_when_narrowing_cannot_be_proven() {

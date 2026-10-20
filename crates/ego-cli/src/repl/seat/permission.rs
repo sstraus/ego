@@ -416,12 +416,12 @@ pub(super) fn choose_policy_mode(
     status: &SharedStatus,
     busy: bool,
 ) -> Option<Line> {
-    let current = status
-        .lock()
-        .expect("surface status lock")
-        .status_base
-        .as_ref()
-        .map(|base| base.mode);
+    let current = {
+        let status = status.lock().expect("surface status lock");
+        status
+            .selected_mode
+            .or_else(|| status.status_base.as_ref().map(|base| base.mode))
+    };
     let Some(current) = current else {
         return permission_failure(status, "the effective execution mode is unavailable");
     };
@@ -431,7 +431,17 @@ pub(super) fn choose_policy_mode(
         .iter()
         .map(|mode| {
             let suffix = if *mode == current { " ✓ current" } else { "" };
-            (mode.as_str(), format!("{mode:?}{suffix}"))
+            (
+                mode.as_str(),
+                format!(
+                    "{}{suffix}",
+                    if *mode == Mode::Yolo {
+                        "yolo (bypass permissions)"
+                    } else {
+                        mode.as_str()
+                    }
+                ),
+            )
         })
         .collect::<Vec<_>>();
     let borrowed = options
@@ -443,7 +453,7 @@ pub(super) fn choose_policy_mode(
         phase,
         status,
         busy,
-        "Choose execution mode",
+        "Choose permission mode",
         &borrowed,
         (true, false, Some(current.as_str())),
     ) {
@@ -623,7 +633,7 @@ mod tests {
             &phase,
             &status,
             false,
-            "Choose execution mode",
+            "Choose permission mode",
             &[("plan", "Plan"), ("default", "Default"), ("auto", "Auto")],
             (true, false, Some("default")),
         );
@@ -646,7 +656,7 @@ mod tests {
             &phase,
             &status,
             false,
-            "Choose execution mode",
+            "Choose permission mode",
             &[("plan", "Plan"), ("default", "Default")],
             (true, false, Some("default")),
         );
