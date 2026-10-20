@@ -288,8 +288,59 @@ mod unreadable_tests {
     use ego_core::event::id::Seq;
     use ego_core::session_lifecycle::SessionLifecycleStore;
     use ego_core::store::codec::encode_record;
-    use ego_tools::store::{JsonlStore, OsIo};
+    use ego_tools::store::{JsonlStore, OsIo, StoreIo};
     use serde_json::json;
+
+    struct NoListingIo;
+
+    impl ego_tools::store::StoreIo for NoListingIo {
+        fn append_line(&self, path: &Path, line: &[u8]) -> std::io::Result<()> {
+            OsIo.append_line(path, line)
+        }
+        fn fsync(&self, path: &Path) -> std::io::Result<()> {
+            OsIo.fsync(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+            OsIo.read(path)
+        }
+        fn exists(&self, path: &Path) -> std::io::Result<bool> {
+            OsIo.exists(path)
+        }
+        fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            OsIo.replace_atomic(path, bytes)
+        }
+        fn truncate(&self, path: &Path, length: u64) -> std::io::Result<()> {
+            OsIo.truncate(path, length)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            OsIo.remove_file(path)
+        }
+        fn list_dirs(&self, _path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            Err(std::io::Error::other(
+                "named session lookup must not enumerate the store",
+            ))
+        }
+    }
+
+    // Catches: explicit resume enumerates and replays all unrelated session histories.
+    #[test]
+    fn named_resume_reads_requested_session_without_catalogue_enumeration() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        store
+            .publish_empty_session(id, Path::new("/workspace"), Timestamp::EPOCH)
+            .unwrap();
+        let no_listing = JsonlStore::new(dir.path(), "/workspace", Box::new(NoListingIo));
+        assert_eq!(
+            resolve(&no_listing, Path::new("/workspace"), Some(id)).unwrap(),
+            id
+        );
+        assert!(
+            resolve(&no_listing, Path::new("/workspace"), None).is_err(),
+            "latest session still requires a catalogue"
+        );
+    }
 
     #[derive(Default)]
     struct Notes(std::sync::Mutex<Vec<String>>);
