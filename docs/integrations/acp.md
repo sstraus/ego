@@ -166,6 +166,25 @@ fork selector have different surfaces; do not assume all CLI flags are ACP field
 Subscription usage is reported without pretending that an unknown monetary rate
 is USD 0.
 
+## Prompt settlement and recovery
+
+The response to `session/prompt`, not a streamed text chunk or a successful pipe
+write, is the turn settlement. A completed run returns `end_turn`; cancellation
+returns `cancelled`. A known execution/provider failure or uncertain result
+returns a correlated JSON-RPC error rather than pretending the host cancelled.
+A held or newly paused prompt uses error code `-32011`; resume it through the
+advertised `_ego/resume` control. Context overflow reports an error with
+`_ego/compact` guidance, not a fabricated normal completion.
+
+Source owners: [prompt dispatch](../../crates/ego-acp/src/prompt_turn.rs),
+[durable settlement mapping](../../crates/ego-acp/src/serve.rs), and
+[ACP stop-reason projection](../../crates/ego-acp/src/project.rs).
+[Packaged stdio tests](../../crates/ego-cli/tests/acp_settlement.rs) cover
+cancellation during a permission wait or stream, durable holds after reconnect,
+a known HTTP 400 followed by another prompt, and restart after a killed
+generation. This documentation change reads those tests; it does not rerun them
+or replace the live host matrix.
+
 ## Host verification boundary
 
 The accepted TUICommander proof boundary is the packaged production backend API
