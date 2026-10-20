@@ -27,9 +27,7 @@ use {
             FileBackedHistory, History, HistoryCursor, HistoryItem, HistoryItemId,
             HistoryNavigationQuery, HistorySessionId, SearchDirection, SearchQuery,
         },
-        painting::{
-            Painter, PainterSuspendedState, PromptFootprint, PromptLines, RenderSnapshot, W,
-        },
+        painting::{Painter, PromptFootprint, PromptLines, RenderSnapshot, W},
         prompt::{PromptEditMode, PromptHistorySearchStatus},
         result::{ReedlineError, ReedlineErrorVariants},
         terminal_extensions::{
@@ -148,9 +146,9 @@ pub struct Reedline {
     history_cursor_on_excluded: bool,
     input_mode: InputMode,
 
-    // State of the painter after a `ReedlineEvent::ExecuteHostCommand` was requested, used after
-    // execution to decide if we can re-use the previous prompt or paint a new one.
-    suspended_state: Option<PainterSuspendedState>,
+    // A host command pauses input, not terminal ownership. The painter keeps its
+    // live region until a receipt, explicit erase, or completed read retires it.
+    suspended: bool,
     // Parsed keys following a host command belong to the resumed read.
     pending_events: Vec<ReedlineEvent>,
 
@@ -394,7 +392,7 @@ impl Reedline {
             history_excluded_item: None,
             history_cursor_on_excluded: false,
             input_mode: InputMode::Regular,
-            suspended_state: None,
+            suspended: false,
             pending_events: Vec::new(),
             last_prompt: None,
             last_render_snapshot: None,
@@ -954,7 +952,7 @@ impl Reedline {
         // hand the tty to another program. Keep keys raw while the host works,
         // or Ctrl+V becomes VLNEXT and the next Enter is echoed as literal ^M.
         // A completed read and Drop still restore the original terminal mode.
-        if self.suspended_state.is_none() {
+        if !self.suspended {
             terminal::disable_raw_mode()?;
         }
         result
@@ -993,7 +991,7 @@ impl Reedline {
         self.last_prompt = None;
         self.submit_buffer(prompt)?;
         self.painter.move_cursor_to_end()?;
-        self.suspended_state = None;
+        self.suspended = false;
         Ok(())
     }
 
@@ -1012,7 +1010,7 @@ impl Reedline {
         };
         let erased = self.painter.erase_footprint(&footprint)?;
         if erased {
-            self.suspended_state = None;
+            self.suspended = false;
         }
         Ok(erased)
     }
@@ -1073,12 +1071,16 @@ impl Reedline {
     /// in a `raw_mode` context.
     fn read_line_helper(&mut self, prompt: &dyn Prompt) -> Result<Signal> {
         self.last_prompt = None;
-        self.painter
-            .initialize_prompt_position(self.suspended_state.as_ref())?;
-        if self.suspended_state.is_some() {
-            // Last editor was suspended (ExecuteHostCommand or ExternalBreak),
-            // we are resuming operation now.
-            self.suspended_state = None;
+        if std::mem::take(&mut self.suspended) {
+            // Host commands and external breaks keep the tty in this owner.
+            // Reconstructing an origin from the cursor would abandon the live
+            // region at the bottom row before the external printer can erase it.
+            let (width, height) = terminal::size()?;
+            if (width, height) != (self.painter.screen_width(), self.painter.screen_height()) {
+                self.painter.handle_resize(width, height);
+            }
+        } else {
+            self.painter.initialize_prompt_position(None)?;
         }
         self.hide_hints = false;
 
@@ -1104,7 +1106,7 @@ impl Reedline {
                     let buffer = self.editor.get_buffer().to_string();
                     self.input_mode = InputMode::Regular;
                     self.last_render_snapshot = None;
-                    self.suspended_state = Some(self.painter.state_before_suspension());
+                    self.suspended = true;
                     self.last_prompt = Some(self.painter.footprint_in_place());
                     self.editor.reset_undo_stack();
                     return Ok(Signal::ExternalBreak(buffer));
@@ -1341,7 +1343,7 @@ impl Reedline {
                 EventStatus::Exits(signal) => {
                     // Check if we are merely suspended (to process an ExecuteHostCommand event)
                     // or if we're about to quit the editor.
-                    if self.suspended_state.is_none() {
+                    if !self.suspended {
                         // We are about to quit the editor, move the cursor below the input
                         // area, for external commands or new read_line call
                         self.last_prompt = Some(self.painter.footprint_after_end());
@@ -1441,7 +1443,7 @@ impl Reedline {
             ReedlineEvent::ExecuteHostCommandIfEmpty(host_command) => {
                 if self.editor.get_buffer().is_empty() {
                     self.last_render_snapshot = None;
-                    self.suspended_state = Some(self.painter.state_before_suspension());
+                    self.suspended = true;
                     Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
                 } else {
                     Ok(EventStatus::Inapplicable)
@@ -1449,7 +1451,7 @@ impl Reedline {
             }
             ReedlineEvent::ExecuteHostCommand(host_command) => {
                 self.last_render_snapshot = None;
-                self.suspended_state = Some(self.painter.state_before_suspension());
+                self.suspended = true;
                 Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
             }
             ReedlineEvent::Edit(commands) => {
@@ -1768,7 +1770,7 @@ impl Reedline {
             ReedlineEvent::ExecuteHostCommandIfEmpty(host_command) => {
                 if self.editor.get_buffer().is_empty() {
                     self.last_render_snapshot = None;
-                    self.suspended_state = Some(self.painter.state_before_suspension());
+                    self.suspended = true;
                     Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
                 } else {
                     Ok(EventStatus::Inapplicable)
@@ -1776,7 +1778,7 @@ impl Reedline {
             }
             ReedlineEvent::ExecuteHostCommand(host_command) => {
                 self.last_render_snapshot = None;
-                self.suspended_state = Some(self.painter.state_before_suspension());
+                self.suspended = true;
                 Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
             }
             ReedlineEvent::Edit(commands) => {

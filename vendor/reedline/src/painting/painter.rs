@@ -2215,7 +2215,7 @@ mod tests {
             menu_start_row,
             first_buffer_col: 0,
         };
-        p.print_menu(menu, false, &layout)
+        p.print_menu(menu, false, &layout, 0)
             .expect("print_menu failed");
         String::from_utf8_lossy(p.stdout.captured()).into_owned()
     }
