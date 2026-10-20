@@ -241,6 +241,11 @@ async fn regression_case_silent_provider_is_bounded_by_the_logical_call_deadline
         HttpCallTimeout::default().duration(),
         Duration::from_secs(1800)
     );
+    // Prepare lazy runtime and TLS setup before the silent-response scenarios.
+    // A 150 ms budget could expire during setup: TCP connected, but the
+    // deadline cancelled the send before the server received any request.
+    crate::exec::runtime_handle();
+    let _prepared_client = reqwest::Client::builder().no_proxy().build().unwrap();
     for send_headers in [false, true] {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -265,8 +270,10 @@ async fn regression_case_silent_provider_is_bounded_by_the_logical_call_deadline
             Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
             CancelToken::new(),
         );
-        let deadline = Instant::now() + Duration::from_millis(150);
-        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+        // Client construction is per hop; leave room for it and scheduling,
+        // while the outer watchdog still catches a missing call deadline.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
             match GuardedHttp::new(transport.clone(), transport)
                 .execute_admitted(route, connect, request, deadline)
                 .await
