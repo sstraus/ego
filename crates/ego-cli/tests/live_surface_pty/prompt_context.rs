@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
