@@ -510,6 +510,11 @@ pub(super) struct AppendState {
     cursor: AppendCursor,
 }
 
+enum ProjectionInvalidation {
+    Discard,
+    Retain,
+}
+
 #[derive(Default)]
 struct AppendCursor {
     next: Option<Seq>,
@@ -703,15 +708,20 @@ impl JsonlStore {
     fn with_events_lock<T>(
         &self,
         id: &SessionId,
+        projection: ProjectionInvalidation,
         operation: impl FnOnce() -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         if let Some(state) = self.appender(id)? {
             let mut state = state
                 .lock()
                 .map_err(|_| invalid_log("session appender poisoned"))?;
-            // This path can replace or truncate the log, or append a different
-            // record kind. Never reuse its old inode or physical position.
-            state.cursor = AppendCursor::default();
+            // Every mutation can change the inode or physical position. Only
+            // evidence-only writes are known to leave the domain reducer intact.
+            state.cursor.next = None;
+            state.cursor.log = None;
+            if matches!(projection, ProjectionInvalidation::Discard) {
+                state.cursor.state = None;
+            }
             let _guard = state.lock.write()?;
             operation()
         } else {
@@ -773,10 +783,12 @@ impl JsonlStore {
     /// and must be selected even when the directory durability barrier or the
     /// derived manifest cache reports a failure.
     pub(super) fn publish_target(&self, id: &SessionId, seed: &TargetSeed) -> TargetPublication {
-        self.with_events_lock(id, || Ok(self.publish_target_already_locked(id, seed)))
-            .unwrap_or_else(|error| TargetPublication::NotPublished {
-                diagnostic: format!("the target lock could not be acquired: {error}"),
-            })
+        self.with_events_lock(id, ProjectionInvalidation::Discard, || {
+            Ok(self.publish_target_already_locked(id, seed))
+        })
+        .unwrap_or_else(|error| TargetPublication::NotPublished {
+            diagnostic: format!("the target lock could not be acquired: {error}"),
+        })
     }
 
     fn publish_target_already_locked(
@@ -1141,7 +1153,9 @@ impl JsonlStore {
         if !self.io.exists(&self.session_dir(id))? {
             return Ok(Repair::default());
         }
-        self.with_events_lock(id, || self.recover_already_locked(id))
+        self.with_events_lock(id, ProjectionInvalidation::Discard, || {
+            self.recover_already_locked(id)
+        })
     }
 
     fn recover_already_locked(&self, id: &SessionId) -> Result<Repair, StoreError> {
@@ -1553,7 +1567,7 @@ impl JsonlStore {
             key: key.clone(),
             diagnostic: error.to_string(),
         };
-        self.with_events_lock(id, || {
+        self.with_events_lock(id, ProjectionInvalidation::Retain, || {
             let mut index = index
                 .lock()
                 .map_err(|_| invalid_log("lease-local evidence index lock is poisoned"))?;
@@ -2120,7 +2134,7 @@ impl SessionStore for JsonlStore {
             }
             result
         } else {
-            self.with_events_lock(id, || {
+            self.with_events_lock(id, ProjectionInvalidation::Discard, || {
                 self.append_already_locked(id, ev, &mut AppendCursor::default())
             })
         }
@@ -2177,7 +2191,7 @@ impl SessionStore for JsonlStore {
         expected_revision: Option<RunRevision>,
         transaction: RunTransaction,
     ) -> Result<RunAppend, StoreError> {
-        self.with_events_lock(session, || {
+        self.with_events_lock(session, ProjectionInvalidation::Discard, || {
             self.compare_and_append_run_already_locked(session, expected_revision, transaction)
         })
     }
@@ -2326,7 +2340,7 @@ impl JsonlStore {
         session: &SessionId,
         model: ego_core::config::ModelRef,
     ) -> Result<(), StoreError> {
-        self.with_events_lock(session, || {
+        self.with_events_lock(session, ProjectionInvalidation::Discard, || {
             let log = self.log_path(session);
             if !self.io.exists(&log)? {
                 return Err(StoreError::NotFound);
@@ -2346,7 +2360,7 @@ impl JsonlStore {
         session: &SessionId,
         notice: ego_core::store::session_store::NoticeDelivery,
     ) -> Result<(), StoreError> {
-        self.with_events_lock(session, || {
+        self.with_events_lock(session, ProjectionInvalidation::Discard, || {
             let log = self.log_path(session);
             if !self.io.exists(&log)? {
                 return Err(StoreError::NotFound);
@@ -2477,7 +2491,7 @@ impl JsonlStore {
         created: Timestamp,
         profiles: SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError> {
-        self.with_events_lock(&id, || {
+        self.with_events_lock(&id, ProjectionInvalidation::Discard, || {
             let log_path = self.log_path(&id);
             if self.io.exists(&log_path)? {
                 return Ok(LifecyclePublication::NotPublished {
@@ -2512,7 +2526,7 @@ impl JsonlStore {
         expected: Seq,
         event: DomainEvent,
     ) -> Result<LifecyclePublication, LifecycleAppendError> {
-        self.with_events_lock(&id, || {
+        self.with_events_lock(&id, ProjectionInvalidation::Discard, || {
             let log_path = self.log_path(&id);
             let bytes = self.io.read(&log_path)?.ok_or(StoreError::NotFound)?;
             let (header, start) = decoded_header(&bytes)?.ok_or(StoreError::MissingHeader)?;
@@ -2825,8 +2839,10 @@ impl CompactionTargetPort for JsonlStore {
         {
             return Ok(CompactionTargetInspection::Missing);
         }
-        self.with_events_lock(&target, || self.inspect_compaction_target_locked(&target))
-            .map_err(compaction_target_error)
+        self.with_events_lock(&target, ProjectionInvalidation::Discard, || {
+            self.inspect_compaction_target_locked(&target)
+        })
+        .map_err(compaction_target_error)
     }
 
     fn publish(&self, target: SessionId, seed: &TargetSeed) -> TargetPublication {
@@ -2838,7 +2854,7 @@ impl CompactionTargetPort for JsonlStore {
         target: SessionId,
         expected: CompactionTargetFacts,
     ) -> Result<TargetPublication, CompactionTargetError> {
-        self.with_events_lock(&target, || {
+        self.with_events_lock(&target, ProjectionInvalidation::Discard, || {
             let actual = self.inspect_compaction_target_locked(&target)?;
             if actual != CompactionTargetInspection::Compaction(expected) {
                 return Err(invalid_log(

@@ -681,10 +681,7 @@ mod store {
                 .unwrap()
                 .is_some()
         );
-        assert!(matches!(
-            store.open_writer(&session, evidence_lease()),
-            Err(_)
-        ));
+        assert!(store.open_writer(&session, evidence_lease()).is_err());
         drop(opened);
         let resumed = store.open_writer(&session, evidence_lease()).unwrap();
         resumed.writer.append(&session, &event(seq.next())).unwrap();
