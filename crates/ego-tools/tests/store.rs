@@ -1599,13 +1599,17 @@ mod store {
         let log = log_path(dir.path(), &session);
         let mut seq = Seq::ZERO;
         let turn = TurnId::new();
+        let event = |seq, kind| {
+            let mut event = ev(seq, turn, kind);
+            event.env.item = Some(ego_core::event::id::ItemId::new());
+            event
+        };
         opened
             .writer
             .append(
                 &session,
-                &ev(
+                &event(
                     seq.next(),
-                    turn,
                     EventKind::UserPrompt {
                         audio: Vec::new(),
                         text: "first question".into(),
@@ -1639,9 +1643,8 @@ mod store {
                     .writer
                     .append(
                         &session,
-                        &ev(
+                        &event(
                             seq.next(),
-                            turn,
                             EventKind::AssistantMessage {
                                 text: "first answer".into(),
                             },
@@ -1654,9 +1657,8 @@ mod store {
             .writer
             .append(
                 &session,
-                &ev(
+                &event(
                     seq.next(),
-                    turn,
                     EventKind::TurnCompleted {
                         ok: true,
                         exit_reason: ExitReason::Completed,
