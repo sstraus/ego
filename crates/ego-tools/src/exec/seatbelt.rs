@@ -23,7 +23,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v5-user-config-floor";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v6-read-root-deny";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -47,6 +47,7 @@ struct ProfileBase {
     exec_paths: Vec<PathBuf>,
     roots: Vec<SandboxGrant>,
     read_only_roots: Vec<CanonPath>,
+    write_restrictions: Vec<CanonPath>,
 }
 
 impl SeatbeltBackend {
@@ -98,6 +99,12 @@ impl SeatbeltBackend {
                 .roots()
                 .iter()
                 .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
+                .map(|root| root.path().clone())
+                .collect(),
+            write_restrictions: policy
+                .roots()
+                .iter()
+                .filter(|root| root.restricts_writes(policy.workspace(), policy.roots()))
                 .map(|root| root.path().clone())
                 .collect(),
             roots: policy
@@ -167,6 +174,23 @@ impl SeatbeltBackend {
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
         if base.level != Confinement::Off {
+            // Explicit denies win over workspace, adaptive and later human grants.
+            // Protect ancestor entries too: renaming one would move the subtree
+            // outside the path-based deny before a later write.
+            for root in &base.write_restrictions {
+                profile.push_str(&format!(
+                    "(deny file-write* (subpath {}))\n",
+                    profile::path_literal(root.as_path())
+                        .map_err(|error| ProcessError::Backend(error.to_string()))?
+                ));
+                for ancestor in root.as_path().ancestors() {
+                    profile.push_str(&format!(
+                        "(deny file-write-unlink (literal {}))\n",
+                        profile::path_literal(ancestor)
+                            .map_err(|error| ProcessError::Backend(error.to_string()))?
+                    ));
+                }
+            }
             profile.push_str("(deny file-write*\n");
             for directory in &base.user_config {
                 profile.push_str(&format!(

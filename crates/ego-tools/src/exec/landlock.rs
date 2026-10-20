@@ -45,7 +45,7 @@ const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--noc
 
 const HELPER_FAILURE: u8 = 125;
 const MAX_RUNTIME_ROOTS: usize = 128;
-const BACKEND_REVISION: &str = "landlock-safe-reexec-v3-user-config-floor";
+const BACKEND_REVISION: &str = "landlock-safe-reexec-v4-nested-read-warning";
 
 /// One immutable Linux confinement mechanism prepared for an effective run.
 /// Its capability value is only an upper bound; common production probes must
@@ -95,24 +95,19 @@ impl LandlockBackend {
                 .map_err(|error| ProcessError::Backend(error.to_string()))?;
         }
 
-        // Landlock grants are additive: an executable ancestor would undo a
-        // read root's lack of EXECUTE rights. Refuse such overlapping authority.
-        for root in policy
-            .roots()
-            .iter()
-            .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
-        {
+        // Landlock grants are additive. Nested read roots keep their built-in
+        // tool boundary, but an executable/writable ancestor wins for children.
+        // The CLI reports that limitation without refusing the session.
+
+        // Keep the existing no-exec guarantee for disjoint read roots. Only
+        // nested writable authority uses the explicitly reported fallback.
+        for root in policy.roots().iter().filter(|root| {
+            root.access() == ego_core::permit::RootAccess::Read
+                && !root.restricts_writes(policy.workspace(), policy.roots())
+        }) {
             if runtime_roots
                 .iter()
                 .any(|runtime| root.path().as_path().starts_with(runtime))
-                || root
-                    .path()
-                    .as_path()
-                    .starts_with(policy.workspace().as_path())
-                || policy.roots().iter().any(|other| {
-                    other.access() == ego_core::permit::RootAccess::ReadWrite
-                        && root.path().is_or_under(other.path())
-                })
             {
                 return Err(ProcessError::Backend(
                     "read-only root overlaps executable authority".into(),

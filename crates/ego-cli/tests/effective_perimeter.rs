@@ -160,10 +160,10 @@ fn unadmitted_perimeter_fails_closed_without_raw_doctor_paths() {
     assert!(!output.contains(missing.to_str().unwrap()));
 }
 
-// Catches: a canonical alias bypasses nested-read-only refusal; workspace overlap stays visible.
+// Catches: a canonical alias loses its read-only access or workspace overlap warning.
 #[cfg(unix)]
 #[test]
-fn overlapping_roots_refuse_read_nesting_and_warn_on_workspace_overlap() {
+fn overlapping_roots_admit_read_nesting_and_warn_on_workspace_overlap() {
     let scratch = tempfile::tempdir().unwrap();
     let workspace = scratch.path().join("workspace");
     let home = scratch.path().join("ego-home");
@@ -192,9 +192,18 @@ fn overlapping_roots_refuse_read_nesting_and_warn_on_workspace_overlap() {
         )
     };
     std::fs::write(home.join("config.toml"), config("read")).unwrap();
-    let refused = run();
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("nested-read-only-root"));
+    let output = run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["roots"][1]["path"],
+        nested.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(value["roots"][1]["access"], "read");
     std::fs::write(home.join("config.toml"), config("read-write")).unwrap();
     let output = run();
     assert!(

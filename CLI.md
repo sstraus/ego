@@ -2086,8 +2086,8 @@ explicit `--offline` invocation.
 `--read-only-dir DIR` grants reads of one session upload directory at launch.
 It is available to interactive runs, `run`, `resume`, and served protocols.
 DIR must be an existing canonical absolute directory: relative paths, `..`,
-symlink aliases, home/administrator ancestors, and directories beneath a
-writable workspace or root are refused. This launch grant does not make
+symlink aliases and home/administrator ancestors are refused. Nested directories
+beneath a writable workspace or root follow the platform rules below. This launch grant does not make
 configuration `roots` writable from flags. System and host profile ceilings
 still bind; credential denials remain in force. The grant adds neither writes
 nor executable uploads. It does not change the selected sandbox level. On Linux, confined read roots
@@ -2104,9 +2104,16 @@ when loading a session that has not yet started a run. Paths inside the grant
 are still canonicalized by each built-in tool, so symlinks cannot open siblings.
 
 Effective perimeter inspection warns when canonical roots overlap the workspace.
-A read root beneath a read-write root is refused with `nested-read-only-root`,
-including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
-remains an admission error; it is never shown as an admitted root.
+A read root beneath a writable root or the workspace is admitted. Built-in tools
+keep that subtree read-only, even if a deeper write root exists. On macOS,
+Seatbelt denies writes and execution in the subtree; later grants cannot reopen
+it, and its ancestors cannot be renamed to bypass the restriction. On Linux,
+Landlock grants are additive: the writable ancestor wins for exec children,
+including execution in the read subtree. Ego reports that limitation without
+exiting; built-in tools still enforce read-only access. With `sandbox=ro`, the
+global native write denial remains in force. With `sandbox=off`, native writes
+are not confined. A missing or unresolvable configured path is reported as a
+warning and remains an admission error; it is never shown as an admitted root.
 
 `/config` lists Model, Mode, Sandbox, Perimeter, and Budget from the session's
 captured startup configuration. Each declaration names its origin layer and

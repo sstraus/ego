@@ -1083,14 +1083,6 @@ impl ConfigLayer {
                         message: "roots paths must be absolute or start with ~/".into(),
                     });
                 }
-                if root.access == crate::permit::RootAccess::Read
-                    && roots.iter().any(|other| {
-                        other.access == crate::permit::RootAccess::ReadWrite
-                            && root.path.starts_with(&other.path)
-                    })
-                {
-                    return Err(ConfigError::Invalid { source, message: "nested-read-only-root: a read root beneath a read-write root cannot be enforced by Landlock".into() });
-                }
             }
         }
         for exec in value.exec.iter().chain(
