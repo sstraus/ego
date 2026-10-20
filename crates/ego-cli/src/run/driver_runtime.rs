@@ -524,39 +524,16 @@ pub(super) async fn drive_execution<S: EventSink>(
                             .current()
                             .map_err(|message| RunTermination::Failed { message })?,
                     };
-                    if let Some(status) = status
-                        .as_ref()
-                        .filter(|status| status.human && status.native)
-                        && skill_trust == Trust::Trusted
-                        && let Some(providers) = effective
-                            .ui
-                            .statusline
-                            .as_ref()
-                            .and_then(|line| line.providers.as_ref())
-                    {
-                        let effects = ToolEffectPorts::new(
-                            &fs,
-                            session_hook_ports.process(),
-                            active.evidence(),
-                            session_hook_ports.resolver_handle(),
-                            session_hook_ports.one_hop_handle(),
-                            session_hook_ports.duplex_handle(),
-                        )
-                        .with_cancel(cancel.clone());
-                        let (values, errors) = crate::status_provider::collect(
-                            providers,
-                            &cwd,
-                            exec_environment.clone(),
-                            &session_policy,
-                            effects,
-                            session_hook_ports.process(),
-                        )
-                        .await;
-                        status.seat.set_status_providers(values);
-                        for error in errors {
-                            diagnostics.note(&error);
-                        }
-                    }
+                    collect_epoch_status_providers(
+                        status.as_ref(),
+                        &effective,
+                        skill_trust,
+                        (&cwd, exec_environment.clone()),
+                        &session_policy,
+                        (&session_hook_ports, active.evidence(), &cancel),
+                        diagnostics,
+                    )
+                    .await;
                     let (leased_session_journal, session_journal, session_hooks) = open_session_hooks!(
                         active,
                         active.state().clone(),
@@ -905,6 +882,51 @@ pub(super) async fn drive_execution<S: EventSink>(
                     }
                 }
             }
+        }
+    }
+}
+
+async fn collect_epoch_status_providers(
+    status: Option<&InteractiveStatus>,
+    effective: &Effective,
+    skill_trust: Trust,
+    environment: (&Path, ego_core::permit::EnvPolicy),
+    policy: &PolicyEngine,
+    effects: (&RunEffectPorts, &SessionEvidenceStore, &CancelToken),
+    diagnostics: &dyn Diagnostics,
+) {
+    let (cwd, exec_environment) = environment;
+    let (session_hook_ports, evidence, cancel) = effects;
+    let fs = OsFs;
+    if let Some(status) = status.filter(|status| status.human && status.native)
+        && skill_trust == Trust::Trusted
+        && let Some(providers) = effective
+            .ui
+            .statusline
+            .as_ref()
+            .and_then(|line| line.providers.as_ref())
+    {
+        let effects = ToolEffectPorts::new(
+            &fs,
+            session_hook_ports.process(),
+            evidence,
+            session_hook_ports.resolver_handle(),
+            session_hook_ports.one_hop_handle(),
+            session_hook_ports.duplex_handle(),
+        )
+        .with_cancel(cancel.clone());
+        let (values, errors) = crate::status_provider::collect(
+            providers,
+            cwd,
+            exec_environment,
+            policy,
+            effects,
+            session_hook_ports.process(),
+        )
+        .await;
+        status.seat.set_status_providers(values);
+        for error in errors {
+            diagnostics.note(&error);
         }
     }
 }
@@ -1480,37 +1502,40 @@ async fn drive_interactive_input<'session: 'turn, 'turn>(
                     .await;
                 Some((termination, result))
             }
-            None => match loop_.run_queued_turn().await {
-                Ok(Some(outcome)) => {
-                    let termination = loop_
-                        .state()
-                        .pending_question()
-                        .map(|pending| RunTermination::QuestionRequired {
-                            question: Box::new(QuestionReport::from_request(
-                                pending.item_id(),
-                                pending.target(),
-                                pending.request(),
-                            )),
-                        })
-                        .or_else(|| RunTermination::after_outcome(&outcome))
-                        .unwrap_or(RunTermination::Done);
-                    Some((
-                        termination,
-                        Value::String(last_assistant_message(&loop_.state())),
-                    ))
-                }
-                Ok(None) => None,
-                Err(abandoned) => Some((
-                    RunTermination::Failed {
-                        message: format!(
-                            "the session log could not be written: {}",
-                            abandoned.cause
-                        ),
-                    },
-                    Value::String(last_assistant_message(&loop_.state())),
-                )),
-            },
+            None => drive_queued_interactive_input(loop_).await,
         },
+    }
+}
+
+async fn drive_queued_interactive_input<'session: 'turn, 'turn>(
+    loop_: &mut TurnLoop<'session, 'turn>,
+) -> Option<(RunTermination, Value)> {
+    match loop_.run_queued_turn().await {
+        Ok(Some(outcome)) => {
+            let termination = loop_
+                .state()
+                .pending_question()
+                .map(|pending| RunTermination::QuestionRequired {
+                    question: Box::new(QuestionReport::from_request(
+                        pending.item_id(),
+                        pending.target(),
+                        pending.request(),
+                    )),
+                })
+                .or_else(|| RunTermination::after_outcome(&outcome))
+                .unwrap_or(RunTermination::Done);
+            Some((
+                termination,
+                Value::String(last_assistant_message(&loop_.state())),
+            ))
+        }
+        Ok(None) => None,
+        Err(abandoned) => Some((
+            RunTermination::Failed {
+                message: format!("the session log could not be written: {}", abandoned.cause),
+            },
+            Value::String(last_assistant_message(&loop_.state())),
+        )),
     }
 }
 
@@ -1606,6 +1631,20 @@ fn activate_epoch(
     }
 }
 
+fn report_policy_notice(
+    notice: String,
+    status: Option<&InteractiveStatus>,
+    diagnostics: &dyn Diagnostics,
+) {
+    if let Some(status) = status
+        && status.human
+    {
+        status.seat.set_notice(notice);
+    } else {
+        diagnostics.note(&notice);
+    }
+}
+
 fn handle_interactive_policy(
     request: PolicyControlRequest,
     policy_application: Option<&PolicyApplicationOwner>,
@@ -1615,13 +1654,7 @@ fn handle_interactive_policy(
 ) -> bool {
     let Some(owner) = policy_application else {
         let notice = "interactive policy controls are unavailable".to_owned();
-        if let Some(status) = status
-            && status.human
-        {
-            status.seat.set_notice(notice);
-        } else {
-            diagnostics.note(&notice);
-        }
+        report_policy_notice(notice, status, diagnostics);
         return false;
     };
     if matches!(
@@ -1647,24 +1680,12 @@ fn handle_interactive_policy(
                 format!("policy control failed: {error}")
             }
         };
-        if let Some(status) = status
-            && status.human
-        {
-            status.seat.set_notice(notice);
-        } else {
-            diagnostics.note(&notice);
-        }
+        report_policy_notice(notice, status, diagnostics);
         return false;
     }
     let Some(output) = text_output else {
         let notice = "interactive permission output is unavailable".to_owned();
-        if let Some(status) = status
-            && status.human
-        {
-            status.seat.set_notice(notice);
-        } else {
-            diagnostics.note(&notice);
-        }
+        report_policy_notice(notice, status, diagnostics);
         return false;
     };
     let handled = handle_policy_request(
@@ -1686,13 +1707,7 @@ fn handle_interactive_policy(
         Ok(None) => {}
         Err(error) => {
             let notice = format!("policy control failed: {error}");
-            if let Some(status) = status
-                && status.human
-            {
-                status.seat.set_notice(notice);
-            } else {
-                diagnostics.note(&notice);
-            }
+            report_policy_notice(notice, status, diagnostics);
         }
     }
 
@@ -2435,60 +2450,45 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
     line: repl::Line,
     posture: (bool, bool, bool),
 ) -> Result<CommandOutcome<'store>, RunTermination> {
+    match line {
+        repl::Line::HostCommand(
+            repl::HostCommand::Images(_)
+            | repl::HostCommand::RemovePasteImage
+            | repl::HostCommand::ClipboardPaste
+            | repl::HostCommand::PastePath(_),
+        ) => dispatch_image_command(input, line).await,
+        repl::Line::HostCommand(
+            repl::HostCommand::Fast(_)
+            | repl::HostCommand::ModelSwitch(_)
+            | repl::HostCommand::Policy(_),
+        ) => dispatch_policy_command(input, line).await,
+        repl::Line::HostCommand(
+            repl::HostCommand::Memory(_)
+            | repl::HostCommand::Init(_)
+            | repl::HostCommand::Config(_)
+            | repl::HostCommand::Setup(_),
+        ) => dispatch_workspace_command(input, line).await,
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Compact)) => {
+            compact_session_command(input, posture).await
+        }
+        _ => dispatch_session_command(input, line, posture).await,
+    }
+}
+
+async fn dispatch_image_command<'session: 'a, 'a, 'store: 'session>(
+    input: InteractiveCommand<'a, 'session, 'store>,
+    line: repl::Line,
+) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
-        args,
         active,
         pending_attachments,
         seat,
         source,
         confinement,
         run_deadline,
-        last,
-        state,
-        diagnostics,
-        interactive_metadata,
-        leased_session_journal,
-        session_journal,
-        interactive_metadata_ceilings,
-        status,
-        selection,
-        skills,
-        effective,
-        jsonl_store,
-        exec_environment,
-        registry,
-        session_hooks,
-        model_switch_owner,
-        policy_application,
-        text_output,
-        session_hook_ports,
-        task_owner,
-        skill_profile_layers,
-        perimeter,
-        mcp_registry,
-        session_mcp,
-        disabled_mcp,
-        root,
         cwd,
-        clock,
-        config,
-        refresh_prompt,
-        automatic_compaction_failed,
-        policy_source,
-        gate,
-        evidence,
-        invocation,
-        admitted_tools,
-        mcp_runtime,
-        skill_resource_roots,
-        last_generation_request,
-        elicitor,
-        judge_available,
-        skill_trust,
-        control,
-        checkpoint_pending,
+        ..
     } = input;
-    let (pending_work, _, _) = posture;
     match line {
         repl::Line::HostCommand(repl::HostCommand::Images(request)) => {
             let admitted = matches!(request.operation(), repl::ImageOperation::Admit);
@@ -2546,6 +2546,204 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             }
             Ok(CommandOutcome::Continue)
         }
+        _ => unreachable!("only image commands are dispatched here"),
+    }
+}
+
+async fn dispatch_policy_command<'session: 'a, 'a, 'store: 'session>(
+    input: InteractiveCommand<'a, 'session, 'store>,
+    line: repl::Line,
+) -> Result<CommandOutcome<'store>, RunTermination> {
+    let InteractiveCommand {
+        seat,
+        state,
+        diagnostics,
+        status,
+        selection,
+        model_switch_owner,
+        policy_application,
+        text_output,
+        ..
+    } = input;
+    match line {
+        repl::Line::HostCommand(repl::HostCommand::Fast(enabled)) => {
+            match selection.set_fast(enabled) {
+                Ok(receipt) => {
+                    diagnostics.note(&receipt);
+                    if let Some(status) = status.as_ref()
+                        && status.human
+                        && let Ok(selected) = selection.snapshot()
+                    {
+                        status.seat.refresh_status(state, selected);
+                    }
+                }
+                Err(error) => diagnostics.note(&error.to_string()),
+            }
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
+            switch_session_model(
+                request,
+                model_switch_owner.clone(),
+                seat.as_ref(),
+                status.as_ref(),
+                selection,
+                state,
+                diagnostics,
+            )
+            .await;
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
+            if handle_interactive_policy(
+                request,
+                policy_application.as_deref(),
+                status.as_ref(),
+                text_output,
+                diagnostics,
+            ) {
+                return Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)));
+            }
+            Ok(CommandOutcome::Continue)
+        }
+        _ => unreachable!("only policy commands are dispatched here"),
+    }
+}
+
+async fn dispatch_workspace_command<'session: 'a, 'a, 'store: 'session>(
+    input: InteractiveCommand<'a, 'session, 'store>,
+    line: repl::Line,
+) -> Result<CommandOutcome<'store>, RunTermination> {
+    let InteractiveCommand {
+        seat,
+        diagnostics,
+        status,
+        selection,
+        effective,
+        skill_profile_layers,
+        perimeter,
+        root,
+        skill_trust,
+        ..
+    } = input;
+    match line {
+        repl::Line::HostCommand(repl::HostCommand::Config(arguments)) => {
+            run_interactive_config(
+                &arguments,
+                effective,
+                skill_profile_layers.as_deref(),
+                perimeter,
+                diagnostics,
+            )
+            .await;
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Memory(arguments)) => {
+            let confirm = |preview: String| {
+                status
+                    .as_ref()
+                    .filter(|status| status.human)
+                    .is_some_and(|status| {
+                        matches!(
+                            status.seat.confirm_setup(preview),
+                            repl::Confirmation::Confirmed
+                        )
+                    })
+            };
+            let user = crate::config::ego_home();
+            match crate::memory::command(
+                &arguments,
+                root,
+                user.as_deref(),
+                effective,
+                skill_trust,
+                &confirm,
+            )
+            .await
+            {
+                Ok(report) => diagnostics.note(&ego_core::permit::terminal_safe(&report)),
+                Err(error) => diagnostics.note(&format!("Memory: {error}")),
+            }
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Init(arguments)) => {
+            if !arguments.is_empty() {
+                diagnostics
+                    .note("usage: /init (review a deterministic project instruction proposal)");
+            } else {
+                let admitted = crate::memory::init_admitted(effective, root, skill_trust);
+                let confirm = |preview: String| {
+                    status
+                        .as_ref()
+                        .filter(|status| status.human)
+                        .is_some_and(|status| {
+                            matches!(
+                                status.seat.confirm_setup(preview),
+                                repl::Confirmation::Confirmed
+                            )
+                        })
+                };
+                let result = if admitted {
+                    crate::memory::InitProposal::prepare(root)
+                        .and_then(|proposal| proposal.apply(admitted, &confirm))
+                } else {
+                    Err("instruction initialization denied by effective write policy or workspace trust".into())
+                };
+                match result {
+                    Ok(report) => diagnostics.note(&report),
+                    Err(error) => diagnostics.note(&format!("Init: {error}")),
+                }
+            }
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
+            run_interactive_setup(prompt, selection, root, status.as_ref(), diagnostics).await;
+            Ok(CommandOutcome::Continue)
+        }
+        _ => unreachable!("only workspace commands are dispatched here"),
+    }
+}
+
+async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
+    input: InteractiveCommand<'a, 'session, 'store>,
+    line: repl::Line,
+    posture: (bool, bool, bool),
+) -> Result<CommandOutcome<'store>, RunTermination> {
+    let InteractiveCommand {
+        args,
+        active,
+        seat,
+        last,
+        state,
+        diagnostics,
+        interactive_metadata,
+        leased_session_journal,
+        session_journal,
+        interactive_metadata_ceilings,
+        status,
+        selection,
+        skills,
+        effective,
+        jsonl_store,
+        exec_environment,
+        registry,
+        session_hooks,
+        session_hook_ports,
+        task_owner,
+        skill_profile_layers,
+        perimeter,
+        mcp_registry,
+        session_mcp,
+        disabled_mcp,
+        root,
+        cwd,
+        clock,
+        config,
+        refresh_prompt,
+        ..
+    } = input;
+    let (pending_work, _, _) = posture;
+    match line {
         repl::Line::Submitted(text) => Ok(CommandOutcome::Input(InteractiveTurnInput::Prompt {
             text,
             images: None,
@@ -2658,46 +2856,6 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
             render_session_hooks(&session_hooks.state, diagnostics);
             Ok(CommandOutcome::Continue)
         }
-        repl::Line::HostCommand(repl::HostCommand::Fast(enabled)) => {
-            match selection.set_fast(enabled) {
-                Ok(receipt) => {
-                    diagnostics.note(&receipt);
-                    if let Some(status) = status.as_ref()
-                        && status.human
-                        && let Ok(selected) = selection.snapshot()
-                    {
-                        status.seat.refresh_status(state, selected);
-                    }
-                }
-                Err(error) => diagnostics.note(&error.to_string()),
-            }
-            Ok(CommandOutcome::Continue)
-        }
-        repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
-            switch_session_model(
-                request,
-                model_switch_owner.clone(),
-                seat.as_ref(),
-                status.as_ref(),
-                selection,
-                state,
-                diagnostics,
-            )
-            .await;
-            Ok(CommandOutcome::Continue)
-        }
-        repl::Line::HostCommand(repl::HostCommand::Policy(request)) => {
-            if handle_interactive_policy(
-                request,
-                policy_application.as_deref(),
-                status.as_ref(),
-                text_output,
-                diagnostics,
-            ) {
-                return Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)));
-            }
-            Ok(CommandOutcome::Continue)
-        }
         repl::Line::HostCommand(repl::HostCommand::Tasks(arguments)) => {
             ego_core::turn::BackgroundTaskPort::refresh_tasks(
                 task_owner,
@@ -2753,79 +2911,6 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                     Err(error) => diagnostics.note(&crate::mcp::session_error(&error)),
                 }
             }
-            Ok(CommandOutcome::Continue)
-        }
-        repl::Line::HostCommand(repl::HostCommand::Config(arguments)) => {
-            run_interactive_config(
-                &arguments,
-                effective,
-                skill_profile_layers.as_deref(),
-                perimeter,
-                diagnostics,
-            )
-            .await;
-            Ok(CommandOutcome::Continue)
-        }
-        repl::Line::HostCommand(repl::HostCommand::Memory(arguments)) => {
-            let confirm = |preview: String| {
-                status
-                    .as_ref()
-                    .filter(|status| status.human)
-                    .is_some_and(|status| {
-                        matches!(
-                            status.seat.confirm_setup(preview),
-                            repl::Confirmation::Confirmed
-                        )
-                    })
-            };
-            let user = crate::config::ego_home();
-            match crate::memory::command(
-                &arguments,
-                root,
-                user.as_deref(),
-                effective,
-                skill_trust,
-                &confirm,
-            )
-            .await
-            {
-                Ok(report) => diagnostics.note(&ego_core::permit::terminal_safe(&report)),
-                Err(error) => diagnostics.note(&format!("Memory: {error}")),
-            }
-            Ok(CommandOutcome::Continue)
-        }
-        repl::Line::HostCommand(repl::HostCommand::Init(arguments)) => {
-            if !arguments.is_empty() {
-                diagnostics
-                    .note("usage: /init (review a deterministic project instruction proposal)");
-            } else {
-                let admitted = crate::memory::init_admitted(effective, root, skill_trust);
-                let confirm = |preview: String| {
-                    status
-                        .as_ref()
-                        .filter(|status| status.human)
-                        .is_some_and(|status| {
-                            matches!(
-                                status.seat.confirm_setup(preview),
-                                repl::Confirmation::Confirmed
-                            )
-                        })
-                };
-                let result = if admitted {
-                    crate::memory::InitProposal::prepare(root)
-                        .and_then(|proposal| proposal.apply(admitted, &confirm))
-                } else {
-                    Err("instruction initialization denied by effective write policy or workspace trust".into())
-                };
-                match result {
-                    Ok(report) => diagnostics.note(&report),
-                    Err(error) => diagnostics.note(&format!("Init: {error}")),
-                }
-            }
-            Ok(CommandOutcome::Continue)
-        }
-        repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-            run_interactive_setup(prompt, selection, root, status.as_ref(), diagnostics).await;
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(
@@ -2985,65 +3070,6 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
                 return Ok(CommandOutcome::Transition(Box::new(transition)));
             }
             Ok(CommandOutcome::Continue)
-        }
-        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Compact)) => {
-            compact_session_command(
-                InteractiveCommand {
-                    args,
-                    active,
-                    pending_attachments,
-                    seat,
-                    source,
-                    confinement,
-                    run_deadline,
-                    last,
-                    state,
-                    diagnostics,
-                    interactive_metadata,
-                    leased_session_journal,
-                    session_journal,
-                    interactive_metadata_ceilings,
-                    status,
-                    selection,
-                    skills,
-                    effective,
-                    jsonl_store,
-                    exec_environment,
-                    registry,
-                    session_hooks,
-                    model_switch_owner,
-                    policy_application,
-                    text_output,
-                    session_hook_ports,
-                    task_owner,
-                    skill_profile_layers,
-                    perimeter,
-                    mcp_registry,
-                    session_mcp,
-                    disabled_mcp,
-                    root,
-                    cwd,
-                    clock,
-                    config,
-                    refresh_prompt,
-                    automatic_compaction_failed,
-                    policy_source,
-                    gate,
-                    evidence,
-                    invocation,
-                    admitted_tools,
-                    mcp_runtime,
-                    skill_resource_roots,
-                    last_generation_request,
-                    elicitor,
-                    judge_available,
-                    skill_trust,
-                    control,
-                    checkpoint_pending,
-                },
-                posture,
-            )
-            .await
         }
         repl::Line::HostCommand(_) => Ok(CommandOutcome::Continue),
         repl::Line::ExternalBreak(_) => {
