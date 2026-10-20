@@ -514,12 +514,12 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                 ));
             }
         };
-        let entry =
-            serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|error| {
-                invalid_log(format!(
-                    "unknown payload in the valid session prefix: {error}"
-                ))
-            })?;
+        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
+            invalid_log(format!(
+                "session {} has an unknown payload in the valid session prefix at record {} (unsupported schema or invalid payload)",
+                header.session, record.seq
+            ))
+        })?;
         projection.apply(entry);
     }
     projection.facts().map(Some)
