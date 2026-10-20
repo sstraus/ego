@@ -644,15 +644,24 @@ impl JsonlStore {
 
     fn open_events_lock(&self, id: &SessionId) -> Result<RwLock<std::fs::File>, StoreError> {
         let lock_path = self.events_lock_path(id);
-        if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)?;
+        let open = || {
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+        };
+        let file = match open() {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = lock_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                open()?
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(RwLock::new(file))
     }
 
