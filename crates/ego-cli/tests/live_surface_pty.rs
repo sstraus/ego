@@ -42,6 +42,8 @@ mod picker_roles;
 mod pinned_plan;
 #[path = "live_surface_pty/plan_denial.rs"]
 mod plan_denial;
+#[path = "live_surface_pty/prompt_context.rs"]
+mod prompt_context;
 #[path = "live_surface_pty/prompt_echo.rs"]
 mod prompt_echo;
 #[path = "live_surface_pty/prompt_readiness.rs"]
@@ -2774,6 +2776,44 @@ fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, s
     until_prompt_from_with_context(receiver, output, start, PROGRESS_DEADLINE, "PTY prompt");
 }
 
+fn until_prompt_after_reply(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    reply: &[u8],
+) {
+    until(receiver, output, reply);
+    // The same read can contain both the reply and its successor composer.
+    let reply_end = output
+        .windows(reply.len())
+        .rposition(|window| window == reply)
+        .expect("reply received")
+        + reply.len();
+    until_prompt_from(receiver, output, reply_end);
+}
+
+// Catches: an accepted-line redraw authorizing quit before the post-reply idle
+// composer, or discarding that composer when it shares the reply's PTY read.
+#[cfg(not(windows))]
+#[test]
+fn post_reply_prompt_wait_ignores_accepted_line_redraws() {
+    // Accepted-line frames and the answer marker captured from the failing rb PTY.
+    let prior = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> original queued text\x1b7\x1b8\x1b[?25h\x1b[J\r\n\x1b[6n\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> edited queued text\x1b7\x1b8\x1b[?25h\x1b[J\r\nSTEER-RECEIVED";
+    let idle = b"\x1b[6n\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> \x1b7\x1b8\x1b[?25h";
+    assert!(rendered_prompt_count(prior) > 0);
+    for coalesced in [false, true] {
+        let (sender, receiver) = mpsc::channel();
+        let mut output = prior.to_vec();
+        if coalesced {
+            output.extend_from_slice(idle);
+        } else {
+            sender.send(idle.to_vec()).expect("successor idle frame");
+        }
+        drop(sender);
+        until_prompt_after_reply(&receiver, &mut output, b"STEER-RECEIVED");
+        assert_eq!(&output[prior.len()..], idle);
+    }
+}
+
 fn until_prompt_from_with_context(
     receiver: &mpsc::Receiver<Vec<u8>>,
     output: &mut Vec<u8>,
@@ -4102,8 +4142,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
         "Messages to be submitted after next tool call",
     );
     initial_gate.release();
-    until(&reader, &mut output, b"STEER-RECEIVED");
-    until_prompt_from(&reader, &mut output, steer_start);
+    until_prompt_after_reply(&reader, &mut output, b"STEER-RECEIVED");
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
     let status = session.quit(input);
@@ -4196,8 +4235,7 @@ fn live_surface_recalled_pasted_slash_text_is_not_reinterpreted_as_a_command() {
         "Messages to be submitted after next tool call",
     );
     initial_gate.release();
-    until(&reader, &mut output, b"STEER-RECEIVED");
-    until_prompt_from(&reader, &mut output, steer_start);
+    until_prompt_after_reply(&reader, &mut output, b"STEER-RECEIVED");
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
     let status = session.quit(input);
