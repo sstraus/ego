@@ -420,10 +420,22 @@ mod store {
         }
 
         fn read_first_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("first"))
+                .or_insert(0) += 1;
             self.inner.read_first_line(path)
         }
 
         fn read_last_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("last"))
+                .or_insert(0) += 1;
             self.inner.read_last_line(path)
         }
 
@@ -454,6 +466,88 @@ mod store {
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             self.inner.list_dirs(path)
         }
+    }
+
+    // Catches: a lease-held append reopens the header and tail for every event.
+    #[test]
+    fn leased_append_does_not_reread_log_per_event() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store
+            .open_writer(
+                &session,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::EPOCH,
+                    stale_after: Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        reads.lock().unwrap().clear();
+        for _ in 0..32 {
+            opened
+                .writer
+                .append(
+                    &session,
+                    &ev(
+                        seq.next(),
+                        turn,
+                        EventKind::TurnCompleted {
+                            ok: true,
+                            exit_reason: ExitReason::Completed,
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        let log = log_path(dir.path(), &session);
+        let counts = reads.lock().unwrap();
+        assert_eq!(
+            counts
+                .get(&log.with_extension("first"))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state append must not reopen the log header"
+        );
+        assert_eq!(
+            counts
+                .get(&log.with_extension("last"))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state append must not reopen the log tail"
+        );
+        drop(counts);
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 33);
+        assert!(entries.iter().all(Result::is_ok));
     }
 
     /// A [`StoreIo`] that fails `read` for one specific path (simulating,
