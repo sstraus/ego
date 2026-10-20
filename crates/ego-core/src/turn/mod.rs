@@ -35,7 +35,7 @@ type PendingPrompt = (
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1299,7 +1299,7 @@ pub struct TurnLoop<'session, 'turn> {
     hook_binding: Option<HookBindingState<'session>>,
     hook_runtime: Option<SessionHookRuntime<'session>>,
     prompt_context: Option<Arc<dyn PromptContextSource + 'turn>>,
-    warmup_attempted: bool,
+    warmup_attempted: Arc<AtomicBool>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     task_usage: Option<Arc<dyn Fn() -> Result<Usage, StoreError> + Send + Sync + 'turn>>,
     generation_role: GenerationRole,
@@ -1481,7 +1481,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             hook_binding: None,
             hook_runtime: None,
             prompt_context: None,
-            warmup_attempted: false,
+            warmup_attempted: Arc::new(AtomicBool::new(false)),
             active_skill_scope: None,
             active_skill_invocations: BTreeMap::new(),
             task_usage: None,
@@ -1660,6 +1660,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     /// Attach optional prompt recall. The source cannot affect hook decisions.
     pub fn with_prompt_context(mut self, source: Arc<dyn PromptContextSource + 'turn>) -> Self {
         self.prompt_context = Some(source);
+        self
+    }
+
+    /// Retain unsuccessful warmup attempts when a run rebuilds its turn loop.
+    /// A new process/resume can start with fresh state; successful warmup is durable.
+    pub fn with_prompt_warmup_state(mut self, attempted: Arc<AtomicBool>) -> Self {
+        self.warmup_attempted = attempted;
         self
     }
 
@@ -4376,8 +4383,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     item.kind == crate::state::ItemKind::HostContext
                         && item.text.starts_with(WARMUP_TAG)
                 });
-                if !already_warmed && !self.warmup_attempted {
-                    self.warmup_attempted = true;
+                if !already_warmed && !self.warmup_attempted.swap(true, Ordering::Relaxed) {
                     match source
                         .warmup(self.tools.cwd().as_path(), self.session_id)
                         .await

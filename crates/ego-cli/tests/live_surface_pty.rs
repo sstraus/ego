@@ -40,6 +40,8 @@ mod permission_receipts;
 mod picker_roles;
 #[path = "live_surface_pty/plan_denial.rs"]
 mod plan_denial;
+#[path = "live_surface_pty/prompt_context.rs"]
+mod prompt_context;
 #[path = "live_surface_pty/prompt_echo.rs"]
 mod prompt_echo;
 #[path = "live_surface_pty/prompt_readiness.rs"]

@@ -23,7 +23,8 @@ The source is disabled by default. Project configuration cannot enable it.
 It calls `mdkb hook session-start` once before the first admitted prompt of a run
 and `mdkb hook user-prompt-submit` for each admitted prompt, with the real ego
 session ID and workspace path. A successful durable warmup is reused on resume.
-Empty or failed warmup is not retried in the same run, but can retry on resume.
+Empty or failed warmup is not retried across interactive turns in the same active
+session epoch. A new process/resume can retry it.
 After tool execution, `mdkb hook post-tool-use` receives settled input and the
 model-visible result. Only the matching event's
 `hookSpecificOutput.additionalContext` string is admitted as source-tagged,
