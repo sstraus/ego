@@ -542,6 +542,11 @@ mod store {
         let log = log_path(dir.path(), &session);
         let counts = reads.lock().unwrap();
         assert_eq!(
+            counts.get(&log).copied().unwrap_or(0),
+            0,
+            "turn-boundary synopsis projection must not replay the session log"
+        );
+        assert_eq!(
             counts
                 .get(&log.with_extension("first"))
                 .copied()
