@@ -75,6 +75,8 @@ mod support;
 mod task_rows;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
+#[path = "live_surface_pty/working_repaint.rs"]
+mod working_repaint;
 #[path = "live_surface_pty/workspace_trust.rs"]
 mod workspace_trust;
 

@@ -55,6 +55,32 @@ OpenAI and Gemini are selectable; old research that required a live recording
 before offering these public contracts was amended. Deterministic contract
 conformance is not a claim that this documentation run called every hosted vendor.
 
+## Codex transport
+
+The `openai-codex` subscription mapping uses a run-owned WebSocket connection.
+It sends `response.create` and requests `reasoning.encrypted_content`; opaque
+reasoning can be replayed only through the matching provider dialect.
+After a completed response, the next request can send `previous_response_id`
+and only the new input items. Reuse requires the same active session, unchanged
+non-input settings, and an exact prefix of the previous input plus normalized
+completed output. A fork, changed prefix after compaction, unidentified request,
+or fresh generator does not inherit another session's continuation.
+
+HTTP SSE remains a fallback only when opening the connection fails with a
+**definitely-unsent connect failure**. Once a request might have been sent,
+transport failure is not permission to send it again over SSE. The socket and
+each request remain under the run's admitted network authority.
+
+Sources: [Codex mapping](../../crates/ego-ai/src/wire/openai_codex_responses.rs),
+[continuation owner](../../crates/ego-ai/src/codex_session.rs),
+[generator dispatch](../../crates/ego-ai/src/generator.rs), and
+[guarded CLI transport](../../crates/ego-cli/src/provider_http.rs).
+Existing [public boundary coverage](../../crates/ego-ai/tests/generator.rs)
+and [CLI generation coverage](../../crates/ego-cli/src/model.rs) protect
+same-session continuation and lineage invalidation. These are implementation
+claims, not measured cache-hit parity or latency improvements. regression case's
+live workload targets remain separate from the shipped transport.
+
 ## Subscription login
 
 `ego auth login PROVIDER` runs the profile's built-in supported login flow or

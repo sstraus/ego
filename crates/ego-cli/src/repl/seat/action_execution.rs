@@ -343,12 +343,8 @@ pub(super) fn surface_line(
         if phase.get() == EditPhase::Busy {
             let notice = status.lock().expect("surface status lock").notice.take();
             if let Some(notice) = notice {
-                // A host command suspends the live prompt in place. Retire it
-                // before the notice is queued, including at the bottom row
-                // where resuming the old footprint would scroll it into history.
-                if editor.erase_last_prompt().is_err() {
-                    return (Line::Ended, true);
-                }
+                // Notices and other transcript output use the same Reedline
+                // owner, which retires its live region before printing.
                 commit_to_transcript(status, &format!("{}: {notice}", crate::DISPLAY_NAME));
             }
         } else if phase.get() == EditPhase::Idle {

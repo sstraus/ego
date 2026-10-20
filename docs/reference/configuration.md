@@ -269,11 +269,17 @@ Source: [facts.rs](../../crates/ego-cli/src/facts.rs),
 | `...default_reasoning_effort` | Optional supported effort; absent unknown |
 | `...cancel` | `unsupported`, `cooperative`, `immediate` |
 | `...cache` | `none`, `short`, `long` |
-| `...transport` | `sse` (the only implemented transport) |
+| `...transport` | `sse` or `web_socket`; Codex uses WebSocket, with guarded SSE fallback. `auto`, `web_transport`, and `websocket` are not accepted spellings |
 | `...image_input` | `"unknown"` default, `"unsupported"`, or supported table below |
 | `model."PROVIDER/MODEL".pricing` | Optional quote table; absence is unpriced, not free |
 | `retired."PROVIDER/MODEL".replacement` | Required replacement slug |
 | `retired."PROVIDER/MODEL".retired` | Required date string; runtime tombstone consultation uses the builtin table |
+
+Transport spellings come from
+[`Transport`](../../crates/ego-core/src/generator/capabilities.rs); the
+[Codex mapping](../../crates/ego-ai/src/wire/openai_codex_responses.rs) selects
+its transport. A capability declaration is not a switch that changes another
+provider's wire contract.
 
 A supported image table has `kind="supported"`, `accepted_media_types` from
 `png`, `jpeg`, `webp`, `gif`, and optional `max_images`, `max_bytes_per_image`,

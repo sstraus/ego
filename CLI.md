@@ -213,7 +213,7 @@ omitted when empty: two states, identical bytes.
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it a human terminal shows the session picker across roots; headless execution takes the most recently updated session of this workspace. With terminal stdin and stdout, a positional prompt is submitted once to the interactive driver, which accepts further messages. Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file, or profile `ci` selects headless execution. Redirected stdin or stdout also selects headless execution |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |
-| `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
+| `ego compact` | **yes** | publishes one idempotent clean target from the idle compaction operation and supports later continuation; `--request-id` optionally reuses an existing ID, otherwise the parser generates one |
 | `ego export` | **yes** | local transcript export plus the producer-only version-1 structural bundle under `--sanitize`; Markdown, JSON, JSONL, stdout, and atomic file publication follow §2.1 |
 | `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME --client-id ID`, `login NAME --cimd URL`, or `login NAME --dcr` selects an explicit public-client registration strategy, prints a copyable authorization URL, and waits up to 120 seconds on an exact loopback callback; `--callback-port PORT` selects a registered callback port |
 | `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status`/`compact` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
@@ -1985,14 +1985,18 @@ branches its owning ancestor at that ancestor's completion sequence. Title and
 active goal come from the selected boundary. An explicit completed boundary can
 be read while the source writer runs; a tip fork requires an inactive source.
 
-Standard ACP `session/fork` currently serves the tip. The message selector
-`_meta.ego.atMessageId`, lineage metadata, and inherited-message replay are
-planned extensions. The accepted cache design snapshots only the system prompt
+Standard ACP `session/fork` serves the tip when no selector is supplied.
+Negotiated `_meta.ego.atMessageId` selects a completed-message boundary;
+lineage metadata and inherited-message replay are also implemented. See
+[ACP history metadata](docs/integrations/acp-extensions.md#session-and-history-metadata)
+and the source owners `crates/ego-acp/src/serve.rs` and
+`crates/ego-acp/src/project.rs`. The accepted cache design snapshots only the system prompt
 per epoch; resume/fork inherit it, and compaction or explicit refresh replaces
 it. Tool admission remains current. The snapshot is captured on the first admitted generation. `/refresh` reloads
 instructions and opens a new epoch on the next admitted generation; it refuses
 while source work is pending. Live runtime and host facts are transient data
-before current user intent. Provider cache fields remain regression case, with decisions in
+before current user intent. Provider cache usage and Codex continuation are separate observations; see
+[Codex transport](docs/guides/providers.md#codex-transport), with decisions in
 `ARCHITECTURE.md`.
 
 ## 7. Configuration
