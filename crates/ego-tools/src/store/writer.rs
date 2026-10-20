@@ -46,7 +46,7 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 use futures::stream::BoxStream;
 
 use super::SessionEvidenceStore;
-use super::jsonl_store::{EvidenceIndex, JsonlStore, Repair};
+use super::jsonl_store::{AppendState, EvidenceIndex, JsonlStore, Repair};
 use super::lease::{Lease, LeaseError};
 use super::snapshot::SnapshotRejection;
 
@@ -140,6 +140,8 @@ pub struct SessionWriter<'a> {
     store: &'a JsonlStore,
     id: SessionId,
     pid: u32,
+    /// Drop append descriptors before releasing the writer lease.
+    _appender: Arc<Mutex<AppendState>>,
     /// Released on drop, which is the whole point. Never read.
     _lease: Arc<Lease>,
     /// References derived from the repaired log and accepted snapshot state.
@@ -370,6 +372,10 @@ impl JsonlStore {
             .evidence_index(id)
             .map_err(|source| OpenError::Resume { source, repair })?;
 
+        let appender = self
+            .retain_appender(id)
+            .map_err(|source| OpenError::Resume { source, repair })?;
+
         Ok(OpenSession {
             state,
             repair,
@@ -379,6 +385,7 @@ impl JsonlStore {
                 id: *id,
                 pid: lease.pid,
                 _lease: Arc::new(held),
+                _appender: appender,
                 reachable_blobs,
                 evidence_index: Mutex::new(evidence_index),
             },

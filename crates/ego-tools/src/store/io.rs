@@ -166,8 +166,33 @@ pub trait PrivateLogWriter: Send {
     fn append(&mut self, line: &[u8]) -> io::Result<()>;
 }
 
+/// A session append descriptor owned by a writer lease. Writes are immediately
+/// visible to readers; durability barriers use this same descriptor.
+pub trait SessionLogWriter: Send {
+    fn append_line(&mut self, line: &[u8]) -> io::Result<()>;
+    fn fsync(&self) -> io::Result<()>;
+}
+
+impl SessionLogWriter for fs::File {
+    fn append_line(&mut self, line: &[u8]) -> io::Result<()> {
+        use io::Write as _;
+        self.write_all(line)?;
+        self.write_all(b"\n")
+    }
+
+    fn fsync(&self) -> io::Result<()> {
+        self.sync_all()
+    }
+}
+
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
+    /// Retain an append descriptor when the adapter supports it. The parent
+    /// directory already exists. Other adapters keep their observable I/O seam.
+    fn open_session_log(&self, _path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {
+        Ok(None)
+    }
+
     /// Exclusively create one retained owner file; never reopen an existing log.
     fn open_private_log(
         &self,
@@ -597,6 +622,14 @@ fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
 pub struct OsIo;
 
 impl StoreIo for OsIo {
+    fn open_session_log(&self, path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Some(Box::new(file)))
+    }
+
     fn open_private_log(
         &self,
         root: &Path,

@@ -401,6 +401,19 @@ mod store {
     }
 
     impl StoreIo for ReadCountingIo {
+        fn open_session_log(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Option<Box<dyn ego_tools::store::SessionLogWriter>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("open"))
+                .or_insert(0) += 1;
+            self.inner.open_session_log(path)
+        }
+
         fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
             self.inner.append_line(path, line)
         }
@@ -548,6 +561,118 @@ mod store {
         let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
         assert_eq!(entries.len(), 33);
         assert!(entries.iter().all(Result::is_ok));
+    }
+
+    // Catches: cached physical positions ignore non-event records or survive recovery.
+    #[test]
+    fn leased_append_revalidates_after_other_records_and_recovery() {
+        use ego_core::config::ModelRef;
+        use std::io::Write as _;
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: "visible".into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            )
+        };
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        store
+            .record_model_selection(&session, ModelRef("ollama/first".into()))
+            .unwrap();
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let path = log_path(dir.path(), &session);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"torn")
+            .unwrap();
+        assert_eq!(store.recover(&session).unwrap().truncated_bytes, 4);
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let positions: Vec<_> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| match decode_line(line).unwrap() {
+                StoreLine::Record(record) => Some(record.seq.get()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, [1, 2, 3, 4]);
+        // A retained descriptor must not retain the exclusive operation lock.
+        assert!(
+            ego_core::session::ReplaySource::entries(&store, &session)
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            store.open_writer(&session, evidence_lease()),
+            Err(_)
+        ));
+        drop(opened);
+        let resumed = store.open_writer(&session, evidence_lease()).unwrap();
+        resumed.writer.append(&session, &event(seq.next())).unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().all(Result::is_ok));
+    }
+
+    // Catches: a published append with a failed durability barrier reuses its position.
+    #[test]
+    fn leased_append_revalidates_after_failed_fsync() {
+        let dir = tempdir().unwrap();
+        let fsyncs = Arc::new(AtomicUsize::new(0));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(FailingFsyncIo {
+                inner: CountingIo {
+                    inner: OsIo,
+                    fsyncs,
+                },
+                fail_on: 1,
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            )
+        };
+        assert!(opened.writer.append(&session, &event(seq.next())).is_err());
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(Result::is_ok));
+        let bytes = std::fs::read(log_path(dir.path(), &session)).unwrap();
+        let positions: Vec<_> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| match decode_line(line).unwrap() {
+                StoreLine::Record(record) => Some(record.seq.get()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, [1, 2]);
     }
 
     /// A [`StoreIo`] that fails `read` for one specific path (simulating,

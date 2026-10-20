@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use ego_core::compact::{
     CompactionTargetError, CompactionTargetFacts, CompactionTargetInspection, CompactionTargetPort,
@@ -46,7 +46,7 @@ use fd_lock::RwLock;
 use futures::stream::{self, BoxStream};
 
 use super::blob::SessionBlobStore;
-use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
+use super::io::{AtomicReplacePublication, SessionLogWriter, StoreIo, tmp_path_for};
 use super::lease::Lease;
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
@@ -502,6 +502,20 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
     }))
 }
 
+/// Exists only while the session writer lease is held. The mutex orders local
+/// mutations; the retained advisory-lock descriptor still locks each operation,
+/// not the lifetime of the session (readers must remain able to replay it).
+pub(super) struct AppendState {
+    lock: RwLock<std::fs::File>,
+    cursor: AppendCursor,
+}
+
+#[derive(Default)]
+struct AppendCursor {
+    next: Option<Seq>,
+    log: Option<Box<dyn SessionLogWriter>>,
+}
+
 /// The filesystem `SessionStore`. Real I/O goes through the injected
 /// [`StoreIo`], so tests can wrap it (e.g. to count fsyncs) without faking
 /// the filesystem itself.
@@ -509,6 +523,7 @@ pub struct JsonlStore {
     root: PathBuf,
     workspace: PathBuf,
     pid_index_home: Option<PathBuf>,
+    appenders: Mutex<HashMap<SessionId, Weak<Mutex<AppendState>>>>,
     pub(super) io: Arc<dyn StoreIo>,
 }
 
@@ -542,6 +557,7 @@ impl JsonlStore {
             root: root.into(),
             workspace: workspace.into(),
             pid_index_home: None,
+            appenders: Mutex::new(HashMap::new()),
             io: Arc::from(io),
         }
     }
@@ -618,6 +634,32 @@ impl JsonlStore {
         Ok(RwLock::new(file))
     }
 
+    pub(super) fn retain_appender(
+        &self,
+        id: &SessionId,
+    ) -> Result<Arc<Mutex<AppendState>>, StoreError> {
+        let state = Arc::new(Mutex::new(AppendState {
+            lock: self.open_events_lock(id)?,
+            cursor: AppendCursor::default(),
+        }));
+        let mut appenders = self
+            .appenders
+            .lock()
+            .map_err(|_| invalid_log("append registry poisoned"))?;
+        appenders.retain(|_, state| state.strong_count() != 0);
+        appenders.insert(*id, Arc::downgrade(&state));
+        Ok(state)
+    }
+
+    fn appender(&self, id: &SessionId) -> Result<Option<Arc<Mutex<AppendState>>>, StoreError> {
+        Ok(self
+            .appenders
+            .lock()
+            .map_err(|_| invalid_log("append registry poisoned"))?
+            .get(id)
+            .and_then(Weak::upgrade))
+    }
+
     /// Serialize one complete log mutation and its manifest projection.
     /// This is deliberately distinct from the long-held session writer lease.
     fn with_events_lock<T>(
@@ -625,9 +667,20 @@ impl JsonlStore {
         id: &SessionId,
         operation: impl FnOnce() -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let mut lock = self.open_events_lock(id)?;
-        let _guard = lock.write()?;
-        operation()
+        if let Some(state) = self.appender(id)? {
+            let mut state = state
+                .lock()
+                .map_err(|_| invalid_log("session appender poisoned"))?;
+            // This path can replace or truncate the log, or append a different
+            // record kind. Never reuse its old inode or physical position.
+            state.cursor = AppendCursor::default();
+            let _guard = state.lock.write()?;
+            operation()
+        } else {
+            let mut lock = self.open_events_lock(id)?;
+            let _guard = lock.write()?;
+            operation()
+        }
     }
 
     fn run_log_state_from_lines<'a>(
@@ -1455,16 +1508,13 @@ impl JsonlStore {
             key: key.clone(),
             diagnostic: error.to_string(),
         };
-        let mut lock = self.open_events_lock(id).map_err(map_store)?;
-        let _guard = lock.write().map_err(|error| EvidenceError::Store {
-            key: key.clone(),
-            diagnostic: error.to_string(),
-        })?;
-        let mut index = index.lock().map_err(|_| EvidenceError::Store {
-            key: key.clone(),
-            diagnostic: "lease-local evidence index lock is poisoned".to_owned(),
-        })?;
-        self.write_evidence_already_locked(id, &mut index, key, record)
+        self.with_events_lock(id, || {
+            let mut index = index
+                .lock()
+                .map_err(|_| invalid_log("lease-local evidence index lock is poisoned"))?;
+            Ok(self.write_evidence_already_locked(id, &mut index, key.clone(), record))
+        })
+        .map_err(map_store)?
     }
 
     fn write_evidence_already_locked(
@@ -1679,20 +1729,40 @@ impl JsonlStore {
         Ok(())
     }
 
-    fn append_already_locked(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
+    fn append_already_locked(
+        &self,
+        id: &SessionId,
+        ev: &DomainEvent,
+        cursor: &mut AppendCursor,
+    ) -> Result<(), StoreError> {
         let log_path = self.log_path(id);
-        let is_new_session = !self.io.exists(&log_path)?;
-        let position = if is_new_session {
-            let header = Header::new(*id, ev.env.ts, self.workspace.clone());
-            self.io.append_line(&log_path, &encode_header(&header))?;
-            let mut first = Seq::ZERO;
-            first.next()
-        } else {
-            self.next_physical_position(&log_path, id)?
+        let is_new_session = cursor.next.is_none() && !self.io.exists(&log_path)?;
+        let position = match cursor.next {
+            Some(next) => next,
+            None if is_new_session => {
+                let mut first = Seq::ZERO;
+                first.next()
+            }
+            None => self.next_physical_position(&log_path, id)?,
         };
-
+        if cursor.log.is_none() {
+            cursor.log = self.io.open_session_log(&log_path)?;
+        }
+        let mut append_line = |line: &[u8]| -> Result<(), StoreError> {
+            match cursor.log.as_mut() {
+                Some(log) => log.append_line(line)?,
+                None => self.io.append_line(&log_path, line)?,
+            }
+            Ok(())
+        };
+        if is_new_session {
+            let header = Header::new(*id, ev.env.ts, self.workspace.clone());
+            append_line(&encode_header(&header))?;
+        }
         let record_line = encode_record(position, &SessionEntry::Event(ev.clone()))?;
-        self.io.append_line(&log_path, &record_line)?;
+        append_line(&record_line)?;
+        let mut next = position;
+        cursor.next = Some(next.next());
 
         let is_turn_boundary = matches!(ev.kind, EventKind::TurnCompleted { .. });
         let is_execution_observation = matches!(ev.kind, EventKind::ExecutionObserved { .. });
@@ -1728,7 +1798,10 @@ impl JsonlStore {
             || is_skill_admission
             || is_queue_boundary
         {
-            self.io.fsync(&log_path)?;
+            match cursor.log.as_ref() {
+                Some(log) => log.fsync()?,
+                None => self.io.fsync(&log_path)?,
+            }
         }
 
         if (is_new_session && !is_hook_invocation)
@@ -1978,7 +2051,24 @@ impl SessionStore for JsonlStore {
     }
 
     fn append(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
-        self.with_events_lock(id, || self.append_already_locked(id, ev))
+        if let Some(state) = self.appender(id)? {
+            let mut state = state
+                .lock()
+                .map_err(|_| invalid_log("session appender poisoned"))?;
+            let AppendState { lock, cursor } = &mut *state;
+            let _guard = lock.write()?;
+            let result = self.append_already_locked(id, ev, cursor);
+            if result.is_err() {
+                // A failed write may have left a torn tail. Revalidate before
+                // any retry instead of advancing a speculative cached cursor.
+                *cursor = AppendCursor::default();
+            }
+            result
+        } else {
+            self.with_events_lock(id, || {
+                self.append_already_locked(id, ev, &mut AppendCursor::default())
+            })
+        }
     }
 
     fn read(
