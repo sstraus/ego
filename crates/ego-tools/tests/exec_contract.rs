@@ -1795,6 +1795,37 @@ fn inherited_fd_oracle_rejects_owned_files_at_low_and_high_descriptors() {
     }
 }
 
+/// Catches: a real inherited host socket is silently classified as clean by
+/// the owned-descriptor oracle's regular-file-only filter.
+#[cfg(unix)]
+#[test]
+fn inherited_fd_oracle_rejects_owned_socket_instead_of_silently_skipping_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    for fd in [3, 63, 127] {
+        let script =
+            format!("exec 64</dev/null; exec {fd}<>/dev/tcp/127.0.0.1/{port}; exec \"$@\"");
+        let output = Command::new("/bin/bash")
+            .args(["-c", &script, "socket-control"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "exec_contract_fixture_rejects_inherited_fds",
+                "--nocapture",
+                "--",
+            ])
+            .arg(format!("/dev/fd/{fd}"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(29),
+            "owned socket at fd {fd} was not rejected: {output:?}"
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_helper_receives_an_eof_pipe_and_refuses_inherited_fd_above_stderr() {
