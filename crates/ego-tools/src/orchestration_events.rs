@@ -10,7 +10,7 @@ use ego_core::orchestration_events::{Card, Cursor, Observation, Salience, conten
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::store::{Lease, OsIo, StoreIo};
+use crate::store::{FileRevision, Lease, OsIo, StoreIo};
 
 #[derive(Debug, Deserialize)]
 pub struct InboxPage {
@@ -30,39 +30,9 @@ pub struct InboxMessage {
     pub from_tuic_session: Option<String>,
 }
 
-// In-memory invalidation only. The durable cursor still uses content digests,
-// and a restart rereads every candidate before trusting its content identity.
-#[derive(Debug, PartialEq, Eq)]
-struct ResultSignature {
-    modified: SystemTime,
-    created: Option<SystemTime>,
-    length: u64,
-    #[cfg(unix)]
-    identity: (u64, u64, i64, i64),
-}
-
-impl ResultSignature {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
-        Ok(Self {
-            modified: metadata.modified()?,
-            created: metadata.created().ok(),
-            length: metadata.len(),
-            #[cfg(unix)]
-            identity: {
-                use std::os::unix::fs::MetadataExt as _;
-                (
-                    metadata.dev(),
-                    metadata.ino(),
-                    metadata.ctime(),
-                    metadata.ctime_nsec(),
-                )
-            },
-        })
-    }
-}
-
+// The durable cursor still uses content digests; a restart rereads candidates.
 struct CachedResult {
-    signature: ResultSignature,
+    signature: FileRevision,
     is_result: bool,
 }
 
@@ -392,7 +362,7 @@ impl ObservationPump {
             if entry.file_type()?.is_file()
                 && entry.path().extension().is_some_and(|ext| ext == "md")
             {
-                let signature = ResultSignature::from_metadata(&entry.metadata()?)?;
+                let signature = FileRevision::from_metadata(&entry.metadata()?)?;
                 files.push((signature.modified, entry.path(), signature));
             }
         }

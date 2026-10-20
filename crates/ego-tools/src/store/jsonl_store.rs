@@ -594,6 +594,11 @@ impl JsonlStore {
         )
     }
 
+    /// An invalidation hint for a live follower, not a substitute for replay validation.
+    pub fn log_revision(&self, id: &SessionId) -> std::io::Result<Option<super::FileRevision>> {
+        self.io.file_revision(&self.log_path(id))
+    }
+
     /// Conversational search is a derived cache beside the authoritative logs.
     pub fn history(self: &Arc<Self>) -> super::HistoryIndex {
         super::HistoryIndex::new(self.root.join("history.sqlite"), Arc::clone(self))

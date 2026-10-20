@@ -204,6 +204,7 @@ fn transcript_snapshot(
 struct TranscriptFollow {
     cursor: u64,
     header: bool,
+    revision: Option<ego_tools::store::FileRevision>,
 }
 
 impl TranscriptFollow {
@@ -211,6 +212,7 @@ impl TranscriptFollow {
         Self {
             cursor: after,
             header: true,
+            revision: None,
         }
     }
 
@@ -219,7 +221,18 @@ impl TranscriptFollow {
         store: &JsonlStore,
         session: SessionId,
     ) -> Result<String, RunTermination> {
+        let revision = store
+            .log_revision(&session)
+            .map_err(|error| RunTermination::Failed {
+                message: format!("cannot inspect followed session {session}: {error}"),
+            })?;
+        if revision.is_some() && revision == self.revision {
+            return Ok(String::new());
+        }
         let (bytes, next) = transcript_snapshot(store, session, self.cursor, self.header)?;
+        // Save the pre-read signature: a concurrent append will differ on the
+        // next poll, even if it raced this coherent prefix read.
+        self.revision = revision;
         self.cursor = next;
         self.header = false;
         Ok(bytes)
@@ -729,7 +742,7 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
 mod follow_tests {
     use super::*;
     use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
-    use ego_core::event::id::{EventId, Producer, Seq, TurnId};
+    use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
     use ego_core::event::time::Timestamp;
     use ego_core::store::session_store::SessionStore;
 
@@ -746,7 +759,7 @@ mod follow_tests {
                         seq,
                         id: EventId::new(),
                         turn: TurnId::new(),
-                        item: None,
+                        item: Some(ItemId::new()),
                         parent: None,
                         ts: Timestamp::EPOCH,
                         producer: Producer::Main,
@@ -760,6 +773,39 @@ mod follow_tests {
                 },
             )
             .unwrap();
+    }
+
+    // Catches: cached follow state hides appended events, repeats its header, or ignores replacement/corruption.
+    #[test]
+    fn follow_transcript_revalidates_appends_replacements_and_missing_logs() {
+        let home = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(home.path(), "/workspace", Box::new(OsIo));
+        let id = SessionId::new();
+        let mut seq = Seq::ZERO;
+        append(&store, id, seq.next(), "first");
+        let mut follow = TranscriptFollow::new(1);
+        let first = follow.snapshot(&store, id).unwrap();
+        assert_eq!(first.lines().count(), 1, "header only after sequence one");
+        append(&store, id, seq.next(), "second");
+        let next = follow.snapshot(&store, id).unwrap();
+        assert_eq!(
+            next.lines().count(),
+            1,
+            "one new event and no second header"
+        );
+        assert!(next.contains("second"));
+        assert!(follow.snapshot(&store, id).unwrap().is_empty());
+        let log = home.path().join(id.to_string()).join("events.jsonl");
+        let replacement = log.with_extension("replacement");
+        std::fs::write(&replacement, std::fs::read(&log).unwrap()).unwrap();
+        std::fs::rename(replacement, &log).unwrap();
+        REPLAYS.with(|count| count.set(0));
+        assert!(follow.snapshot(&store, id).unwrap().is_empty());
+        assert_eq!(REPLAYS.with(std::cell::Cell::get), 1);
+        std::fs::write(&log, "invalid header\n").unwrap();
+        assert!(follow.snapshot(&store, id).is_err());
+        std::fs::remove_file(log).unwrap();
+        assert!(follow.snapshot(&store, id).is_err());
     }
 
     // Catches: idle export --follow replays the growing log every 250 ms.

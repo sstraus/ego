@@ -185,8 +185,46 @@ impl SessionLogWriter for fs::File {
     }
 }
 
+/// An in-memory file invalidation hint, never a durable content identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRevision {
+    pub(crate) modified: std::time::SystemTime,
+    created: Option<std::time::SystemTime>,
+    length: u64,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl FileRevision {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
+        Ok(Self {
+            modified: metadata.modified()?,
+            created: metadata.created().ok(),
+            length: metadata.len(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt as _;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        })
+    }
+}
+
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
+    /// Inspect an invalidation hint without opening the file's content.
+    fn file_revision(&self, _path: &Path) -> io::Result<Option<FileRevision>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file revisions unavailable",
+        ))
+    }
+
     /// Retain an append descriptor when the adapter supports it. The parent
     /// directory already exists. Other adapters keep their observable I/O seam.
     fn open_session_log(&self, _path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {
@@ -622,6 +660,14 @@ fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
 pub struct OsIo;
 
 impl StoreIo for OsIo {
+    fn file_revision(&self, path: &Path) -> io::Result<Option<FileRevision>> {
+        match fs::metadata(path) {
+            Ok(metadata) => FileRevision::from_metadata(&metadata).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn open_session_log(&self, path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {
         let file = fs::OpenOptions::new()
             .create(true)

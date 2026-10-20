@@ -21,7 +21,8 @@ pub use history::{HistoryError, HistoryHit, HistoryIndex};
 #[cfg(feature = "test-support")]
 pub use io::NonDurableOsIo;
 pub use io::{
-    AtomicReplacePublication, OsIo, PrivateLogWriter, SessionLogWriter, StoreIo, tmp_path_for,
+    AtomicReplacePublication, FileRevision, OsIo, PrivateLogWriter, SessionLogWriter, StoreIo,
+    tmp_path_for,
 };
 pub use jsonl_store::{JsonlStore, Repair};
 pub use lease::{Lease, LeaseError};
