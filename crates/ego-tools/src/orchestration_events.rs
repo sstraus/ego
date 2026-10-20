@@ -353,6 +353,8 @@ impl ObservationPump {
         files.sort();
         for (modified, path) in files {
             let mut bytes = Vec::new();
+            #[cfg(test)]
+            tests::REPORT_READS.with(|count| count.set(count.get() + 1));
             std::fs::File::open(&path)?
                 .take(64 * 1024 + 1)
                 .read_to_end(&mut bytes)?;
@@ -466,6 +468,8 @@ impl ObservationPump {
 }
 
 fn read_tracking(path: &Path) -> io::Result<String> {
+    #[cfg(test)]
+    tests::TRACKING_READS.with(|count| count.set(count.get() + 1));
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
         other => other,
@@ -552,6 +556,45 @@ pub fn spawn_receipts(
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    thread_local! {
+        pub(super) static REPORT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static TRACKING_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    // Catches: unchanged report scans reopen every report and tracking twice per report.
+    #[test]
+    fn result_scan_does_not_reopen_unchanged_content_or_tracking_per_report() {
+        let home = tempfile::tempdir().unwrap();
+        let results = home.path().join("Gits/.tmp/results");
+        std::fs::create_dir_all(&results).unwrap();
+        for name in ["alpha-1.md", "alpha-long-1.md", "other-1.md"] {
+            std::fs::write(results.join(name), format!("RESULT {name}")).unwrap();
+        }
+        let mut pump = ObservationPump::open(home.path(), home.path()).unwrap();
+        std::fs::write(&pump.children, "id-alpha\talpha\nid-long\talpha-long\n").unwrap();
+        pump.scan_results(100).unwrap();
+        REPORT_READS.with(|count| count.set(0));
+        TRACKING_READS.with(|count| count.set(0));
+        pump.scan_results(200).unwrap();
+        assert_eq!(
+            REPORT_READS.with(std::cell::Cell::get),
+            0,
+            "unchanged reports must not be reopened"
+        );
+        assert_eq!(
+            TRACKING_READS.with(std::cell::Cell::get),
+            1,
+            "tracking must be one scan snapshot, not two reads per report"
+        );
+        let cards = pump.ready(20_000);
+        let long = cards
+            .iter()
+            .find(|card| card.result.as_ref() == Some(&results.join("alpha-long-1.md")))
+            .unwrap();
+        assert_eq!(long.peer.as_deref(), Some("alpha-long"));
+        assert_eq!(long.sender.as_deref(), Some("id-long"));
+    }
 
     // Catches: the observer consumes its launching Claude coordinator's inbox.
     #[test]
