@@ -599,6 +599,23 @@ impl JsonlStore {
         self.io.file_revision(&self.log_path(id))
     }
 
+    /// Read one visible session from its authoritative log, not its manifest.
+    /// Deleted and quarantined sessions are absent from the resumable catalogue.
+    pub fn readable_meta(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        match self.readable_meta_existing(id) {
+            Err(StoreError::NotFound) => Ok(None),
+            result => result,
+        }
+    }
+
+    fn readable_meta_existing(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        if self.io.exists(&self.quarantine_path(id))? {
+            return Ok(None);
+        }
+        let facts = self.lifecycle_facts(*id)?.ok_or(StoreError::NotFound)?;
+        Ok((!facts.deleted).then(|| meta_from_log_facts(*id, &facts)))
+    }
+
     /// Conversational search is a derived cache beside the authoritative logs.
     pub fn history(self: &Arc<Self>) -> super::HistoryIndex {
         super::HistoryIndex::new(self.root.join("history.sqlite"), Arc::clone(self))
@@ -2147,13 +2164,7 @@ impl SessionStore for JsonlStore {
             else {
                 continue;
             };
-            let result = (|| {
-                if self.io.exists(&self.quarantine_path(&id))? {
-                    return Ok(None);
-                }
-                let facts = self.lifecycle_facts(id)?.ok_or(StoreError::NotFound)?;
-                Ok((!facts.deleted).then(|| meta_from_log_facts(id, &facts)))
-            })();
+            let result = self.readable_meta_existing(&id);
             match result {
                 Ok(Some(meta)) => metas.push(meta),
                 Ok(None) => {}

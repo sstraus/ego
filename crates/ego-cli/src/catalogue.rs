@@ -55,12 +55,17 @@ pub fn by_recency(metas: &mut [SessionMeta]) {
 /// `id` is what the caller typed, already known to parse. `None` means the
 /// latest of this workspace.
 pub fn resolve(
-    store: &dyn SessionStore,
+    store: &ego_tools::store::JsonlStore,
     root: &Path,
     id: Option<SessionId>,
 ) -> Result<SessionId, UsageError> {
-    let metas = readable_sessions(store, &crate::output::Stderr)
-        .map_err(|err| UsageError(format!("the session store could not be listed: {err}")))?;
+    let metas = match id {
+        Some(wanted) => store
+            .readable_meta(&wanted)
+            .map(|meta| meta.into_iter().collect()),
+        None => readable_sessions(store, &crate::output::Stderr),
+    }
+    .map_err(|err| UsageError(format!("the session store could not be listed: {err}")))?;
 
     let Some(wanted) = id else {
         return in_workspace(metas, root)
@@ -288,10 +293,12 @@ mod unreadable_tests {
     use ego_core::event::id::Seq;
     use ego_core::session_lifecycle::SessionLifecycleStore;
     use ego_core::store::codec::encode_record;
-    use ego_tools::store::{JsonlStore, OsIo, StoreIo};
+    use ego_tools::store::{JsonlStore, OsIo};
     use serde_json::json;
 
-    struct NoListingIo;
+    struct NoListingIo {
+        log: std::path::PathBuf,
+    }
 
     impl ego_tools::store::StoreIo for NoListingIo {
         fn append_line(&self, path: &Path, line: &[u8]) -> std::io::Result<()> {
@@ -301,6 +308,10 @@ mod unreadable_tests {
             OsIo.fsync(path)
         }
         fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+            assert_eq!(
+                path, self.log,
+                "named lookup must read only its authoritative log"
+            );
             OsIo.read(path)
         }
         fn exists(&self, path: &Path) -> std::io::Result<bool> {
@@ -331,7 +342,13 @@ mod unreadable_tests {
         store
             .publish_empty_session(id, Path::new("/workspace"), Timestamp::EPOCH)
             .unwrap();
-        let no_listing = JsonlStore::new(dir.path(), "/workspace", Box::new(NoListingIo));
+        let no_listing = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(NoListingIo {
+                log: dir.path().join(id.to_string()).join("events.jsonl"),
+            }),
+        );
         assert_eq!(
             resolve(&no_listing, Path::new("/workspace"), Some(id)).unwrap(),
             id
@@ -340,6 +357,48 @@ mod unreadable_tests {
             resolve(&no_listing, Path::new("/workspace"), None).is_err(),
             "latest session still requires a catalogue"
         );
+    }
+
+    // Catches: direct metadata lookup trusts a stale manifest for deleted/quarantined/corrupt sessions.
+    #[test]
+    fn named_resume_still_refuses_hidden_and_corrupt_sessions() {
+        use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+        use ego_core::event::id::{EventId, Producer, TurnId};
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let ids = [SessionId::new(), SessionId::new(), SessionId::new()];
+        for id in ids {
+            store
+                .publish_empty_session(id, Path::new("/workspace"), Timestamp::EPOCH)
+                .unwrap();
+        }
+        let mut seq = Seq::ZERO;
+        store
+            .append(
+                &ids[0],
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn: TurnId::new(),
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::EPOCH,
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::SessionDeleted,
+                },
+            )
+            .unwrap();
+        store.quarantine(ids[1]).unwrap();
+        let corrupt = dir.path().join(ids[2].to_string()).join("events.jsonl");
+        std::fs::write(corrupt, "invalid header\n").unwrap();
+        for id in ids {
+            assert!(
+                resolve(&store, Path::new("/workspace"), Some(id)).is_err(),
+                "{id} must not be resumed"
+            );
+        }
     }
 
     #[derive(Default)]

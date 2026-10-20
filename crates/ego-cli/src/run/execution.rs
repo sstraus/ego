@@ -67,12 +67,10 @@ async fn resolve_invocation_phase(
             let recorded_model = if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
                 chosen_session
                     .store
-                    .list()
+                    .readable_meta(&chosen_session.id)
                     .map_err(|error| RunTermination::Failed {
                         message: format!("could not read the resumed session model: {error}"),
                     })?
-                    .into_iter()
-                    .find(|session| session.id == chosen_session.id)
                     .and_then(|session| session.model)
                     .map(ModelRef)
             } else {
