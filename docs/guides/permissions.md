@@ -279,6 +279,13 @@ macOS uses Seatbelt. Linux uses admitted/proven Linux backends. Windows confinem
 is open product work; transport/private-state support does not establish the
 same filesystem/network boundary. See [troubleshooting](troubleshooting.md).
 
+Mode names, input aliases, and cycle order come from
+[the shared mode definition](../../crates/ego-core/src/config/layer.rs).
+[REPL actions](../../crates/ego-cli/src/repl/actions.rs) and
+[key handling](../../crates/ego-cli/src/repl/seat/edit_mode.rs) route direct and
+Shift+Tab selections through the same policy owner. This is the shipped story
+586 surface, not the rejected proposal for an extra manual-approval mode.
+
 Sources: [policy engine](../../crates/ego-core/src/permit/grant.rs),
 [rule grammar](../../crates/ego-core/src/permit/rule/),
 [confinement adapters](../../crates/ego-tools/src/exec/), and
