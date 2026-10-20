@@ -748,8 +748,34 @@ fn exec_contract_fixture_terminates_by_signal() {
 #[test]
 #[ignore]
 fn exec_contract_fixture_rejects_inherited_fds() {
-    for fd in 3..=64 {
-        if std::path::Path::new(&format!("/dev/fd/{fd}")).exists() {
+    use std::os::unix::fs::MetadataExt;
+
+    let owned_files = std::env::args_os()
+        .skip_while(|arg| arg != "--")
+        .skip(1)
+        .map(|path| std::fs::metadata(path).expect("owned descriptor identity"))
+        .collect::<Vec<_>>();
+    assert!(!owned_files.is_empty(), "the fixture needs owned files");
+    // Drop the enumeration handle before checking candidates. Descriptor numbers
+    // can be reused by libtest; only an owned file's identity proves a leak.
+    let descriptors = std::fs::read_dir("/dev/fd")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    for path in descriptors {
+        let Some(fd) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if fd.parse::<u32>().is_ok_and(|fd| fd >= 3)
+            && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file())
+            // macOS /dev/fd stat reports the synthetic fd filesystem's device;
+            // fstat on the opened file reports the original device identity.
+            && let Ok(actual) = std::fs::File::open(&path).and_then(|file| file.metadata())
+            && owned_files
+                .iter()
+                .any(|owned| actual.dev() == owned.dev() && actual.ino() == owned.ino())
+        {
+            eprintln!("inherited owned file on descriptor {fd}");
             std::process::exit(29);
         }
     }
@@ -1711,25 +1737,62 @@ fn handler_closed_stdin_still_obeys_scope_stops() {
     }
 }
 
+/// Catches: a file opened by the host reaches its child. Launcher-owned
+/// descriptors are outside this contract (CLI.md section 3), not leaked files.
 #[cfg(unix)]
 #[test]
 fn child_does_not_inherit_open_descriptors_at_or_above_three() {
     use std::os::fd::AsRawFd;
 
     let open_files = (0..16)
-        .map(|_| std::fs::File::open("/dev/null").unwrap())
+        .map(|_| tempfile::NamedTempFile::new().unwrap())
         .collect::<Vec<_>>();
-    assert!(open_files.iter().any(|file| file.as_raw_fd() >= 3));
+    assert!(open_files.iter().all(|file| file.as_raw_fd() >= 3));
 
     let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
-    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
-        "exec_contract_fixture_rejects_inherited_fds",
-        [],
-        None,
-        cwd(),
-    )))
+    let out = block_on(
+        run.ports.process().execute(&fixture_arg_spec(
+            "exec_contract_fixture_rejects_inherited_fds",
+            open_files
+                .iter()
+                .map(|file| file.path().as_os_str().to_owned()),
+            None,
+            cwd(),
+        )),
+    )
     .unwrap();
     assert!(format!("{out:?}").contains("fd-clean"));
+}
+
+/// Catches: narrowing the descriptor oracle hides real inheritance, including
+/// descriptors above the old scan's arbitrary upper bound of 64.
+#[cfg(unix)]
+#[test]
+fn inherited_fd_oracle_rejects_owned_files_at_low_and_high_descriptors() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    for fd in [3, 63, 127] {
+        let script = format!("exec {fd}<\"$1\"; shift; exec \"$@\"");
+        let output = Command::new("/bin/bash")
+            .args(["-c", &script, "fd-control"])
+            .arg(file.path())
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "exec_contract_fixture_rejects_inherited_fds",
+                "--nocapture",
+                "--",
+            ])
+            .arg(file.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(29), "fd {fd}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("inherited owned file on descriptor {fd}")),
+            "fd {fd}: {output:?}"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
