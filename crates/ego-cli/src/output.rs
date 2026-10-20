@@ -73,6 +73,11 @@ pub trait TextOutput: Diagnostics {
     fn retry_status(&self, _message: Option<(&str, u64)>) {}
     /// Refresh the active goal counter without writing a transcript row.
     fn goal_status(&self, _goal: Option<(String, u32, Option<u32>)>) {}
+    /// Replace the interactive plan; false retains append-only output.
+    fn plan_status(&self, _plan: &ego_core::plan::Plan) -> bool {
+        false
+    }
+    fn finish_plan(&self, _caps: Capabilities) {}
     fn begin_block(&self) {}
     fn settle_shell(&self) {}
     fn finish(&self) {}
@@ -327,6 +332,20 @@ impl TextOutput for InteractiveOutput {
             .goal_status(goal);
     }
 
+    fn plan_status(&self, plan: &ego_core::plan::Plan) -> bool {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .plan_status(plan)
+    }
+
+    fn finish_plan(&self, caps: Capabilities) {
+        let plan = self.inner.lock().expect("surface output lock").take_plan();
+        if let Some(plan) = plan {
+            self.notice_block(&plan_block(&plan, caps));
+        }
+    }
+
     fn begin_block(&self) {
         let _ = self
             .inner
@@ -381,7 +400,7 @@ pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
 }
 
 /// Layout before painting: ANSI bytes must never participate in notice wrapping.
-fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> String {
+pub(crate) fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> String {
     use crate::render::Line;
     use crate::render::style::{Palette, Style};
     use ego_core::plan::StepStatus;
@@ -753,6 +772,10 @@ impl EventSink for TextSink<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.goal_receipts(event, state);
+        if matches!(event, PublicEvent::TurnCompleted { .. }) && !self.quiet {
+            self.finish();
+            self.out.finish_plan(self.capabilities.with_current_width());
+        }
         // Only adjacent completed top-level exec calls share the live row.
         // Prose settles through write_answer/begin_block when it becomes visible;
         // do not acquire the surface lock a second time for every streamed delta.
@@ -835,10 +858,12 @@ impl EventSink for TextSink<'_> {
             }
             PublicEvent::PlanUpdated { .. } if !self.quiet => {
                 self.finish();
-                self.out.notice_block(&plan_block(
-                    &state.plan,
-                    self.capabilities.with_current_width(),
-                ));
+                if !self.out.plan_status(&state.plan) {
+                    self.out.notice_block(&plan_block(
+                        &state.plan,
+                        self.capabilities.with_current_width(),
+                    ));
+                }
             }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
