@@ -66,7 +66,7 @@ pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
 pub fn id_for(
     choice: &SessionChoice,
     workspace: &std::path::Path,
-    store: &dyn SessionStore,
+    store: &JsonlStore,
 ) -> Result<SessionId, UsageError> {
     match choice {
         SessionChoice::New => Ok(SessionId::new()),

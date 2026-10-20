@@ -1823,16 +1823,14 @@ async fn report_session_usage(
     width: usize,
     diagnostics: &dyn Diagnostics,
 ) {
-    let metadata = match crate::catalogue::saved_sessions(store, diagnostics)
-        .map(|metas| crate::catalogue::in_workspace(metas, root))
-    {
-        Ok(metadata) => metadata,
+    let metadata = match store.readable_meta(&session_id) {
+        Ok(metadata) => metadata.filter(|meta| meta.workspace_root == root),
         Err(error) => {
             diagnostics.note(&format!("the session catalogue could not be read: {error}"));
             return;
         }
     };
-    let Some(meta) = metadata.into_iter().find(|meta| meta.id == session_id) else {
+    let Some(meta) = metadata else {
         diagnostics.note("the active session is absent from its durable catalogue");
         return;
     };

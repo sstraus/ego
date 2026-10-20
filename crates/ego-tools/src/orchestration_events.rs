@@ -1,5 +1,6 @@
 //! Fixed host-owned observation sources and one durable cursor. No model calls.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -9,7 +10,7 @@ use ego_core::orchestration_events::{Card, Cursor, Observation, Salience, conten
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::store::{Lease, OsIo, StoreIo};
+use crate::store::{FileRevision, Lease, OsIo, StoreIo};
 
 #[derive(Debug, Deserialize)]
 pub struct InboxPage {
@@ -29,6 +30,12 @@ pub struct InboxMessage {
     pub from_tuic_session: Option<String>,
 }
 
+// The durable cursor still uses content digests; a restart rereads candidates.
+struct CachedResult {
+    signature: FileRevision,
+    is_result: bool,
+}
+
 /// A local lease prevents two observers from advancing the same root's cursor.
 pub struct ObservationPump {
     cursor: Cursor,
@@ -36,6 +43,8 @@ pub struct ObservationPump {
     results: PathBuf,
     children: PathBuf,
     supervised: Vec<ego_core::orchestrator::SpawnReceipt>,
+    result_cache: HashMap<PathBuf, CachedResult>,
+    last_scan_ms: Option<u64>,
     _lease: Lease,
 }
 
@@ -68,6 +77,8 @@ impl ObservationPump {
             results: home.join("Gits/.tmp/results"),
             children: state.join("children.tsv"),
             supervised: Vec::new(),
+            result_cache: HashMap::new(),
+            last_scan_ms: None,
             _lease: lease,
         };
         pump.persist()?;
@@ -277,8 +288,11 @@ impl ObservationPump {
     }
 
     pub async fn poll(&mut self, now_ms: u64) -> io::Result<()> {
+        // Supervision and polling share one result snapshot within a pump tick.
         // Files first survive mail-source failure; no shared watch stamp is changed.
-        self.scan_results(now_ms)?;
+        if self.last_scan_ms != Some(now_ms) {
+            self.scan_results(now_ms)?;
+        }
         self.persist()?;
         // Bound the cycle even if mail keeps arriving; retained pages resume next tick.
         for _ in 0..2 {
@@ -341,27 +355,51 @@ impl ObservationPump {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
+        let tracking = parse_tracking(&read_tracking(&self.children)?);
         let mut files = Vec::new();
         for entry in entries {
             let entry = entry?;
             if entry.file_type()?.is_file()
                 && entry.path().extension().is_some_and(|ext| ext == "md")
             {
-                files.push((entry.metadata()?.modified()?, entry.path()));
+                let signature = FileRevision::from_metadata(&entry.metadata()?)?;
+                files.push((signature.modified, entry.path(), signature));
             }
         }
-        files.sort();
-        for (modified, path) in files {
-            let mut bytes = Vec::new();
-            std::fs::File::open(&path)?
-                .take(64 * 1024 + 1)
-                .read_to_end(&mut bytes)?;
-            let text = if bytes.len() > 64 * 1024 {
-                format!("BLOCKED: result exceeds 64 KiB: {}", path.display())
+        files.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        let present: HashSet<_> = files.iter().map(|(_, path, _)| path.clone()).collect();
+        self.result_cache.retain(|path, _| present.contains(path));
+        for (modified, path, signature) in files {
+            let unchanged = self
+                .result_cache
+                .get(&path)
+                .filter(|cached| cached.signature == signature);
+            let (changed, is_result) = if let Some(cached) = unchanged {
+                (None, cached.is_result)
             } else {
-                String::from_utf8(bytes).map_err(io::Error::other)?
+                let mut bytes = Vec::new();
+                #[cfg(test)]
+                tests::REPORT_READS.with(|count| count.set(count.get() + 1));
+                std::fs::File::open(&path)?
+                    .take(64 * 1024 + 1)
+                    .read_to_end(&mut bytes)?;
+                let text = if bytes.len() > 64 * 1024 {
+                    format!("BLOCKED: result exceeds 64 KiB: {}", path.display())
+                } else {
+                    String::from_utf8(bytes).map_err(io::Error::other)?
+                };
+                let is_result = text.trim().starts_with("RESULT");
+                let revision = content_id(&text);
+                self.result_cache.insert(
+                    path.clone(),
+                    CachedResult {
+                        signature,
+                        is_result,
+                    },
+                );
+                (Some((text, revision)), is_result)
             };
-            let revision = content_id(&text);
+            let tracked = tracked_child(&tracking, &path);
             let peer = self
                 .supervised
                 .iter()
@@ -373,7 +411,7 @@ impl ObservationPump {
                 })
                 .max_by_key(|r| r.name.len())
                 .map(|r| r.name.clone())
-                .or(tracked_peer(&self.children, &path)?);
+                .or_else(|| tracked.map(|(_, name)| name.to_owned()));
             let candidate_sender = self
                 .supervised
                 .iter()
@@ -382,13 +420,13 @@ impl ObservationPump {
                 })
                 .max_by_key(|r| r.spawned_at_ms)
                 .map(|r| r.session_id.clone());
-            let tracked_sender = tracked_sender(&self.children, &path)?;
+            let tracked_sender = tracked.map(|(id, _)| id.to_owned());
             // A reused peer name cannot override the tracked child's identity.
             let (peer, sender) = match (candidate_sender, tracked_sender) {
                 (Some(candidate), Some(tracked)) if candidate != tracked => (None, Some(tracked)),
                 (candidate, tracked) => (peer, candidate.or(tracked)),
             };
-            if text.trim().starts_with("RESULT") {
+            if is_result {
                 // A RESULT settles only a spawn it postdates; a reused name keeps older files.
                 for receipt in self.supervised.iter().filter(|r| {
                     sender.as_deref() == Some(r.session_id.as_str())
@@ -398,6 +436,9 @@ impl ObservationPump {
                     self.cursor.settle_spawn(&receipt.session_id);
                 }
             }
+            let Some((text, revision)) = changed else {
+                continue;
+            };
             if self.cursor.files.get(&path) == Some(&revision) {
                 continue;
             }
@@ -413,7 +454,9 @@ impl ObservationPump {
                 now_ms,
             );
         }
-        self.persist()
+        self.persist()?;
+        self.last_scan_ms = Some(now_ms);
+        Ok(())
     }
 
     pub fn ingest_sessions(&mut self, sessions: &Value, now_ms: u64) -> io::Result<()> {
@@ -466,36 +509,34 @@ impl ObservationPump {
 }
 
 fn read_tracking(path: &Path) -> io::Result<String> {
+    #[cfg(test)]
+    tests::TRACKING_READS.with(|count| count.set(count.get() + 1));
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
         other => other,
     }
 }
 
-fn tracked_peer(children: &Path, result: &Path) -> io::Result<Option<String>> {
-    let filename = result.file_name().unwrap_or_default().to_string_lossy();
-    Ok(read_tracking(children)?
-        .lines()
-        .filter_map(|row| row.split('\t').nth(1))
-        .filter(|name| filename.starts_with(&format!("{name}-")))
-        .max_by_key(|name| name.len())
-        .map(str::to_owned))
-}
-
-fn tracked_sender(children: &Path, result: &Path) -> io::Result<Option<String>> {
-    let filename = result.file_name().unwrap_or_default().to_string_lossy();
-    Ok(read_tracking(children)?
+fn parse_tracking(tracking: &str) -> Vec<(String, String)> {
+    tracking
         .lines()
         .filter_map(|row| {
             let mut fields = row.split('\t');
-            let id = fields.next()?;
-            let name = fields.next()?;
-            filename
-                .starts_with(&format!("{name}-"))
-                .then_some((name.len(), id.to_owned()))
+            Some((fields.next()?.to_owned(), fields.next()?.to_owned()))
         })
-        .max_by_key(|(len, _)| *len)
-        .map(|(_, id)| id))
+        .collect()
+}
+
+fn tracked_child<'a>(
+    tracking: &'a [(String, String)],
+    result: &Path,
+) -> Option<(&'a str, &'a str)> {
+    let filename = result.file_name().unwrap_or_default().to_string_lossy();
+    tracking
+        .iter()
+        .filter(|(_, name)| filename.starts_with(&format!("{name}-")))
+        .max_by_key(|(_, name)| name.len())
+        .map(|(id, name)| (id.as_str(), name.as_str()))
 }
 
 pub fn millis(time: SystemTime) -> u64 {
@@ -552,6 +593,93 @@ pub fn spawn_receipts(
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    thread_local! {
+        pub(super) static REPORT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static TRACKING_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    // Catches: unchanged report scans reopen every report and tracking twice per report.
+    #[test]
+    fn result_scan_does_not_reopen_unchanged_content_or_tracking_per_report() {
+        let home = tempfile::tempdir().unwrap();
+        let results = home.path().join("Gits/.tmp/results");
+        std::fs::create_dir_all(&results).unwrap();
+        for name in ["alpha-1.md", "alpha-long-1.md", "other-1.md"] {
+            std::fs::write(results.join(name), format!("RESULT {name}")).unwrap();
+        }
+        let mut pump = ObservationPump::open(home.path(), home.path()).unwrap();
+        std::fs::write(&pump.children, "id-alpha\talpha\nid-long\talpha-long\n").unwrap();
+        pump.scan_results(100).unwrap();
+        REPORT_READS.with(|count| count.set(0));
+        TRACKING_READS.with(|count| count.set(0));
+        pump.scan_results(200).unwrap();
+        assert_eq!(
+            REPORT_READS.with(std::cell::Cell::get),
+            0,
+            "unchanged reports must not be reopened"
+        );
+        assert_eq!(
+            TRACKING_READS.with(std::cell::Cell::get),
+            1,
+            "tracking must be one scan snapshot, not two reads per report"
+        );
+        let cards = pump.ready(20_000);
+        let long = cards
+            .iter()
+            .find(|card| card.result.as_ref() == Some(&results.join("alpha-long-1.md")))
+            .unwrap();
+        assert_eq!(long.peer.as_deref(), Some("alpha-long"));
+        assert_eq!(long.sender.as_deref(), Some("id-long"));
+    }
+
+    // Catches: metadata caching hides replacements, additions, removals, or restart replay.
+    #[test]
+    fn result_scan_revalidates_changed_replaced_and_restarted_reports() {
+        let home = tempfile::tempdir().unwrap();
+        let results = home.path().join("Gits/.tmp/results");
+        std::fs::create_dir_all(&results).unwrap();
+        let path = results.join("worker-1.md");
+        std::fs::write(&path, "RESULT first").unwrap();
+        let mut pump = ObservationPump::open(home.path(), home.path()).unwrap();
+        pump.scan_results(100).unwrap();
+        for (index, content) in ["RESULT other", "RESULT third"].into_iter().enumerate() {
+            REPORT_READS.with(|count| count.set(0));
+            if index == 0 {
+                std::fs::write(&path, content).unwrap();
+            } else {
+                let replacement = results.join("replacement.tmp");
+                std::fs::write(&replacement, content).unwrap();
+                let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&replacement)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(modified))
+                    .unwrap();
+                std::fs::rename(replacement, &path).unwrap();
+            }
+            pump.scan_results(200 + index as u64).unwrap();
+            assert_eq!(REPORT_READS.with(std::cell::Cell::get), 1);
+        }
+        std::fs::remove_file(&path).unwrap();
+        pump.scan_results(300).unwrap();
+        assert!(pump.result_cache.is_empty());
+        std::fs::write(&path, "BLOCKED added").unwrap();
+        pump.scan_results(400).unwrap();
+        let cards = pump.ready(20_000).to_vec();
+        assert!(cards.iter().any(|card| card.text == "BLOCKED added"));
+        drop(pump);
+        let mut reopened = ObservationPump::open(home.path(), home.path()).unwrap();
+        REPORT_READS.with(|count| count.set(0));
+        reopened.scan_results(500).unwrap();
+        assert_eq!(
+            REPORT_READS.with(std::cell::Cell::get),
+            1,
+            "restart must validate content, not trust persisted metadata"
+        );
+        assert_eq!(reopened.ready(20_000), cards);
+    }
 
     // Catches: the observer consumes its launching Claude coordinator's inbox.
     #[test]
