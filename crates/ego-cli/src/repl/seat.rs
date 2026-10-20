@@ -463,6 +463,7 @@ struct SurfaceStatus {
     origin: InputOrigin,
     native_status: bool,
     width: usize,
+    plan: Option<ego_core::plan::Plan>,
     template: super::status::StatusTemplate,
     template_diagnostic: Option<String>,
     provider_values: Vec<(StatusSegmentName, super::status::SegmentValue)>,
@@ -567,6 +568,7 @@ impl Default for SurfaceStatus {
             origin: InputOrigin::Typed,
             native_status: false,
             width: 0,
+            plan: None,
             template: super::status::StatusTemplate::new(super::status::DEFAULT_TEMPLATE.into()),
             template_diagnostic: None,
             provider_values: Vec::new(),
@@ -908,6 +910,22 @@ impl SurfaceOutput {
             },
             owner,
         )
+    }
+
+    pub(crate) fn plan_status(&self, plan: &ego_core::plan::Plan) -> bool {
+        let Some(status) = &self.status else {
+            return false;
+        };
+        status.lock().expect("surface status lock").plan = Some(plan.clone());
+        repaint_status(status);
+        true
+    }
+
+    pub(crate) fn take_plan(&self) -> Option<ego_core::plan::Plan> {
+        let status = self.status.as_ref()?;
+        let plan = status.lock().expect("surface status lock").plan.take();
+        repaint_status(status);
+        plan
     }
 
     pub(crate) fn goal_status(&self, goal: Option<(String, u32, Option<u32>)>) {
