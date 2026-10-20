@@ -68,7 +68,7 @@ fn adapter(path: &Path, io: &Arc<ReadIo>) -> OsUserConfigStore<Arc<ReadIo>> {
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let text = "model = 'provider/raw'\nthinking = 'low'\nmode = 'edits'\nsandbox = 'workspace'\nbudget = '5$'\nbare = false\n[permissions]\njudge = 'judge/raw'\n[ui.statusline]\nsegments = []\n[profile.dev]\nmodel = 'dev/raw'\n[profile.ci]\nsession_dir = '/sessions'\nartifact_dir = '/artifacts'\n";
+    let text = "model = 'provider/raw'\nthinking = 'low'\nmode = 'edits'\nsandbox = 'workspace'\nbudget = '5$'\nbare = false\n[permissions]\njudge = 'judge/raw'\n[ui.statusline]\ntemplate = '{{ prompt }}'\n[profile.dev]\nmodel = 'dev/raw'\n[profile.ci]\nsession_dir = '/sessions'\nartifact_dir = '/artifacts'\n";
     std::fs::write(&path, text).unwrap();
     ConfigLayer::parse(Source::User, text).expect("fixture is strict");
     dir
@@ -116,14 +116,18 @@ fn real_adapter_reads_exact_stored_values_in_canonical_order_without_writes() {
                 )))
             ),
             (
-                ManagedConfigKey::StatuslineSegments,
-                Some(ManagedConfigValue::StatuslineSegments(Vec::new()))
+                ManagedConfigKey::StatuslineTemplate,
+                Some(ManagedConfigValue::StatuslineTemplate(
+                    "{{ prompt }}".into()
+                ))
             ),
             (ManagedConfigKey::ExecEnv, None),
             (ManagedConfigKey::ExecEnvAllowlist, None),
             (ManagedConfigKey::Network, None),
             (ManagedConfigKey::Roots, None),
             (ManagedConfigKey::ExecPaths, None),
+            (ManagedConfigKey::Keybindings, None),
+            (ManagedConfigKey::Vim, None),
         ]
     );
     assert_eq!(io.writes.load(Ordering::SeqCst), 0);

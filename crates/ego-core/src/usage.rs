@@ -7,7 +7,9 @@ use std::num::NonZeroU64;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::cost::{CostDelta, CurrencyCode, Money, UnknownCost};
+use crate::cost::{
+    CostAttribution, CostDelta, CurrencyCode, Money, SubscriptionEquivalent, UnknownCost,
+};
 use crate::event::domain::{GenerationRole, OccupancyProvenance};
 use crate::event::id::SessionId;
 use crate::event::time::{Clock, Timestamp};
@@ -15,9 +17,9 @@ use crate::session::SessionLineage;
 use crate::state::{Charge, ChargeAttribution, SessionState, Usage};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
-/// The current closed v2 contract requires every role, including goal_check.
+/// The current closed v3 contract separates subscription equivalents from monetary spend.
 /// Old report snapshots are not accepted through compatibility defaults.
-pub const USAGE_REPORT_VERSION: u32 = 2;
+pub const USAGE_REPORT_VERSION: u32 = 3;
 
 /// A deterministic workspace or active-session usage report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +111,10 @@ impl Serialize for UsageLine {
 pub struct CostBreakdown {
     pub known: Vec<Money>,
     pub unknown: Vec<UnknownCost>,
+    /// Display-only standard API equivalents, never monetary charges.
+    pub subscription_equivalent: Vec<Money>,
+    /// Missing or overflowing policy estimates (including unmetered usage), not monetary unknowns.
+    pub subscription_unknown: Vec<UnknownCost>,
 }
 
 /// A report cannot truthfully place legacy spend on a generation-role line.
@@ -300,42 +306,31 @@ impl LinesAccumulator {
 
 struct LineAccumulator {
     usage: Usage,
-    known: BTreeMap<CurrencyCode, Money>,
-    overflowed: BTreeSet<CurrencyCode>,
-    unknown: Vec<UnknownCost>,
+    monetary: CostTotals,
+    subscription: CostTotals,
 }
 
 impl LineAccumulator {
     fn new() -> Self {
         Self {
             usage: Usage::IDENTITY,
-            known: BTreeMap::new(),
-            overflowed: BTreeSet::new(),
-            unknown: Vec::new(),
+            monetary: CostTotals::default(),
+            subscription: CostTotals::default(),
         }
     }
 
     fn add(&mut self, charge: &Charge) {
         self.usage.add(&charge.usage);
         match &charge.cost {
-            CostDelta::Unknown(reason) => self.unknown.push(reason.clone()),
-            CostDelta::Known { amount, .. } if !self.overflowed.contains(&amount.currency) => {
-                if let Some(current) = self.known.get(&amount.currency).copied() {
-                    match current.checked_add(amount) {
-                        Ok(total) => {
-                            self.known.insert(amount.currency, total);
-                        }
-                        Err(_) => {
-                            self.known.remove(&amount.currency);
-                            self.overflowed.insert(amount.currency);
-                            self.unknown.push(UnknownCost::Overflow);
-                        }
-                    }
-                } else {
-                    self.known.insert(amount.currency, *amount);
-                }
-            }
-            CostDelta::Known { .. } => {}
+            CostDelta::Unknown(reason) => self.monetary.unknown.push(reason.clone()),
+            CostDelta::Known {
+                attribution: CostAttribution::MeteringPolicy { equivalent, .. },
+                ..
+            } => match equivalent.as_deref() {
+                Some(SubscriptionEquivalent::V1 { amount, .. }) => self.subscription.add(amount),
+                None => self.subscription.unknown.push(UnknownCost::NoPricingQuote),
+            },
+            CostDelta::Known { amount, .. } => self.monetary.add(amount),
         }
     }
 
@@ -343,9 +338,40 @@ impl LineAccumulator {
         UsageLine {
             usage: self.usage,
             cost: CostBreakdown {
-                known: self.known.into_values().collect(),
-                unknown: self.unknown,
+                known: self.monetary.known.into_values().collect(),
+                unknown: self.monetary.unknown,
+                subscription_equivalent: self.subscription.known.into_values().collect(),
+                subscription_unknown: self.subscription.unknown,
             },
+        }
+    }
+}
+
+#[derive(Default)]
+struct CostTotals {
+    known: BTreeMap<CurrencyCode, Money>,
+    overflowed: BTreeSet<CurrencyCode>,
+    unknown: Vec<UnknownCost>,
+}
+
+impl CostTotals {
+    fn add(&mut self, amount: &Money) {
+        if self.overflowed.contains(&amount.currency) {
+            return;
+        }
+        if let Some(current) = self.known.get(&amount.currency).copied() {
+            match current.checked_add(amount) {
+                Ok(total) => {
+                    self.known.insert(amount.currency, total);
+                }
+                Err(_) => {
+                    self.known.remove(&amount.currency);
+                    self.overflowed.insert(amount.currency);
+                    self.unknown.push(UnknownCost::Overflow);
+                }
+            }
+        } else {
+            self.known.insert(amount.currency, *amount);
         }
     }
 }

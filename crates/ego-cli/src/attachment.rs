@@ -35,14 +35,23 @@ struct Staged {
     writer: Box<dyn BlobWriter>,
 }
 
+/// Ordered sources for one prompt, admitted under one aggregate limit.
+#[derive(Clone)]
+pub(crate) enum AttachmentInput {
+    Spec(String),
+    Inline(Image),
+    Published(ImageRef),
+}
+
 /// Acquire, validate, and publish one ordered CLI attachment batch.
 ///
 /// Capability support and count are proved before a source is touched. Blob
 /// commits happen only after every exact byte sequence satisfies both product
 /// and selected-model limits, and therefore before any prompt can reference
 /// the returned values.
-pub(crate) async fn acquire(
-    specs: &[String],
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn acquire_ordered(
+    inputs: &[AttachmentInput],
     capabilities: &ModelCapabilities,
     profile: &str,
     resolved_model: &str,
@@ -50,7 +59,7 @@ pub(crate) async fn acquire(
     ports: &RunEffectPorts,
     blobs: &dyn BlobStore,
 ) -> Result<Vec<ImageRef>, UsageError> {
-    if specs.is_empty() {
+    if inputs.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -58,17 +67,21 @@ pub(crate) async fn acquire(
     let max_images = limits.max_images().map_or(MAX_IMAGES_PER_PROMPT, |value| {
         usize::try_from(value.get()).expect("model image count is product-bounded at 100")
     });
-    if specs.len() > max_images {
+    if inputs.len() > max_images {
         return Err(UsageError(format!(
             "model profile `{profile}` resolved to `{resolved_model}` accepts at most \
-             {max_images} images, but {} --attach values were supplied",
-            specs.len()
+             {max_images} images, but {} images were supplied",
+            inputs.len()
         )));
     }
 
-    let sources = specs
+    // Parse every path/URL before reading any source.
+    let sources = inputs
         .iter()
-        .map(|spec| parse_source(spec, cwd))
+        .map(|input| match input {
+            AttachmentInput::Spec(spec) => parse_source(spec, cwd).map(Some),
+            _ => Ok(None),
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let max_per_image = limits
         .max_bytes_per_image()
@@ -79,15 +92,45 @@ pub(crate) async fn acquire(
     let mut total = 0_u64;
     let mut staged = Vec::with_capacity(sources.len());
 
-    for (offset, source) in sources.into_iter().enumerate() {
+    for (offset, (input, source)) in inputs.iter().zip(sources).enumerate() {
         let index = offset + 1;
         let mut writer = blobs.begin().map_err(|error| {
             UsageError(format!(
                 "attachment {index} could not begin its session blob: {error}"
             ))
         })?;
-        let bytes = match source {
-            Source::Path(path) => read_path_once(
+        let bytes = match (input, source) {
+            (AttachmentInput::Inline(image), _) => {
+                stage_bounded(
+                    0,
+                    writer.as_mut(),
+                    image.bytes(),
+                    index,
+                    max_per_image,
+                    max_total,
+                    &mut total,
+                )?;
+                image.bytes().to_vec()
+            }
+            (AttachmentInput::Published(reference), _) => {
+                let bytes = blobs.read(reference.reference()).map_err(|error| {
+                    UsageError(format!("recalled image {index} could not be read: {error}"))
+                })?;
+                reference.hydrate(bytes.clone()).map_err(|error| {
+                    UsageError(format!("recalled image {index} is invalid: {error}"))
+                })?;
+                stage_bounded(
+                    0,
+                    writer.as_mut(),
+                    &bytes,
+                    index,
+                    max_per_image,
+                    max_total,
+                    &mut total,
+                )?;
+                bytes
+            }
+            (_, Some(Source::Path(path))) => read_path_once(
                 &path,
                 writer.as_mut(),
                 index,
@@ -95,7 +138,7 @@ pub(crate) async fn acquire(
                 max_total,
                 &mut total,
             )?,
-            Source::Https(url) => {
+            (_, Some(Source::Https(url))) => {
                 fetch_https(
                     url,
                     writer.as_mut(),
@@ -106,6 +149,9 @@ pub(crate) async fn acquire(
                     ports,
                 )
                 .await?
+            }
+            (AttachmentInput::Spec(_), None) => {
+                unreachable!("specs were parsed before acquisition")
             }
         };
         let media_type = media_type(&bytes).ok_or_else(|| {
@@ -118,82 +164,19 @@ pub(crate) async fn acquire(
                 "attachment {index} is not an admitted image: {error}"
             ))
         })?;
+        let text_offset = match input {
+            AttachmentInput::Inline(image) => image.text_offset(),
+            AttachmentInput::Published(image) => image.text_offset(),
+            AttachmentInput::Spec(_) => None,
+        };
+        let image = match text_offset {
+            Some(offset) => image.with_text_offset(offset),
+            None => image,
+        };
         validate_model_image(&image, index, limits, profile, resolved_model)?;
         staged.push(Staged { image, writer });
     }
 
-    commit_staged(staged)
-}
-
-/// Publish an ordered batch of images that arrived already decoded.
-///
-/// The sibling of [`acquire`] for content ego did not have to fetch: an ACP
-/// `session/prompt` carries its images inside the request, so there is no path
-/// to open and no URL to dial, and the two steps that remain are the two that
-/// are actually about admission — proving the selected model accepts each
-/// image, and publishing the exact bytes into the session's store.
-///
-/// Both halves are shared with `acquire` rather than restated, so a limit that
-/// is enforced for `--attach` cannot silently not be enforced here. The order
-/// of the batch is the order it was sent in, and, as in `acquire`, nothing is
-/// committed until every image in it has passed: a prompt that is going to be
-/// refused leaves no blobs behind for the collector to find.
-pub(crate) fn publish(
-    images: &[Image],
-    capabilities: &ModelCapabilities,
-    profile: &str,
-    resolved_model: &str,
-    blobs: &dyn BlobStore,
-) -> Result<Vec<ImageRef>, UsageError> {
-    if images.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let limits = supported_limits(capabilities, profile, resolved_model)?;
-    let max_images = limits.max_images().map_or(MAX_IMAGES_PER_PROMPT, |value| {
-        usize::try_from(value.get()).expect("model image count is product-bounded at 100")
-    });
-    if images.len() > max_images {
-        return Err(UsageError(format!(
-            "model profile `{profile}` resolved to `{resolved_model}` accepts at most \
-             {max_images} images, but {} were sent with the prompt",
-            images.len()
-        )));
-    }
-    let max_per_image = limits
-        .max_bytes_per_image()
-        .map_or(MAX_IMAGE_BYTES, |value| value.get());
-    let max_total = limits
-        .max_total_bytes()
-        .map_or(MAX_TOTAL_IMAGE_BYTES, |value| value.get());
-
-    let mut total = 0_u64;
-    let mut staged = Vec::with_capacity(images.len());
-    for (offset, image) in images.iter().enumerate() {
-        let index = offset + 1;
-        let mut writer = blobs.begin().map_err(|error| {
-            UsageError(format!(
-                "image {index} could not begin its session blob: {error}"
-            ))
-        })?;
-        // `Image` already proved the bytes decode and are within the product
-        // bounds; what is left is this model's ceiling and the running total,
-        // which is the same check `--attach` streams against.
-        stage_bounded(
-            0,
-            writer.as_mut(),
-            image.bytes(),
-            index,
-            max_per_image,
-            max_total,
-            &mut total,
-        )?;
-        validate_model_image(image, index, limits, profile, resolved_model)?;
-        staged.push(Staged {
-            image: image.clone(),
-            writer,
-        });
-    }
     commit_staged(staged)
 }
 
@@ -602,8 +585,35 @@ mod tests {
         let effects = crate::provider_http::CommandHttpScope::online(CancelToken::new())
             .await
             .unwrap();
-        let capabilities = ModelCapabilities {
+        let capabilities = image_capabilities();
+        let result = acquire_ordered(
+            &[AttachmentInput::Spec(format!(
+                "https://{address}/image.png"
+            ))],
+            &capabilities,
+            "fixture",
+            "fixture/image",
+            owner.path(),
+            effects.ports(),
+            &blobs,
+        )
+        .await;
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("could not fetch"), "{error}");
+        assert!(
+            peer.await.unwrap() > 0,
+            "the local peer received no TLS handshake"
+        );
+        assert_eq!(
+            blobs.collect_garbage(&[]).unwrap(),
+            0,
+            "failed TLS published a blob"
+        );
+    }
+    fn image_capabilities() -> ModelCapabilities {
+        ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens: Some(8192),
             max_output_tokens: Some(128),
             max_tools: None,
@@ -627,9 +637,80 @@ mod tests {
                 .unwrap(),
             ),
             default_reasoning_effort: None,
-        };
-        let result = acquire(
-            &[format!("https://{address}/image.png")],
+        }
+    }
+
+    // Catches: collecting inline images separately reorders a mixed draft.
+    #[tokio::test]
+    async fn mixed_image_sources_preserve_the_draft_order() {
+        let owner = tempfile::tempdir().unwrap();
+        let bytes = crate::run::test_support::PNG_1X1;
+        let path = owner.path().join("middle.png");
+        std::fs::write(&path, bytes).unwrap();
+        let blobs = SessionBlobStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let image = Image::new(bytes.to_vec(), ImageMediaType::Png).unwrap();
+        let inputs = [
+            AttachmentInput::Inline(image.clone().with_text_offset(1)),
+            AttachmentInput::Spec(path.to_string_lossy().into_owned()),
+            AttachmentInput::Inline(image.with_text_offset(3)),
+        ];
+        let references = acquire_ordered(
+            &inputs,
+            &image_capabilities(),
+            "fixture",
+            "fixture/image",
+            owner.path(),
+            effects.ports(),
+            &blobs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            references
+                .iter()
+                .map(ImageRef::text_offset)
+                .collect::<Vec<_>>(),
+            [Some(1), None, Some(3)]
+        );
+        for reference in references {
+            assert_eq!(blobs.read(reference.reference()).unwrap(), bytes);
+        }
+    }
+
+    // Catches: inline/path batches each pass a separate aggregate byte budget
+    // and publish a prompt that exceeds the selected model's total limit.
+    #[tokio::test]
+    async fn mixed_image_sources_share_one_aggregate_limit_before_publication() {
+        let owner = tempfile::tempdir().unwrap();
+        let bytes = crate::run::test_support::PNG_1X1;
+        let path = owner.path().join("second.png");
+        std::fs::write(&path, bytes).unwrap();
+        let blobs = SessionBlobStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let mut capabilities = image_capabilities();
+        capabilities.image_input = ImageInputSupport::Supported(
+            ImageLimits::new(
+                [ImageMediaType::Png].into_iter().collect(),
+                None,
+                None,
+                std::num::NonZeroU64::new(bytes.len() as u64),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let inputs = [
+            AttachmentInput::Inline(Image::new(bytes.to_vec(), ImageMediaType::Png).unwrap()),
+            AttachmentInput::Spec(path.to_string_lossy().into_owned()),
+        ];
+        let error = acquire_ordered(
+            &inputs,
             &capabilities,
             "fixture",
             "fixture/image",
@@ -637,17 +718,16 @@ mod tests {
             effects.ports(),
             &blobs,
         )
-        .await;
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("could not fetch"), "{error}");
+        .await
+        .unwrap_err();
         assert!(
-            peer.await.unwrap() > 0,
-            "the local peer received no TLS handshake"
+            error.to_string().contains("aggregate image limit"),
+            "{error}"
         );
         assert_eq!(
             blobs.collect_garbage(&[]).unwrap(),
             0,
-            "failed TLS published a blob"
+            "a refused mixed batch must not publish blobs"
         );
     }
 }

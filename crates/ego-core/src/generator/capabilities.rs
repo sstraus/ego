@@ -20,6 +20,17 @@ use super::types::{
     ThinkingLevel,
 };
 
+/// Proven audio input contract; missing facts are never support.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioInputSupport {
+    #[default]
+    Unknown,
+    Unsupported,
+    /// The admitted PCM16 WAV subset on the public Chat Completions endpoint.
+    SupportedWav,
+}
+
 /// Every image `messages` carries, in order.
 fn images_in(messages: &[Message]) -> Vec<&Image> {
     messages
@@ -396,6 +407,8 @@ pub struct ModelCapabilities {
     /// Exact image-input facts. Missing older fields fail closed.
     #[serde(default)]
     pub image_input: ImageInputSupport,
+    #[serde(default)]
+    pub audio_input: AudioInputSupport,
 }
 
 /// One way a `GenRequest` does not fit a model's capabilities.
@@ -408,6 +421,8 @@ pub struct ModelCapabilities {
 /// being switched to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapabilityGap {
+    AudioInputUnknown,
+    AudioInputUnsupported,
     ImageInputUnknown,
     /// Where the images came from, because the gap is a statement about the
     /// whole request and the person only sent the last message of it.
@@ -570,6 +585,12 @@ impl std::error::Error for ReasoningSelectionError {}
 impl std::fmt::Display for CapabilityGap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AudioInputUnknown => {
+                f.write_str("unknown audio input support; audio was not sent")
+            }
+            Self::AudioInputUnsupported => f.write_str(
+                "this model cannot accept audio; select an audio-capable model; audio was not sent",
+            ),
             Self::ImageInputUnknown => {
                 write!(f, "unknown image input support; resolve the model again")
             }
@@ -683,7 +704,7 @@ impl ModelCapabilities {
     ///
     /// [`reasoning_efforts`]: ModelCapabilities::reasoning_efforts
     /// [`reasoning_state_dialect`]: ModelCapabilities::reasoning_state_dialect
-    pub const SCHEMA_VERSION: u32 = 5;
+    pub const SCHEMA_VERSION: u32 = 6;
 
     /// Resolve one explicit override or the model's stated default, then
     /// validate that exact value against the existing reasoning-support fact.
@@ -730,6 +751,19 @@ impl ModelCapabilities {
     /// sent.
     pub fn request_gaps(&self, req: &GenRequest) -> Vec<CapabilityGap> {
         let mut gaps = Vec::new();
+        if req
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| matches!(block, ContentBlock::Audio { .. }))
+        {
+            match self.audio_input {
+                AudioInputSupport::Unknown => gaps.push(CapabilityGap::AudioInputUnknown),
+                AudioInputSupport::Unsupported => gaps.push(CapabilityGap::AudioInputUnsupported),
+                AudioInputSupport::SupportedWav => {}
+            }
+        }
 
         // Split at the newest message rather than counting the request as one
         // heap. Every gap below is a fact about the whole request — history is

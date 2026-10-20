@@ -27,6 +27,7 @@ use ego_core::public::MeteringKind;
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(128_000),
         max_output_tokens: Some(16_000),
         max_tools: Some(128),

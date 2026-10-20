@@ -496,14 +496,27 @@ fn resolve_inner(
             });
         }
         merge_auth(&mut auth, &sourced.value.auth);
-        if let Some(segments) = sourced
+        if let Some(template) = sourced
             .value
             .ui
             .as_ref()
             .and_then(|ui| ui.statusline.as_ref())
-            .and_then(|statusline| statusline.segments.clone())
+            .and_then(|statusline| statusline.template.clone())
         {
-            ui.statusline.get_or_insert_default().segments = Some(segments);
+            ui.statusline.get_or_insert_default().template = Some(template);
+        }
+        // Installing executable status producers is operator authority, not project content.
+        if matches!(
+            sourced.source,
+            Source::System | Source::User | Source::Flags
+        ) && let Some(providers) = sourced
+            .value
+            .ui
+            .as_ref()
+            .and_then(|ui| ui.statusline.as_ref())
+            .and_then(|line| line.providers.clone())
+        {
+            ui.statusline.get_or_insert_default().providers = Some(providers);
         }
     }
 

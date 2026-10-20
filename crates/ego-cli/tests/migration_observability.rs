@@ -32,6 +32,7 @@ fn event() -> DomainEvent {
             producer: Producer::Main,
         },
         kind: EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "lossless migration".to_owned(),
             images: Vec::new(),
             queued_prompt: None,

@@ -1,10 +1,10 @@
-//! `edit`: one occurrence of one string, replaced, through the guarded seam.
+//! `edit`: exact text replacement through the guarded seam.
 //!
 //! The first tool in the tree that needs **two** authorities for one call. See
 //! `ARCHITECTURE.md`.
 
 use ego_core::permit::{
-    Change, GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
+    Change, GuardedIo, LineChange, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
 };
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
@@ -17,19 +17,16 @@ pub struct EditParams {
     /// The file to edit. Absolute, or relative to the working directory. It
     /// must already exist.
     pub path: String,
-    /// The exact text to replace. It must appear in the file exactly once —
-    /// include the surrounding lines if it does not.
+    /// The exact text to replace. Must occur exactly once unless replace_all is true.
     pub old_string: String,
     /// The text to put in its place.
     pub new_string: String,
+    /// Replace all original non-overlapping matches. Defaults to false (unique match only).
+    #[serde(default)]
+    pub replace_all: bool,
 }
 
-/// Replaces one occurrence of a string in one file.
-///
-/// **Exact, and exactly one.** No fuzzy fallback, no `replace_all`, no array of
-/// edits. Every shipped agent has at least one of those; none of them is needed
-/// to make an edit land, and each is a decision of its own — `replace_all` in
-/// particular turns one reviewed substitution into an unbounded number of them.
+/// Replaces exact text in one existing UTF-8 file. Bulk replacement is explicit.
 ///
 /// Unlike [`WriteTool`](super::WriteTool), the bytes this produces are not
 /// knowable from the call alone: they depend on the file found at execute time.
@@ -48,9 +45,10 @@ impl TypedTool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Replace one exact occurrence of a string in a file. The old text must appear exactly \
-         once — if it appears more than once, include surrounding lines until it is unique. \
-         The file must already exist. Use `write` to create a file or to replace all of it."
+        "Replace exact text in one existing UTF-8 file. By default old_string must occur exactly \
+         once; include surrounding context to disambiguate. Set replace_all=true to replace all \
+         original non-overlapping matches, not matches introduced by the replacement. Returns \
+         actual occurrence and changed-line counts. Use write for new files or whole-file replacement."
     }
 
     fn prepare_typed(
@@ -88,6 +86,7 @@ impl TypedTool for EditTool {
         .with_op(Op::Write {
             path,
             change: Change::Replace {
+                replace_all: params.replace_all,
                 old_string: params.old_string,
                 new_string: params.new_string,
             },
@@ -103,7 +102,7 @@ impl TypedTool for EditTool {
         'io: 'a,
     {
         Box::pin(async move {
-            let (path, old_string, new_string) = self.decode(call)?;
+            let (path, old_string, new_string, replace_all) = self.decode(call)?;
 
             let bytes = io.read(&path)?;
             // `old_string` is a string, so the file has to be one. A lossy
@@ -115,8 +114,10 @@ impl TypedTool for EditTool {
                 ))
             })?;
 
-            match before.matches(&old_string).count() {
+            let occurrences = before.matches(&old_string).count();
+            match occurrences {
                 1 => {}
+                n if n > 1 && replace_all => {}
                 0 => {
                     return Err(ToolError::InvalidParams(format!(
                         "that text is not in {path}"
@@ -134,12 +135,64 @@ impl TypedTool for EditTool {
             }
 
             let after = before.replace(&old_string, &new_string);
+            let change = if replace_all {
+                diff_lines(&before, &after)
+            } else {
+                changed_lines(&before, &after, &old_string, &new_string)
+            };
             io.write(&path, after.as_bytes())?;
             Ok(ToolResult::builtin(format!(
-                "replaced 1 occurrence in {path}"
-            )))
+                "replaced {occurrences} {} in {path} (+{} -{} lines){}",
+                if occurrences == 1 {
+                    "occurrence"
+                } else {
+                    "occurrences"
+                },
+                change.added,
+                change.removed,
+                io.write_notice(&path)
+                    .map(|notice| format!("\n{notice}"))
+                    .unwrap_or_default()
+            ))
+            .with_line_change(change))
         })
     }
+}
+
+/// Diff only the lines touched by the one replacement, not the whole file.
+fn changed_lines(before: &str, after: &str, old: &str, new: &str) -> LineChange {
+    let start = before
+        .find(old)
+        .expect("the unique old text was just verified");
+    let line_start = before[..start].rfind('\n').map_or(0, |index| index + 1);
+    let old_end = start + old.len();
+    let new_end = start + new.len();
+    let before_end = before[old_end..]
+        .find('\n')
+        .map_or(before.len(), |index| old_end + index + 1);
+    let after_end = after[new_end..]
+        .find('\n')
+        .map_or(after.len(), |index| new_end + index + 1);
+    diff_lines(
+        &before[line_start..before_end],
+        &after[line_start..after_end],
+    )
+}
+
+/// Count changed lines once even when several substitutions touch the same line.
+fn diff_lines(before: &str, after: &str) -> LineChange {
+    let mut change = LineChange {
+        added: 0,
+        removed: 0,
+    };
+    for line in similar::TextDiff::from_lines(before, after).iter_all_changes() {
+        match line.tag() {
+            similar::ChangeTag::Insert => change.added += 1,
+            similar::ChangeTag::Delete => change.removed += 1,
+            similar::ChangeTag::Equal => {}
+        }
+    }
+    change
 }
 
 impl EditTool {
@@ -153,7 +206,7 @@ impl EditTool {
     fn decode(
         &self,
         call: PreparedCall,
-    ) -> Result<(ego_core::permit::CanonPath, String, String), ToolError> {
+    ) -> Result<(ego_core::permit::CanonPath, String, String, bool), ToolError> {
         let (_, ops) = call.into_parts();
         let mut ops = ops.into_iter();
         let (Some(Op::Read { path: read_path }), Some(Op::Write { path, change }), None) =
@@ -162,6 +215,7 @@ impl EditTool {
             return Err(wrong_op(self.name()));
         };
         let Change::Replace {
+            replace_all,
             old_string,
             new_string,
         } = change
@@ -171,6 +225,55 @@ impl EditTool {
         if read_path != path {
             return Err(wrong_op(self.name()));
         }
-        Ok((path, old_string, new_string))
+        Ok((path, old_string, new_string, replace_all))
+    }
+}
+
+#[cfg(test)]
+mod line_change_tests {
+    use super::*;
+
+    #[test]
+    fn counts_only_changed_lines_and_preserves_matching_context() {
+        assert_eq!(
+            changed_lines("a\nb\nz\n", "a\nx\ny\nz\n", "b", "x\ny"),
+            LineChange {
+                added: 2,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            changed_lines("a\nsame\nb\n", "A\nsame\nB\n", "a\nsame\nb", "A\nsame\nB"),
+            LineChange {
+                added: 2,
+                removed: 2
+            }
+        );
+        assert_eq!(
+            changed_lines("a\n", "a", "a\n", "a"),
+            LineChange {
+                added: 1,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            changed_lines(
+                "prefixoldtail\nnext\n",
+                "prefixnewtail\nnext\n",
+                "old",
+                "new"
+            ),
+            LineChange {
+                added: 1,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            changed_lines("a\nb\n", "a\nb\n", "b", "b"),
+            LineChange {
+                added: 0,
+                removed: 0
+            }
+        );
     }
 }

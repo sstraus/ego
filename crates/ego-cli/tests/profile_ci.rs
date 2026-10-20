@@ -42,7 +42,7 @@ fn profile_ci_config(session_root: &Path, artifact_root: &Path) -> String {
 
 const OPENAI_CODEX_FACTS: &str = r#"
 [model."openai-codex/gpt-5.1".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
@@ -416,6 +416,7 @@ fn seed_session_with_unopenable_evidence(fixture: &Fixture) {
                     producer: Producer::Main,
                 },
                 kind: EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "durable prefix".to_owned(),
                     images: Vec::new(),
                     queued_prompt: None,

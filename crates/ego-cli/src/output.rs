@@ -7,12 +7,13 @@
 //! ([`note`]) not being able to reach it.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{ErrorKind, Write};
-use std::sync::Mutex;
+use std::io::{ErrorKind, IsTerminal, Write};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use ego_core::cost::{CumulativeCost, RateSource};
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
-use ego_core::event::id::{ItemId, SessionId};
+use ego_core::event::id::{ItemId, SessionId, TurnId};
 use ego_core::permit::Authority;
 use ego_core::public::{CeilingEffect, ItemKind, MeteringKind, PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination};
@@ -32,12 +33,22 @@ use crate::repl::SurfaceOutput;
 pub trait Diagnostics: Send + Sync {
     fn note(&self, message: &str);
 
+    /// One already-laid-out diagnostic block, with no spacing between its rows.
+    fn notice_block(&self, message: &str) {
+        self.note(message);
+    }
+
     /// A finished tool call: its rows, and the full detail the expand key
     /// shows later. A headless run has no expand key, so the rows are a
     /// diagnostic and the detail is dropped; a terminal surface commits the
     /// rows to the transcript and keeps the detail.
     fn tool_row(&self, rows: &str, _detail: String) {
         self.note(rows);
+    }
+
+    /// A replaceable successful shell row; append-only adapters keep the row.
+    fn shell_row(&self, rows: &str, detail: String, _live: crate::render::Line) {
+        self.tool_row(rows, detail);
     }
 
     /// Print the detail of the most recent tool call, if this surface kept
@@ -60,7 +71,10 @@ pub trait TextOutput: Diagnostics {
     }
     /// Replace a live retry row; ordinary outputs remain append-only.
     fn retry_status(&self, _message: Option<(&str, u64)>) {}
+    /// Refresh the active goal counter without writing a transcript row.
+    fn goal_status(&self, _goal: Option<(String, u32, Option<u32>)>) {}
     fn begin_block(&self) {}
+    fn settle_shell(&self) {}
     fn finish(&self) {}
 }
 
@@ -70,6 +84,10 @@ pub struct Stderr;
 impl Diagnostics for Stderr {
     fn note(&self, message: &str) {
         note(message);
+    }
+
+    fn notice_block(&self, message: &str) {
+        let _ = writeln!(std::io::stderr(), "{DISPLAY_NAME}: {message}");
     }
 }
 
@@ -172,6 +190,10 @@ impl Diagnostics for Stdout {
     fn note(&self, message: &str) {
         note(message);
     }
+
+    fn notice_block(&self, message: &str) {
+        Stderr.notice_block(message);
+    }
 }
 
 impl TextOutput for Stdout {
@@ -184,28 +206,55 @@ impl TextOutput for Stdout {
     }
 }
 
-/// How many finished tool calls the expand key can reach back to.
+/// How many tool calls and collapsed prompts the expand key retains.
 const EXPANDABLE_CALLS: usize = 16;
+
+/// One history shared by submission receipts and finished tool output.
+#[derive(Default)]
+pub(crate) struct ExpansionHistory(Mutex<VecDeque<String>>);
+
+impl ExpansionHistory {
+    pub(crate) fn remember(&self, detail: String) {
+        let mut entries = self.0.lock().expect("expansion detail lock");
+        if entries.len() == EXPANDABLE_CALLS {
+            entries.pop_front();
+        }
+        entries.push_back(detail);
+    }
+
+    pub(crate) fn latest(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("expansion detail lock")
+            .back()
+            .cloned()
+    }
+}
 
 /// Interactive text and diagnostics serialized into complete logical rows.
 pub struct InteractiveOutput {
     inner: Mutex<SurfaceOutput>,
-    /// Detail of the most recent tool calls, oldest first. Its own lock: the
-    /// rows are written through `inner` and the detail is only ever read back.
-    tools: Mutex<VecDeque<String>>,
+    /// Shared with the terminal owner's prompt submission renderer.
+    details: Arc<ExpansionHistory>,
 }
 
 impl InteractiveOutput {
     pub fn new(output: SurfaceOutput) -> Self {
         Self {
+            details: Arc::clone(&output.details),
             inner: Mutex::new(output),
-            tools: Mutex::new(VecDeque::new()),
         }
     }
 }
 
 impl Diagnostics for InteractiveOutput {
     fn note(&self, message: &str) {
+        let text = format!("{DISPLAY_NAME}: {message}");
+        let width = terminal_size::terminal_size().map(|(width, _)| usize::from(width.0));
+        self.line(&wrap_notice(&text, width));
+    }
+
+    fn notice_block(&self, message: &str) {
         self.line(&format!("{DISPLAY_NAME}: {message}"));
     }
 
@@ -214,15 +263,20 @@ impl Diagnostics for InteractiveOutput {
             let mut output = self.inner.lock().expect("surface output lock");
             let _ = output.write_tool(rows);
         }
-        let mut tools = self.tools.lock().expect("tool detail lock");
-        if tools.len() == EXPANDABLE_CALLS {
-            tools.pop_front();
-        }
-        tools.push_back(detail);
+        self.details.remember(detail);
+    }
+
+    fn shell_row(&self, rows: &str, detail: String, live: crate::render::Line) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .write_shell(rows, live);
+        self.details.remember(detail);
     }
 
     fn expand_last_tool(&self) {
-        let detail = self.tools.lock().expect("tool detail lock").back().cloned();
+        let detail = self.details.latest();
         match detail {
             Some(detail) => self.line(&detail),
             None => self.note("no tool call to expand yet"),
@@ -266,12 +320,27 @@ impl TextOutput for InteractiveOutput {
             .retry_status(message);
     }
 
+    fn goal_status(&self, goal: Option<(String, u32, Option<u32>)>) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .goal_status(goal);
+    }
+
     fn begin_block(&self) {
         let _ = self
             .inner
             .lock()
             .expect("surface output lock")
             .begin_block();
+    }
+
+    fn settle_shell(&self) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .settle_shell();
     }
 
     fn finish(&self) {
@@ -283,13 +352,76 @@ impl TextOutput for InteractiveOutput {
 /// why it does not take a [`Stdout`] and could not use one if it wanted to.
 pub fn note(message: &str) {
     let mut err = std::io::stderr();
-    write_note(&mut err, message);
+    let width = err
+        .is_terminal()
+        .then(terminal_size::terminal_size)
+        .flatten()
+        .map(|(width, _)| usize::from(width.0));
+    write_note(&mut err, message, width);
 }
 
-fn write_note(mut err: impl Write, message: &str) {
+/// Plain human notices share the answer renderer's word and cell layout.
+/// A missing terminal width keeps redirected diagnostics byte-for-byte intact.
+pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
+    // Zero is an unmeasured surface width, not a one-cell terminal.
+    let Some(width) = width.filter(|width| *width > 0) else {
+        return text.to_owned();
+    };
+    text.split('\n')
+        .flat_map(|line| {
+            let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+            let prefix = " ".repeat(indent.min(width.saturating_sub(1)));
+            crate::render::Line::plain(&line[indent..])
+                .wrap(width.saturating_sub(prefix.len()).max(1))
+                .into_iter()
+                .map(move |row| format!("{prefix}{}", row.text()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Layout before painting: ANSI bytes must never participate in notice wrapping.
+fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> String {
+    use crate::render::Line;
+    use crate::render::style::{Palette, Style};
+    use ego_core::plan::StepStatus;
+
+    if plan.steps.is_empty() {
+        return "Plan cleared".into();
+    }
+    let completed = plan
+        .steps
+        .iter()
+        .filter(|step| step.status == StepStatus::Completed)
+        .count();
+    let mut rows = vec![format!("Plan {completed}/{}", plan.steps.len())];
+    for step in &plan.steps {
+        let (symbol, colour) = match step.status {
+            StepStatus::Completed => ("✓", Palette::ADDED_FG),
+            StepStatus::InProgress => ("▶", Palette::CODE),
+            StepStatus::Pending => ("○", Palette::GUTTER_FG),
+            StepStatus::Blocked => ("!", Palette::ERROR),
+        };
+        // A step is one logical row even when its text contains line breaks.
+        let text = ego_core::permit::terminal_safe(
+            &step.text.split_whitespace().collect::<Vec<_>>().join(" "),
+        );
+        let mut row = Line::styled(symbol, Style::fg(colour));
+        row.push(crate::render::Span::plain(format!(" {text}")));
+        rows.extend(
+            row.wrap_hanging(caps.width, 2)
+                .into_iter()
+                .map(|row| row.render(caps.depth)),
+        );
+    }
+    rows.join("\n")
+}
+
+fn write_note(mut err: impl Write, message: &str, width: Option<usize>) {
     // Nothing to be done if the diagnostic channel itself is gone, and a
     // panic here would replace a report with a crash.
-    let _ = writeln!(err, "{DISPLAY_NAME}: {message}");
+    let text = wrap_notice(&format!("{DISPLAY_NAME}: {message}"), width);
+    let _ = writeln!(err, "{text}");
 }
 
 /// The one sentence every empty listing says: what is missing, and the command
@@ -361,6 +493,10 @@ pub struct TextSink<'a> {
     calls: Mutex<HashMap<ItemId, StartedCall>>,
     capabilities: Capabilities,
     retry_cause: Mutex<Option<String>>,
+    goal: Mutex<Option<ego_core::goal::GoalRecord>>,
+    turn_started: Mutex<HashMap<TurnId, Instant>>,
+    edited_lines: Mutex<HashMap<TurnId, ego_core::permit::LineChange>>,
+    last_cache: Mutex<Option<(ego_core::generator::attempt::CachePrefix, bool)>>,
 }
 
 struct StartedCall {
@@ -371,6 +507,7 @@ struct StartedCall {
 /// The state of the answer currently being written.
 struct Streaming {
     answer: Answer,
+    tools: tool_row::ToolRows,
     open: bool,
 }
 
@@ -381,13 +518,90 @@ impl<'a> TextSink<'a> {
             quiet,
             text: Mutex::new(Streaming {
                 answer: Answer::new(capabilities),
+                tools: tool_row::ToolRows::default(),
                 open: false,
             }),
             ceiling: Mutex::new(None),
             calls: Mutex::new(HashMap::new()),
             capabilities,
             retry_cause: Mutex::new(None),
+            goal: Mutex::new(None),
+            turn_started: Mutex::new(HashMap::new()),
+            edited_lines: Mutex::new(HashMap::new()),
+            last_cache: Mutex::new(None),
         }
+    }
+
+    /// Compare reduced goal facts, not provider prose, at the live output boundary.
+    /// One path renders set/update, admitted continuation and stop receipts.
+    fn goal_receipts(&self, event: &PublicEvent, state: &SessionState) {
+        use ego_core::goal::{GoalOwner, GoalState};
+        let mut previous = self.goal.lock().expect("goal receipt lock");
+        let current = state.goal.as_ref();
+        let updated_by_tool = matches!(event, PublicEvent::ItemCompleted {
+            item, kind: ItemKind::Tool, ok: true, ..
+        } if state.items.get(item)
+            .is_some_and(|item| item.tool_name.as_deref() == Some("goal")));
+        if previous.as_ref() == current && !updated_by_tool {
+            return;
+        }
+        self.out.goal_status(
+            current
+                .filter(|goal| goal.state == GoalState::Active)
+                .map(|goal| {
+                    (
+                        goal.objective.clone(),
+                        goal.continuation_turns,
+                        goal.continuation_budget,
+                    )
+                }),
+        );
+        if let Some(goal) = current {
+            let prior = previous.as_ref().filter(|prior| prior.id == goal.id);
+            let mut receipts = Vec::new();
+            if prior
+                .is_none_or(|prior| prior.objective != goal.objective || prior.owner != goal.owner)
+                || updated_by_tool
+            {
+                let owner = match goal.owner {
+                    GoalOwner::Operator => "operator",
+                    GoalOwner::Automated => "automated",
+                    GoalOwner::Check => "check",
+                };
+                receipts.push(format!("Goal ({owner}): {}", goal.objective));
+            }
+            let allowance = goal
+                .continuation_budget
+                .map_or_else(|| "pending".into(), |n| n.to_string());
+            if prior.is_some_and(|prior| prior.continuation_turns < goal.continuation_turns) {
+                receipts.push(format!(
+                    "Goal turn {} of {allowance}: {}",
+                    goal.continuation_turns,
+                    goal.blocker_reason
+                        .as_deref()
+                        .unwrap_or("condition unavailable")
+                ));
+            }
+            if let Some(reason) = &goal.check_stop
+                && prior.is_none_or(|prior| prior.check_stop.as_ref() != Some(reason))
+            {
+                let next = if goal.state == GoalState::Blocked {
+                    "Next: /goal show; after resolving the blocker, /goal set TEXT starts a new goal. /goal achieve and /goal block require an active goal"
+                } else {
+                    "Next: /goal show, /goal achieve, /goal block"
+                };
+                receipts.push(format!(
+                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. {next}; --goal-turns N sets the allowance when checks first start.",
+                    goal.objective, goal.continuation_turns,
+                    goal.blocker_reason.as_deref().unwrap_or("none recorded")
+                ));
+            }
+            for receipt in receipts {
+                self.finish();
+                self.out.note(&receipt);
+            }
+        }
+        *previous = current.cloned();
     }
 
     /// What an operator has to be told about the ceiling they asked for, and
@@ -464,8 +678,17 @@ impl<'a> TextSink<'a> {
             .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
+        self.finish_text(&mut text);
+        text.tools.separate();
+        self.out.settle_shell();
+    }
+
+    fn finish_text(&self, text: &mut Streaming) {
+        text.answer
+            .resize(self.capabilities.with_current_width().width);
         let rest = text.answer.finish();
         if !rest.is_empty() {
+            text.tools.separate();
             self.out.answer(&rest);
             text.open = !rest.ends_with('\n');
         }
@@ -480,17 +703,66 @@ impl<'a> TextSink<'a> {
             .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
+        text.answer
+            .resize(self.capabilities.with_current_width().width);
         let ready = text.answer.push(delta);
         if ready.is_empty() {
             return;
         }
+        text.tools.separate();
         self.out.answer(&ready);
         text.open = !ready.ends_with('\n');
     }
 }
 
 impl EventSink for TextSink<'_> {
+    fn cache_observed(
+        &self,
+        prefix: &ego_core::generator::attempt::CachePrefix,
+        usage: Option<ego_core::state::Usage>,
+    ) {
+        if !self.capabilities.on_screen() || self.quiet {
+            return;
+        }
+        let mut last = self.last_cache.lock().expect("cache observation lock");
+        let Some(usage) = usage.filter(|usage| {
+            usage.cache_read_tokens > 0
+                || usage.uncached_input_tokens > 0
+                || usage.cache_write_tokens > 0
+                || usage.cache_write_extended_tokens > 0
+        }) else {
+            if last
+                .as_ref()
+                .is_some_and(|(previous, _)| previous != prefix)
+            {
+                *last = None;
+            }
+            return;
+        };
+        let hit = usage.cache_read_tokens > 0;
+        let probable_loss = last
+            .as_ref()
+            .is_some_and(|(previous, hit_before)| previous == prefix && *hit_before && !hit);
+        *last = Some((prefix.clone(), hit));
+        drop(last);
+        if probable_loss {
+            self.finish();
+            self.out.note("cache reuse was reported on an earlier request with the same marked input, but not this one; cached entries may have expired or changed at the provider");
+        }
+    }
+
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        self.goal_receipts(event, state);
+        // Only adjacent completed top-level exec calls share the live row.
+        // Prose settles through write_answer/begin_block when it becomes visible;
+        // do not acquire the surface lock a second time for every streamed delta.
+        if matches!(
+            event,
+            PublicEvent::TurnStarted { .. } | PublicEvent::TurnCompleted { .. }
+        ) || matches!(event, PublicEvent::ItemStarted { kind: ItemKind::Tool, name: Some(name), .. } if name != "exec")
+        {
+            self.out.settle_shell();
+        }
         if self.capabilities.on_screen()
             && self.out.live_retry()
             && matches!(
@@ -503,10 +775,71 @@ impl EventSink for TextSink<'_> {
             self.out.retry_status(None);
             if let Some(cause) = self.retry_cause.lock().expect("retry cause lock").take() {
                 self.finish();
-                self.out.note(&format!("{cause} — retry finished"));
+                let colour = if matches!(event, PublicEvent::TurnCompleted { ok: false, .. }) {
+                    crate::render::style::Palette::ERROR
+                } else {
+                    crate::render::style::Palette::ADDED_FG
+                };
+                let capabilities = self.capabilities.with_current_width();
+                let receipt = crate::render::Line::styled(
+                    format!("{DISPLAY_NAME}: {cause} — retry finished"),
+                    crate::render::style::Style::fg(colour),
+                )
+                .wrap(capabilities.width)
+                .into_iter()
+                .map(|line| line.render(capabilities.depth))
+                .collect::<Vec<_>>()
+                .join("\n");
+                self.out.line(&receipt);
             }
         }
         match event {
+            PublicEvent::TurnStarted { turn } if self.capabilities.on_screen() && !self.quiet => {
+                self.turn_started
+                    .lock()
+                    .expect("turn clock lock")
+                    .insert(*turn, Instant::now());
+            }
+            PublicEvent::TurnCompleted { turn, ok, .. }
+                if self.capabilities.on_screen() && !self.quiet =>
+            {
+                let started = self
+                    .turn_started
+                    .lock()
+                    .expect("turn clock lock")
+                    .remove(turn);
+                let lines = self
+                    .edited_lines
+                    .lock()
+                    .expect("edit count lock")
+                    .remove(turn);
+                if let Some(started) = started {
+                    self.finish();
+                    let elapsed = tool_row::duration(started.elapsed());
+                    let clock = chrono::Local::now().format("%-I:%M %p");
+                    let outcome = if *ok { "done" } else { "stopped" };
+                    let mut receipt = format!("Turn elapsed {elapsed} · {outcome} {clock}");
+                    if let Some(lines) = lines {
+                        let (green, red, reset) = if self.capabilities.coloured() {
+                            ("\x1b[32m", "\x1b[31m", "\x1b[0m")
+                        } else {
+                            ("", "", "")
+                        };
+                        receipt.push_str(&format!(
+                            " · tracked edits {green}+{}{reset} {red}-{}{reset}",
+                            lines.added, lines.removed
+                        ));
+                    }
+                    self.out.note(&receipt);
+                }
+            }
+            PublicEvent::PlanUpdated { .. } if !self.quiet => {
+                self.finish();
+                self.out.notice_block(&plan_block(
+                    &state.plan,
+                    self.capabilities.with_current_width(),
+                ));
+            }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
@@ -548,18 +881,36 @@ impl EventSink for TextSink<'_> {
             }
             PublicEvent::ItemCompleted {
                 kind: ItemKind::Tool,
+                turn,
                 item,
                 ok,
                 text,
-                ..
             } if !self.quiet => {
+                if *ok
+                    && self.capabilities.on_screen()
+                    && let Some(change) = state
+                        .items
+                        .get(item)
+                        .and_then(|item| item.tool_result.as_ref())
+                        .and_then(|result| result.line_change())
+                {
+                    let mut lines = self.edited_lines.lock().expect("edit count lock");
+                    let total = lines.entry(*turn).or_insert(ego_core::permit::LineChange {
+                        added: 0,
+                        removed: 0,
+                    });
+                    total.added = total.added.saturating_add(change.added);
+                    total.removed = total.removed.saturating_add(change.removed);
+                }
                 let started = self
                     .calls
                     .lock()
                     .expect("a poisoned lock means a writer panicked mid-line")
                     .remove(item);
                 if let Some(started) = started {
-                    let record = tool_row::record(
+                    let mut streaming = self.text.lock().expect("streaming output lock");
+                    self.finish_text(&mut streaming);
+                    let record = streaming.tools.record(
                         &Finished {
                             name: &started.name,
                             args: &started.args,
@@ -567,10 +918,15 @@ impl EventSink for TextSink<'_> {
                             result: text.as_deref().unwrap_or(""),
                             timing: state.items.get(item).and_then(|item| item.tool_timing),
                         },
-                        self.capabilities,
+                        self.capabilities.with_current_width(),
                     );
-                    self.finish();
-                    self.out.tool_row(&record.rows, record.detail);
+                    if self.capabilities.on_screen()
+                        && let Some(live) = record.shell_progress
+                    {
+                        self.out.shell_row(&record.rows, record.detail, live);
+                    } else {
+                        self.out.tool_row(&record.rows, record.detail);
+                    }
                 }
             }
             // Deliberately **not** gated on `quiet`. `-q` is presentation —
@@ -628,6 +984,12 @@ impl EventSink for TextSink<'_> {
                     self.out.note(&message);
                 }
             }
+            PublicEvent::Error { message, .. }
+                if state
+                    .goal
+                    .as_ref()
+                    .and_then(|goal| goal.check_stop.as_deref())
+                    == Some(message.as_str()) => {}
             PublicEvent::Error { message, kind, .. } => {
                 self.finish();
                 if self.capabilities.on_screen()
@@ -824,9 +1186,56 @@ mod tests {
     #[test]
     fn a_diagnostic_uses_the_human_facing_product_name_byte_for_byte() {
         let mut err = Vec::new();
-        write_note(&mut err, "something failed");
+        write_note(&mut err, "something failed", None);
 
         assert_eq!(err, "εgo: something failed\n".as_bytes());
+    }
+
+    // Catches: a terminal width leaks into redirected diagnostic bytes.
+    #[test]
+    fn redirected_diagnostics_keep_long_lines_and_whitespace() {
+        let message =
+            "a long diagnostic with instructions that must stay on one logical line\n  next line";
+        let mut err = Vec::new();
+        write_note(&mut err, message, None);
+        assert_eq!(String::from_utf8(err).unwrap(), format!("εgo: {message}\n"));
+    }
+
+    // Catches: unmeasured surface geometry splits a permission receipt into characters.
+    #[test]
+    fn unmeasured_notice_width_preserves_receipt_bytes() {
+        let receipt = "Allowed run seq 1 3\n  next receipt";
+        assert_eq!(wrap_notice(receipt, Some(0)), receipt);
+        assert_eq!(wrap_notice(receipt, None), receipt);
+    }
+
+    // Catches: multiline notice wrapping drops blank rows or measures Unicode in bytes.
+    #[test]
+    fn notices_preserve_blank_rows_and_wrap_unicode_in_cells() {
+        assert_eq!(
+            wrap_notice("\n  hint\nεgo: 日本語 café text continues\n", Some(20)),
+            "\n  hint\nεgo: 日本語 café\ntext continues\n"
+        );
+    }
+
+    // Catches: wrapping long key hints strips their header-alignment indentation.
+    #[test]
+    fn wrapped_notices_keep_leading_indent_on_every_row() {
+        assert_eq!(
+            wrap_notice("     Ctrl+B backgrounds · Esc interrupts", Some(25)),
+            "     Ctrl+B backgrounds ·\n     Esc interrupts"
+        );
+    }
+
+    // Catches: an oversized diagnostic token bypasses the shared bounded fallback.
+    #[test]
+    fn diagnostic_tokens_wider_than_the_terminal_still_fit() {
+        let mut err = Vec::new();
+        write_note(&mut err, "abcdefghijklmnopqrstuvwxyz", Some(20));
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "εgo:\nabcdefghijklmnopqrst\nuvwxyz\n"
+        );
     }
 
     #[test]
@@ -898,6 +1307,272 @@ mod tests {
         }
     }
 
+    /// Catches: successful cache hits adding a notice for every generation.
+    #[test]
+    fn interactive_usage_keeps_successful_cache_hits_silent() {
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        for cached in [0, 18_400] {
+            sink.publish(
+                &PublicEvent::UsageUpdated {
+                    turn,
+                    item: None,
+                    usage_delta: ego_core::state::Usage {
+                        cache_read_tokens: cached,
+                        ..ego_core::state::Usage::IDENTITY
+                    },
+                    cost_delta: ego_core::cost::CostDelta::Unknown(
+                        ego_core::cost::UnknownCost::NoPricingQuote,
+                    ),
+                },
+                &state,
+            );
+        }
+        assert!(out.notes.lock().unwrap().is_empty());
+    }
+
+    /// Catches: treating a first miss or a different cache prefix as a reset,
+    /// and repeating the warning for every miss after one prior hit.
+    #[test]
+    fn cache_warning_requires_a_prior_hit_on_the_same_marked_prefix() {
+        use ego_core::generator::attempt::CachePrefix;
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let original = CachePrefix {
+            session: SessionId::new(),
+            provider: "anthropic".into(),
+            model: "model-a".into(),
+            digest: "marked-a".into(),
+        };
+        let different = CachePrefix {
+            model: "model-b".into(),
+            ..original.clone()
+        };
+        let usage = |read, uncached| ego_core::state::Usage {
+            cache_read_tokens: read,
+            uncached_input_tokens: uncached,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(&different, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        assert!(out.notes.lock().unwrap().is_empty());
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(0, 800)));
+        sink.cache_observed(&original, Some(usage(400, 0)));
+        sink.cache_observed(
+            &original,
+            Some(ego_core::state::Usage {
+                cache_write_tokens: 800,
+                ..ego_core::state::Usage::IDENTITY
+            }),
+        );
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("may have expired"), "{notes:?}");
+    }
+
+    /// Catches: a missing usage report being read as a zero-token miss, or a
+    /// cache warning entering a headless or quiet transcript.
+    #[test]
+    fn cache_warning_needs_reported_input_and_an_interactive_loud_surface() {
+        use ego_core::generator::attempt::CachePrefix;
+        let prefix = CachePrefix {
+            session: SessionId::new(),
+            provider: "anthropic".into(),
+            model: "model-a".into(),
+            digest: "same".into(),
+        };
+        let hit = ego_core::state::Usage {
+            cache_read_tokens: 500,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        let miss = ego_core::state::Usage {
+            uncached_input_tokens: 500,
+            ..ego_core::state::Usage::IDENTITY
+        };
+        for (quiet, interactive) in [(false, true), (true, true), (false, false)] {
+            let out = Recorded::default();
+            let mut caps = Capabilities::plain();
+            if interactive {
+                caps.osc = crate::render::caps::OscProfile::Standard;
+            }
+            let sink = TextSink::new(&out, quiet, caps);
+            sink.cache_observed(&prefix, Some(hit));
+            sink.cache_observed(&prefix, None);
+            sink.cache_observed(&prefix, Some(ego_core::state::Usage::IDENTITY));
+            assert!(out.notes.lock().unwrap().is_empty());
+            sink.cache_observed(&prefix, Some(miss));
+            sink.cache_observed(&prefix, Some(hit));
+            sink.cache_observed(&prefix, Some(miss));
+            assert_eq!(
+                out.notes.lock().unwrap().len(),
+                2 * usize::from(!quiet && interactive)
+            );
+        }
+    }
+
+    /// Catches: a finished turn disappearing without a visible receipt, or
+    /// a headless answer receiving terminal-only status text.
+    #[test]
+    fn interactive_turn_completion_prints_elapsed_receipt_without_changing_headless_output() {
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let interactive = TextSink::new(&out, false, caps);
+        let headless = TextSink::new(&out, false, Capabilities::plain());
+        let state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        let start = PublicEvent::TurnStarted { turn };
+        let end = PublicEvent::TurnCompleted {
+            turn,
+            ok: true,
+            exit_reason: ego_core::event::domain::ExitReason::Completed,
+        };
+        interactive.publish(&start, &state);
+        interactive.publish(&end, &state);
+        headless.publish(&start, &state);
+        headless.publish(&end, &state);
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("Turn elapsed "), "{notes:?}");
+        assert!(notes[0].contains(" · done "), "{notes:?}");
+    }
+
+    /// Catches: a terminal receipt loses the diff-like signs or leaks ANSI
+    /// sequences when colour was disabled.
+    #[test]
+    fn turn_receipt_colours_only_observed_edit_counts() {
+        for (colour, green, red) in [(false, "", ""), (true, "\x1b[32m", "\x1b[31m")] {
+            let out = Recorded::default();
+            let mut caps = Capabilities::plain();
+            caps.osc = crate::render::caps::OscProfile::Standard;
+            if colour {
+                caps.depth = crate::render::caps::Depth::Ansi16;
+            }
+            let sink = TextSink::new(&out, false, caps);
+            let state = SessionState::default();
+            let turn = TurnId::new();
+            sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+            sink.edited_lines.lock().unwrap().insert(
+                turn,
+                ego_core::permit::LineChange {
+                    added: 3,
+                    removed: 1,
+                },
+            );
+            sink.publish(
+                &PublicEvent::TurnCompleted {
+                    turn,
+                    ok: true,
+                    exit_reason: ego_core::event::domain::ExitReason::Completed,
+                },
+                &state,
+            );
+            let notes = out.notes.lock().unwrap();
+            let reset = if colour { "\x1b[0m" } else { "" };
+            assert!(
+                notes[0].contains(&format!("tracked edits {green}+3{reset} {red}-1{reset}")),
+                "{notes:?}"
+            );
+        }
+    }
+
+    /// Catches: counting metadata from a failed call, or showing a measured
+    /// zero for a successful write whose line changes were never observed.
+    #[test]
+    fn receipt_reads_only_successful_measured_tool_results_from_reduced_state() {
+        use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+        use ego_core::event::id::{EventId, Producer, Seq};
+        use ego_core::event::time::Timestamp;
+        use ego_core::permit::{LineChange, ToolResult};
+
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, false, caps);
+        let turn = TurnId::new();
+        let mut state = SessionState::default();
+        sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+        let mut seq = Seq::ZERO;
+        for (ok, change) in [
+            (
+                true,
+                Some(LineChange {
+                    added: 3,
+                    removed: 1,
+                }),
+            ),
+            (
+                false,
+                Some(LineChange {
+                    added: 9,
+                    removed: 9,
+                }),
+            ),
+            (true, None),
+        ] {
+            let item = ItemId::new();
+            let result = match change {
+                Some(change) => ToolResult::builtin("done").with_line_change(change),
+                None => ToolResult::builtin("done"),
+            };
+            let event = DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn,
+                    item: Some(item),
+                    parent: None,
+                    ts: Timestamp::from_millis(0),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::ToolCallCompleted { ok, result },
+            };
+            state.apply(&event);
+            sink.publish(&ego_core::public::project_public(&event).unwrap(), &state);
+        }
+        sink.publish(
+            &PublicEvent::TurnCompleted {
+                turn,
+                ok: true,
+                exit_reason: ExitReason::Completed,
+            },
+            &state,
+        );
+        let notes = out.notes.lock().unwrap();
+        assert!(notes[0].contains("tracked edits +3 -1"), "{notes:?}");
+        assert!(!notes[0].contains("+12"), "{notes:?}");
+    }
+
+    #[test]
+    fn quiet_interactive_turn_does_not_print_progress_receipt() {
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.osc = crate::render::caps::OscProfile::Standard;
+        let sink = TextSink::new(&out, true, caps);
+        let state = SessionState::default();
+        let turn = TurnId::new();
+        sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+        sink.publish(
+            &PublicEvent::TurnCompleted {
+                turn,
+                ok: true,
+                exit_reason: ego_core::event::domain::ExitReason::Completed,
+            },
+            &state,
+        );
+        assert!(out.notes.lock().unwrap().is_empty());
+    }
+
     fn completed(item: ItemId, ok: bool, result: &str) -> PublicEvent {
         PublicEvent::ItemCompleted {
             turn: ego_core::event::id::TurnId::new(),
@@ -906,6 +1581,177 @@ mod tests {
             ok,
             text: Some(result.to_owned()),
         }
+    }
+
+    fn plan_fixture() -> SessionState {
+        use ego_core::plan::{PlanStep, StepStatus};
+        let mut state = SessionState::default();
+        state.plan.steps = [
+            (StepStatus::Completed, "Read the current output path"),
+            (
+                StepStatus::InProgress,
+                "Render the plan as one compact block with readable status symbols",
+            ),
+            (StepStatus::Pending, "Verify narrow output"),
+            (StepStatus::Blocked, "Wait for review"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (status, text))| PlanStep {
+            id: index.to_string(),
+            text: text.into(),
+            status,
+        })
+        .collect();
+        state
+    }
+
+    #[test]
+    #[ignore = "writes the plan goldens; run deliberately after reading the diff"]
+    fn regenerate_plan_goldens() {
+        for width in [40, 80, 120] {
+            for (depth, extension) in [
+                (crate::render::Depth::None, "txt"),
+                (crate::render::Depth::TrueColor, "ansi"),
+            ] {
+                let mut caps = Capabilities::plain();
+                caps.width = width;
+                caps.depth = depth;
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("tests/goldens/plan/{width}.{extension}"));
+                std::fs::write(
+                    path,
+                    format!(
+                        "{DISPLAY_NAME}: {}\n",
+                        plan_block(&plan_fixture().plan, caps)
+                    ),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    // Catches: separate notes insert blank lines and expose Debug status names.
+    #[test]
+    fn plan_block_compact() {
+        use ego_core::plan::PlanUpdate;
+        let state = plan_fixture();
+        let event = PublicEvent::PlanUpdated {
+            turn: TurnId::new(),
+            update: PlanUpdate::Replace { steps: vec![] },
+        };
+        for (width, plain, coloured) in [
+            (
+                40,
+                include_str!("../tests/goldens/plan/40.txt"),
+                include_str!("../tests/goldens/plan/40.ansi"),
+            ),
+            (
+                80,
+                include_str!("../tests/goldens/plan/80.txt"),
+                include_str!("../tests/goldens/plan/80.ansi"),
+            ),
+            (
+                120,
+                include_str!("../tests/goldens/plan/120.txt"),
+                include_str!("../tests/goldens/plan/120.ansi"),
+            ),
+        ] {
+            for (depth, expected) in [
+                (crate::render::Depth::None, plain),
+                (crate::render::Depth::TrueColor, coloured),
+            ] {
+                let out = Recorded::default();
+                let mut caps = Capabilities::plain();
+                caps.width = width;
+                caps.depth = depth;
+                TextSink::new(&out, false, caps).publish(&event, &state);
+                let notes = out.notes.lock().unwrap();
+                assert_eq!(notes.len(), 1, "one update must be one block");
+                assert_eq!(
+                    format!("{DISPLAY_NAME}: {}\n", notes[0]),
+                    expected,
+                    "width {width}, {depth:?}"
+                );
+            }
+        }
+    }
+
+    // Catches: embedded newlines split a step into blank blocks, or narrow
+    // output truncates unbreakable Unicode text instead of retaining every cell.
+    #[test]
+    fn plan_block_preserves_multiline_and_long_unicode_text() {
+        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+        let mut state = SessionState::default();
+        state
+            .plan
+            .apply(&PlanUpdate::Replace {
+                steps: vec![PlanStep {
+                    id: "unicode".into(),
+                    text: "Read\n\n界界界界界界界界界界界界界界界界界界界界界界\tthen verify"
+                        .into(),
+                    status: StepStatus::Pending,
+                }],
+            })
+            .unwrap();
+        let event = PublicEvent::PlanUpdated {
+            turn: TurnId::new(),
+            update: PlanUpdate::Step {
+                id: "unicode".into(),
+                status: StepStatus::Pending,
+            },
+        };
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.width = 40;
+        TextSink::new(&out, false, caps).publish(&event, &state);
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].contains("\n\n"));
+        let rows: Vec<_> = notes[0].lines().collect();
+        assert!(rows[2..].iter().all(|row| row.starts_with("  ")));
+        assert!(
+            rows.iter()
+                .all(|row| crate::render::Line::plain(*row).width() <= 40)
+        );
+        assert_eq!(
+            rows[1..]
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(' ', ""),
+            "○Read界界界界界界界界界界界界界界界界界界界界界界thenverify"
+        );
+    }
+
+    #[test]
+    fn terminal_plan_rows_use_reduced_state_and_respect_quiet_progress() {
+        // Catches: terminal renders stale operation payloads instead of the authoritative plan.
+        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+        let mut state = SessionState::default();
+        state.plan.steps = vec![PlanStep {
+            id: "stable".into(),
+            text: "Verify output".into(),
+            status: StepStatus::Blocked,
+        }];
+        let event = PublicEvent::PlanUpdated {
+            turn: ego_core::event::id::TurnId::new(),
+            update: PlanUpdate::Step {
+                id: "stable".into(),
+                status: StepStatus::Blocked,
+            },
+        };
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain());
+        sink.publish(&event, &state);
+        assert_eq!(*out.notes.lock().unwrap(), ["Plan 0/1\n! Verify output"]);
+        state.plan.steps.clear();
+        sink.publish(&event, &state);
+        assert_eq!(out.notes.lock().unwrap().last().unwrap(), "Plan cleared");
+        let quiet_out = Recorded::default();
+        TextSink::new(&quiet_out, true, Capabilities::plain()).publish(&event, &state);
+        assert!(quiet_out.notes.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -924,11 +1770,7 @@ mod tests {
 
         let rows = out.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(
-            rows[0].0.starts_with("✓ read a.rs · 2 lines · "),
-            "{:?}",
-            rows[0].0
-        );
+        assert!(rows[0].0 == "✓ read a.rs · 2 lines", "{:?}", rows[0].0);
         assert!(!rows[0].0.contains('{'), "{:?}", rows[0].0);
         assert!(out.notes.lock().unwrap().is_empty());
     }
@@ -950,6 +1792,61 @@ mod tests {
         let rows = out.rows.lock().unwrap();
         assert!(rows[0].0.starts_with("✓ read second.rs"), "{:?}", rows[0].0);
         assert!(rows[1].0.starts_with("✗ read first.rs"), "{:?}", rows[1].0);
+    }
+
+    // Catches: child groups lose ownership after task/parent/prose interleaving,
+    // or expand detail depends on an earlier task header still being visible.
+    #[test]
+    fn child_tool_groups_keep_ownership_across_interleaved_output() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let state = SessionState::default();
+        for name in [
+            "alpha › exec",
+            "alpha › read",
+            "beta › read",
+            "alpha › read",
+            "read",
+            "alpha › read",
+        ] {
+            let item = ItemId::new();
+            sink.publish(
+                &started(item, name, r#"{"path":"a.rs","argv":["printf","one"]}"#),
+                &state,
+            );
+            sink.publish(&completed(item, true, "one\ntwo\nthree"), &state);
+        }
+        sink.stream("parent prose\n\n");
+        let item = ItemId::new();
+        sink.publish(&started(item, "alpha › read", r#"{"path":"b.rs"}"#), &state);
+        sink.publish(&completed(item, true, "hello"), &state);
+        let rows = out.rows.lock().unwrap();
+        let shown = rows
+            .iter()
+            .map(|(rows, _)| rows.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let headers: Vec<_> = shown.lines().filter(|line| line.contains('↳')).collect();
+        assert_eq!(
+            headers,
+            [
+                "  ↳ task alpha",
+                "  ↳ task beta",
+                "  ↳ task alpha",
+                "  ↳ task alpha",
+                "  ↳ task alpha"
+            ]
+        );
+        assert!(!shown.contains("duration unavailable"));
+        assert!(
+            rows[1].1.starts_with("  ↳ task alpha\n    ✓ read a.rs"),
+            "expand detail must be self-contained: {:?}",
+            rows[1].1
+        );
+        assert!(
+            !rows[1].0.contains("alpha"),
+            "same-task continuation repeats header"
+        );
     }
 
     #[test]
@@ -1003,7 +1900,10 @@ mod tests {
         for call in 0..(EXPANDABLE_CALLS + 5) {
             output.tool_row("row", format!("detail {call}"));
         }
-        assert_eq!(output.tools.lock().unwrap().len(), EXPANDABLE_CALLS);
-        assert_eq!(output.tools.lock().unwrap().front().unwrap(), "detail 5");
+        assert_eq!(output.details.0.lock().unwrap().len(), EXPANDABLE_CALLS);
+        assert_eq!(
+            output.details.0.lock().unwrap().front().unwrap(),
+            "detail 5"
+        );
     }
 }

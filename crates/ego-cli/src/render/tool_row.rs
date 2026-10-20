@@ -23,7 +23,7 @@ use similar::{ChangeTag, TextDiff};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Output lines an exec row shows under its header.
-const TAIL_LINES: usize = 3;
+pub(crate) const PREVIEW_LINES: usize = 3;
 
 /// Most bytes of one call's detail kept for the expand key. A result larger
 /// than this is cut with a visible mark: the store is a bounded log of recent
@@ -41,6 +41,8 @@ pub struct ToolRecord {
     pub rows: String,
     /// The row followed by the whole result, for the expand key.
     pub detail: String,
+    /// Only output-free top-level successful commands may be replaced live.
+    pub shell_progress: Option<Line>,
 }
 
 /// One finished tool call.
@@ -54,45 +56,77 @@ pub struct Finished<'a> {
     pub timing: Option<ego_core::event::domain::ToolTiming>,
 }
 
-pub fn record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
-    if let Some((child, name)) = call.name.split_once(" › ") {
-        let label = Line::plain(printable(child))
-            .truncate_to(capabilities.width.saturating_sub(30))
-            .text();
-        let prefix = format!("  ↳ {label} › ");
-        let mut nested_caps = capabilities;
-        nested_caps.width = capabilities
-            .width
-            .saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()))
-            .max(1);
-        let mut nested = record(&Finished { name, ..*call }, nested_caps);
-        nested.rows = nested
-            .rows
-            .lines()
-            .map(|line| format!("{prefix}{line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        nested.detail = cap(nested
-            .detail
-            .lines()
-            .map(|line| format!("{prefix}{line}"))
-            .collect::<Vec<_>>()
-            .join("\n"));
-        return nested;
+/// Presentation state for adjacent completed calls, shared by live output and replay.
+#[derive(Default)]
+pub struct ToolRows {
+    task: Option<String>,
+}
+
+impl ToolRows {
+    /// Prose, parent diagnostics or a new turn ends the current task group.
+    pub fn separate(&mut self) {
+        self.task = None;
     }
+
+    pub fn record(&mut self, call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
+        let Some((task, name)) = call.name.rsplit_once(" › ") else {
+            self.separate();
+            return plain_record(call, capabilities);
+        };
+        let header = Line::plain(format!("  ↳ task {}", printable(task)))
+            .truncate_to(capabilities.width)
+            .render(capabilities.depth);
+        let nested = plain_record(
+            &Finished { name, ..*call },
+            Capabilities {
+                width: capabilities.width.saturating_sub(4).max(1),
+                ..capabilities
+            },
+        );
+        let indent = |text: &str| {
+            text.lines()
+                .map(|line| format!("    {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let rows = indent(&nested.rows);
+        let rows = if self.task.as_deref() == Some(task) {
+            rows
+        } else {
+            format!("{header}\n{rows}")
+        };
+        self.task = Some(task.to_owned());
+        ToolRecord {
+            rows,
+            // Expand is an independent view: it always names its owning task.
+            detail: cap(format!("{header}\n{}", indent(&nested.detail))),
+            shell_progress: None,
+        }
+    }
+}
+
+/// A standalone call retains its task context even without a preceding group.
+pub fn record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
+    ToolRows::default().record(call, capabilities)
+}
+
+fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let width = capabilities.width;
     let depth = capabilities.depth;
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
-    let header = header(call, &args, width);
+    let heading = header(call, &args, width);
 
-    let mut rows = vec![header.clone()];
+    let mut rows = vec![heading.clone()];
     if call.name == "exec" {
         rows.extend(tail(call, width));
     }
 
-    let mut detail = vec![header];
+    let shell_progress =
+        (call.name == "exec" && call.ok && output_lines(call).is_empty()).then(|| heading.clone());
+    let mut detail = vec![heading];
     detail.extend(body(call, &args, width));
     ToolRecord {
+        shell_progress,
         rows: render(&rows, depth),
         detail: cap(render(&detail, depth)),
     }
@@ -118,6 +152,11 @@ fn cap(mut text: String) -> String {
 /// the wrapper measures is the cell count the terminal draws.
 fn printable(text: &str) -> String {
     ego_core::permit::terminal_safe(&text.replace('\r', "").replace('\t', " "))
+}
+
+/// Process output may contain decoration, unlike call arguments or file text.
+fn printable_output(text: &str) -> String {
+    ego_core::permit::terminal_output_safe(&text.replace('\r', "").replace('\t', " "))
 }
 
 /// [`printable`] for text that spans lines: the line breaks stay, the rest of
@@ -207,12 +246,9 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
         (true, _) => None,
     };
     let mut notes: Vec<String> = outcome.into_iter().collect();
-    notes.push(
-        call.timing
-            .and_then(|timing| timing.execution_ms)
-            .map(|millis| duration(Duration::from_millis(millis)))
-            .unwrap_or_else(|| "duration unavailable".to_owned()),
-    );
+    if let Some(millis) = call.timing.and_then(|timing| timing.execution_ms) {
+        notes.push(duration(Duration::from_millis(millis)));
+    }
     if let Some(timing) = call.timing
         && timing.approval_wait_ms > 0
     {
@@ -278,7 +314,7 @@ fn failure(result: &str, width: usize) -> String {
                 .unwrap_or("?");
             format!("exit {code}")
         }
-        None => keep_end(&printable(last), (width / 3).max(12)),
+        None => keep_end(&printable_output(last), (width / 3).max(12)),
     }
 }
 
@@ -323,7 +359,11 @@ fn header(call: &Finished<'_>, args: &Value, width: usize) -> Line {
         .as_ref()
         .map(|stat| format!(" {stat}"))
         .unwrap_or_default();
-    let notes = format!(" · {}", parts.notes.join(" · "));
+    let notes = if parts.notes.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.notes.join(" · "))
+    };
     let fixed = Line::plain(format!("{lead}{stat}{notes}")).width();
     let room = width.saturating_sub(fixed);
     let target = if Line::plain(parts.target.as_str()).width() <= room {
@@ -356,7 +396,7 @@ fn output_lines(call: &Finished<'_>) -> Vec<String> {
             _ if line.trim().is_empty() => {}
             _ if !call.ok && line.starts_with(EXIT_PREFIX) => {}
             _ => {
-                let text = printable(line);
+                let text = printable_output(line);
                 lines.push(if stderr {
                     format!("stderr: {text}")
                 } else {
@@ -372,19 +412,22 @@ fn dim(text: String) -> Line {
     Line::styled(text, Style::fg(Palette::NOTE))
 }
 
+/// The shared hidden-line count for compact tool and prompt output.
+pub(crate) fn hidden_lines(hidden: usize, width: usize) -> Line {
+    dim(format!(
+        "  … {hidden} more {} · Option+O or /expand",
+        if hidden == 1 { "line" } else { "lines" }
+    ))
+    .truncate_to(width)
+}
+
 /// The last lines of an exec's output, and a count of the ones left out.
 fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
     let lines = output_lines(call);
-    let hidden = lines.len().saturating_sub(TAIL_LINES);
+    let hidden = lines.len().saturating_sub(PREVIEW_LINES);
     let mut rows = Vec::new();
     if hidden > 0 {
-        rows.push(
-            dim(format!(
-                "  … {hidden} more {} · /expand shows all",
-                if hidden == 1 { "line" } else { "lines" }
-            ))
-            .truncate_to(width),
-        );
+        rows.push(hidden_lines(hidden, width));
     }
     rows.extend(
         lines[hidden..]
@@ -414,7 +457,7 @@ fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
     let room = width.saturating_sub(2).max(1);
     call.result
         .lines()
-        .flat_map(|line| Line::plain(printable(line)).wrap(room))
+        .flat_map(|line| Line::plain(printable_output(line)).wrap(room))
         .map(|line| {
             let mut indented = Line::plain("  ");
             line.spans.into_iter().for_each(|span| indented.push(span));
@@ -465,8 +508,15 @@ mod tests {
                 ),
                 at(width),
             );
-            assert!(header_of(&result).starts_with("  ↳ a very lon"));
-            assert!(header_of(&result).contains("› ✓ read"));
+            assert!(header_of(&result).starts_with("  ↳ task a very lon"));
+            assert!(
+                result
+                    .rows
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .starts_with("    ✓ read")
+            );
             assert!(
                 result.rows.lines().all(|line| cells(line) <= width),
                 "{width}: {}",
@@ -514,7 +564,7 @@ mod tests {
                 assert!(rendered.rows.lines().count() <= 5);
                 if let Some(hidden) = hidden {
                     assert!(
-                        grid.contains(hidden) && grid.contains("/expand shows all"),
+                        grid.contains(hidden) && grid.contains("Option+O or /expand"),
                         "{grid}"
                     );
                 }
@@ -522,6 +572,21 @@ mod tests {
                 assert!(rendered.detail.contains("rg: missing.txt") || ok);
                 println!("exec width={width} ok={ok} grid={grid:?}");
             }
+        }
+    }
+
+    // Catches: absent timing leaves a placeholder or an empty separator.
+    #[test]
+    fn missing_timing_omits_the_note_and_its_separator() {
+        for (name, expected) in [("task", "✓ task child"), ("read", "✓ read a.rs · 1 line")] {
+            let record = record(
+                &Finished {
+                    timing: None,
+                    ..call(name, r#"{"name":"child","path":"a.rs"}"#, true, "hello")
+                },
+                at(80),
+            );
+            assert_eq!(record.rows, expected);
         }
     }
 
@@ -578,7 +643,7 @@ mod tests {
         );
         let rows: Vec<_> = record.rows.lines().collect();
         assert_eq!(rows.len(), 5, "{rows:?}");
-        assert_eq!(rows[1], "  … 17 more lines · /expand shows all");
+        assert_eq!(rows[1], "  … 17 more lines · Option+O or /expand");
         assert_eq!(rows[2..], ["  18", "  19", "  20"]);
         assert!(record.detail.contains("  1\n"));
         assert!(record.detail.contains("  20"));
@@ -606,6 +671,37 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // Catches: SGR decoration is printed as escaped text in tool output.
+    #[test]
+    fn tool_output_strips_sgr_without_hiding_other_controls() {
+        for (source, expected) in [
+            ("\x1b[32m✓ Added worklog\x1b[0m", "✓ Added worklog"),
+            ("\x1b[38;2;1;2;3mcolour\x1b[m", "colour"),
+            ("\x1b[38:2::1:2:3mcolour\x1b[0m", "colour"),
+            ("\x1b[2Jscreen\u{202e}", "\\u{1b}[2Jscreen\\u{202e}"),
+            ("\x1b]0;title\x07", "\\u{1b}]0;title\\u{7}"),
+            ("\x1b[32incomplete", "\\u{1b}[32incomplete"),
+        ] {
+            let result = format!("[stdout]\n{source}\n[stderr]\n{source}\n");
+            let rendered = record(&call("exec", r#"{"argv":["x"]}"#, true, &result), at(120));
+            let rows: Vec<_> = rendered.rows.lines().skip(1).collect();
+            assert_eq!(
+                rows,
+                [format!("  {expected}"), format!("  stderr: {expected}")]
+            );
+            let detail: Vec<_> = rendered.detail.lines().skip(1).collect();
+            assert_eq!(
+                detail,
+                [
+                    "  [stdout]".to_owned(),
+                    format!("  {expected}"),
+                    "  [stderr]".to_owned(),
+                    format!("  {expected}")
+                ]
+            );
         }
     }
 

@@ -56,6 +56,15 @@ pub(crate) fn report_discarded(
     effective: &Effective,
     diagnostics: &dyn Diagnostics,
 ) {
+    report_discarded_in(workspace, effective, diagnostics, ego_home().as_deref());
+}
+
+fn report_discarded_in(
+    workspace: &Path,
+    effective: &Effective,
+    diagnostics: &dyn Diagnostics,
+    home: Option<&Path>,
+) {
     for discarded in &effective.discarded {
         diagnostics.note(&discarded.to_string());
     }
@@ -63,6 +72,9 @@ pub(crate) fn report_discarded(
         return;
     }
     for (source, path) in project_layer_paths(workspace) {
+        if home.is_some_and(|home| same_config_file(&path, &home.join("config.toml"))) {
+            continue;
+        }
         if effective
             .discarded
             .iter()
@@ -637,6 +649,26 @@ pub fn ego_home() -> Option<PathBuf> {
         return Some(PathBuf::from(home));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ego"))
+}
+
+/// Process keyboard preferences come only from the user file, before any terminal
+/// owner exists. Project/session admission must never change the human's keys.
+pub(crate) fn keyboard_preferences(vim: bool) -> Result<ego_core::config::UiLayer, UsageError> {
+    keyboard_preferences_at(ego_home().as_deref(), vim)
+}
+
+fn keyboard_preferences_at(
+    home: Option<&Path>,
+    vim: bool,
+) -> Result<ego_core::config::UiLayer, UsageError> {
+    let mut preferences = match home {
+        Some(home) => layer(Source::User, &home.join("config.toml"))?
+            .and_then(|layer| layer.value.ui)
+            .unwrap_or_default(),
+        None => ego_core::config::UiLayer::default(),
+    };
+    preferences.vim = Some(vim || preferences.vim.unwrap_or(false));
+    Ok(preferences)
 }
 
 /// Authentication configuration for `ego auth`.
@@ -1226,6 +1258,8 @@ enum InvocationMcpServer {
         inherit_env: Vec<McpEnvironmentName>,
     },
     Http {
+        #[serde(default)]
+        profile: ego_core::config::McpHttpProfile,
         name: McpServerName,
         url: McpHttpUrl,
         #[serde(default)]
@@ -1248,12 +1282,16 @@ impl InvocationMcpServer {
                 .map(|server| (name, server))
                 .map_err(|error| UsageError(error.to_string())),
             Self::Http {
+                profile,
                 name,
                 url,
                 auth,
                 allow_insecure_loopback,
             } => McpHttpConfig::new(url, auth, allow_insecure_loopback)
-                .map(McpServerConfig::Http)
+                .map(|mut config| {
+                    config.profile = profile;
+                    McpServerConfig::Http(config)
+                })
                 .map(|server| (name, server))
                 .map_err(|error| UsageError(error.to_string())),
         }
@@ -1265,6 +1303,13 @@ fn project_layer_paths(workspace: &Path) -> [(Source, PathBuf); 2] {
         (Source::Project, workspace.join(".ego/config.toml")),
         (Source::Local, workspace.join(".ego/config.local.toml")),
     ]
+}
+
+fn same_config_file(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn base_layers(workspace: &Path, trust: Trust) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
@@ -1287,7 +1332,12 @@ pub(crate) fn base_layers_in(
     // Open configuration only in a trusted workspace. Diagnostics may inspect
     // metadata for excluded paths, but never read or parse their contents.
     if trust == Trust::Trusted {
-        files.extend(project_layer_paths(workspace));
+        for (source, path) in project_layer_paths(workspace) {
+            if home.is_some_and(|home| same_config_file(&path, &home.join("config.toml"))) {
+                continue;
+            }
+            files.push((source, path));
+        }
     }
 
     let mut found = Vec::new();
@@ -1382,8 +1432,17 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     // changes every config diagnostic and belongs with `Source::rank` going
     // public (`ARCHITECTURE.md`
     // "Consequences"), not with whichever caller noticed it.
-    ConfigLayer::parse(Source::Flags, &toml)
-        .map_err(|err| UsageError(format!("the command line: {err}")))
+    let layer = ConfigLayer::parse(Source::Flags, &toml)
+        .map_err(|err| UsageError(format!("the command line: {err}")))?;
+    if layer
+        .value
+        .ui
+        .as_ref()
+        .is_some_and(|ui| ui.keybindings.is_some() || ui.vim.is_some())
+    {
+        return Err(UsageError("keyboard preferences are user/process-only: use ego config set ui.keybindings=TABLE or --vim, not -c".into()));
+    }
+    Ok(layer)
 }
 
 /// The model-selection flags as one precedence layer.
@@ -1517,6 +1576,146 @@ mod tests {
         *args
     }
 
+    // Catches the user file being parsed a second time as a project file when
+    // the workspace is HOME, rejecting otherwise valid read-write roots.
+    #[test]
+    fn home_workspace_loads_user_roots_once_without_project_rejection() {
+        let home = tempfile::tempdir().unwrap();
+        let user_dir = home.path().join(".ego");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::write(
+            user_dir.join("config.toml"),
+            format!(
+                "roots=[{{path={},access=\"read-write\"}}]",
+                toml::Value::String(home.path().to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+
+        let found = base_layers_in(home.path(), Trust::Trusted, Some(&user_dir)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, Source::User);
+        let effective = resolve(&found, Trust::Trusted, None).unwrap();
+        assert_eq!(effective.roots.len(), 1);
+        assert_eq!(effective.roots_source, Some(Source::User));
+        assert_eq!(
+            effective.roots[0].access,
+            ego_core::permit::RootAccess::ReadWrite
+        );
+    }
+
+    // Catches bare diagnostics mislabeling the selected user file as an ignored
+    // project file, or suppressing the warning for a genuinely distinct file.
+    #[test]
+    fn bare_diagnostics_preserve_user_identity_and_warn_for_distinct_project() {
+        #[derive(Default)]
+        struct Recorded(std::sync::Mutex<Vec<String>>);
+        impl Diagnostics for Recorded {
+            fn note(&self, message: &str) {
+                self.0.lock().unwrap().push(message.to_owned());
+            }
+        }
+
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join(".ego");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::write(user_dir.join("config.toml"), "bare=true").unwrap();
+        let layers = base_layers_in(owner.path(), Trust::Trusted, Some(&user_dir)).unwrap();
+        let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+        let diagnostics = Recorded::default();
+        report_discarded_in(owner.path(), &effective, &diagnostics, Some(&user_dir));
+        assert!(diagnostics.0.lock().unwrap().is_empty());
+
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        std::fs::write(workspace.join(".ego/config.toml"), "model='project/model'").unwrap();
+        report_discarded_in(&workspace, &effective, &diagnostics, Some(&user_dir));
+        let notes = diagnostics.0.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("project configuration"), "{}", notes[0]);
+        assert!(
+            notes[0].contains("not applied in the bare posture"),
+            "{}",
+            notes[0]
+        );
+    }
+
+    // Catches an overbroad fix that skips every project config if EGO_HOME is
+    // set or if a workspace sits under the operator's home directory.
+    #[test]
+    fn distinct_project_config_keeps_its_project_authority() {
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join("user-config");
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        std::fs::write(user_dir.join("config.toml"), "model='user/model'").unwrap();
+        std::fs::write(workspace.join(".ego/config.toml"), "model='project/model'").unwrap();
+
+        let found = base_layers_in(&workspace, Trust::Trusted, Some(&user_dir)).unwrap();
+        assert_eq!(
+            resolve(&found, Trust::Trusted, None).unwrap().model,
+            Some(ModelRef("project/model".into()))
+        );
+        let untrusted = base_layers_in(&workspace, Trust::Untrusted, Some(&user_dir)).unwrap();
+        assert_eq!(
+            resolve(&untrusted, Trust::Untrusted, None).unwrap().model,
+            Some(ModelRef("user/model".into()))
+        );
+    }
+
+    // Catches a distinct project file being incorrectly promoted to user
+    // authority, which would admit write access from a project document.
+    #[test]
+    fn distinct_project_write_roots_remain_rejected() {
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join("user-config");
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        std::fs::write(
+            workspace.join(".ego/config.toml"),
+            format!(
+                "roots=[{{path={},access=\"read-write\"}}]",
+                toml::Value::String(workspace.to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+
+        let error = base_layers_in(&workspace, Trust::Trusted, Some(&user_dir))
+            .err()
+            .unwrap();
+        assert!(error.0.contains("project layer"), "{error}");
+        assert!(error.0.contains("read access"), "{error}");
+        assert!(base_layers_in(&workspace, Trust::Untrusted, Some(&user_dir)).is_ok());
+    }
+
+    // Catches a lexical-only path comparison admitting one user file twice
+    // when a trusted project's config is a symlink to the user file.
+    #[cfg(unix)]
+    #[test]
+    fn project_symlink_to_user_config_does_not_duplicate_authority() {
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join("user-config");
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        let user_file = user_dir.join("config.toml");
+        std::fs::write(
+            &user_file,
+            format!(
+                "roots=[{{path={},access=\"read-write\"}}]",
+                toml::Value::String(owner.path().to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&user_file, workspace.join(".ego/config.toml")).unwrap();
+
+        let found = base_layers_in(&workspace, Trust::Trusted, Some(&user_dir)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, Source::User);
+    }
+
     #[test]
     fn request_profile_overrides_captured_startup_profile_and_records_flags_authority() {
         let owner = tempfile::tempdir().expect("profile fixture owner");
@@ -1595,5 +1794,69 @@ mod config_repl_tests {
             assert!(repl_set_args(invalid).is_err(), "{invalid}");
         }
         assert_eq!(std::fs::read_to_string(path).unwrap(), disk);
+    }
+}
+
+#[cfg(test)]
+mod keyboard_preference_tests {
+    use super::*;
+
+    // Catches: keyboard bootstrap consults repository settings or --vim loses to the user file.
+    #[test]
+    fn keyboard_bootstrap_is_user_only_and_cli_vim_wins() {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("config.toml"),
+            "[ui]\nvim=false\nkeybindings={model=['Ctrl+P']}\n",
+        )
+        .unwrap();
+        let saved = keyboard_preferences_at(Some(user.path()), false).unwrap();
+        assert_eq!(saved.vim, Some(false));
+        assert_eq!(saved.keybindings.unwrap()["model"], vec!["Ctrl+P"]);
+        assert_eq!(
+            keyboard_preferences_at(Some(user.path()), true)
+                .unwrap()
+                .vim,
+            Some(true)
+        );
+        assert_eq!(
+            keyboard_preferences_at(None, false).unwrap().vim,
+            Some(false)
+        );
+        std::fs::write(user.path().join("config.toml"), "[ui]\nvim=true\n").unwrap();
+        assert_eq!(
+            keyboard_preferences_at(Some(user.path()), false)
+                .unwrap()
+                .vim,
+            Some(true)
+        );
+        let layers = [ConfigLayer::parse(
+            Source::Project,
+            "[ui]\nvim=true\nkeybindings={model=['Ctrl+P']}\n",
+        )
+        .unwrap()];
+        let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+        assert_eq!(effective.ui.vim, None);
+        assert_eq!(effective.ui.keybindings, None);
+    }
+
+    // Catches: malformed user preferences are silently replaced by default keys.
+    #[test]
+    fn keyboard_bootstrap_refuses_invalid_user_types_and_per_turn_overrides() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "[ui]\nvim='yes'\n").unwrap();
+        assert!(keyboard_preferences_at(Some(home.path()), false).is_err());
+        let crate::cli::Invocation::Interactive(mut args) =
+            crate::cli::parse(vec!["ego".into()]).unwrap()
+        else {
+            panic!("interactive")
+        };
+        args.set = vec!["ui.vim=true".into()];
+        assert!(
+            args_layer(&args)
+                .unwrap_err()
+                .0
+                .contains("user/process-only")
+        );
     }
 }

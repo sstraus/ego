@@ -234,7 +234,7 @@ pub struct ToolTiming {
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
 /// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
-/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PromptQueued | PromptDeliveryExpedited |
+/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | ToolCallStarted | ToolCallDelta |
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
@@ -246,7 +246,8 @@ pub struct ToolTiming {
 /// TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
-/// SubagentSettled | SkillCatalogueAdmitted | SkillInstructionAdmitted |
+/// SubagentSettled | BackgroundTaskRequested | SubagentCompletionDelivered |
+/// SkillCatalogueAdmitted | SkillInstructionAdmitted |
 /// SkillResourceAdmitted | Error
 /// ```
 ///
@@ -269,6 +270,8 @@ pub struct ToolTiming {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
+    /// An authoritative plan replacement or step progress transition.
+    PlanUpdated { update: crate::plan::PlanUpdate },
     /// Operator-facing metadata. The session identity and lineage do not change.
     SessionTitleChanged { title: Option<String> },
     /// Durable soft deletion. Storage remains available to lineage replay.
@@ -359,6 +362,8 @@ pub enum EventKind {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audio: Vec<crate::generator::audio::AudioRef>,
     },
     /// A durable request to expedite the FIFO prefix ending at `through`.
     PromptDeliveryExpedited { through: QueuedPromptId },
@@ -370,6 +375,8 @@ pub enum EventKind {
         /// Ordered immutable image metadata; bytes live in the session CAS.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audio: Vec<crate::generator::audio::AudioRef>,
         /// The queue acceptance this conversation item consumes. Absent on
         /// ordinary direct prompts and on records written before queues.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -676,6 +683,16 @@ pub enum EventKind {
         child: Option<RunId>,
         terminal: SubagentTerminal,
     },
+    /// Exact standalone background-task recovery authority, before child admission.
+    BackgroundTaskRequested {
+        invocation: SubagentInvocationId,
+        authority: crate::subagent::BackgroundTaskAuthority,
+    },
+    /// One settled background task entered the parent conversation at a safe boundary.
+    SubagentCompletionDelivered {
+        invocation: SubagentInvocationId,
+        text: String,
+    },
     /// One complete ordered skill catalogue was admitted atomically.
     SkillCatalogueAdmitted {
         generation: SkillCatalogueGeneration,
@@ -736,8 +753,9 @@ impl EventKind {
             | Self::ExecutionMeasured { probe_evidence, .. } => {
                 references.extend(probe_evidence.iter().map(|evidence| evidence.blob_ref()));
             }
-            Self::PromptQueued { images, .. } | Self::UserPrompt { images, .. } => {
+            Self::PromptQueued { images, audio, .. } | Self::UserPrompt { images, audio, .. } => {
                 references.extend(images.iter().map(|image| image.reference().clone()));
+                references.extend(audio.iter().map(|audio| audio.reference().clone()));
             }
             Self::ToolCallCompleted { result, .. } => {
                 references.extend(
@@ -821,6 +839,7 @@ impl EventKind {
             EventKind::GoalAllowanceInherited { .. } => "goal_allowance_inherited",
             EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
             EventKind::GoalUpdated { .. } => "goal_updated",
+            EventKind::PlanUpdated { .. } => "plan_updated",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
@@ -866,6 +885,8 @@ impl EventKind {
             EventKind::SubagentRequested { .. } => "subagent_requested",
             EventKind::SubagentSpawned { .. } => "subagent_spawned",
             EventKind::SubagentSettled { .. } => "subagent_settled",
+            EventKind::BackgroundTaskRequested { .. } => "background_task_requested",
+            EventKind::SubagentCompletionDelivered { .. } => "subagent_completion_delivered",
             EventKind::SkillCatalogueAdmitted { .. } => "skill_catalogue_admitted",
             EventKind::SkillInstructionAdmitted { .. } => "skill_instruction_admitted",
             EventKind::SkillResourceAdmitted { .. } => "skill_resource_admitted",

@@ -441,6 +441,7 @@ fn event(text: &str, seq: u64) -> DomainEvent {
             producer: Producer::Main,
         },
         kind: EventKind::UserPrompt {
+            audio: Vec::new(),
             text: text.into(),
             images: Vec::new(),
             queued_prompt: None,
@@ -451,6 +452,7 @@ fn event(text: &str, seq: u64) -> DomainEvent {
 fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecord {
     let capabilities = ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(context_window),
         max_output_tokens: None,
         max_tools: None,

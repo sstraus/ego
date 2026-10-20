@@ -27,6 +27,7 @@ fn event(sequence: u64, text: &str) -> DomainEvent {
             producer: Producer::Main,
         },
         kind: EventKind::UserPrompt {
+            audio: Vec::new(),
             text: text.into(),
             images: vec![],
             queued_prompt: None,

@@ -15,22 +15,10 @@ _ego() {
 
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-":: :_ego_commands" \
-"*::: :->ego" \
-&& ret=0
-    case $state in
-    (ego)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ego-command-$line[1]:"
-        case $line[1] in
-            (run)
-_arguments "${_arguments_options[@]}" : \
-'-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
-'--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
-'*--var=[Supply one declared agent-file template variable]:KEY=VALUE:_default' \
+'(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
+'()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
 '*--attach=[Add exact image bytes as ordered context before the prompt text]:IMAGE_PATH|HTTPS_IMAGE_URL:_default' \
 '-m+[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
@@ -39,6 +27,7 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
@@ -63,11 +52,11 @@ _arguments "${_arguments_options[@]}" : \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
 '--timeout=[Wall clock, e.g. '\''90s'\'' or '\''10m'\'']:TIMEOUT:_default' \
 '*--mcp=[Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server]:NAME|@FILE:_default' \
-'--mode=[Permission mode\: plan|default|auto|edits|yolo]:MODE:_default' \
+'--mode=[Permission mode\: plan|default|auto|accept-edits|yolo (alias\: edits)]:MODE:_default' \
 '*-c+[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '*--set=[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
-'--bare[No ambient discovery, even in a trusted workspace]' \
+'(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
@@ -79,6 +68,77 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
+'--vim[Use Vim normal/insert editing in the interactive composer]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'::prompt -- The prompt. `-` reads it from stdin:_default' \
+":: :_ego_commands" \
+"*::: :->ego" \
+&& ret=0
+    case $state in
+    (ego)
+        words=($line[2] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ego-command-$line[2]:"
+        case $line[2] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+'(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
+'()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
+'*--attach=[Add exact image bytes as ordered context before the prompt text]:IMAGE_PATH|HTTPS_IMAGE_URL:_default' \
+'-m+[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
+'--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
+'--sandbox=[Filesystem confinement\: ro|workspace|adaptive|off; off = no confinement, credentials included]:SANDBOX:_default' \
+'--thinking=[off|minimal|low|medium|high|xhigh|max]:THINKING:_default' \
+'--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
+'--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
+'--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
+'--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
+'*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
+'*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
+'*--deny=[Deny rule, e.g. '\''write(**)'\''. Repeatable]:RULE:_default' \
+'--profile=[Layer \[profile.NAME\] from config]:PROFILE:_default' \
+'--session=[Named session\: created or attached]:SESSION:_default' \
+'--session-id=[A session id supplied by the caller]:SESSION_ID:_default' \
+'--session-dir=[Override the store location]:SESSION_DIR:_files' \
+'-C+[Run as if started in DIR]:DIR:_files' \
+'--output=[text|json|jsonl]:OUTPUT:(text json jsonl)' \
+'--artifact-dir=[Override the sanitized run-artifact root for profile \`ci\`]:ARTIFACT_DIR:_files' \
+'--schema=[JSON Schema the final answer must validate against; \`@file\` or inline]:SCHEMA:_default' \
+'--schema-retries=[How many times to re-prompt on a schema mismatch]:SCHEMA_RETRIES:_default' \
+'--retry=[Additional delivery-safe attempts for each candidate]:RETRY:_default' \
+'*--fallback=[Ordered provider/model candidate used after a delivery-safe failure]:P/M:_default' \
+'--budget=[Hard cap\: '\''2.5\$'\'' or '\''400k'\'' tokens]:BUDGET:_default' \
+'--max-output-tokens=[Maximum generated tokens per request]:MAX_OUTPUT_TOKENS:_default' \
+'--goal=[Set a checked session objective]:GOAL:_default' \
+'--context-interval=[Minimum completed turns between model-requested transitions]:CONTEXT_INTERVAL:_default' \
+'--goal-turns=[Maximum automatic goal continuation turns]:GOAL_TURNS:_default' \
+'--goal-check-command=[Evaluator argv as a JSON string array; reads evidence JSON on stdin]:GOAL_CHECK_COMMAND:_default' \
+'--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
+'--timeout=[Wall clock, e.g. '\''90s'\'' or '\''10m'\'']:TIMEOUT:_default' \
+'*--mcp=[Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server]:NAME|@FILE:_default' \
+'--mode=[Permission mode\: plan|default|auto|accept-edits|yolo (alias\: edits)]:MODE:_default' \
+'*-c+[Dotted-path config override, value parsed as TOML]:K=V:_default' \
+'*--set=[Dotted-path config override, value parsed as TOML]:K=V:_default' \
+'--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
+'(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
+'(--tools)--no-tools[Offer no tools at all]' \
+'(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
+'--ephemeral[Refused\: every run uses a durable session]' \
+'--no-context-tool[Disable model-requested context transitions]' \
+'--context-clear[Permit the model to discard conversation history using clear]' \
+'--plan[Shorthand for --mode plan]' \
+'--yolo[Shorthand for --mode yolo]' \
+'-q[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
+'--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
+'--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
+'--plain[Append plain output without terminal styling or live retry updates]' \
+'--vim[Use Vim normal/insert editing in the interactive composer]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::prompt -- The prompt. `-` reads it from stdin:_default' \
@@ -87,9 +147,11 @@ _arguments "${_arguments_options[@]}" : \
 (resume)
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
-'-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
-'--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
-'*--var=[Supply one declared agent-file template variable]:KEY=VALUE:_default' \
+'(--goal-operation --answer -f --file --var --attach -m --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
+'(--name --answer -f --file --var --attach -m --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, achieve, block=REASON]:GOAL_OPERATION:_default' \
+'()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
 '*--attach=[Add exact image bytes as ordered context before the prompt text]:IMAGE_PATH|HTTPS_IMAGE_URL:_default' \
 '-m+[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
@@ -98,13 +160,12 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
 '*--deny=[Deny rule, e.g. '\''write(**)'\''. Repeatable]:RULE:_default' \
 '--profile=[Layer \[profile.NAME\] from config]:PROFILE:_default' \
-'--session=[Named session\: created or attached]:SESSION:_default' \
-'--session-id=[A session id supplied by the caller]:SESSION_ID:_default' \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--output=[text|json|jsonl]:OUTPUT:(text json jsonl)' \
@@ -122,11 +183,14 @@ _arguments "${_arguments_options[@]}" : \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
 '--timeout=[Wall clock, e.g. '\''90s'\'' or '\''10m'\'']:TIMEOUT:_default' \
 '*--mcp=[Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server]:NAME|@FILE:_default' \
-'--mode=[Permission mode\: plan|default|auto|edits|yolo]:MODE:_default' \
+'--mode=[Permission mode\: plan|default|auto|accept-edits|yolo (alias\: edits)]:MODE:_default' \
 '*-c+[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '*--set=[Dotted-path config override, value parsed as TOML]:K=V:_default' \
+'--session=[Named session\: created or attached]:SESSION:_default' \
+'--session-id=[A session id supplied by the caller]:SESSION_ID:_default' \
+'(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
-'--bare[No ambient discovery, even in a trusted workspace]' \
+'(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
@@ -138,18 +202,21 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
+'--vim[Use Vim normal/insert editing in the interactive composer]' \
 '-h[Print help]' \
 '--help[Print help]' \
-'::id -- The session to continue. Omit it for the latest in this workspace:_default' \
+'::id -- Session UUID; omit it for the terminal picker or headless latest in this workspace:_default' \
 '::prompt -- The prompt. `-` reads it from stdin:_default' \
 && ret=0
 ;;
 (continue)
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
-'-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
-'--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
-'*--var=[Supply one declared agent-file template variable]:KEY=VALUE:_default' \
+'(--goal-operation --answer -f --file --var --attach -m --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
+'(--name --answer -f --file --var --attach -m --model --offline --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, achieve, block=REASON]:GOAL_OPERATION:_default' \
+'()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
+'()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
 '*--attach=[Add exact image bytes as ordered context before the prompt text]:IMAGE_PATH|HTTPS_IMAGE_URL:_default' \
 '-m+[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
 '--model=[provider/model slug, e.g. ollama/qwen3]:MODEL:_default' \
@@ -158,13 +225,12 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
 '*--deny=[Deny rule, e.g. '\''write(**)'\''. Repeatable]:RULE:_default' \
 '--profile=[Layer \[profile.NAME\] from config]:PROFILE:_default' \
-'--session=[Named session\: created or attached]:SESSION:_default' \
-'--session-id=[A session id supplied by the caller]:SESSION_ID:_default' \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--output=[text|json|jsonl]:OUTPUT:(text json jsonl)' \
@@ -182,11 +248,14 @@ _arguments "${_arguments_options[@]}" : \
 '--max-turns=[Cap the turns this run may take]:MAX_TURNS:_default' \
 '--timeout=[Wall clock, e.g. '\''90s'\'' or '\''10m'\'']:TIMEOUT:_default' \
 '*--mcp=[Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server]:NAME|@FILE:_default' \
-'--mode=[Permission mode\: plan|default|auto|edits|yolo]:MODE:_default' \
+'--mode=[Permission mode\: plan|default|auto|accept-edits|yolo (alias\: edits)]:MODE:_default' \
 '*-c+[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '*--set=[Dotted-path config override, value parsed as TOML]:K=V:_default' \
+'--session=[Named session\: created or attached]:SESSION:_default' \
+'--session-id=[A session id supplied by the caller]:SESSION_ID:_default' \
+'(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
-'--bare[No ambient discovery, even in a trusted workspace]' \
+'(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
@@ -198,9 +267,10 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
+'--vim[Use Vim normal/insert editing in the interactive composer]' \
 '-h[Print help]' \
 '--help[Print help]' \
-'::id -- The session to continue. Omit it for the latest in this workspace:_default' \
+'::id -- Session UUID; omit it for the terminal picker or headless latest in this workspace:_default' \
 '::prompt -- The prompt. `-` reads it from stdin:_default' \
 && ret=0
 ;;
@@ -219,11 +289,11 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
-'--yes[]' \
-'--force[]' \
+'--yes[Supply deletion confirmation without prompting; required without terminal stdin]' \
+'--force[Acknowledge an uncertain prior run; does not replace deletion confirmation and is not a general override]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':source:_default' \
+':source -- Stored session ID to delete; history needed by descendants is retained:_default' \
 && ret=0
 ;;
 (compact)
@@ -241,14 +311,16 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (export)
 _arguments "${_arguments_options[@]}" : \
-'--format=[]:FORMAT:(md json jsonl)' \
-'--file=[]:PATH:_files' \
+'--format=[Transcript format; JSONL is stdout-only and cannot be combined with --file]:FORMAT:(md json jsonl transcript)' \
+'--after=[Only emit transcript events after this session-local sequence]:SEQ:_default' \
+'--file=[Write to PATH instead of stdout; its parent must exist. Refuse symlinks, non-regular targets and existing files with different bytes; identical bytes are accepted]:PATH:_files' \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
-'--sanitize[]' \
+'--sanitize[Remove private content structurally; exports are unsanitized by default]' \
+'--follow[Follow committed local transcript events until stopped]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':source:_default' \
+':source -- Stored session ID to export:_default' \
 && ret=0
 ;;
 (ls)
@@ -313,9 +385,49 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(checkpoint)
+_arguments "${_arguments_options[@]}" : \
+'-C+[]:DIRECTORY:_files' \
+'--directory=[]:DIRECTORY:_files' \
+'-h[Print help]' \
+'--help[Print help]' \
+':session:_default' \
+":: :_ego__subcmd__checkpoint_commands" \
+"*::: :->checkpoint" \
+&& ret=0
+
+    case $state in
+    (checkpoint)
+        words=($line[2] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ego-checkpoint-command-$line[2]:"
+        case $line[2] in
+            (preview)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(restore)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':checkpoint:_default' \
+&& ret=0
+;;
+(close)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (setup)
 _arguments "${_arguments_options[@]}" : \
-'*--items=[Limit proposals to these report item IDs (comma-separated)]:ITEMS:_default' \
+'*--items=[Select proposal item IDs as one comma-separated list; repeat to add IDs]:ID[,ID...]:_default' \
 '--judge=[Offer a validated judge for unresolved policy; never authorizes an action]:JUDGE:_default' \
 '--profile=[]:PROFILE:_default' \
 '--directory=[]:DIRECTORY:_files' \
@@ -332,16 +444,17 @@ _arguments "${_arguments_options[@]}" : \
 '--read-only-dir=[Grant reads of one existing canonical absolute upload directory]:DIR:_files' \
 '--system=[Replace the system prompt. \`@file\` reads it from a file]:SYSTEM:_default' \
 '--append-system=[Append to the system prompt. \`@file\` reads it from a file]:APPEND_SYSTEM:_default' \
+'--output-style=[Select a trusted prompt-only style\: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md]:NAME:_default' \
 '--instructions=[Use this instruction file instead of discovering one]:INSTRUCTIONS:_files' \
 '*--tools=[Restrict the builtin tools to this comma-separated list]:TOOLS:_default' \
 '*--allow=[Allow rule, e.g. '\''read(src/**)'\''. Repeatable]:RULE:_default' \
 '*--deny=[Deny rule, e.g. '\''write(**)'\''. Repeatable]:RULE:_default' \
 '--profile=[Layer \[profile.NAME\] from config]:PROFILE:_default' \
 '--listen=[Serve on a socket path or address instead of stdio]:LISTEN:_default' \
-'--max-connections=[Maximum simultaneous listener connections]:MAX_CONNECTIONS:_default' \
-'--connection-lifetime=[Maximum lifetime of one listener connection\: 90s, 10m or 2h]:CONNECTION_LIFETIME:_default' \
-'--max-ingress-bytes=[Maximum cumulative bytes read from one listener connection]:MAX_INGRESS_BYTES:_default' \
-'--bare[No ambient discovery, even in a trusted workspace]' \
+'--max-connections=[Maximum simultaneous listener connections (runtime default\: 32)]:MAX_CONNECTIONS:_default' \
+'--connection-lifetime=[Maximum lifetime of one listener connection\: 90s, 10m or 2h (runtime default\: 24h)]:CONNECTION_LIFETIME:_default' \
+'--max-ingress-bytes=[Maximum cumulative bytes read from one listener connection (runtime default\: 134217728 bytes)]:MAX_INGRESS_BYTES:_default' \
+'(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
 '--allow-public-bind[Serve on an address reachable from outside this machine]' \
 '-h[Print help]' \
@@ -418,6 +531,7 @@ _arguments "${_arguments_options[@]}" : \
 '(--stdio)--http=[Configure a Streamable HTTP transport]:URL:_default' \
 '(--http)--cwd=[Working directory for the stdio child]:DIR:_files' \
 '(--http)*--inherit-env=[Environment variable inherited by the stdio child. Repeatable]:NAME:_default' \
+'(--stdio)--profile=[Explicit HTTP wire profile; never selected by fallback]:PROFILE:(current legacy-sse)' \
 '(--stdio)--auth=[HTTP authentication mode]:AUTH:(none oauth)' \
 '(--http)--stdio[Configure a subprocess transport. Its command follows literal \`--\`]' \
 '(--stdio)--allow-insecure-loopback[Consent to plaintext HTTP for an exact loopback host]' \
@@ -698,6 +812,38 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(worktree)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_ego__subcmd__worktree_commands" \
+"*::: :->worktree" \
+&& ret=0
+
+    case $state in
+    (worktree)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ego-worktree-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':receipt:_default' \
+&& ret=0
+;;
+(cleanup)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':receipt:_default' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
         esac
     ;;
 esac
@@ -707,8 +853,8 @@ esac
 _ego_commands() {
     local commands; commands=(
 'run:Run an agent from a prompt, headless.' \
-'resume:Continue a session; no ID = latest in this workspace.' \
-'continue:Continue a session; no ID = latest in this workspace.' \
+'resume:Continue a stored session.' \
+'continue:Continue a stored session.' \
 'fork:Fork a session at its tip or after the completed turn containing a message.' \
 'rm:Delete a stored session (history is retained for descendants).' \
 'compact:Compact a session into its deterministic successor.' \
@@ -718,6 +864,7 @@ _ego_commands() {
 'models:List the shared model catalogue.' \
 'hooks:Inspect the admitted system and user hook catalogue.' \
 'doctor:Report a read-only redacted health snapshot of this installation.' \
+'checkpoint:Preview or selectively restore session-owned Git file checkpoints.' \
 'setup:Inspect expected work without running effects.' \
 'acp:Serve the Agent Client Protocol on stdio or an endpoint.' \
 'a2a:Serve the Agent2Agent protocol on a local or loopback endpoint.' \
@@ -728,6 +875,7 @@ _ego_commands() {
 'rules:Inspect and manage persistent permission rules.' \
 'mcp-server:Serve scoped ego runs over MCP on stdio.' \
 'orchestrator:' \
+'worktree:Inspect or clean up a retained local worktree.' \
     )
     _describe -t commands 'ego commands' commands "$@"
 }
@@ -764,6 +912,30 @@ _ego__subcmd__auth__subcmd__logout_commands() {
 _ego__subcmd__auth__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'ego auth status commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint_commands] )) ||
+_ego__subcmd__checkpoint_commands() {
+    local commands; commands=(
+'preview:List checkpoint IDs, paths, effects, and external-change conflicts as JSON' \
+'restore:Restore one selected checkpoint; external changes are never forced' \
+'close:Close checkpoint ownership and delete the session'\''s private Git ref' \
+    )
+    _describe -t commands 'ego checkpoint commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint__subcmd__close_commands] )) ||
+_ego__subcmd__checkpoint__subcmd__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego checkpoint close commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint__subcmd__preview_commands] )) ||
+_ego__subcmd__checkpoint__subcmd__preview_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego checkpoint preview commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__checkpoint__subcmd__restore_commands] )) ||
+_ego__subcmd__checkpoint__subcmd__restore_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego checkpoint restore commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__compact_commands] )) ||
 _ego__subcmd__compact_commands() {
@@ -1009,6 +1181,24 @@ _ego__subcmd__setup_commands() {
 _ego__subcmd__usage_commands() {
     local commands; commands=()
     _describe -t commands 'ego usage commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__worktree_commands] )) ||
+_ego__subcmd__worktree_commands() {
+    local commands; commands=(
+'show:Inspect a durable local worktree receipt without starting a model' \
+'cleanup:Remove only a clean worktree whose commits are integrated; retain its branch' \
+    )
+    _describe -t commands 'ego worktree commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__worktree__subcmd__cleanup_commands] )) ||
+_ego__subcmd__worktree__subcmd__cleanup_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego worktree cleanup commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__worktree__subcmd__show_commands] )) ||
+_ego__subcmd__worktree__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego worktree show commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_ego" ]; then

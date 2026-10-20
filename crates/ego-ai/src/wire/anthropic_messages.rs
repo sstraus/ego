@@ -97,6 +97,10 @@ impl WireFormat for AnthropicMessages {
         build_request(target, req).map_err(RequestRefused::from)
     }
 
+    fn cache_prefix(&self, body: &[u8]) -> Option<String> {
+        cache_prefix(body)
+    }
+
     fn decode(
         &self,
         response: Result<HttpResponse, HttpError>,
@@ -140,6 +144,7 @@ pub const DIALECT: &str = "anthropic-messages";
 /// can tell it happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
+    AudioNotSupported,
     /// `max_tokens` is required and the request set no ceiling.
     ///
     /// A number invented here would be a silent choice about what the caller
@@ -149,13 +154,17 @@ pub enum Inexpressible {
     ///
     /// Only `Minimal` reaches this. Substituting the nearest published level
     /// would bill for reasoning at a depth nobody asked for, silently.
-    ThinkingLevelUnavailable { level: ThinkingLevel },
+    ThinkingLevelUnavailable {
+        level: ThinkingLevel,
+    },
     /// Reasoning state another protocol minted.
     ///
     /// It cannot be posted into a `content` array that has no shape for it,
     /// and dropping it produces the documented `400` on the next turn rather
     /// than on this one — which is the worst of both.
-    ReasoningStateFromAnotherDialect { dialect: String },
+    ReasoningStateFromAnotherDialect {
+        dialect: String,
+    },
     /// Reasoning state this mapping minted and cannot read back.
     ///
     /// Unreachable from a stream decoded here and reachable from a durable log
@@ -167,7 +176,9 @@ pub enum Inexpressible {
     /// mid-stream survives as *evidence about the stream*; `tool_use.input` is
     /// an object, so this is the seam at which that evidence stops being
     /// sendable.
-    ArgumentsNotJson { call_id: String },
+    ArgumentsNotJson {
+        call_id: String,
+    },
     /// A system turn carrying something other than text.
     ///
     /// [`Conversation`](ego_core::generator::types::Conversation) permits a
@@ -180,6 +191,9 @@ pub enum Inexpressible {
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AudioNotSupported => {
+                f.write_str("this wire contract does not support audio input")
+            }
             Inexpressible::CeilingRequired => write!(
                 f,
                 "anthropic-messages requires max_tokens on every request, and \
@@ -424,6 +438,7 @@ fn project(messages: &[Message]) -> Result<(Option<String>, Vec<WireMessage<'_>>
 fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
     Ok(match block {
         ContentBlock::Text { text } => WireBlock::Text { kind: "text", text },
+        ContentBlock::Audio { .. } => unreachable!("audio is refused before wire serialization"),
         ContentBlock::Image { image } => WireBlock::Image {
             kind: "image",
             source: ImageSource {
@@ -476,6 +491,9 @@ fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
 /// or a credential in it — the body is the contract with the provider; the
 /// endpoint and the auth header are the provider row's business.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     let max_tokens = req
         .max_output_tokens
         .ok_or(Inexpressible::CeilingRequired)?;
@@ -551,6 +569,85 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         }
     }
     Ok(serde_json::to_vec(&body).expect("a JSON value serialises"))
+}
+
+/// Fingerprint the longest explicitly marked prefix of the encoded request.
+/// Later, volatile messages cannot change this identity; changes to the
+/// marked prefix, tools, or generation settings do change it.
+fn cache_prefix(body: &[u8]) -> Option<String> {
+    let mut request: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let messages = request.get_mut("messages")?.as_array_mut()?;
+    let marked = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            message["content"]
+                .as_array()?
+                .iter()
+                .rposition(|block| block.get("cache_control").is_some())
+                .map(|block| (index, block))
+        });
+    if let Some((index, block)) = marked {
+        messages.truncate(index + 1);
+        messages[index]["content"]
+            .as_array_mut()?
+            .truncate(block + 1);
+    } else {
+        let system_marked = request["system"].as_array().is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.get("cache_control").is_some())
+        });
+        if !system_marked {
+            return None;
+        }
+        request["messages"].as_array_mut()?.clear();
+    }
+    request.as_object_mut()?.remove("max_tokens");
+    request.as_object_mut()?.remove("stream");
+    Some(ego_core::digest::sha256_hex(
+        &serde_json::to_vec(&request).ok()?,
+    ))
+}
+
+#[cfg(test)]
+mod cache_prefix_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn digest_tracks_the_marked_request_prefix_not_volatile_messages() {
+        let body = |marked, volatile| {
+            json!({
+                "model": "model-a", "max_tokens": 100, "stream": true,
+                "system": [{"type":"text", "text":"system", "cache_control":{"type":"ephemeral"}}],
+                "messages": [
+                    {"role":"user", "content":[{"type":"text", "text":marked,
+                        "cache_control":{"type":"ephemeral"}}]},
+                    {"role":"user", "content":[{"type":"text", "text":volatile}]}
+                ]
+            })
+        };
+        let digest = |body: serde_json::Value| cache_prefix(&serde_json::to_vec(&body).unwrap());
+        let baseline = digest(body("stable", "first"));
+        assert!(baseline.is_some());
+        assert_eq!(baseline, digest(body("stable", "second")));
+        assert_ne!(baseline, digest(body("changed", "first")));
+        let mut other_model = body("stable", "first");
+        other_model["model"] = json!("model-b");
+        assert_ne!(baseline, digest(other_model));
+        let mut unmarked = body("stable", "first");
+        unmarked["system"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control");
+        unmarked["messages"][0]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control");
+        assert_eq!(digest(unmarked), None);
+    }
 }
 
 /// A complete HTTP request for `req` against `target`.

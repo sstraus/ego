@@ -539,11 +539,16 @@ struct CanonicalArgument {
 #[derive(Serialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 enum CanonicalChange {
+    Notebook {
+        bytes: usize,
+        sha256: String,
+    },
     Whole {
         bytes: usize,
         sha256: String,
     },
     Replace {
+        replace_all: bool,
         old_bytes: usize,
         old_sha256: String,
         new_bytes: usize,
@@ -554,14 +559,23 @@ enum CanonicalChange {
 impl From<&Change> for CanonicalChange {
     fn from(change: &Change) -> Self {
         match change {
+            Change::Notebook(edit) => {
+                let bytes = serde_json::to_vec(edit).expect("closed cell edit codec");
+                Self::Notebook {
+                    bytes: bytes.len(),
+                    sha256: sha256_hex(&bytes),
+                }
+            }
             Change::Whole(bytes) => Self::Whole {
                 bytes: bytes.len(),
                 sha256: sha256_hex(bytes),
             },
             Change::Replace {
+                replace_all,
                 old_string,
                 new_string,
             } => Self::Replace {
+                replace_all: *replace_all,
                 old_bytes: old_string.len(),
                 old_sha256: sha256_hex(old_string.as_bytes()),
                 new_bytes: new_string.len(),

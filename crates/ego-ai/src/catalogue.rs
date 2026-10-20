@@ -35,6 +35,30 @@ use crate::resolver::{Resolution, StaticResolution};
 use crate::wire::WireFormat;
 use crate::wire::provider_cost::ProviderCost;
 
+fn admitted_capabilities(
+    provider: &str,
+    model: &str,
+    row: &ProviderRow,
+    supplied: &ModelCapabilities,
+) -> ModelCapabilities {
+    let mut caps = supplied.clone();
+    caps.audio_input = if provider == "openai"
+        && model == "gpt-audio-1.5"
+        && row.base().as_str() == "https://api.openai.com/v1/"
+    {
+        ego_core::generator::capabilities::AudioInputSupport::SupportedWav
+    } else if supplied.audio_input
+        == ego_core::generator::capabilities::AudioInputSupport::SupportedWav
+    {
+        // Operator claims cannot promote an unproved model/route. Preserve
+        // Unknown as ignorance rather than inventing a negative provider fact.
+        ego_core::generator::capabilities::AudioInputSupport::Unsupported
+    } else {
+        supplied.audio_input
+    };
+    caps
+}
+
 /// The provider id of the hosted row this milestone ships.
 pub const OPENAI: &str = "openai";
 /// The provider id of the local daemon this milestone ships.
@@ -250,7 +274,7 @@ pub enum ModelAvailability {
 }
 
 /// One stable, public row shared by every catalogue consumer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ModelCatalogueEntry {
     pub slug: ModelSlug,
     pub capabilities: ModelCapabilities,
@@ -258,6 +282,29 @@ pub struct ModelCatalogueEntry {
     pub provenance: ModelFactProvenance,
     pub freshness: FactFreshness,
     pub availability: ModelAvailability,
+}
+
+impl Serialize for ModelCatalogueEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut row = serializer.serialize_struct("ModelCatalogueEntry", 8)?;
+        row.serialize_field("slug", &self.slug)?;
+        row.serialize_field("capabilities", &self.capabilities)?;
+        row.serialize_field("metering", &self.metering)?;
+        row.serialize_field("provenance", &self.provenance)?;
+        row.serialize_field("freshness", &self.freshness)?;
+        row.serialize_field("availability", &self.availability)?;
+        row.serialize_field("standard_token_price_multiplier", &1)?;
+        row.serialize_field("fast", &self.fast_support())?;
+        row.end()
+    }
+}
+
+impl ModelCatalogueEntry {
+    /// Verified optional tier facts; absence means standard only.
+    pub fn fast_support(&self) -> Option<crate::service_tier::FastSupport> {
+        crate::service_tier::fast_support(&self.slug.to_string())
+    }
 }
 
 /// The latest observation status for one model source.
@@ -1182,8 +1229,14 @@ impl Catalogue {
             .get(&key)
             .ok_or(ResolveError::HostedModelNotConfigured { slug: key })?;
         Ok(StaticRequestProfile::new(
+            self.row(&slug.provider)?.base().clone(),
             slug.model.clone(),
-            hosted.capabilities.clone(),
+            admitted_capabilities(
+                &slug.provider,
+                &slug.model,
+                self.row(&slug.provider)?,
+                &hosted.capabilities,
+            ),
             wire,
         ))
     }
@@ -1252,9 +1305,19 @@ impl Catalogue {
             model: slug.model.clone(),
             row: row.clone(),
             wire,
-            capabilities: hosted.capabilities.clone(),
+            capabilities: admitted_capabilities(
+                &slug.provider,
+                &slug.model,
+                row,
+                &hosted.capabilities,
+            ),
             metering: hosted.metering.clone(),
-            rates: hosted.rates.clone(),
+            // Text-token quotes cannot price the model's audio token categories.
+            rates: if slug.provider == "openai" && slug.model == "gpt-audio-1.5" {
+                None
+            } else {
+                hosted.rates.clone()
+            },
         })
     }
 
@@ -1284,8 +1347,14 @@ impl Catalogue {
             .map(|(slug, hosted)| {
                 let slug = ModelSlug::parse(slug).map_err(|error| error.to_string())?;
                 Ok(ModelDiscoveryEntry {
-                    slug,
-                    capabilities: hosted.capabilities.clone(),
+                    slug: slug.clone(),
+                    capabilities: admitted_capabilities(
+                        &slug.provider,
+                        &slug.model,
+                        self.row(&slug.provider)
+                            .map_err(|error| error.to_string())?,
+                        &hosted.capabilities,
+                    ),
                     metering: metering.unwrap_or_else(|| metering_kind(&hosted.metering)),
                     provenance: ModelFactProvenance::supplied(hosted.authority),
                 })

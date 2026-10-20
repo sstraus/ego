@@ -723,6 +723,9 @@ where
     ) -> Result<LifecycleMutation<GoalRecord>, LifecycleError> {
         let session = append.session_id();
         let transition = match transition {
+            GoalTransition::Blocked { reason } => GoalTransition::Blocked {
+                reason: validate_operator_text(reason)?,
+            },
             GoalTransition::BlockerObserved { reason } => GoalTransition::BlockerObserved {
                 reason: validate_operator_text(reason)?,
             },
@@ -936,6 +939,11 @@ where
     /// Read the current durable goal for an attached consumer.
     pub fn goal(&self, id: SessionId) -> Result<Option<GoalRecord>, LifecycleError> {
         self.metadata.goal(id)
+    }
+
+    /// Read the same durable plan used by live consumers.
+    pub fn plan(&self, id: SessionId) -> Result<crate::plan::Plan, LifecycleError> {
+        Ok(self.metadata.state(id)?.plan)
     }
 
     /// Derive tree metadata without retaining a second lineage authority.

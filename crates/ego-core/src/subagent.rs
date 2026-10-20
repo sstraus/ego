@@ -23,6 +23,16 @@ use crate::run::{
 use crate::store::blob::BlobRef;
 use crate::store::session_store::SessionStore;
 
+/// Durable admission ceiling for an explicitly backgrounded task.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BackgroundTaskAuthority {
+    pub parent_run: RunId,
+    pub tools: BTreeSet<String>,
+    pub mode: crate::config::Mode,
+    pub model: Option<crate::config::ModelRef>,
+    pub policy: crate::turn::GenerationPolicyDigest,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildWait {
     Foreground,
@@ -480,6 +490,25 @@ impl ChildRunService {
             }),
         }
     }
+    /// Reopen a task under its original run lineage after the CLI process restarts.
+    pub fn for_background_task(&self, parent_run: RunId) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                controller: Arc::clone(&self.inner.controller),
+                gate: self.inner.gate.clone(),
+                root: self.inner.root.clone(),
+                bindings: self
+                    .inner
+                    .bindings
+                    .clone()
+                    .without_delegation()
+                    .with_cancel(crate::turn::CancelToken::new()),
+                ports: ChildServicePorts::new(parent_run, Arc::clone(&self.inner.ports.host)),
+                active: Mutex::new(BTreeMap::new()),
+            }),
+        }
+    }
+
     /// The already admitted parent identity required by typed child requests.
     pub fn parent_run(&self) -> RunId {
         self.inner.ports.parent_run
@@ -522,6 +551,23 @@ impl ChildRunService {
             .await
             .map_err(controller_error)
     }
+    /// A nonblocking observation; collection remains serialized by `finish`.
+    pub fn is_settled(&self, invocation: SubagentInvocationId) -> Result<bool, ChildServiceError> {
+        let active = self.inner.active.lock().expect("active children");
+        let child = active
+            .get(&invocation)
+            .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
+        Ok(child
+            .settlement
+            .try_lock()
+            .is_some_and(|state| state.settled.is_some())
+            || child.observed.is_some()
+            || child
+                .subscription
+                .as_ref()
+                .is_some_and(|subscription| subscription.snapshot().settlement().is_some()))
+    }
+
     /// Cancel a child on behalf of the retained product owner.
     pub async fn cancel_owned(
         &self,

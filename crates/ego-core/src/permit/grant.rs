@@ -961,6 +961,13 @@ impl fmt::Display for PermissionRequest {
                 Op::Write { path, change } => {
                     write!(f, "\n- write {}", TerminalSafe(&path.to_string()))?;
                     match change {
+                        Change::Notebook(edit) => write!(
+                            f,
+                            "\n  notebook cell edit: {}\n  other cells, metadata and outputs are retained",
+                            TerminalSafe(
+                                &serde_json::to_string(edit).expect("closed cell edit codec")
+                            )
+                        )?,
                         Change::Whole(content) => write!(
                             f,
                             "\n  whole content ({} bytes): {}",
@@ -968,11 +975,17 @@ impl fmt::Display for PermissionRequest {
                             EscapedBytes(content)
                         )?,
                         Change::Replace {
+                            replace_all,
                             old_string,
                             new_string,
                         } => write!(
                             f,
-                            "\n  replace old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
+                            "\n  replace {} old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
+                            if *replace_all {
+                                "all original non-overlapping occurrences of"
+                            } else {
+                                "exactly one occurrence of"
+                            },
                             TerminalSafe(old_string),
                             TerminalSafe(new_string)
                         )?,
@@ -1243,9 +1256,8 @@ impl PolicyEngine {
         self.coordinator && self.risk(call).class == super::analysis::RiskClass::High
     }
 
-    /// What this engine lets a run do at `path`: the most specific containing
-    /// boundary decides. A path with a `..` component is not canonical and is
-    /// never inside anything.
+    /// Nested read-only restrictions veto writes throughout their subtree.
+    /// Otherwise the most specific root wins. Parent traversal is not canonical.
     fn reach(&self, path: &CanonPath) -> Option<RootAccess> {
         if path
             .as_path()
@@ -1253,6 +1265,11 @@ impl PolicyEngine {
             .any(|part| part == std::path::Component::ParentDir)
         {
             return None;
+        }
+        if self.roots.iter().any(|root| {
+            root.restricts_writes(&self.workspace, &self.roots) && path.is_or_under(root.path())
+        }) {
+            return Some(RootAccess::Read);
         }
         let depth = |base: &CanonPath| base.as_path().components().count();
         self.roots
@@ -1481,7 +1498,7 @@ impl PolicyEngine {
                         Op::Read { path: read },
                         write @ Op::Write {
                             path,
-                            change: Change::Replace { .. },
+                            change: Change::Replace { .. } | Change::Notebook(_),
                         },
                     ],
                     Op::Read { .. },
@@ -2394,6 +2411,7 @@ mod tests {
                 Op::Write {
                     path: CanonPath::new("/ws/edit.txt"),
                     change: Change::Replace {
+                        replace_all: false,
                         old_string: "old\n".to_string(),
                         new_string: "new\t".to_string(),
                     },
@@ -2416,7 +2434,7 @@ mod tests {
                 "- list /ws/src matching *.rs\\n\n",
                 "- search /ws/src for unsafe\\u{1b}\n",
                 "- write /ws/edit.txt\n",
-                "  replace old text: old\\n\n",
+                "  replace exactly one occurrence of old text: old\\n\n",
                 "  with new text: new\\t\n",
                 "  final content depends on the file at execution time",
             )

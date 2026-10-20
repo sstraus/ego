@@ -1,3 +1,6 @@
+#[path = "legacy_sse.rs"]
+mod legacy_sse;
+
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -642,6 +645,46 @@ pub struct McpClient {
     control: Arc<ClientControl>,
     state: ClientState,
     acp: Option<AcpConnection>,
+    identity_retry: Arc<tokio::sync::Mutex<bool>>,
+}
+
+// This is TUIC's explicit identity contract, not a generic cache of error prose.
+// The gate is scoped to an admitted connection, never shared across servers.
+fn identity_action(params: &serde_json::Value) -> Option<&str> {
+    let (name, args) = if params["name"] == "call_tool" {
+        (
+            &params["arguments"]["tool_name"],
+            &params["arguments"]["arguments"],
+        )
+    } else {
+        (&params["name"], &params["arguments"])
+    };
+    if name != "agent" {
+        return None;
+    }
+    args["action"]
+        .as_str()
+        .filter(|action| matches!(*action, "inbox" | "register"))
+}
+
+fn identity_context_refused(result: &CallToolResult) -> bool {
+    if result.is_error != Some(true) {
+        return false;
+    }
+    let body = result.structured_content.clone().or_else(|| {
+        let [block] = result.content.as_slice() else {
+            return None;
+        };
+        serde_json::from_str::<serde_json::Value>(&block.as_text()?.text).ok()
+    });
+    body.is_some_and(|body| {
+        body["code"] == "identity_context_required"
+            && body["effect"] == "not_started"
+            && (body["retryable"] == false
+                || body["repair"]["max_attempts"]
+                    .as_u64()
+                    .is_some_and(|bound| bound <= 1))
+    })
 }
 
 pub(crate) struct McpClientInventory {
@@ -680,6 +723,7 @@ impl McpClient {
                 effects,
             }),
             acp: None,
+            identity_retry: Arc::default(),
         })
     }
 
@@ -694,6 +738,7 @@ impl McpClient {
             control: Arc::new(ClientControl::default()),
             state: ClientState::Pending(PendingTransport::Stdio { effects }),
             acp: None,
+            identity_retry: Arc::default(),
         })
     }
 
@@ -720,12 +765,27 @@ impl McpClient {
             options,
             control: Arc::new(ClientControl::default()),
             state: ClientState::Pending(PendingTransport::Acp { stream }),
+            identity_retry: Arc::default(),
             acp: Some(AcpConnection {
                 id: connection_id,
                 effects,
                 bridge,
             }),
         })
+    }
+
+    /// Fresh HTTP/one-shot stdio clients share their admitted server's identity
+    /// failure until that context is replaced or an explicit register succeeds.
+    pub(crate) fn with_identity_retry(
+        mut self,
+        identity_retry: Arc<tokio::sync::Mutex<bool>>,
+    ) -> Self {
+        self.identity_retry = identity_retry;
+        self
+    }
+
+    pub(crate) fn set_identity_retry(&mut self, identity_retry: Arc<tokio::sync::Mutex<bool>>) {
+        self.identity_retry = identity_retry;
     }
 
     /// Give a retained ACP client fresh authority and a fresh deadline for one call.
@@ -791,6 +851,47 @@ impl McpClient {
                 profile,
                 effects,
             }) => {
+                if config.profile == ego_core::config::McpHttpProfile::LegacySse {
+                    let mut drop_guard = DiscoverDropGuard::new(Arc::clone(&self.control));
+                    let outcome = async {
+                        let transport = legacy_sse::LegacySse::open(
+                            self.server.clone(),
+                            config,
+                            profile,
+                            effects,
+                            self.options,
+                            Arc::clone(&self.control),
+                        )
+                        .await?;
+                        let info = ClientInfo::new(
+                            ClientCapabilities::default(),
+                            Implementation::new("ego", env!("CARGO_PKG_VERSION")),
+                        )
+                        .with_protocol_version(ProtocolVersion::V_2024_11_05);
+                        serve_client_with_lifecycle(
+                            info,
+                            transport,
+                            ClientLifecycleMode::Initialize,
+                        )
+                        .await
+                        .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))
+                    }
+                    .await;
+                    drop_guard.disarm();
+                    return match outcome {
+                        Ok(service) => {
+                            self.state = ClientState::Running {
+                                service,
+                                duplex: None,
+                            };
+                            Ok(())
+                        }
+                        Err(error) => {
+                            self.state = ClientState::Failed { duplex: None };
+                            Err(error)
+                        }
+                    };
+                }
                 let backend = EgoStreamableHttpClient {
                     server: self.server.clone(),
                     url: config.url.as_url().clone(),
@@ -976,6 +1077,54 @@ impl McpClient {
         params: CallToolRequestParams,
     ) -> Result<McpManualOutcome<CallToolResult>, McpError> {
         self.claim_operation()?;
+        let wire = serde_json::to_value(&params)?;
+        let action = identity_action(&wire);
+        let gate = Arc::clone(&self.identity_retry);
+        // Serialize identity reads/repairs so concurrent identical inbox calls
+        // cannot all pass the check before the first refusal arrives.
+        let mut identity = if action.is_some() {
+            Some(gate.lock().await)
+        } else {
+            None
+        };
+        if action == Some("inbox") && identity.as_deref().is_some_and(|blocked| *blocked) {
+            return Err(McpError::with_delivery(
+                McpFailure::Authority,
+                "MCP inbox retry blocked: identity_context_required; reconnect with host-issued context or explicitly register an external protocol session before retrying",
+                ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
+            ));
+        }
+        let correlation = wire["_meta"]["tuic/call_id"]
+            .as_str()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok());
+        if let Some(id) = correlation {
+            tracing::info!(client_call_id = %id, server = %self.server, "MCP tool call started");
+        }
+        let outcome = self.call_tool_round(params).await;
+        if let Ok(McpManualOutcome::Complete(result)) = &outcome
+            && let Some(blocked) = identity.as_deref_mut()
+        {
+            if action == Some("register") && result.is_error != Some(true) {
+                *blocked = false;
+            } else if action == Some("inbox") && identity_context_refused(result) {
+                *blocked = true;
+            }
+        }
+        if let Some(id) = correlation {
+            let observation = if outcome.is_ok() {
+                "reply_observed"
+            } else {
+                "error_effect_unknown"
+            };
+            tracing::info!(client_call_id = %id, server = %self.server, observation, "MCP tool call settled");
+        }
+        outcome
+    }
+
+    async fn call_tool_round(
+        &mut self,
+        params: CallToolRequestParams,
+    ) -> Result<McpManualOutcome<CallToolResult>, McpError> {
         if matches!(
             self.state,
             ClientState::Running {

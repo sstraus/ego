@@ -32,7 +32,11 @@ fn interactive_start_reports_a_configured_mcp_server_that_cannot_start() {
         "{}",
         result.stdout
     );
-    assert!(result.stdout.contains("ego mcp ls"), "{}", result.stdout);
+    assert!(
+        support::notice_prose(&result.stdout).contains("ego mcp ls"),
+        "{}",
+        result.stdout
+    );
     assert!(
         !result.stdout.contains(&missing.display().to_string()),
         "unsafe raw configuration diagnostic"

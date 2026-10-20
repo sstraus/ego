@@ -32,12 +32,14 @@ fn snapshot_has_exact_target_and_closed_canonical_schema_order() {
             ManagedConfigKey::Budget,
             ManagedConfigKey::Bare,
             ManagedConfigKey::PermissionsJudge,
-            ManagedConfigKey::StatuslineSegments,
+            ManagedConfigKey::StatuslineTemplate,
             ManagedConfigKey::ExecEnv,
             ManagedConfigKey::ExecEnvAllowlist,
             ManagedConfigKey::Network,
             ManagedConfigKey::Roots,
             ManagedConfigKey::ExecPaths,
+            ManagedConfigKey::Keybindings,
+            ManagedConfigKey::Vim,
         ]
     );
     assert_eq!(
@@ -113,8 +115,10 @@ fn every_scope_preserves_stored_authority_without_inheritance() {
                 ))),
             ),
             (
-                ManagedConfigKey::StatuslineSegments,
-                Some(ManagedConfigValue::StatuslineSegments(Vec::new())),
+                ManagedConfigKey::StatuslineTemplate,
+                Some(ManagedConfigValue::StatuslineTemplate(
+                    "{{ prompt }}".into(),
+                )),
             ),
         ],
     };
@@ -127,7 +131,9 @@ fn every_scope_preserves_stored_authority_without_inheritance() {
     assert_eq!(base.values[5].1, Some(ManagedConfigValue::Bare(false)));
     assert_eq!(
         base.values[7].1,
-        Some(ManagedConfigValue::StatuslineSegments(Vec::new()))
+        Some(ManagedConfigValue::StatuslineTemplate(
+            "{{ prompt }}".into()
+        ))
     );
 
     let profile = UserConfigSnapshot {

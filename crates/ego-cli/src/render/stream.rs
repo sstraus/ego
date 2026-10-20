@@ -46,6 +46,11 @@ impl Answer {
         }
     }
 
+    /// Update the geometry before rendering the next buffered block.
+    pub fn resize(&mut self, width: usize) {
+        self.capabilities.width = width;
+    }
+
     /// Whether this answer is being drawn rather than piped.
     fn rendering(&self) -> bool {
         self.capabilities.on_screen()
@@ -225,9 +230,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rendered_host_markers_keep_pty_soft_wraps() {
-        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-        use std::io::Read;
-
         let source = format!(
             "TUICommander v1.8.0 is connected.\nintent: {} (PTY check)\nsuggest: [ A | B | C ]\n",
             "long marker text ".repeat(30)
@@ -237,30 +239,7 @@ mod tests {
         for width in [80, 120, 200] {
             for (mode, chunks) in [("whole", vec![source.as_str()]), ("split", deltas.clone())] {
                 let rendered = drain(Capabilities { width, ..screen() }, &chunks);
-                let pair = NativePtySystem::default()
-                    .openpty(PtySize {
-                        rows: 24,
-                        cols: width as u16,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    })
-                    .unwrap();
-                let mut command = CommandBuilder::new("/bin/sh");
-                command.args(["-c", "printf '%s' \"$1\"", "marker-capture", &rendered]);
-                let mut child = pair.slave.spawn_command(command).unwrap();
-                drop(pair.slave);
-                let mut reader = pair.master.try_clone_reader().unwrap();
-                let mut bytes = Vec::new();
-                let mut buffer = [0; 4096];
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => bytes.extend_from_slice(&buffer[..n]),
-                        Err(error) if error.raw_os_error() == Some(5) => break,
-                        Err(error) => panic!("PTY read: {error}"),
-                    }
-                }
-                assert!(child.wait().unwrap().success());
+                let bytes = pty_bytes(&rendered, width);
                 let mut terminal = vt100::Parser::new(24, width as u16, 0);
                 terminal.process(&bytes);
                 let grid = terminal.screen();
@@ -290,6 +269,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn pty_bytes(rendered: &str, width: usize) -> Vec<u8> {
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: width as u16,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "printf '%s' \"$1\"", "answer-capture", rendered]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                Err(error) if error.raw_os_error() == Some(5) => break,
+                Err(error) => panic!("PTY read: {error}"),
+            }
+        }
+        assert!(child.wait().unwrap().success());
+        bytes
+    }
+
+    // Catches: PTY-width paragraph hard breaks and hanging indents survive narrower viewers.
+    #[cfg(unix)]
+    #[test]
+    fn answer_paragraphs_leave_wrapping_to_the_viewer_at_221_columns() {
+        let mut errors = Vec::new();
+        for prefix in ["", "💬 "] {
+            let source = format!(
+                "{prefix}{}REGRESSION-MARKER",
+                "L’eseguibile è stato rimosso perché il collegamento è rimasto sul percorso precedente. ".repeat(8)
+            );
+            let chars: Vec<String> = source.chars().map(|ch| ch.to_string()).collect();
+            let split: Vec<&str> = chars.iter().map(String::as_str).collect();
+            for chunks in [vec![source.as_str()], split] {
+                let rendered = drain(
+                    Capabilities {
+                        width: 221,
+                        ..screen()
+                    },
+                    &chunks,
+                );
+                let bytes = pty_bytes(&rendered, 221);
+                eprintln!(
+                    "REGRESSION-MARKER prefix={prefix:?} bytes={:?}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                let actual = bare(&String::from_utf8(bytes).unwrap());
+                if actual != format!("{source}\r\n") {
+                    errors.push(format!("paragraph has renderer hard breaks: {actual:?}"));
+                }
+            }
+        }
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
     }
 
     /// §2's promise about redirection, and the one that must not regress:

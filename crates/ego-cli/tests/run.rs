@@ -88,7 +88,7 @@ fn the_version_in_the_document_is_the_version_the_binary_writes() {
 /// small enough to be crossed without arithmetic nobody can follow.
 const ANTHROPIC_FACTS: &str = r#"
 [model."anthropic/claude-test-5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
@@ -1150,10 +1150,10 @@ fn the_named_roots_grant_lets_a_resumed_session_read_the_file() {
         ))
     };
     let places = Places::new();
-    places
-        .0
-        .ego(&Stub::start(Plan::default()))
-        .home_file("config.toml", "sandbox='workspace'\nroots=[]\n");
+    places.0.ego(&Stub::start(Plan::default())).home_file(
+        "config.toml",
+        "mode='default'\nsandbox='workspace'\nroots=[]\n",
+    );
     let stub = Stub::start(Plan {
         completions: vec![read("call_a"), Reply::Sse(text("Refused."))],
         ..Plan::default()

@@ -15,6 +15,7 @@ pub(crate) fn standard(slug: &str) -> Option<Box<EquivalentPricing>> {
     };
     Some(Box::new(EquivalentPricing {
         model: slug.to_owned(),
+        service_tier: "standard".to_owned(),
         quote: PricingQuote {
             web_search: None,
             revision: PricingRevision(format!(

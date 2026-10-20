@@ -1,14 +1,15 @@
 use super::*;
 
 pub struct SurfaceEditMode {
-    editor: Emacs,
+    editor: Box<dyn EditMode>,
+    modal_editor: Emacs,
     phase: SurfacePhase,
     status: SharedStatus,
     asked_for_image: Arc<AtomicBool>,
 }
 
 impl SurfaceEditMode {
-    pub fn new(editor: Emacs, phase: SurfacePhase) -> Self {
+    pub fn new(editor: impl EditMode + 'static, phase: SurfacePhase) -> Self {
         Self::with_status(
             editor,
             phase,
@@ -18,9 +19,22 @@ impl SurfaceEditMode {
         )
     }
 
-    pub(super) fn with_status(editor: Emacs, phase: SurfacePhase, status: SharedStatus) -> Self {
+    pub(super) fn with_status(
+        editor: impl EditMode + 'static,
+        phase: SurfacePhase,
+        status: SharedStatus,
+    ) -> Self {
+        Self::with_editor(Box::new(editor), phase, status)
+    }
+
+    pub(super) fn with_editor(
+        editor: Box<dyn EditMode>,
+        phase: SurfacePhase,
+        status: SharedStatus,
+    ) -> Self {
         Self {
             editor,
+            modal_editor: emacs_composer(),
             phase,
             status,
             asked_for_image: Arc::new(AtomicBool::new(false)),
@@ -79,6 +93,17 @@ impl EditMode for SurfaceEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let raw: Event = event.into();
 
+        // Modal keys belong only to that modal. Never change authority behind it.
+        if let Event::Key(key) = &raw
+            && key.code == KeyCode::BackTab
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        {
+            return if self.phase.get() == EditPhase::Modal {
+                ReedlineEvent::None
+            } else {
+                ReedlineEvent::ExecuteHostCommand(MODE_CYCLE_COMMAND.to_owned())
+            };
+        }
         let picker_open = self.picker_open();
         let question_selector_open = if self.phase.get() == EditPhase::Modal {
             self.status
@@ -251,7 +276,7 @@ impl EditMode for SurfaceEditMode {
             }
             if self.phase.get() == EditPhase::Modal {
                 return match ReedlineRawEvent::try_from(raw) {
-                    Ok(event) => self.editor.parse_event(event),
+                    Ok(event) => self.modal_editor.parse_event(event),
                     Err(()) => ReedlineEvent::None,
                 };
             }
@@ -298,7 +323,7 @@ impl EditMode for SurfaceEditMode {
                 Intercept::Draft => {
                     return ReedlineEvent::ExecuteHostCommand(DRAFT_COMMAND.to_string());
                 }
-                Intercept::SubmitBusy if self.phase.get() == EditPhase::Busy => {
+                Intercept::SubmitBusy => {
                     return ReedlineEvent::ExecuteHostCommand(BUSY_SUBMIT_COMMAND.to_string());
                 }
                 Intercept::SteerBusy if self.phase.get() == EditPhase::Busy => {
@@ -310,10 +335,7 @@ impl EditMode for SurfaceEditMode {
                 Intercept::Interrupt if self.phase.get() == EditPhase::Busy => {
                     return ReedlineEvent::ExecuteHostCommand(INTERRUPT_COMMAND.to_string());
                 }
-                Intercept::Editor
-                | Intercept::SubmitBusy
-                | Intercept::SteerBusy
-                | Intercept::Interrupt => {}
+                Intercept::Editor | Intercept::SteerBusy | Intercept::Interrupt => {}
             }
         }
 
@@ -327,7 +349,11 @@ impl EditMode for SurfaceEditMode {
     }
 
     fn edit_mode(&self) -> PromptEditMode {
-        self.editor.edit_mode()
+        if self.phase.get() == EditPhase::Modal {
+            self.modal_editor.edit_mode()
+        } else {
+            self.editor.edit_mode()
+        }
     }
 }
 

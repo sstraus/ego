@@ -1080,6 +1080,7 @@ fn generation_request(prompt: &str) -> GenRequest {
 fn generation_capabilities() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(4096),
         max_output_tokens: Some(1024),
         max_tools: Some(128),
@@ -2618,7 +2619,7 @@ fn foreground_cancel_and_background_drop_preserve_real_execution_ownership() {
 }
 
 #[test]
-fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
+fn background_task_budget_exhaustion_does_not_start_an_unfunded_child() {
     let harness = Harness::new(RunSettlement::Completed);
     let gate = SharedBudgetGate::new(BudgetGate::new(ego_core::cost::Money::new(
         "0.025".parse().expect("amount"),
@@ -3262,4 +3263,22 @@ fn settlement_error_after_persist_reconciles_without_duplicate_effects_or_delive
         controller_effects,
         "retry and restart do not re-execute the child controller"
     );
+}
+
+#[test]
+fn background_task_denied_child_permission_does_not_return_a_successful_answer() {
+    // Catches: a denied durable child being materialized as successful assistant output.
+    let denied = RunSettlement::PermissionRequired {
+        action: "write /workspace/denied".to_owned(),
+        by: ego_core::run::DeniedBy::Decided(ego_core::permit::Authority::Party),
+    };
+    let harness = Harness::new(denied.clone());
+    let service = harness.service(BudgetGate::unlimited(
+        ego_core::cost::CurrencyCode::new("USD").unwrap(),
+    ));
+    let invocation = SubagentInvocationId::new();
+    futures::executor::block_on(service.start(request(invocation, ChildWait::Background))).unwrap();
+    futures::executor::block_on(service.host_launch(invocation)).unwrap();
+    let result = futures::executor::block_on(service.collect_background(invocation)).unwrap();
+    assert_eq!(result, ChildWaitResult::Failed { settlement: denied });
 }

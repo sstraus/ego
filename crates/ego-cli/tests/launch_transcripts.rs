@@ -118,15 +118,15 @@ fn readable(raw: &str) -> String {
         let mut line = undouble(line);
         let mut repainted_modal = false;
         if line.starts_with("Trust project files")
-            && let Some((_, redrawn_banner)) = line.split_once(" ego ")
+            && let Some((_, redrawn_banner)) = line.split_once(" Project files offered for trust:")
         {
-            line = format!("ego {redrawn_banner}");
+            line = format!("Project files offered for trust:{redrawn_banner}");
             repainted_modal = true;
         }
-        if line.starts_with("ego ")
+        if line.starts_with("Project files offered for trust:")
             && let Some(start) = lines
                 .iter()
-                .position(|previous| previous.starts_with("ego "))
+                .position(|previous| previous.starts_with("Project files offered for trust:"))
             && (repainted_modal
                 || lines[start..]
                     .iter()
@@ -151,16 +151,19 @@ fn readable(raw: &str) -> String {
             lines.pop();
         }
         for prefix in ["ego ", "εgo: ego "] {
-            if let Some(identity) = line.strip_prefix(prefix)
-                && let Some((version, model)) = identity.split_once(" · ")
-                && version
+            if let Some(identity) = line.strip_prefix(prefix) {
+                let version = identity
+                    .split_once(" · ")
+                    .map_or(identity, |(version, _)| version);
+                if version
                     .bytes()
                     .next()
                     .is_some_and(|byte| byte.is_ascii_digit())
-                && !version.contains(char::is_whitespace)
-            {
-                line = format!("{prefix}<version> · {model}");
-                break;
+                    && !version.contains(char::is_whitespace)
+                {
+                    line = format!("{prefix}<version>{}", &identity[version.len()..]);
+                    break;
+                }
             }
         }
         lines.push(line);
@@ -179,10 +182,30 @@ fn is_thinking_repaint(line: &str) -> bool {
     let Some((frame, elapsed)) = line.split_once(" Working ") else {
         return false;
     };
-    ["◐", "◓", "◑", "◒"].contains(&frame)
-        && elapsed
-            .strip_suffix("s · Esc to interrupt")
-            .is_some_and(|seconds| seconds.parse::<u64>().is_ok())
+    if !["◐", "◓", "◑", "◒"].contains(&frame) || elapsed.is_empty() {
+        return false;
+    }
+    // Replace numeric runs, not words: a real answer after a status-like prefix
+    // must still survive. A bounded row can end anywhere in this grammar.
+    let mut shape = String::new();
+    let mut was_digit = false;
+    for character in elapsed.chars() {
+        let digit = character.is_ascii_digit();
+        if !digit || !was_digit {
+            shape.push(if digit { '#' } else { character });
+        }
+        was_digit = digit;
+    }
+    ["#s", "#m #s", "#h #m"].iter().any(|duration| {
+        [
+            " · Esc to interrupt",
+            " · ↓ ~# tokens · Esc to interrupt",
+            " · thinking started #s ago · Esc to interrupt",
+            " · ↓ ~# tokens · thinking started #s ago · Esc to interrupt",
+        ]
+        .iter()
+        .any(|suffix| format!("{duration}{suffix}").starts_with(&shape))
+    })
 }
 
 /// Drop a repaint that landed on the same line as the draw it replaced.
@@ -267,6 +290,38 @@ fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
     assert_eq!(readable(raw), "hello\na launch transcript\n");
 }
 
+// Catches: live progress leaking into goldens, or filtering real answer text.
+#[test]
+fn readable_discards_extended_working_repaints_but_keeps_real_answers() {
+    let rows = [
+        "◐ Working 0s · ↓ ~5 tokens · Esc to interrupt",
+        "◓ Working 1m 0s · thinking started 3s ago · Esc to interrupt",
+        "◑ Working 1h 05m · ↓ ~438 tokens · thinking started 12s ago · Esc to interrupt",
+        "◒ Working 42s · Esc to interrupt",
+    ];
+    for row in rows {
+        // Truncation cuts at a terminal cell without adding an ellipsis.
+        for width in [19, 39, 79, 120] {
+            let bounded: String = row.chars().take(width).collect();
+            assert_eq!(
+                readable(&format!("hello\r\n{bounded}\r\n>\r\nanswer\r\n")),
+                "hello\nanswer\n",
+                "{bounded:?}"
+            );
+        }
+    }
+    for answer in [
+        "Working 0s · ↓ ~5 tokens · Esc to interrupt",
+        "◐ Working on the answer",
+        "◐ Working 0s is the example",
+        "◐ Working 0s · ↓ ~5 tokens are estimated",
+        "◐ Working 0s · Esc to interrupt is a hint",
+        "A> A",
+    ] {
+        assert_eq!(readable(answer), format!("{answer}\n"));
+    }
+}
+
 #[test]
 fn redact_session_id_replaces_only_the_id_after_the_resume_hint() {
     assert_eq!(
@@ -284,10 +339,14 @@ fn readable_keeps_answer_text_that_looks_like_a_prompt_echo() {
 
 #[test]
 fn readable_keeps_the_last_complete_trust_modal_frame() {
-    let raw = "ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] ego 0.1.0 · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n";
+    let raw = concat!(
+        "εgo: ego ",
+        env!("CARGO_PKG_VERSION"),
+        "\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] Project files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n"
+    );
     assert_eq!(
         readable(raw),
-        "ego <version> · ollama/qwen3\n- AGENTS.md\nTrust project files? [y/N] yes\n"
+        "εgo: ego <version>\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n"
     );
 }
 
@@ -330,11 +389,19 @@ fn regenerate() {
 // Catches: a version-only bump breaks launch golden comparisons.
 #[test]
 fn readable_redacts_version_bumps_only_in_banner_identity() {
-    for version in ["0.1.0", "9.42.17", "10.0.0-rc.2"] {
-        let raw = format!("ego {version} · ollama/qwen3\nanswer cites {version}\n");
-        assert_eq!(
-            readable(&raw),
-            format!("ego <version> · ollama/qwen3\nanswer cites {version}\n")
-        );
+    for version in [env!("CARGO_PKG_VERSION"), "9.42.17", "10.0.0-rc.2"] {
+        for identity in [
+            format!("ego {version} · ollama/qwen3"),
+            format!("εgo: ego {version}"),
+        ] {
+            let raw = format!("{identity}\nanswer cites {version}\n");
+            assert_eq!(
+                readable(&raw),
+                format!(
+                    "{}\nanswer cites {version}\n",
+                    identity.replace(version, "<version>")
+                )
+            );
+        }
     }
 }

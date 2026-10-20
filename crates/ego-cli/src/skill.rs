@@ -194,6 +194,23 @@ impl SkillCatalogueCapture {
         self.attempt != self.publication
     }
 
+    pub(crate) fn render_summary(&self) -> String {
+        let mut rows = vec![format!(
+            "skills: {} admitted; /skills details for sources and diagnostics",
+            self.descriptors().len()
+        )];
+        rows.extend(
+            self.descriptors()
+                .iter()
+                .take(6)
+                .map(|spec| format!("/{} — {}", spec.name(), spec.descriptor().description)),
+        );
+        if self.retained_last_good() {
+            rows.push("skills: retained last good catalogue; /skills diagnose".to_owned());
+        }
+        rows.join("\n")
+    }
+
     pub(crate) fn render_list(&self) -> String {
         let state = if self.retained_last_good() {
             "retained_last_good"
@@ -627,7 +644,9 @@ fn load_skill(
         .map_err(|error| format!("skill root could not be resolved: {error}"))?;
     let path = fs::canonicalize(requested_path)
         .map_err(|error| format!("could not be resolved: {error}"))?;
-    if !path.starts_with(&canonical_root) {
+    // User-owned roots can link to skills maintained elsewhere. Project and
+    // system roots must not admit files outside their declared authority.
+    if source != SkillSourceAuthority::User && !path.starts_with(&canonical_root) {
         return Err("resolves outside its canonical skill root".to_owned());
     }
     let mut file = fs::File::open(&path).map_err(|error| format!("could not be read: {error}"))?;

@@ -576,6 +576,7 @@ pub enum CostAttribution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquivalentPricing {
     pub model: String,
+    pub service_tier: String,
     pub quote: crate::budget::PricingQuote,
     pub long_context_threshold: u64,
 }
@@ -611,7 +612,7 @@ impl EquivalentPricing {
         Some(Box::new(SubscriptionEquivalent::V1 {
             model: self.model.clone(),
             source: quote.revision,
-            service_tier: "standard".to_owned(),
+            service_tier: self.service_tier.clone(),
             amount,
         }))
     }
@@ -624,7 +625,7 @@ pub enum SubscriptionEquivalent {
     V1 {
         model: String,
         source: PricingRevision,
-        /// Standard API service tier, not the subscription's billing tier.
+        /// API comparison service tier, not the subscription's billing tier.
         service_tier: String,
         amount: Money,
     },
@@ -642,6 +643,8 @@ pub enum UnknownCost {
     /// No pricing quote was resolved before the request, so there is nothing
     /// to compute a cost from and nothing to reconcile against.
     NoPricingQuote,
+    /// The text-token quote cannot bound audio-specific token prices.
+    AudioPricingUnavailable,
     /// The pricing quote exists but does not price one of the token
     /// categories the provider reported, so any total would be an undercount
     /// presented as a fact.

@@ -19,6 +19,7 @@ use support::{server, unasked};
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: None,
         max_output_tokens: None,
         max_tools: None,
@@ -87,8 +88,12 @@ fn snapshot_is_v2_json_with_explicit_nulls_empty_arrays_and_full_slug_order() {
             "models": [
                 {
                     "slug": "openai/gpt-5.6",
+                    "standard_token_price_multiplier": 1,
+                    "fast": null,
                     "capabilities": serde_json::to_value(capabilities()).unwrap(),
                     "metering": "currency",
+                    "standard_token_price_multiplier": 1,
+                    "fast": null,
                     "provenance": { "source": "supplied", "authority": "user" },
                     "freshness": "cached",
                     "availability": {
@@ -99,8 +104,12 @@ fn snapshot_is_v2_json_with_explicit_nulls_empty_arrays_and_full_slug_order() {
                 },
                 {
                     "slug": "zeta/z-model",
+                    "standard_token_price_multiplier": 1,
+                    "fast": null,
                     "capabilities": serde_json::to_value(capabilities()).unwrap(),
                     "metering": "unmetered",
+                    "standard_token_price_multiplier": 1,
+                    "fast": null,
                     "provenance": { "source": "discovered", "provider": "zeta" },
                     "freshness": "cached",
                     "availability": {

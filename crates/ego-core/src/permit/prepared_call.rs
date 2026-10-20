@@ -115,15 +115,40 @@ pub enum SessionProcessAction {
 pub enum Change {
     /// Every byte of the file, replaced.
     Whole(Vec<u8>),
-    /// The one occurrence of `old_string`, replaced by `new_string`.
-    ///
-    /// One, not the first: a tool preparing this must refuse a call whose
-    /// `old_string` is not in the file exactly once. Choosing among several
-    /// would be choosing a place the call never named.
+    /// One ID-addressed notebook cell operation; other state is retained.
+    Notebook(NotebookCellEdit),
+    /// Exact text replacement. Unless `replace_all` is true, exactly one
+    /// occurrence must exist. Bulk mode replaces original non-overlapping matches.
     Replace {
+        replace_all: bool,
         old_string: String,
         new_string: String,
     },
+}
+
+/// A cell mutation, bound into the same permission identity as other writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "edit_mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NotebookCellEdit {
+    Replace {
+        cell_id: String,
+        new_source: String,
+    },
+    Insert {
+        cell_id: Option<String>,
+        cell_type: NotebookCellType,
+        new_source: String,
+    },
+    Delete {
+        cell_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotebookCellType {
+    Code,
+    Markdown,
 }
 
 /// Which kind of operation a denial or a question is about.
@@ -494,8 +519,12 @@ impl PreparedCall {
         &self.ops
     }
 
-    /// Acquisition changes only the spawn observation, not delegation provenance.
-    pub(crate) fn observe_processes(
+    /// Bind spawn operations to the selected process backend before policy authorization.
+    ///
+    /// Composition roots preparing operator-owned calls use the same observation path as
+    /// `Tools::prepare`. Acquisition changes only executable observations, never authority
+    /// or delegation provenance; callers must still authorize and execute through guarded effects.
+    pub fn observe_processes(
         mut self,
         process: &dyn super::ProcessExecutor,
     ) -> Result<Self, super::ProcessError> {
@@ -771,15 +800,24 @@ impl PreparedCall {
                 Op::List { pattern, .. } => frame(&mut digest, pattern.as_bytes()),
                 Op::Search { query, .. } => frame(&mut digest, query.as_bytes()),
                 Op::Write { change, .. } => match change {
+                    Change::Notebook(edit) => {
+                        frame(&mut digest, b"notebook");
+                        frame(
+                            &mut digest,
+                            &serde_json::to_vec(edit).expect("closed cell edit codec"),
+                        );
+                    }
                     Change::Whole(bytes) => {
                         frame(&mut digest, b"whole");
                         frame(&mut digest, bytes);
                     }
                     Change::Replace {
+                        replace_all,
                         old_string,
                         new_string,
                     } => {
                         frame(&mut digest, b"replace");
+                        frame(&mut digest, &[u8::from(*replace_all)]);
                         frame(&mut digest, old_string.as_bytes());
                         frame(&mut digest, new_string.as_bytes());
                     }

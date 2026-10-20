@@ -45,6 +45,7 @@ fn prompt(at: u64, item: ItemId, text: &str) -> SessionEntry {
         at,
         Some(item),
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: text.to_owned(),
             images: Vec::new(),
             queued_prompt: None,
@@ -64,6 +65,7 @@ fn image_prompt(at: u64, item: ItemId, text: &str, reference: BlobRef) -> Sessio
         at,
         Some(item),
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: text.to_owned(),
             images: vec![image],
             queued_prompt: None,
@@ -195,6 +197,7 @@ fn replay_uses_source_event_seq_cutoff_and_keeps_target_state_local() {
         1,
         Some(target_item),
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "target-local state".to_owned(),
             images: Vec::new(),
             queued_prompt: None,

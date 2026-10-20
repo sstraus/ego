@@ -24,7 +24,7 @@ State is a **reduction over an append-only event log** (pi's reducer,
 SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested | SessionPaused |
 SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
 ContextRequested | ContextRequestConsumed | ContextCooldown |
-GoalAllowanceInherited | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped |
+GoalAllowanceInherited | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
 AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted |
 ToolCallStarted | ToolCallDelta | ToolCallCompleted | ToolCallMeasured |
@@ -36,14 +36,15 @@ UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
 CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
 HookLifecycleReached | HookInvocationStarted | HookInvocationSettled |
 SubagentRequested | SubagentSpawned | SubagentSettled |
+BackgroundTaskRequested | SubagentCompletionDelivered |
 SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-64 variants in the current schema, and this list is exhaustive by contract.
+67 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-62, including the session-metadata, pause and goal, question, detached-exec,
-hook, subagent, skill, and clean-session compaction lifecycles.
+67, including the session-metadata, pause and goal, question, detached-exec,
+hook, subagent, background-task, skill, and clean-session compaction lifecycles.
 `ExecutionObserved` records an admitted execution authority.
 `ExecutionMeasured` records a capability measurement as evidence only (§3.4).
 The enum and this list are compared by hand at each milestone close.
@@ -339,8 +340,17 @@ second human-input boundary.
 
 
 1. **Mode** — `plan` (read-only, ends in an approval gate) · `default`
-   (reviews unresolved sensitive actions) · **`auto`** (judge model, below) ·
-   `edits` (auto-approves workspace writes) · `yolo` (bypass).
+   (free reads, prompts for uncovered writes, honors allow rules and retains
+   coordinator bounded admission) · **`auto`** (bounded analysis/judge, below) ·
+   `accept-edits` (auto-approves workspace file writes, not execution, network,
+   opaque tools or writes outside the workspace) · `yolo` (bypass ordinary approvals).
+   `edits` remains an input alias for accept-edits. Snapshot v1 retains its historical
+   spelling only inside content-addressed authority bytes for saved-session resume.
+   Direct `/mode <name>`, the picker and Shift+Tab stage the same generation-owned
+   selection. Cycle order is plan, default, auto, accept-edits, yolo; modals ignore
+   Shift+Tab. During a turn, cycle intents queue and resolve from the owner's last
+   accepted staged mode, not stale editor status. Drafts remain intact. System
+   max_mode and fixed confinement remain unchanged. No approval mechanism is added.
 2. **Rules** — persistent, scoped (project/user), with **stable IDs**,
    listable and revocable without the original context, storable without
    executing (`rules remember`). fx's contract verbatim (`ARCHITECTURE.md`

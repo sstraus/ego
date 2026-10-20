@@ -1,5 +1,7 @@
 //! Own interactive process entry, terminal announcements, and model switching.
 
+use std::io::IsTerminal;
+
 use super::*;
 
 /// The currency a session settles in.
@@ -451,6 +453,7 @@ pub(super) async fn run_process(
     let signalling = Signalling {
         inner: sink,
         announce: &announce,
+        seat: None,
     };
 
     let ended = run_with_registry(
@@ -511,17 +514,29 @@ pub(super) async fn interactive_process(
         });
     }
 
+    // Identity precedes keyboard/configuration admission, trust, and provider/MCP
+    // setup. These paths keep their own diagnostics; none need buffering.
+    if !args.quiet && std::io::stdin().is_terminal() {
+        out.note(&format!("ego {}", env!("CARGO_PKG_VERSION")));
+    }
     let quiet = args.quiet;
     let environment = Environment::read();
     let capabilities = Capabilities::of(&Terminal {
         flag_plain: args.plain,
         ..Terminal::from_process(args.no_color, &environment)
     });
-    let (seat, surface) = match repl::Seat::new(cancel.clone()) {
+    let keyboard = match config::keyboard_preferences(args.vim) {
+        Ok(preferences) => preferences,
+        Err(error) => return Ended::refused(RunTermination::UsageError { message: error.0 }),
+    };
+    let (seat, surface) = match repl::Seat::with_keyboard(cancel.clone(), &keyboard) {
         Ok(built) => built,
         Err(err) => {
-            return Ended::refused(RunTermination::Failed {
-                message: format!("could not start the terminal owner: {err}"),
+            let message = format!("could not start the terminal owner: {err}");
+            return Ended::refused(if err.kind() == std::io::ErrorKind::InvalidInput {
+                RunTermination::UsageError { message }
+            } else {
+                RunTermination::Failed { message }
             });
         }
     };
@@ -529,14 +544,17 @@ pub(super) async fn interactive_process(
     let services = InteractiveServices { evidence };
 
     if let Some(surface) = surface {
-        let output = InteractiveOutput::new(surface);
+        let output = Arc::new(InteractiveOutput::new(surface));
+        let diagnostics: Arc<dyn crate::output::Diagnostics> = output.clone();
+        seat.install_diagnostics(Arc::downgrade(&diagnostics));
+        drop(diagnostics);
         let ended = interactive_through(
             args,
             cancel,
             Arc::clone(&seat),
             capabilities,
             quiet,
-            &output,
+            output.as_ref(),
             services,
         )
         .await;
@@ -577,6 +595,7 @@ pub(super) async fn interactive_through(
     let signalling = Signalling {
         inner: &text_sink,
         announce: &announce,
+        seat: Some(&seat),
     };
     seat.announce_waits(capabilities, quiet);
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
@@ -597,7 +616,8 @@ pub(super) async fn interactive_through(
                 rooted_path(&root, session::store_root(args.session_dir.as_ref())?),
                 root.clone(),
             );
-            crate::catalogue::saved_sessions(&store).map_err(|error| UsageError(error.to_string()))
+            crate::catalogue::saved_sessions(&store, output)
+                .map_err(|error| UsageError(error.to_string()))
         })();
         let metas = match metas {
             Ok(metas) => metas,
@@ -850,7 +870,11 @@ impl<'a> Announce<'a> {
         } else {
             self.osc.notify(
                 crate::DISPLAY_NAME,
-                &format!("{} after {}", termination.exit_reason(), duration(elapsed)),
+                &format!(
+                    "{} after {}",
+                    termination.exit_reason(),
+                    crate::render::duration(elapsed)
+                ),
             )
         };
         [
@@ -915,22 +939,27 @@ fn excerpt(text: Option<&str>, cells: usize) -> Option<String> {
 pub(super) struct Signalling<'a> {
     pub(super) inner: &'a dyn EventSink,
     pub(super) announce: &'a Announce<'a>,
+    pub(super) seat: Option<&'a repl::Seat>,
 }
 
 impl EventSink for Signalling<'_> {
+    fn cache_observed(
+        &self,
+        prefix: &ego_core::generator::attempt::CachePrefix,
+        usage: Option<ego_core::state::Usage>,
+    ) {
+        self.inner.cache_observed(prefix, usage);
+    }
+
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.inner.publish(event, state);
+        if !self.announce.quiet
+            && let Some(seat) = self.seat
+        {
+            seat.observe_generation_progress(event);
+        }
         self.announce.emit(self.announce.signal(event, state));
     }
-}
-
-/// A duration a person reads, not one a machine parses.
-pub(super) fn duration(elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs();
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-    format!("{}m {}s", seconds / 60, seconds % 60)
 }
 
 /// Run `args` to completion, publishing through the sink `destination` builds.

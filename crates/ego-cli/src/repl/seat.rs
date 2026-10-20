@@ -14,9 +14,10 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use reedline::{
     ColumnarMenu, Completer, CompletionResult, EditCommand, EditMode, Emacs, ExternalPrinter,
-    KeyCode, KeyModifiers, Menu, MenuBuilder, MenuEvent, Painter, Prompt, PromptEditMode,
-    PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Span, Suggestion,
-    default_emacs_keybindings,
+    KeyCode, KeyModifiers, Keybindings, Menu, MenuBuilder, MenuEvent, Painter, Prompt,
+    PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
+    Span, Suggestion, Vi, default_emacs_keybindings, default_vi_insert_keybindings,
+    default_vi_normal_keybindings,
 };
 
 use super::actions::{
@@ -30,8 +31,7 @@ use super::policy_controls::{
 };
 use super::selector::{Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue};
 use super::status::{
-    GitFacts, GitFactsSource, SeatFacts, SelectionFacts, StatusLine, StatusSegmentName,
-    SurfaceSnapshot,
+    GitFacts, GitFactsSource, SeatFacts, SelectionFacts, StatusSegmentName, SurfaceSnapshot,
 };
 use super::surface::InteractivePainter;
 use super::{
@@ -66,6 +66,7 @@ use ego_mcp::McpRegistryController;
 use ego_tools::fs::OsFs;
 
 const CHANNEL_CAPACITY: usize = 1;
+pub(super) const MODE_CYCLE_COMMAND: &str = "ego:mode-cycle";
 pub(super) const ACTION_COMMAND: &str = "ego:action:";
 const ACTION_MENU: &str = "ego_action_menu";
 pub(super) const MODEL_PICKER_COMMAND: &str = "ego:model-picker:";
@@ -95,6 +96,7 @@ struct Actions {
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
     Mode,
+    Fast,
     Export,
     Plan,
     Yolo,
@@ -118,6 +120,8 @@ enum SurfaceActionEffect {
     Hooks,
     Doctor,
     Setup,
+    Memory,
+    Init,
     Config,
     Quit,
     Version,
@@ -127,6 +131,7 @@ enum SurfaceActionEffect {
 struct McpSurfaceActions {
     registry: Arc<McpRegistryController>,
     native_tools: Arc<[RegisteredTool]>,
+    servers: Vec<(ego_core::config::McpServerName, bool)>,
 }
 
 struct SurfaceActionSink {
@@ -137,6 +142,7 @@ impl ActionSink for SurfaceActionSink {
     fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
         let effect = match action.id {
             ActionId::Mode => SurfaceActionEffect::Mode,
+            ActionId::Fast => SurfaceActionEffect::Fast,
             ActionId::Plan => SurfaceActionEffect::Plan,
             ActionId::Yolo => SurfaceActionEffect::Yolo,
             ActionId::Permissions => SurfaceActionEffect::Permissions,
@@ -160,6 +166,8 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Hooks => SurfaceActionEffect::Hooks,
             ActionId::Setup => SurfaceActionEffect::Setup,
             ActionId::Doctor => SurfaceActionEffect::Doctor,
+            ActionId::Memory => SurfaceActionEffect::Memory,
+            ActionId::Init => SurfaceActionEffect::Init,
             ActionId::Config => SurfaceActionEffect::Config,
             ActionId::Quit => SurfaceActionEffect::Quit,
             ActionId::Version => SurfaceActionEffect::Version,
@@ -195,6 +203,7 @@ impl Completer for ActionCompleter {
         }
         if position == line.len()
             && (self.registry.resolve_slash(filter).is_some()
+                || self.registry.resolve_alias(filter).is_some()
                 || self
                     .registry
                     .mcp_menu(filter)
@@ -219,7 +228,7 @@ impl Completer for ActionCompleter {
                     Availability::Disabled { owner } => {
                         format!("{} — unavailable: {owner}", registration.description_text())
                     }
-                    Availability::Busy => {
+                    Availability::Busy | Availability::BusyWithReason { .. } => {
                         format!("{} — busy", registration.description_text())
                     }
                     Availability::Enabled => registration.description_text().to_string(),
@@ -229,6 +238,26 @@ impl Completer for ActionCompleter {
                 ..Suggestion::default()
             })
             .collect::<Vec<_>>();
+        suggestions.extend(
+            self.registry
+                .aliases()
+                .into_iter()
+                .filter(|alias| alias.starts_with(filter))
+                .map(|alias| Suggestion {
+                    value: format!("/{alias}"),
+                    description: Some(
+                        if alias == "history" {
+                            "/history QUERY — search sessions"
+                        } else {
+                            "/resume [ID] or /continue [ID] — resume a session"
+                        }
+                        .to_owned(),
+                    ),
+                    span: Span::new(0, position),
+                    append_whitespace: false,
+                    ..Suggestion::default()
+                }),
+        );
         suggestions.extend(self.registry.skill_menu(filter).into_iter().map(
             |(name, description)| Suggestion {
                 value: format!("/{name}"),
@@ -267,6 +296,10 @@ impl ActionMenu {
 }
 
 impl Menu for ActionMenu {
+    fn submit_on_accept(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -370,7 +403,8 @@ fn rebuild_snapshot(
     status.snapshot = Some(SurfaceSnapshot::from_state_with_git(
         base.session,
         state,
-        SelectionFacts::new(selection.identity, selection.thinking, base.mode),
+        SelectionFacts::new(selection.identity, selection.thinking, base.mode)
+            .with_fast(selection.service_tier == ego_ai::service_tier::ServiceTier::Fast),
         seat,
         base.git,
     ));
@@ -378,13 +412,26 @@ fn rebuild_snapshot(
 
 fn repaint_status(status: &SharedStatus) {
     let (painter, line) = {
-        let status = status.lock().expect("surface status lock");
+        let mut status = status.lock().expect("surface status lock");
         let painter = Arc::clone(&status.painter);
-        let line = status
+        let rendered = status
             .native_status
             .then(|| status.snapshot.as_ref())
             .flatten()
-            .map(|snapshot| StatusLine::render(snapshot, &status.configured, status.width));
+            .map(|snapshot| {
+                status
+                    .template
+                    .render(snapshot, &status.provider_values, status.width)
+            });
+        let line = rendered.map(|(line, diagnostic)| {
+            if let Some(diagnostic) = diagnostic
+                && status.template_diagnostic.is_none()
+            {
+                status.notice = Some(diagnostic.clone());
+                status.template_diagnostic = Some(diagnostic);
+            }
+            line
+        });
         (painter, line)
     };
     if let Some(line) = line {
@@ -395,26 +442,34 @@ fn repaint_status(status: &SharedStatus) {
 }
 
 struct SurfaceStatus {
+    details: Arc<crate::output::ExpansionHistory>,
     setup_cancel: Option<tokio::sync::watch::Sender<bool>>,
     queue: QueueStatus,
     drafts: usize,
     activity: bool,
     activity_since: Option<Instant>,
+    activity_output_chars: usize,
+    thinking_since: Option<Instant>,
     /// When the open modal began; the wait is the person's, not the turn's.
     modal_since: Option<Instant>,
     /// The part of the current turn spent waiting on modals.
     modal_waited: std::time::Duration,
     reply_started: Arc<AtomicBool>,
     retry: Option<(String, Instant, u64)>,
+    shell: Option<crate::render::Line>,
     notice: Option<String>,
     image_chips: Vec<String>,
+    images: super::ImageDraft,
     origin: InputOrigin,
     native_status: bool,
     width: usize,
-    configured: Vec<StatusSegmentName>,
+    template: super::status::StatusTemplate,
+    template_diagnostic: Option<String>,
+    provider_values: Vec<(StatusSegmentName, super::status::SegmentValue)>,
     config_store: Option<Arc<dyn UserConfigStore>>,
     snapshot: Option<SurfaceSnapshot>,
     status_base: Option<StatusBase>,
+    selected_mode: Option<Mode>,
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
@@ -437,40 +492,88 @@ struct SurfaceStatus {
     cursor_selectors: bool,
     mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
+    diagnostics: Option<std::sync::Weak<dyn crate::output::Diagnostics>>,
 }
 
 impl SurfaceStatus {
     fn begin_activity(&mut self) {
         if !self.activity {
             self.activity_since = Some(Instant::now());
+            self.activity_output_chars = 0;
+            self.thinking_since = None;
             self.modal_waited = std::time::Duration::ZERO;
             self.reply_started.store(false, Ordering::Release);
         }
         self.activity = true;
+    }
+
+    fn observe_generation_progress(&mut self, event: &ego_core::public::PublicEvent) {
+        use ego_core::public::{ItemKind, PublicEvent};
+        if !self.activity {
+            return;
+        }
+        match event {
+            PublicEvent::ItemDelta {
+                kind: ItemKind::Reasoning,
+                text,
+                ..
+            } => {
+                self.thinking_since.get_or_insert_with(Instant::now);
+                self.activity_output_chars = self
+                    .activity_output_chars
+                    .saturating_add(text.chars().count());
+            }
+            PublicEvent::ItemDelta {
+                kind: ItemKind::AgentMessage,
+                text,
+                ..
+            } => {
+                self.thinking_since = None;
+                self.activity_output_chars = self
+                    .activity_output_chars
+                    .saturating_add(text.chars().count());
+            }
+            PublicEvent::ItemStarted {
+                kind: ItemKind::Tool,
+                ..
+            }
+            | PublicEvent::TurnCompleted { .. } => {
+                self.thinking_since = None;
+            }
+            _ => {}
+        }
     }
 }
 
 impl Default for SurfaceStatus {
     fn default() -> Self {
         Self {
+            details: Arc::default(),
             setup_cancel: None,
             queue: QueueStatus::default(),
             drafts: 0,
             activity: false,
             activity_since: None,
+            activity_output_chars: 0,
+            thinking_since: None,
             modal_since: None,
             modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
             retry: None,
+            shell: None,
             notice: None,
             image_chips: Vec::new(),
+            images: super::ImageDraft::default(),
             origin: InputOrigin::Typed,
             native_status: false,
             width: 0,
-            configured: Vec::new(),
+            template: super::status::StatusTemplate::new(super::status::DEFAULT_TEMPLATE.into()),
+            template_diagnostic: None,
+            provider_values: Vec::new(),
             config_store: None,
             snapshot: None,
             status_base: None,
+            selected_mode: None,
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
@@ -486,6 +589,7 @@ impl Default for SurfaceStatus {
             cursor_selectors: false,
             mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
+            diagnostics: None,
         }
     }
 }
@@ -520,9 +624,12 @@ struct TerminalOwner {
     cancel: CancelToken,
     startup_output: Receiver<String>,
     signals: Receiver<String>,
+    inspections: Sender<HostCommand>,
+    inspection_waker: Arc<futures::task::AtomicWaker>,
 }
 
 struct ComposerDraft {
+    images: super::ImageDraft,
     text: String,
     cursor: usize,
     origin: InputOrigin,
@@ -622,7 +729,7 @@ pub struct StatusSetup {
     pub mode: Mode,
     pub cwd: PathBuf,
     pub trust: Trust,
-    pub segments: Vec<ego_core::config::StatusSegmentName>,
+    pub template: String,
     pub width: usize,
     pub native: bool,
     pub git: Option<Arc<dyn GitFactsSource>>,
@@ -631,6 +738,7 @@ pub struct StatusSetup {
 pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentName] = &[
     ego_core::config::StatusSegmentName::Model,
     ego_core::config::StatusSegmentName::Effort,
+    ego_core::config::StatusSegmentName::Fast,
     ego_core::config::StatusSegmentName::Mode,
     ego_core::config::StatusSegmentName::Context,
     ego_core::config::StatusSegmentName::Cost,
@@ -642,12 +750,12 @@ pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentN
     ego_core::config::StatusSegmentName::Trust,
 ];
 
-pub(crate) fn effective_statusline_segments(
+pub(crate) fn effective_statusline_template(
     configured: Option<&ego_core::config::StatuslineLayer>,
-) -> Vec<ego_core::config::StatusSegmentName> {
+) -> String {
     configured
-        .and_then(|statusline| statusline.segments.clone())
-        .unwrap_or_else(|| DEFAULT_STATUSLINE_SEGMENTS.to_vec())
+        .and_then(|statusline| statusline.template.clone())
+        .unwrap_or_else(|| super::status::DEFAULT_TEMPLATE.to_owned())
 }
 
 /// Local and durable input that still exists when the session exits.
@@ -701,9 +809,11 @@ enum SurfaceMessage {
 }
 
 pub struct SurfaceOutput {
+    pub(crate) details: Arc<crate::output::ExpansionHistory>,
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
+    shell: Option<String>,
     status: Option<SharedStatus>,
     answer_block: bool,
     wrote: bool,
@@ -716,9 +826,11 @@ pub struct SurfaceOutput {
 impl SurfaceOutput {
     pub fn new(sender: Sender<String>, cancel: CancelToken) -> Self {
         Self {
+            details: Arc::default(),
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
+            shell: None,
             status: None,
             answer_block: false,
             wrote: false,
@@ -739,9 +851,30 @@ impl SurfaceOutput {
         let owner = std::thread::Builder::new()
             .name("ego-output-pump".to_string())
             .spawn(move || {
-                while let Ok(message) = receiver.recv() {
+                let mut pending = None;
+                while let Some(message) = pending.take().or_else(|| receiver.recv().ok()) {
                     match message {
-                        SurfaceMessage::Row(row) => {
+                        SurfaceMessage::Row(mut row) => {
+                            // One printer handoff causes one repaint and cursor query.
+                            // Drain already queued rows together, but never cross a
+                            // finish barrier or change a message's line boundary.
+                            for _ in 0..receiver.len() {
+                                let Ok(message) = receiver.try_recv() else {
+                                    break;
+                                };
+                                match message {
+                                    SurfaceMessage::Row(next) => {
+                                        if !row.is_empty() && !row.ends_with('\n') {
+                                            row.push('\n');
+                                        }
+                                        row.push_str(&next);
+                                    }
+                                    barrier @ SurfaceMessage::Barrier(_) => {
+                                        pending = Some(barrier);
+                                        break;
+                                    }
+                                }
+                            }
                             if external.send(row).is_err() {
                                 pump_cancel.cancel(CancelCause::Host);
                                 break;
@@ -760,9 +893,11 @@ impl SurfaceOutput {
             .expect("output pump thread");
         (
             Self {
+                details: Arc::default(),
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
+                shell: None,
                 status: None,
                 answer_block: false,
                 wrote: false,
@@ -775,7 +910,24 @@ impl SurfaceOutput {
         )
     }
 
-    pub(crate) fn retry_status(&self, message: Option<(&str, u64)>) {
+    pub(crate) fn goal_status(&self, goal: Option<(String, u32, Option<u32>)>) {
+        if let Some(status) = &self.status {
+            if let Some(snapshot) = status
+                .lock()
+                .expect("surface status lock")
+                .snapshot
+                .as_mut()
+            {
+                snapshot.set_goal(goal);
+            }
+            repaint_status(status);
+        }
+    }
+
+    pub(crate) fn retry_status(&mut self, message: Option<(&str, u64)>) {
+        if message.is_some() {
+            let _ = self.settle_shell();
+        }
         if let Some(status) = &self.status {
             status.lock().expect("surface status lock").retry =
                 message.map(|(text, delay)| (text.to_string(), Instant::now(), delay));
@@ -791,10 +943,37 @@ impl SurfaceOutput {
     }
 
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         self.write_with_kind(text, false)
     }
 
+    pub(crate) fn write_shell(
+        &mut self,
+        rows: &str,
+        live: crate::render::Line,
+    ) -> Result<(), SendError<String>> {
+        let Some(status) = &self.status else {
+            return self.write_tool(rows);
+        };
+        self.shell = Some(rows.to_owned());
+        status.lock().expect("surface status lock").shell = Some(live);
+        repaint_status(status);
+        Ok(())
+    }
+
+    pub(crate) fn settle_shell(&mut self) -> Result<(), SendError<String>> {
+        if let Some(rows) = self.shell.take() {
+            if let Some(status) = &self.status {
+                status.lock().expect("surface status lock").shell = None;
+                repaint_status(status);
+            }
+            self.write_tool(&rows)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn begin_block(&mut self) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         if !self.pending.is_empty() {
             self.write_with_kind("\n", false)?;
         }
@@ -818,6 +997,7 @@ impl SurfaceOutput {
         if text.is_empty() {
             return Ok(());
         }
+        self.settle_shell()?;
         let text = if !self.answer_block {
             self.begin_block()?;
             if !self.wrote {
@@ -855,6 +1035,7 @@ impl SurfaceOutput {
     }
 
     pub fn finish(&mut self) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         self.answer_block = false;
         if !self.pending.is_empty() {
             let row = std::mem::take(&mut self.pending);
@@ -952,6 +1133,8 @@ enum Control {
 
 struct LiveSeat {
     input: Receiver<Line>,
+    inspections: Receiver<HostCommand>,
+    inspection_waker: Arc<futures::task::AtomicWaker>,
     control: Sender<Control>,
     activated: AtomicBool,
     break_signal: Arc<AtomicBool>,
@@ -995,17 +1178,96 @@ impl std::fmt::Debug for Seat {
     }
 }
 
+/// Keep the surface controls identical in Emacs, Vim insert and Vim normal.
+fn composer_keybindings(mut keybindings: Keybindings) -> Keybindings {
+    for (modifiers, code) in [
+        (KeyModifiers::CONTROL, KeyCode::Char('j')),
+        (KeyModifiers::CONTROL, KeyCode::Enter),
+        (KeyModifiers::SHIFT, KeyCode::Enter),
+        (KeyModifiers::ALT, KeyCode::Enter),
+    ] {
+        keybindings.add_binding(
+            modifiers,
+            code,
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+    }
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keybindings
+}
+
+fn emacs_composer() -> Emacs {
+    let mut keybindings = composer_keybindings(default_emacs_keybindings());
+    add_action_menu(&mut keybindings);
+    Emacs::new(keybindings)
+}
+
+fn add_action_menu(keybindings: &mut Keybindings) {
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Char('/'),
+        ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
+            ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+        ]),
+    );
+}
+
+fn composer_editor(vim: bool) -> Box<dyn EditMode> {
+    if vim {
+        let mut insert = composer_keybindings(default_vi_insert_keybindings());
+        add_action_menu(&mut insert);
+        Box::new(Vi::new(
+            insert,
+            composer_keybindings(default_vi_normal_keybindings()),
+        ))
+    } else {
+        Box::new(emacs_composer())
+    }
+}
+
 impl Seat {
+    pub(crate) fn observe_generation_progress(&self, event: &ego_core::public::PublicEvent) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status
+                .lock()
+                .expect("surface status lock")
+                .observe_generation_progress(event);
+        }
+    }
+
     /// Build the applicable editor and, for a terminal, its only output port.
     ///
     /// Bracketed paste is not a nicety: without it a pasted stack trace
     /// submits its first line as a whole prompt, which is the failure that
     /// makes pasting one impossible. `CLI.md` §6.1.
     pub fn new(cancel: CancelToken) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
+        Self::with_keyboard(cancel, &ego_core::config::UiLayer::default())
+    }
+
+    pub(crate) fn with_keyboard(
+        cancel: CancelToken,
+        preferences: &ego_core::config::UiLayer,
+    ) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
+        let registry = Arc::new(
+            ActionRegistry::final_surface()
+                .with_keybindings(
+                    preferences
+                        .keybindings
+                        .as_ref()
+                        .unwrap_or(&Default::default()),
+                )
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
+        );
         let (ingress, control) = interactive_control();
         let terminal = std::io::stdin().is_terminal();
-        let registry = Arc::new(ActionRegistry::final_surface());
-
         if !terminal {
             return Ok((
                 Self {
@@ -1024,33 +1286,8 @@ impl Seat {
         let status = Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
             &registry,
         ))));
-        let mut keybindings = default_emacs_keybindings();
-        // Raw LF arrives as Ctrl+J; only an unmodified Enter submits.
-        for code in [KeyCode::Char('j'), KeyCode::Enter] {
-            keybindings.add_binding(
-                KeyModifiers::CONTROL,
-                code,
-                ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
-            );
-        }
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Tab,
-            ReedlineEvent::UntilFound(vec![
-                ReedlineEvent::Menu(ACTION_MENU.to_string()),
-                ReedlineEvent::MenuNext,
-            ]),
-        );
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Char('/'),
-            ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
-                ReedlineEvent::Menu(ACTION_MENU.to_string()),
-            ]),
-        );
-        let mode = SurfaceEditMode::with_status(
-            Emacs::new(keybindings),
+        let mode = SurfaceEditMode::with_editor(
+            composer_editor(preferences.vim.unwrap_or(false)),
             phase.clone(),
             Arc::clone(&status),
         );
@@ -1086,6 +1323,7 @@ impl Seat {
         // Host metadata never waits for the row printer or consumes a row.
         let (signal_sender, signals) = crossbeam::channel::unbounded();
         output.signals = Some(signal_sender);
+        output.details = Arc::clone(&status.lock().expect("surface status lock").details);
         output.status = Some(Arc::clone(&status));
         let active_signals = signals.clone();
         editor = editor.with_idle_callback(Box::new(move || {
@@ -1106,6 +1344,9 @@ impl Seat {
         // terminal owner must remain free to drain that pump's printer even
         // when several input lines arrive before the driver reads again.
         let (input_sender, input) = crossbeam::channel::unbounded();
+        let (inspection_sender, inspections) = crossbeam::channel::unbounded();
+        let inspection_waker = Arc::new(futures::task::AtomicWaker::new());
+        let owner_inspection_waker = Arc::clone(&inspection_waker);
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
         let owner_break = Arc::clone(&break_signal);
         let owner_phase = phase.clone();
@@ -1129,6 +1370,8 @@ impl Seat {
                         cancel,
                         startup_output,
                         signals,
+                        inspections: inspection_sender,
+                        inspection_waker: owner_inspection_waker,
                     },
                 );
             })?;
@@ -1158,6 +1401,8 @@ impl Seat {
             Self {
                 kind: SeatKind::Live(Box::new(LiveSeat {
                     input,
+                    inspections,
+                    inspection_waker,
                     control: seat_control,
                     activated: AtomicBool::new(false),
                     break_signal,
@@ -1183,8 +1428,16 @@ impl Seat {
     pub fn read(&self) -> Line {
         match &self.kind {
             SeatKind::Live(live) => {
-                let line = live.input.recv().unwrap_or(Line::Ended);
-                if matches!(line, Line::Submitted(_)) {
+                // Already admitted inspections belong to the current session, so
+                // answer them before ordinary input can switch or close it.
+                let line = crossbeam::channel::select_biased! {
+                    recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
+                    recv(live.input) -> line => line.unwrap_or(Line::Ended),
+                };
+                if matches!(
+                    line,
+                    Line::Submitted(_) | Line::HostCommand(HostCommand::SubmittedDraft { .. })
+                ) {
                     live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
                     status.begin_activity();
@@ -1203,6 +1456,7 @@ impl Seat {
                     .registry
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
+                    Dispatch::Details(action) => Line::HostCommand(HostCommand::Details(action)),
                     Dispatch::History(query) => Line::HostCommand(HostCommand::History(query)),
                     Dispatch::Resume(id) => Line::HostCommand(HostCommand::Resume(id)),
                     Dispatch::SessionMetadata(operation) => {
@@ -1221,8 +1475,20 @@ impl Seat {
                     }
                     Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
                     Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
+                    Dispatch::Memory(arguments) => {
+                        Line::HostCommand(HostCommand::Memory(arguments))
+                    }
+                    Dispatch::Init(arguments) => Line::HostCommand(HostCommand::Init(arguments)),
+                    Dispatch::Fast(enabled) => Line::HostCommand(HostCommand::Fast(enabled)),
+                    Dispatch::Mode(mode) => {
+                        Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode)))
+                    }
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
+                    }
+                    Dispatch::UnknownSlash(message) => {
+                        eprintln!("{message}");
+                        Line::Blank
                     }
                     Dispatch::Refused { reason } => Line::Refused(reason),
                     Dispatch::Action(ActionId::Config) => {
@@ -1313,6 +1579,17 @@ impl Seat {
         }
     }
 
+    /// Let local output actions run without waiting for the turn coordinator.
+    /// A weak reference avoids a cycle through the output's shared surface status.
+    pub(crate) fn install_diagnostics(
+        &self,
+        diagnostics: std::sync::Weak<dyn crate::output::Diagnostics>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status.lock().expect("surface status lock").diagnostics = Some(diagnostics);
+        }
+    }
+
     /// Install one complete local-action topology around the shared picker and
     /// live MCP registry authority.
     pub fn install_model_picker(
@@ -1341,6 +1618,7 @@ impl Seat {
         }));
         for action in [
             ActionId::Mode,
+            ActionId::Fast,
             ActionId::Plan,
             ActionId::Yolo,
             ActionId::Permissions,
@@ -1362,6 +1640,8 @@ impl Seat {
             ActionId::Expand,
             ActionId::Skills,
             ActionId::Hooks,
+            ActionId::Memory,
+            ActionId::Init,
             ActionId::Retry,
             ActionId::Config,
             ActionId::Doctor,
@@ -1388,6 +1668,12 @@ impl Seat {
             status.model_selection = Some(selection);
             status.config_store = Some(config_store);
             status.mcp_actions = Some(McpSurfaceActions {
+                servers: mcp_registry
+                    .status()
+                    .servers()
+                    .iter()
+                    .map(|server| (server.name().clone(), false))
+                    .collect(),
                 registry: mcp_registry,
                 native_tools: native_tools.into(),
             });
@@ -1408,6 +1694,19 @@ impl Seat {
             .set_availability(ActionId::Compact, availability);
         if let SeatKind::Live(live) = &self.kind {
             repaint_status(&live.status);
+        }
+    }
+
+    /// Keep the busy inventory bound to the same session-local enablement as idle commands.
+    pub(crate) fn set_mcp_session_servers(
+        &self,
+        servers: Vec<(ego_core::config::McpServerName, bool)>,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            if let Some(actions) = status.mcp_actions.as_mut() {
+                actions.servers = servers;
+            }
         }
     }
 
@@ -1442,6 +1741,16 @@ impl Seat {
                     .set_availability(ActionId::Permissions, Availability::Enabled);
             }
             repaint_status(&live.status);
+        }
+    }
+
+    /// The last accepted selection, including one staged for the next boundary.
+    pub(crate) fn set_selected_mode(&self, mode: Mode) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status
+                .lock()
+                .expect("surface status lock")
+                .selected_mode = Some(mode);
         }
     }
 
@@ -1486,6 +1795,26 @@ impl Seat {
         }
     }
 
+    /// Publish cached results from the epoch-owned guarded status producers.
+    pub(crate) fn set_status_providers(&self, values: Vec<(String, String)>) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        live.status
+            .lock()
+            .expect("surface status lock")
+            .provider_values = values
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    StatusSegmentName::custom(name),
+                    super::status::SegmentValue::text(value),
+                )
+            })
+            .collect();
+        repaint_status(&live.status);
+    }
+
     /// Activate native status after session, selection and config are known.
     pub fn configure_status(&self, setup: StatusSetup) {
         let SeatKind::Live(live) = &self.kind else {
@@ -1503,16 +1832,24 @@ impl Seat {
             mode,
             cwd,
             trust,
-            segments,
+            template,
             width,
             native,
             git,
         } = setup;
         {
             let mut status = live.status.lock().expect("surface status lock");
-            status.native_status = native && !segments.is_empty();
+            if status
+                .status_base
+                .as_ref()
+                .is_none_or(|base| base.session != session)
+            {
+                status.selected_mode = None;
+            }
+            status.native_status = native;
             status.width = width;
-            status.configured = segments.into_iter().map(StatusSegmentName::from).collect();
+            status.template = super::status::StatusTemplate::new(template);
+            status.template_diagnostic = None;
             status.status_base = Some(StatusBase {
                 session,
                 mode,
@@ -1531,7 +1868,7 @@ impl Seat {
 
         let git_enabled = {
             let status = live.status.lock().expect("surface status lock");
-            status.native_status && status.configured.contains(&StatusSegmentName::Git)
+            status.native_status
         };
         if !git_enabled || git.is_none() {
             return;
@@ -1732,6 +2069,18 @@ impl crate::run::InteractiveSeat for Seat {
     fn insert_paste_text(&self, text: String) {
         Seat::insert_paste_text(self, text);
     }
+    fn image_draft(&self) -> Option<super::ImageDraft> {
+        match &self.kind {
+            SeatKind::Live(live) => Some(
+                live.status
+                    .lock()
+                    .expect("surface status lock")
+                    .images
+                    .clone(),
+            ),
+            SeatKind::Sequential(_) => None,
+        }
+    }
     fn set_image_chips(&self, chips: Vec<String>) {
         Seat::set_image_chips(self, chips);
     }
@@ -1756,7 +2105,15 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn key_hints(&self) -> String {
-        render_key_hints(&self.registry, self.width())
+        let width = self.width();
+        let width = if width == 0 {
+            crossterm::terminal::size()
+                .map(|(cols, _)| usize::from(cols))
+                .unwrap_or(0)
+        } else {
+            width
+        };
+        render_key_hints(&self.registry, width)
     }
 
     fn read_startup_model(
@@ -1768,8 +2125,12 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn busy(&self) {
-        self.registry
-            .set_availability(ActionId::Compact, Availability::Busy);
+        self.registry.set_availability(
+            ActionId::Compact,
+            Availability::BusyWithReason {
+                reason: "ego is busy; a turn is running",
+            },
+        );
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Busy);
             let mut status = live.status.lock().expect("surface status lock");
@@ -1828,6 +2189,19 @@ impl crate::run::InteractiveSeat for Seat {
         *owner = Some(control);
     }
 
+    fn next_inspection(&self) -> BoxFuture<'_, HostCommand> {
+        let SeatKind::Live(live) = &self.kind else {
+            return Box::pin(futures::future::pending());
+        };
+        Box::pin(futures::future::poll_fn(move |cx| {
+            live.inspection_waker.register(cx.waker());
+            match live.inspections.try_recv() {
+                Ok(command) => std::task::Poll::Ready(command),
+                Err(_) => std::task::Poll::Pending,
+            }
+        }))
+    }
+
     fn refresh_queue(&self, queue: QueueStatus) {
         if let SeatKind::Live(live) = &self.kind {
             let mut status = live.status.lock().expect("surface status lock");
@@ -1856,6 +2230,10 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn activate_session(&self, target: SessionId) -> bool {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            status.selected_mode = None;
+        }
         self.request(|reply| Control::ActivateSession { target, reply }, false)
     }
 
@@ -1962,12 +2340,23 @@ fn own_terminal(
         cancel,
         startup_output,
         signals,
+        inspections,
+        inspection_waker,
     } = owner;
     let mut pending_control = None;
     let mut active = false;
     let mut idle_interrupt = None;
     let mut drafts = DraftStash::new(SessionId::new());
     loop {
+        // Reedline's default indicator colour otherwise leaks into unstyled
+        // retry rows even when the renderer's capability gate forbids colour.
+        editor = editor.with_ansi_colors(
+            status
+                .lock()
+                .expect("surface status lock")
+                .permission_capabilities
+                .coloured(),
+        );
         if matches!(pending_control.as_ref(), Some(Control::Activate { .. })) {
             let Some(Control::Activate { session }) = pending_control.take() else {
                 unreachable!("the pending activation was just matched");
@@ -2047,9 +2436,135 @@ fn own_terminal(
         if failed {
             cancel.cancel(CancelCause::Host);
         }
+        let image_operation = match &line {
+            Line::HostCommand(HostCommand::ClipboardPaste) => {
+                Some(super::ImageOperation::Clipboard)
+            }
+            Line::HostCommand(HostCommand::PastePath(path)) => {
+                Some(super::ImageOperation::Path(path.clone()))
+            }
+            Line::HostCommand(HostCommand::AdmitPrompt { .. }) => {
+                Some(super::ImageOperation::Admit)
+            }
+            _ => None,
+        };
+        let line = if let Some(operation) = image_operation {
+            let draft = status.lock().expect("surface status lock").images.clone();
+            let (request, answer) = super::ImageRequest::new(draft.clone(), operation);
+            // Retire the suspended prompt before draining output. Resuming it
+            // without retiring its footprint can leave a second visible draft.
+            if editor.erase_last_prompt().is_err()
+                || inspections.send(HostCommand::Images(request)).is_err()
+            {
+                break;
+            }
+            inspection_waker.wake();
+            let mut surface = ModalSurface {
+                phase: &phase,
+                status: &status,
+                asked_for_image: &asked_for_image,
+                ingress: &ingress,
+                drafts: &mut drafts,
+            };
+            let Some(result) = wait_image_reply(
+                &mut editor,
+                &phase,
+                &mut surface,
+                &control,
+                &mut pending_control,
+                &startup_output,
+                &signals,
+                &answer,
+            ) else {
+                break;
+            };
+            let images = match result {
+                Ok(images) => images,
+                Err(error) => {
+                    commit_to_transcript(&status, &error);
+                    repaint_status(&status);
+                    continue;
+                }
+            };
+            {
+                let mut current = status.lock().expect("surface status lock");
+                current.image_chips = current.images.labels();
+            }
+            let Line::HostCommand(HostCommand::AdmitPrompt { text, steer }) = line else {
+                repaint_status(&status);
+                continue;
+            };
+            let accepted = if phase.get() == EditPhase::Busy {
+                match futures::executor::block_on(ingress.submit(text.clone(), images.clone())) {
+                    Ok(queue) => {
+                        let mut current = status.lock().expect("surface status lock");
+                        current.queue = queue;
+                        if let Some(snapshot) = current.snapshot.as_mut() {
+                            snapshot.set_queue(queue);
+                        }
+                        true
+                    }
+                    Err(ego_core::turn::ControlError::Closed) => false,
+                    Err(error) => {
+                        commit_to_transcript(&status, &error.to_string());
+                        repaint_status(&status);
+                        continue;
+                    }
+                }
+            } else {
+                false
+            };
+            if editor
+                .accept_buffer(&Waiting::new(Arc::clone(&status)))
+                .is_err()
+            {
+                break;
+            }
+            draft.clear();
+            {
+                let mut current = status.lock().expect("surface status lock");
+                current.images = super::ImageDraft::default();
+                current.image_chips.clear();
+                current.origin = InputOrigin::Typed;
+                current.notice = None;
+            }
+            restore_latest_draft(&mut editor, &status, &mut drafts);
+            if accepted {
+                if steer {
+                    request_interrupt(&status, &ingress);
+                }
+                repaint_status(&status);
+                continue;
+            }
+            Line::HostCommand(HostCommand::SubmittedDraft { text, images })
+        } else if matches!(line, Line::HostCommand(HostCommand::RemovePasteImage)) {
+            let mut current = status.lock().expect("surface status lock");
+            current.images.pop();
+            current.image_chips = current.images.labels();
+            drop(current);
+            repaint_status(&status);
+            continue;
+        } else {
+            line
+        };
+        if phase.get() == EditPhase::Busy
+            && let Line::HostCommand(command) = &line
+            && command.is_read_only_inspection()
+        {
+            if inspections.send(command.clone()).is_err() {
+                break;
+            }
+            inspection_waker.wake();
+            continue;
+        }
         match line {
-            Line::ExternalBreak(_) => match control.recv() {
-                Ok(Control::Shutdown) | Err(_) => break,
+            Line::ExternalBreak(_) => match control.try_recv() {
+                Ok(Control::Shutdown) | Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    break;
+                }
+                // The image rendezvous may already have serviced this wake's
+                // control message. A wake is not another queued request.
+                Err(crossbeam::channel::TryRecvError::Empty) => continue,
                 Ok(Control::Activate { session }) => {
                     drafts.activate(session);
                     continue;
@@ -2085,7 +2600,12 @@ fn own_terminal(
             | Line::Ended
             | Line::Refused(_)
             | Line::HostCommand(_) => {
-                if matches!(line, Line::Submitted(_) | Line::Ended) {
+                if matches!(
+                    line,
+                    Line::Submitted(_)
+                        | Line::HostCommand(HostCommand::SubmittedDraft { .. })
+                        | Line::Ended
+                ) {
                     phase.set(EditPhase::Busy);
                 }
                 let line = if matches!(line, Line::Interrupted) && phase.get() == EditPhase::Idle {
@@ -2105,9 +2625,81 @@ fn own_terminal(
                     line
                 };
                 let ended = matches!(line, Line::Ended);
+                if phase.get() == EditPhase::Busy
+                    && let Line::HostCommand(command) = &line
+                    && !matches!(command, HostCommand::SubmittedDraft { .. })
+                {
+                    let label = match command {
+                        HostCommand::Action(action) => {
+                            let current = status.lock().expect("surface status lock");
+                            format!(
+                                "/{}",
+                                current
+                                    .actions
+                                    .as_ref()
+                                    .expect("installed actions")
+                                    .registry
+                                    .help(*action)
+                                    .name()
+                            )
+                        }
+                        HostCommand::Tasks(_) => "/tasks".to_owned(),
+                        HostCommand::Config(_) => "/config".to_owned(),
+                        HostCommand::Fork(_) => "/fork".to_owned(),
+                        HostCommand::Resume(_) => "/resume".to_owned(),
+                        HostCommand::History(_) => "/history".to_owned(),
+                        _ => "local command".to_owned(),
+                    };
+                    let receipt = if matches!(command, HostCommand::Config(_)) {
+                        "config write pending until the active turn finishes; saved defaults apply to future sessions".to_owned()
+                    } else {
+                        format!("{label} pending until the current turn ends")
+                    };
+                    commit_to_transcript(&status, &receipt);
+                }
                 if input.send(line).is_err() || (ended && failed) {
                     break;
                 }
+            }
+        }
+    }
+}
+
+/// Wait for a driver effect without taking the terminal away from the active
+/// turn's permission/question modals or its bounded output pump.
+#[allow(clippy::too_many_arguments)]
+fn wait_image_reply(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    surface: &mut ModalSurface<'_>,
+    controls: &Receiver<Control>,
+    pending_control: &mut Option<Control>,
+    output: &Receiver<String>,
+    signals: &Receiver<String>,
+    answer: &Receiver<Result<Vec<ego_core::generator::types::ImageRef>, String>>,
+) -> Option<Result<Vec<ego_core::generator::types::ImageRef>, String>> {
+    loop {
+        if let Some(control) = pending_control.take() {
+            if !answer_control(editor, phase, surface, controls, pending_control, control) {
+                return None;
+            }
+            continue;
+        }
+        crossbeam::channel::select_biased! {
+            recv(controls) -> control => {
+                let Ok(control) = control else { return None; };
+                if matches!(control, Control::Shutdown) { return None; }
+                if !answer_control(editor, phase, surface, controls, pending_control, control) { return None; }
+            }
+            recv(answer) -> reply => return Some(reply.unwrap_or_else(|_| Err("image admission was cancelled; the draft was retained".to_owned()))),
+            recv(signals) -> sequence => {
+                let Ok(sequence) = sequence else { return None; };
+                let mut out = std::io::stdout().lock();
+                if out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).is_err() { return None; }
+            }
+            recv(output) -> row => {
+                let Ok(row) = row else { return None; };
+                if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() { return None; }
             }
         }
     }
@@ -2138,8 +2730,8 @@ mod suspend;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;
-use action_execution::surface_line;
 pub(crate) use action_execution::{render_action_help, render_key_hints};
+use action_execution::{request_interrupt, restore_latest_draft, surface_line};
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
 #[cfg(test)]

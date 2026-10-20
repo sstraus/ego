@@ -85,6 +85,17 @@ async fn ordinary_main() -> std::process::ExitCode {
     {
         invocation = Err(cli::UsageError(message));
     }
+    // Keep the checkout lease through session shutdown. A resumed standalone
+    // checkout acquires the same lease; cleanup cannot race an owned process.
+    let mut _worktree_lease = None;
+    if let Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args)) =
+        &mut invocation
+    {
+        match ego_cli::worktree::launch(args) {
+            Ok(lease) => _worktree_lease = lease,
+            Err(message) => invocation = Err(cli::UsageError(message)),
+        }
+    }
     let mut ci_preflight = match &invocation {
         Ok(Invocation::Run(args) | Invocation::Resume(args))
             if args.profile.as_deref() == Some("ci") =>
@@ -113,6 +124,23 @@ async fn ordinary_main() -> std::process::ExitCode {
         }
     } else {
         match invocation {
+            Ok(Invocation::Worktree(action)) => {
+                let termination = match ego_cli::worktree::execute(&action) {
+                    Ok(receipt) => {
+                        out.line(&receipt);
+                        RunTermination::Done
+                    }
+                    Err(message) => RunTermination::Failed { message },
+                };
+                Ended {
+                    termination,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    selected_session: None,
+                    mcp_errors: Vec::new(),
+                }
+            }
             Ok(Invocation::Orchestrator(args)) => Ended {
                 termination: ego_cli::orchestrator::execute(&args, &out).await,
                 session: ego_core::event::id::SessionId::new(),
@@ -287,6 +315,14 @@ async fn ordinary_main() -> std::process::ExitCode {
                     mcp_errors: Vec::new(),
                 }
             }
+            Ok(Invocation::Checkpoint(args)) => Ended {
+                termination: ego_cli::checkpoint::execute(&args, &out),
+                session: args.session,
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                selected_session: None,
+                mcp_errors: Vec::new(),
+            },
             Ok(Invocation::Doctor(args)) => Ended {
                 termination: ego_cli::doctor::execute(&args, &out),
                 session: ego_core::event::id::SessionId::new(),

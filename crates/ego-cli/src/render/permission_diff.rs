@@ -11,7 +11,21 @@ const MAX_DIFF_LINES: usize = 30;
 /// Render fragment replacements or proposed whole-file content for a permission prompt.
 pub fn render(change: &Change, capabilities: Capabilities) -> String {
     let (old, new, before, after, note) = match change {
+        Change::Notebook(edit) => {
+            let encoded = serde_json::to_string(edit).expect("closed cell edit codec");
+            let preview: String = encoded.chars().take(2000).collect();
+            return format!(
+                "Notebook cell edit: {}{}\nOther cells, metadata and outputs are retained.",
+                ego_core::permit::terminal_safe(&preview),
+                if preview.len() < encoded.len() {
+                    "… (truncated)"
+                } else {
+                    ""
+                },
+            );
+        }
         Change::Replace {
+            replace_all,
             old_string,
             new_string,
         } => (
@@ -19,7 +33,11 @@ pub fn render(change: &Change, capabilities: Capabilities) -> String {
             new_string.as_str(),
             "old fragment",
             "new fragment",
-            "Replacement fragment; final content depends on the file at execution time.",
+            if *replace_all {
+                "Replacement fragment: replace all original non-overlapping occurrences; final content depends on the file at execution time."
+            } else {
+                "Replacement fragment: replace exactly one occurrence; final content depends on the file at execution time."
+            },
         ),
         Change::Whole(bytes) => match std::str::from_utf8(bytes) {
             Ok(content) => (

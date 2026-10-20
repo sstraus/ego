@@ -11,6 +11,7 @@ use std::io::Cursor;
 
 use serde::{Deserialize, Serialize};
 
+use super::audio::Audio;
 use crate::store::blob::BlobRef;
 
 pub const MAX_IMAGES_PER_PROMPT: usize = 100;
@@ -629,6 +630,8 @@ pub enum ContentBlock {
     Text { text: String },
     /// Exact image bytes. Only a user-authored message may carry this block.
     Image { image: Image },
+    /// Exact validated audio bytes, legal only in a user message.
+    Audio { audio: Audio },
     /// Reasoning the model produced, kept only so it can be handed back.
     ///
     /// Carries no text: what a human reads rides `AiEvent::ReasoningDelta`
@@ -714,33 +717,56 @@ pub enum HistoryError {
     /// Images are input, never system instructions or model output.
     ImageFromNonUser,
     /// Durable image metadata exists but no session blob port was supplied.
-    ImageBlobStoreRequired { reference: String },
+    AudioUnavailable {
+        cause: String,
+    },
+    ImageBlobStoreRequired {
+        reference: String,
+    },
     /// A referenced blob was absent, corrupt, or invalid as the recorded image.
-    ImageUnavailable { reference: String, cause: String },
+    ImageUnavailable {
+        reference: String,
+        cause: String,
+    },
     /// Durable image metadata exceeds a prompt-wide product bound.
-    ImagePromptInvalid { cause: String },
+    ImagePromptInvalid {
+        cause: String,
+    },
     /// A result names a call that no earlier message made.
-    ResultWithoutCall { call_id: String },
+    ResultWithoutCall {
+        call_id: String,
+    },
     /// Two results name one call.
-    CallAnsweredTwice { call_id: String },
+    CallAnsweredTwice {
+        call_id: String,
+    },
     /// Two calls share one id, so no result can say which it answers.
-    DuplicateCallId { call_id: String },
+    DuplicateCallId {
+        call_id: String,
+    },
     /// A call was made and never answered. Every provider rejects this.
-    CallUnanswered { call_id: String },
+    CallUnanswered {
+        call_id: String,
+    },
     /// A call appears in a turn the assistant did not author. Only the model
     /// asks for a tool to run, on every wire there is.
-    CallFromNonAssistant { call_id: String },
+    CallFromNonAssistant {
+        call_id: String,
+    },
     /// A result appears in an assistant turn. The assistant asks; something
     /// else answers — chat-completions gives the answer its own `tool` role
     /// and anthropic-messages puts it in a `user` turn, and neither lets the
     /// assistant answer itself.
-    ResultFromAssistant { call_id: String },
+    ResultFromAssistant {
+        call_id: String,
+    },
 }
 
 impl std::fmt::Display for HistoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HistoryError::ImageFromNonUser => write!(f, "only user messages may contain images"),
+            HistoryError::AudioUnavailable { cause } => write!(f, "audio replay failed: {cause}"),
             HistoryError::ImageBlobStoreRequired { reference } => write!(
                 f,
                 "image blob {reference} requires the session blob store for replay"
@@ -818,10 +844,15 @@ impl Conversation {
                 ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::ProviderContent { .. } => {}
+                ContentBlock::Audio { .. } if role != Role::User => {
+                    return Err(HistoryError::AudioUnavailable {
+                        cause: "only user messages may contain audio".into(),
+                    });
+                }
                 ContentBlock::Image { .. } if role != Role::User => {
                     return Err(HistoryError::ImageFromNonUser);
                 }
-                ContentBlock::Image { .. } => {}
+                ContentBlock::Image { .. } | ContentBlock::Audio { .. } => {}
                 ContentBlock::ToolUse { call_id, .. } => {
                     if role != Role::Assistant {
                         return Err(HistoryError::CallFromNonAssistant {

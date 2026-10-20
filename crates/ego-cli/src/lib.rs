@@ -41,6 +41,7 @@ pub mod hooks;
 pub mod host_ports;
 pub mod mcp;
 pub mod mcp_server;
+pub mod memory;
 pub mod metadata;
 pub mod model;
 pub mod model_picker;
@@ -50,6 +51,7 @@ pub(crate) mod onboarding;
 pub(crate) mod orchestration_observer;
 pub mod orchestrator;
 pub mod output;
+pub(crate) mod output_style;
 pub mod perimeter;
 pub mod prompt;
 pub(crate) mod prompt_context;
@@ -65,8 +67,10 @@ pub mod setup;
 mod setup_proposals;
 #[allow(dead_code)] // Connected to the turn service by M4 S6 after admission is green.
 pub(crate) mod skill;
+pub mod status_provider;
 pub mod trust;
 pub mod usage;
+pub mod worktree;
 pub(crate) mod yaml_envelope;
 
 // Hosts the same child envelope as the production offline probe. The script
@@ -86,3 +90,5 @@ fn __ego_internal_network_probe_v1() {
     }
     assert!(ego_tools::exec::dispatch_network_probe(std::env::args_os()).expect("probe envelope"));
 }
+
+pub mod checkpoint;

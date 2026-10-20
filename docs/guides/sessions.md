@@ -39,7 +39,7 @@ History is derived from durable records, not a second authority for execution.
 
 Use `/name` to inspect/set the durable display name and `/goal` to manage the
 persistent goal lifecycle. Headless metadata uses `ego resume ID --name ...` or
-`ego resume ID --goal ...`; use its metadata help for exact operations. A metadata
+`ego resume ID --goal-operation ...`; use its metadata help for exact operations. A metadata
 change requires an explicit session ID and does not submit a provider prompt.
 
 ## Fork
@@ -54,6 +54,23 @@ fork needs an inactive source. `/fork [message-id]` uses the same service.
 A fork retains lineage and conversation; it does not duplicate charges or live
 run state. Instructions captured for the prompt epoch are inherited; `/refresh`
 opens a new epoch when idle. Current tool admission remains current.
+
+## File checkpoints
+
+File checkpoints are recovery points for session-owned edits, not conversation
+forks or compaction checkpoints. Built-in `write` and `edit` capture them in Git
+worktrees. Preview the selected session before choosing a restore:
+
+```sh
+ego checkpoint SESSION_ID preview
+ego checkpoint SESSION_ID restore CHECKPOINT_COMMIT
+```
+
+Preview reports checkpoint IDs, affected paths, and external-change conflicts.
+Restore refuses conflicting external changes instead of forcing an overwrite.
+`ego checkpoint SESSION_ID close` releases the session's private recovery ref
+without restoring files. Do not close it while you still need those recovery
+points. These are explicit operator actions, not model-generated prompts.
 
 ## Compact
 
@@ -80,6 +97,9 @@ sanitized Markdown; explicit `local` selects local content.
 `ego usage` reads existing accounting; `--period all|Ns|Nm|Nh`, `--all-roles`, and
 `--json` control its view. Main, judge, compaction, hook, and child work can incur
 separate accounting. Token usage, context occupancy, and cost are separate facts.
+Subscription generations show explicitly labelled standard API equivalents, not
+monetary zero. Usage JSON v3 keeps these in `subscription_equivalent`, separate
+from monetary `known` totals; `subscription_unknown` records missing estimates.
 Unknown or subscription monetary cost is not a known zero.
 
 Busy writer leases, pending questions, held/paused sessions, and uncertain effects

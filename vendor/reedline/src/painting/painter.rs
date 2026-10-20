@@ -381,7 +381,10 @@ impl Painter {
     /// Computes layout values shared between rendering and snapshot creation.
     fn compute_layout(&self, lines: &PromptLines, menu: Option<&ReedlineMenu>) -> PromptLayout {
         let screen_width = self.screen_width();
-        let screen_height = self.screen_height();
+        let screen_height = self
+            .screen_height()
+            .saturating_sub(lines.footer_rows(screen_width))
+            .max(1);
 
         // Large buffer extra rows computation
         let (extra_rows, extra_rows_after_prompt) = if self.large_buffer {
@@ -614,6 +617,9 @@ impl Painter {
         let screen_width = self.screen_width();
         let screen_height = self.screen_height();
 
+        let bounded_lines = lines.with_bounded_footer(screen_width, screen_height);
+        let lines = &bounded_lines;
+
         // We add one here as [`PromptLines::prompt_lines_with_wrap`] intentionally subtracts 1 from the real value.
         self.prompt_height = lines.prompt_lines_with_wrap(screen_width) + 1;
         let lines_before_cursor = lines.required_lines(screen_width, true, None);
@@ -690,6 +696,17 @@ impl Painter {
         } else {
             self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
         };
+
+        if !lines.footer.is_empty() {
+            // The footer owns measured rows, never the editing cursor or buffer.
+            if self.large_buffer {
+                let row = screen_height.saturating_sub(lines.footer_rows(screen_width));
+                self.stdout.queue(cursor::MoveTo(0, row))?;
+            } else {
+                self.stdout.queue(Print("\r\n"))?;
+            }
+            self.stdout.queue(Print(&coerce_crlf(&lines.footer)))?;
+        }
 
         self.last_layout = Some(layout);
 
@@ -995,9 +1012,13 @@ impl Painter {
         menu: &dyn Menu,
         use_ansi_coloring: bool,
         layout: &PromptLayout,
+        footer_rows: u16,
     ) -> Result<()> {
         let starting_row = layout.menu_start_row.unwrap_or(0);
-        let remaining_lines = self.screen_height().saturating_sub(starting_row);
+        let remaining_lines = self
+            .screen_height()
+            .saturating_sub(starting_row)
+            .saturating_sub(footer_rows);
         let menu_string = menu.menu_string(remaining_lines, use_ansi_coloring);
         self.clear_from_anchor(starting_row)?;
         self.stdout
@@ -1089,7 +1110,12 @@ impl Painter {
         ]);
 
         if let Some(menu) = menu {
-            self.print_menu(menu, use_ansi_coloring, layout)?;
+            self.print_menu(
+                menu,
+                use_ansi_coloring,
+                layout,
+                lines.footer_rows(self.screen_width()),
+            )?;
         } else {
             self.stdout.queue(Print(&lines.hint))?;
         }
@@ -1106,7 +1132,10 @@ impl Painter {
         layout: &PromptLayout,
     ) -> Result<Option<u16>> {
         let screen_width = self.screen_width();
-        let screen_height = self.screen_height();
+        let screen_height = self
+            .screen_height()
+            .saturating_sub(lines.footer_rows(screen_width))
+            .max(1);
         let cursor_distance = lines.distance_from_prompt(screen_width);
         let remaining_lines = screen_height.saturating_sub(cursor_distance);
 
@@ -1186,7 +1215,12 @@ impl Painter {
             } else {
                 self.stdout.queue(Print(&lines.after_cursor))?;
             }
-            self.print_menu(menu, use_ansi_coloring, layout)?;
+            self.print_menu(
+                menu,
+                use_ansi_coloring,
+                layout,
+                lines.footer_rows(self.screen_width()),
+            )?;
         } else {
             // Selecting lines for the hint
             // The -1 subtraction is done because the remaining lines consider the line where the
@@ -1297,9 +1331,11 @@ impl Painter {
         // The painter already tracks the absolute row at which it placed the
         // prompt. Reconstructing that row from buffer bytes cannot account for
         // combining or wide graphemes, and divides by a transient zero width.
-        // Position at the owned anchor directly; repaint below reconciles the
-        // measured post-print anchor exactly as before.
-        self.stdout.queue(MoveTo(0, starting_row))?;
+        // Erase the whole owned prompt footprint before external text can
+        // wrap across its rows. Erasing only the first message row leaves old
+        // prompt suffixes behind when a wrapped message is shorter on a later
+        // row; repaint may scroll that contaminated row above its new anchor.
+        self.clear_from_anchor(starting_row)?;
         let erase_line = format!("\r{}\r", " ".repeat(self.screen_width().into()));
         let max_row = self.screen_height().saturating_sub(1);
         // Invalidate up front: a `?` early-return below can leave
@@ -1739,6 +1775,7 @@ mod tests {
             before_cursor: Cow::Borrowed(before),
             after_cursor: Cow::Borrowed(after),
             hint: Cow::Borrowed(""),
+            footer: Cow::Borrowed(""),
             right_prompt_on_last_line: false,
         }
     }
@@ -2613,6 +2650,12 @@ mod tests {
                 .position(|window| window == b"event")
                 .expect("external event was not printed");
             assert!(anchor < event, "anchor must precede event: {bytes:?}");
+            assert!(
+                bytes[anchor..event]
+                    .windows(b"\x1b[J".len())
+                    .any(|window| window == b"\x1b[J"),
+                "the entire old prompt must be erased before a message can wrap: {bytes:?}"
+            );
 
             let mut index = 0;
             while index + 2 < bytes.len() {

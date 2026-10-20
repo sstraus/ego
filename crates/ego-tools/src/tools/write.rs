@@ -37,7 +37,7 @@ impl TypedTool for WriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write a file, replacing its entire contents. Creates the file if it does not exist; \
+        "Write a complete file; use edit for targeted substitutions. Replaces all existing contents. Creates the file if it does not exist; \
          its parent directory must already exist. The path may be absolute or relative to the \
          working directory."
     }
@@ -83,8 +83,11 @@ impl TypedTool for WriteTool {
             // params — see `prepare_typed`.
             io.write(&path, &contents)?;
             Ok(ToolResult::builtin(format!(
-                "wrote {} bytes to {path}",
-                contents.len()
+                "wrote {} bytes to {path}{}",
+                contents.len(),
+                io.write_notice(&path)
+                    .map(|notice| format!("\n{notice}"))
+                    .unwrap_or_default()
             )))
         })
     }

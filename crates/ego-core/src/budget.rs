@@ -242,6 +242,15 @@ impl PricingQuote {
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Money, UnknownCost> {
+        if req
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| matches!(block, crate::generator::types::ContentBlock::Audio { .. }))
+        {
+            return Err(UnknownCost::AudioPricingUnavailable);
+        }
         let (context, output) = ceilings(req, caps)?;
         let input_bound = match req.web_search {
             // Each search can re-enter the model with a full context.
@@ -539,6 +548,7 @@ fn request_input_bound(req: &GenRequest, context: u64) -> Result<u64, UnknownCos
             matches!(
                 block,
                 ContentBlock::Image { .. }
+                    | ContentBlock::Audio { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ProviderContent { .. }
             )

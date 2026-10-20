@@ -27,13 +27,7 @@ use crate::model_picker::reasoning_levels;
 ///
 /// The host is the human seat and shows each mode before the operator selects
 /// it. A selection changes only this session's subsequent generations.
-const HOST_MODES: [Mode; 5] = [
-    Mode::Plan,
-    Mode::Default,
-    Mode::Edits,
-    Mode::Auto,
-    Mode::Yolo,
-];
+const HOST_MODES: [Mode; 5] = Mode::SELECTABLE;
 
 /// What one ACP session's operator has picked, if anything.
 #[derive(Debug, Clone, Default)]

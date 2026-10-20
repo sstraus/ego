@@ -7,7 +7,7 @@ use support::{Ego, Plan, Stub};
 use ego_ai::catalogue::DiscoveryCacheV2;
 
 const MODEL_HEADER: &str =
-    "SLUG  CONTEXT  OUTPUT  REASONING  METERING  SOURCE  FRESHNESS  AVAILABILITY";
+    "SLUG  CONTEXT  OUTPUT  REASONING  METERING  FAST  SOURCE  FRESHNESS  AVAILABILITY";
 const SOURCE_HEADER: &str = "PROVIDER  SOURCE  FRESHNESS  AVAILABILITY";
 const CACHE_RELATIVE_PATH: &str = "model-catalogue/snapshot-v1.json";
 
@@ -57,6 +57,106 @@ fn newer_cache(bytes: &[u8]) -> Vec<u8> {
 
 fn write_cache(home: &Path, bytes: &[u8]) {
     std::fs::write(cache_path(home), bytes).expect("cache is writable");
+}
+
+// Catches: an upgrade refuses interactive startup on its own obsolete derived cache.
+#[test]
+fn obsolete_schema_five_cache_does_not_block_interactive_startup() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("model-catalogue")).unwrap();
+    let stale = include_bytes!("fixtures/discovery-cache-capabilities-v5.json");
+    write_cache(home.path(), stale);
+    std::fs::write(
+        home.path().join("models.toml"),
+        "[default_model]\nollama = \"ollama/qwen3\"\n",
+    )
+    .unwrap();
+    let stub = Stub::start(Plan::default());
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .conversing()
+        .args(["--sandbox", "off", "--thinking", "off"])
+        .run_pty("hello");
+    assert_eq!(
+        result.code,
+        Some(0),
+        "stdout: {} stderr: {}",
+        result.stdout,
+        result.stderr
+    );
+    assert_eq!(stub.generations().len(), 1, "startup must reach generation");
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), stale);
+}
+
+// Catches: obsolete display facts prevent an explicitly selected headless run.
+#[test]
+fn obsolete_schema_five_cache_does_not_block_headless_generation() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("model-catalogue")).unwrap();
+    let stale = include_bytes!("fixtures/discovery-cache-capabilities-v5.json");
+    write_cache(home.path(), stale);
+    let stub = Stub::start(Plan::default());
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .args([
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--thinking",
+            "off",
+            "hello",
+        ])
+        .run();
+    assert_eq!(result.code, Some(0), "{}", result.stderr);
+    assert_eq!(stub.generations().len(), 1);
+    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), stale);
+}
+
+// Catches: obsolete-cache recovery silently discards corrupt or future cache bytes.
+#[test]
+fn startup_rejects_corrupt_and_newer_cache_without_replacing_bytes() {
+    let old = include_bytes!("fixtures/discovery-cache-capabilities-v5.json");
+    let mut future_capabilities: serde_json::Value = serde_json::from_slice(old).unwrap();
+    future_capabilities["providers"]["ollama"]["models"][0]["entry"]["capabilities"]["schema_version"] =
+        serde_json::json!(7);
+    for (bytes, diagnostic) in [
+        (b"not-json".to_vec(), "corrupt"),
+        (newer_cache(old), "unsupported"),
+        (
+            serde_json::to_vec(&future_capabilities).unwrap(),
+            "unsupported",
+        ),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("model-catalogue")).unwrap();
+        write_cache(home.path(), &bytes);
+        let result = Ego::at(home.path(), workspace.path(), None)
+            .args(["--sandbox", "off", "hello"])
+            .run();
+        assert_ne!(result.code, Some(0));
+        assert!(result.stderr.contains(diagnostic), "{}", result.stderr);
+        assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), bytes);
+    }
+}
+
+// Catches: an I/O error is mistaken for a missing, rebuildable cache.
+#[test]
+fn startup_reports_unreadable_cache_without_removing_it() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(cache_path(home.path())).unwrap();
+    let result = Ego::at(home.path(), workspace.path(), None)
+        .args(["--sandbox", "off", "hello"])
+        .run();
+    assert_ne!(result.code, Some(0));
+    assert!(
+        result.stderr.contains("cache could not be accessed"),
+        "{}",
+        result.stderr
+    );
+    assert!(cache_path(home.path()).is_dir());
 }
 
 #[test]
@@ -198,7 +298,7 @@ fn user_row_for_ollama_does_not_replace_the_daemon_facts_the_run_resolves() {
         home.path().join("models.toml"),
         r#"
 [model."ollama/qwen3".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 12345
 max_output_tokens = 4096
 supports_parallel_tool_calls = true
@@ -272,7 +372,7 @@ fn provider_filter_excludes_unadmitted_supplied_sources() {
         "models.toml",
         r#"
 [model."gemini/gemini-2.5-pro".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 65536
 max_tools = 128
@@ -470,21 +570,25 @@ fn unfiltered_refresh_skips_optional_missing_credentials_and_reports_unavailable
     assert_eq!(kimi["availability"]["cause"], "missing_credential");
 }
 
+// Catches: ordinary catalogue reads still require manual refresh after an upgrade.
 #[test]
-fn ordinary_read_of_obsolete_cache_prescribes_refresh_without_writing() {
+fn ordinary_read_rebuilds_obsolete_cache_without_explicit_refresh() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let current = seed_current_cache(home.path(), workspace.path());
     let stale = stale_capabilities(&current);
     write_cache(home.path(), &stale);
 
-    let result = Ego::at(home.path(), workspace.path(), None)
+    let stub = Stub::start(Plan::default());
+    let result = Ego::at(home.path(), workspace.path(), Some(&stub))
         .subcommand("models")
         .args(["--provider", "ollama", "--json"])
         .run();
-    assert_ne!(result.code, Some(0));
-    assert!(result.stderr.contains("--refresh"), "{}", result.stderr);
-    assert_eq!(std::fs::read(cache_path(home.path())).unwrap(), stale);
+    assert_eq!(result.code, Some(0), "{}", result.stderr);
+    let rebuilt = std::fs::read(cache_path(home.path())).unwrap();
+    assert_ne!(rebuilt, stale);
+    let cache = DiscoveryCacheV2::decode(&rebuilt).expect("rebuild publishes current schema");
+    assert!(cache.providers.contains_key("ollama"));
 }
 
 #[test]
@@ -635,7 +739,7 @@ fn builtin_rows_are_listed_as_builtin_until_a_file_overrides_one() {
         format!(
             r#"
 [model."{overridden}".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 12345
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -881,7 +985,7 @@ fn openrouter_row_without_stated_limits_lists_no_limit() {
 
 const OPENROUTER_USER_ROWS: &str = r#"
 [model."openrouter/vendor/bare".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 50000
 max_output_tokens = 4000
 max_tools = 16
@@ -894,7 +998,7 @@ cache = "none"
 transport = "sse"
 
 [model."openrouter/vendor/absent".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 50000
 max_output_tokens = 4000
 max_tools = 16

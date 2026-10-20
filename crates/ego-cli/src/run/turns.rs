@@ -72,18 +72,7 @@ pub(super) fn run_trust(
         args.trust_workspace,
         selected.as_deref(),
         |context| match driver {
-            Driver::Interactive { seat, .. } if seat.has_human() => {
-                let question_context = if args.quiet {
-                    context.to_string()
-                } else {
-                    format!(
-                        "ego {} · {}\n{context}",
-                        env!("CARGO_PKG_VERSION"),
-                        args.model.as_deref().unwrap_or("model pending")
-                    )
-                };
-                Some(seat.trust(root, &question_context))
-            }
+            Driver::Interactive { seat, .. } if seat.has_human() => Some(seat.trust(root, context)),
             _ => None,
         },
     )
@@ -130,6 +119,10 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         picker: Arc<Mutex<ModelPicker>>,
         notice: Option<String>,
     ) -> crate::model_picker::PickerOutcome;
+    /// Host inspections and image admission share the idle/busy driver inbox.
+    fn next_inspection(&self) -> futures::future::BoxFuture<'_, repl::HostCommand> {
+        Box::pin(futures::future::pending())
+    }
     fn busy(&self) {}
     fn idle(&self) {}
     /// How long the current or last turn waited on a modal.
@@ -137,6 +130,10 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         std::time::Duration::ZERO
     }
     fn set_image_chips(&self, _chips: Vec<String>) {}
+    /// The current text draft owns this handle, including across stash/restore.
+    fn image_draft(&self) -> Option<repl::ImageDraft> {
+        None
+    }
     fn set_notice(&self, _notice: String) {}
     fn pasteboard_kind(&self) -> Result<PasteboardKind, String> {
         Err("OS pasteboard is unavailable".to_owned())
@@ -222,6 +219,7 @@ enum TurnStart {
     Prompt {
         text: String,
         images: Vec<ImageRef>,
+        audio: Vec<ego_core::generator::audio::AudioRef>,
     },
     Resumed(ego_core::event::id::TurnId),
     Presented(ItemId),
@@ -247,11 +245,25 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
+        self.drive_with_media(loop_, first, images, Vec::new(), cancel, diagnostics)
+            .await
+    }
+
+    pub(super) async fn drive_with_media<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        first: &str,
+        images: Vec<ImageRef>,
+        audio: Vec<ego_core::generator::audio::AudioRef>,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
         self.drive_from(
             loop_,
             TurnStart::Prompt {
                 text: first.to_owned(),
                 images,
+                audio,
             },
             cancel,
             diagnostics,
@@ -351,7 +363,11 @@ impl Turns<'_> {
                     self.one_running(Box::pin(loop_.continue_checkpoint()), cancel)
                         .await
                 }
-                TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
+                TurnStart::Prompt {
+                    text,
+                    images,
+                    audio,
+                } => self.one(loop_, &text, images, audio, cancel).await,
                 TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
                 TurnStart::Presented(question) => {
                     self.one_running(Box::pin(loop_.present_foreign_question(question)), cancel)
@@ -448,6 +464,7 @@ impl Turns<'_> {
                     next = TurnStart::Prompt {
                         text: schema::repair_prompt(&invalid),
                         images: Vec::new(),
+                        audio: Vec::new(),
                     };
                 }
             }
@@ -468,10 +485,14 @@ impl Turns<'_> {
         loop_: &mut TurnLoop<'session, 'turn>,
         prompt: &str,
         images: Vec<ImageRef>,
+        audio: Vec<ego_core::generator::audio::AudioRef>,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(Box::pin(loop_.run_with_images(prompt, images)), cancel)
-            .await
+        self.one_running(
+            Box::pin(loop_.run_with_media(prompt, images, audio)),
+            cancel,
+        )
+        .await
     }
 
     async fn one_resumed<'session: 'turn, 'turn>(

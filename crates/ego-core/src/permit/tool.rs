@@ -355,6 +355,15 @@ impl ToolContentBlock {
 pub struct ToolResult {
     pub content: Vec<ToolContentBlock>,
     provenance: ToolResultProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_change: Option<LineChange>,
+}
+
+/// Lines observed in one successful builtin file edit. Missing means unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineChange {
+    pub added: u64,
+    pub removed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,13 +388,24 @@ impl ToolResult {
         Self {
             content: vec![ToolContentBlock::builtin(text)],
             provenance: ToolResultProvenance::Builtin,
+            line_change: None,
         }
+    }
+
+    pub fn with_line_change(mut self, change: LineChange) -> Self {
+        self.line_change = Some(change);
+        self
+    }
+
+    pub fn line_change(&self) -> Option<LineChange> {
+        self.line_change
     }
 
     pub fn new(content: Vec<ToolContentBlock>) -> Self {
         Self {
             content,
             provenance: ToolResultProvenance::Builtin,
+            line_change: None,
         }
     }
 
@@ -396,6 +416,7 @@ impl ToolResult {
             provenance: ToolResultProvenance::Foreign {
                 result: Box::new(result),
             },
+            line_change: None,
         }
     }
 
@@ -652,5 +673,31 @@ impl<T: TypedTool> Tool for Typed<T> {
         'io: 'a,
     {
         Box::pin(async move { self.0.execute(call, io).await.map(ToolExecution::Complete) })
+    }
+}
+
+#[cfg(test)]
+mod line_change_tests {
+    use super::*;
+
+    #[test]
+    fn line_change_survives_journal_json_without_rewriting_older_results() {
+        let older = serde_json::to_value(ToolResult::builtin("done")).unwrap();
+        assert!(older.get("line_change").is_none());
+        let new = ToolResult::builtin("done").with_line_change(LineChange {
+            added: 3,
+            removed: 1,
+        });
+        let reloaded: ToolResult =
+            serde_json::from_value(serde_json::to_value(new).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.line_change(),
+            Some(LineChange {
+                added: 3,
+                removed: 1
+            })
+        );
+        let reloaded_old: ToolResult = serde_json::from_value(older).unwrap();
+        assert_eq!(reloaded_old.line_change(), None);
     }
 }

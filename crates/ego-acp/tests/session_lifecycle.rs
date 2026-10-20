@@ -390,9 +390,9 @@ async fn initialize_advertises_exactly_the_composed_v1_lifecycle_surface() {
     );
     assert_eq!(capabilities["promptCapabilities"]["embeddedContext"], true);
 
-    assert_ne!(
+    assert_eq!(
         capabilities["promptCapabilities"]["audio"], true,
-        "unsupported prompt capability audio was advertised"
+        "durable audio surface was not advertised"
     );
 
     connection.finish().await;
@@ -942,7 +942,11 @@ async fn load_replays_projectable_history_then_one_final_usage_and_current_info(
             .filter(|params| params["update"]["sessionUpdate"] != "session_info_update")
             .map(|params| params["update"].clone())
             .collect::<Vec<_>>(),
-        seeded.expected_replay_updates,
+        [
+            seeded.expected_replay_updates,
+            vec![serde_json::json!({"sessionUpdate": "plan", "entries": []})]
+        ]
+        .concat(),
         "load did not preserve the durable public projection order"
     );
     assert_info_update(&notifications, &seeded.session_id, Some("Durable title"));
@@ -1022,8 +1026,12 @@ async fn resume_emits_current_info_but_no_history_or_usage() {
     let notifications = connection.announced().await;
     assert_eq!(
         updates(&notifications).len(),
-        1,
-        "resume replayed durable history: {notifications:?}"
+        2,
+        "resume must publish only current info and current plan, not durable history: {notifications:?}"
+    );
+    assert_eq!(
+        updates(&notifications)[1]["update"],
+        serde_json::json!({"sessionUpdate": "plan", "entries": []})
     );
     assert_info_update(&notifications, &seeded.session_id, Some("Resume me"));
     connection.finish().await;
@@ -1135,7 +1143,10 @@ async fn message_fork_replays_the_cutoff_before_local_history_even_after_parent_
             .is_none()
     );
     assert_eq!(
-        frames.last().unwrap()["update"]["_meta"]["ego"]["lineage"]["sourceDeleted"],
+        frames
+            .iter()
+            .find(|frame| frame["update"]["sessionUpdate"] == "session_info_update")
+            .unwrap()["update"]["_meta"]["ego"]["lineage"]["sourceDeleted"],
         true
     );
     let (listed, _) = connection
@@ -1225,16 +1236,18 @@ async fn compaction_children_project_lineage_in_list_and_load_info() {
     assert!(loaded.get("result").is_some(), "load failed: {loaded}");
     let announced = connection.announced().await;
     assert_eq!(
-        updates(&announced).last().unwrap()["update"]["_meta"]["ego"]["lineage"],
+        updates(&announced)
+            .into_iter()
+            .find(|frame| frame["update"]["sessionUpdate"] == "session_info_update")
+            .unwrap()["update"]["_meta"]["ego"]["lineage"],
         expected
     );
     connection.finish().await;
 }
 
-// Catches: a durable goal set outside the current connection never reaching
-// the host's plan card on attachment.
+// Catches: an attached objective being lost or fabricated as a plan step.
 #[tokio::test]
-async fn loading_a_goal_emits_one_current_plan_entry() {
+async fn loading_a_goal_emits_objective_metadata_without_fabricating_plan_steps() {
     let fixture = support::DurableAcpFixture::new();
     let (session, _) = fixture.seed_settled_messages(ROOT);
     fixture.set_current_goal(&session, "Finish the ACP surface");
@@ -1254,10 +1267,27 @@ async fn loading_a_goal_emits_one_current_plan_entry() {
         .collect::<Vec<_>>();
     assert_eq!(plans.len(), 1, "no complete current plan: {announced:?}");
     let entries = plans[0]["update"]["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["content"], "Finish the ACP surface");
-    assert_eq!(entries[0]["status"], "in_progress");
-    assert_eq!(entries[0]["_meta"]["ego"]["goalState"], "active");
+    assert!(
+        entries.is_empty(),
+        "objective fabricated a plan step: {entries:?}"
+    );
+    let objectives = updates(&announced)
+        .into_iter()
+        .filter(|params| params["update"]["_meta"]["ego"].get("objective").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        objectives.len(),
+        1,
+        "missing or duplicated objective: {announced:?}"
+    );
+    assert_eq!(
+        objectives[0]["update"]["_meta"]["ego"]["objective"],
+        "Finish the ACP surface"
+    );
+    assert_eq!(
+        objectives[0]["update"]["_meta"]["ego"]["goalState"],
+        "active"
+    );
     connection.finish().await;
 }
 

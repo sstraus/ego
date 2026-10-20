@@ -5,6 +5,10 @@
 //! and transcript output stay live without creating a second terminal writer.
 
 mod clipboard;
+mod images;
+mod keyboard;
+pub(crate) use images::{DraftImage, DraftImageSource, ImageOperation};
+pub use images::{ImageDraft, ImageRequest};
 mod keys;
 mod seat;
 
@@ -20,7 +24,7 @@ pub(crate) const INTERRUPTED_RECEIPT: &str = "Interrupted by user";
 
 pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::Confirmation;
-pub(crate) use seat::effective_statusline_segments;
+pub(crate) use seat::effective_statusline_template;
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
@@ -50,6 +54,7 @@ pub(super) const CLIPBOARD_PASTE_COMMAND: &str = "ego:clipboard-paste";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Action(ActionId),
+    Details(ActionId),
     History(String),
     Resume(Option<String>),
     Fork(ego_core::event::id::ItemId),
@@ -63,7 +68,10 @@ pub enum HostCommand {
     /// handler by sending [`ExportSelection::default`].
     Export(ExportSelection),
     Hooks,
+    Memory(String),
+    Init(String),
     Config(String),
+    Fast(bool),
     Setup(String),
     Tasks(String),
     Mcp(String),
@@ -82,9 +90,33 @@ pub enum HostCommand {
     PastePath(String),
     RemovePasteImage,
     ClipboardPaste,
+    /// An image effect addressed to the driver's existing inbox.
+    Images(ImageRequest),
+    /// The owner retains the complete composer until admission succeeds.
+    AdmitPrompt {
+        text: String,
+        steer: bool,
+    },
+    /// Native prompt envelope, admitted before clearing the source draft.
+    SubmittedDraft {
+        text: String,
+        images: Vec<ego_core::generator::types::ImageRef>,
+    },
 }
 
 impl HostCommand {
+    pub(crate) fn is_read_only_inspection(&self) -> bool {
+        match self {
+            Self::Tasks(arguments) => {
+                let words = arguments.split_whitespace().collect::<Vec<_>>();
+                words.is_empty() || (words.len() == 1 && words[0] != "cancel")
+            }
+            Self::Action(ActionId::Config | ActionId::Usage) => true,
+            Self::Config(arguments) => arguments == "perimeter",
+            _ => false,
+        }
+    }
+
     fn from_editor(command: String) -> Option<Self> {
         if command == DRAFT_COMMAND {
             return Some(Self::Draft);
@@ -374,7 +406,7 @@ mod live_surface_red {
     }
 
     #[test]
-    fn edit_mode_submits_busy_input_to_the_host_and_delegates_idle_and_characters() {
+    fn edit_mode_submits_idle_and_busy_input_to_the_host_and_delegates_characters() {
         let phase = SurfacePhase::new(EditPhase::Busy);
         let mut mode = SurfaceEditMode::new(Emacs::default(), phase.clone());
         let escape =
@@ -399,7 +431,10 @@ mod live_surface_red {
             KeyModifiers::NONE,
         )))
         .unwrap();
-        assert!(matches!(mode.parse_event(enter), ReedlineEvent::Enter));
+        assert_eq!(
+            mode.parse_event(enter),
+            ReedlineEvent::ExecuteHostCommand(BUSY_SUBMIT_COMMAND.to_string())
+        );
         let character = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::NONE,
@@ -444,14 +479,17 @@ mod live_surface_red {
         );
     }
 
+    // Catches: a queued inspection backlog requiring one terminal round-trip per
+    // row, delaying quit; batching must retain rows and the finish barrier.
     #[test]
-    fn live_output_pump_keeps_generation_production_cancellable_and_finish_is_a_barrier() {
+    fn live_output_pump_batches_backlog_and_finish_is_a_barrier() {
         let (external, rendered) = crossbeam::channel::bounded(1);
+        external.send("held".to_owned()).unwrap();
         let cancel = ego_core::turn::CancelToken::new();
         let (mut output, pump) =
             SurfaceOutput::pumped(external, cancel, Arc::new(AtomicBool::new(false)));
-
-        output.write("first\nsecond\nthird").unwrap();
+        let expected = format!("{}tail", "first\n\nsecond\n".repeat(100));
+        output.write(&expected).unwrap();
 
         let (done_tx, done_rx) = mpsc::sync_channel(0);
         std::thread::scope(|scope| {
@@ -460,10 +498,21 @@ mod live_surface_red {
                 done_tx.send(()).unwrap();
             });
             assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
-            assert_eq!(rendered.recv().unwrap(), "first\n");
-            assert_eq!(rendered.recv().unwrap(), "second\n");
-            assert_eq!(rendered.recv().unwrap(), "third");
-            assert_eq!(rendered.recv().unwrap(), "");
+            assert_eq!(rendered.recv().unwrap(), "held");
+            let mut rows = Vec::new();
+            let mut batches = 0;
+            loop {
+                let batch = rendered.recv_timeout(Duration::from_secs(1)).unwrap();
+                if batch.is_empty() {
+                    break;
+                }
+                batches += 1;
+                rows.extend(batch.lines().map(str::to_owned));
+            }
+            assert_eq!(rows, expected.lines().collect::<Vec<_>>());
+            // At most one in-flight batch, one queued backlog, and the tail
+            // flushed by finish after the producer handed off its rows.
+            assert!(batches <= 3, "backlog took {batches} printer handoffs");
             done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         });
         drop(rendered);

@@ -177,8 +177,7 @@ async fn open_scope_phase(
     {
         let effective = &settings.effective;
         host.diagnostics.note(&format!(
-            "ego {} · {model}\nmode {} ({}) · sandbox {} ({})\n{}",
-            env!("CARGO_PKG_VERSION"),
+            "model {model}\nmode {} ({}) · sandbox {} ({})\n{}",
             effective.mode.unwrap_or(Mode::Default),
             effective.mode_provenance,
             settings.confinement.level(),
@@ -485,6 +484,7 @@ fn materialize_run_phase<'store>(
             &confinement,
         ))),
         child: true,
+        token_family: None,
     });
     let instruction_descriptors = system
         .as_ref()
@@ -838,7 +838,7 @@ fn activate_session_phase<'store, S: EventSink>(
                 mode: materialized.mode,
                 cwd: materialized.cwd.clone(),
                 trust: materialized.skill_trust,
-                segments: repl::effective_statusline_segments(
+                template: repl::effective_statusline_template(
                     materialized.effective.ui.statusline.as_ref(),
                 ),
                 width: status.width,

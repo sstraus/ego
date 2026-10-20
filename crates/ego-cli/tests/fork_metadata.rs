@@ -27,7 +27,7 @@ struct Fixture {
 
 impl Fixture {
     /// A stored session with a title and an active goal, made through the
-    /// public `resume --name/--goal` surface.
+    /// public `resume --name/--goal-operation` surface.
     fn titled_with_goal() -> Self {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -51,7 +51,11 @@ impl Fixture {
         );
         assert_eq!(
             fixture
-                .resume(&fixture.source, "--goal", &format!("set={OBJECTIVE}"))
+                .resume(
+                    &fixture.source,
+                    "--goal-operation",
+                    &format!("set={OBJECTIVE}")
+                )
                 .code,
             Some(0)
         );
@@ -78,7 +82,7 @@ impl Fixture {
     fn assert_carries_source_metadata(&self, child: &str) {
         let name = self.resume(child, "--name", "show").report();
         assert_eq!(name["name"], TITLE, "child title: {name}");
-        let goal = self.resume(child, "--goal", "show").report();
+        let goal = self.resume(child, "--goal-operation", "show").report();
         assert_eq!(goal["goal"]["objective"], OBJECTIVE, "child goal: {goal}");
         assert_eq!(goal["goal"]["state"], "active", "child goal: {goal}");
     }
@@ -241,6 +245,7 @@ impl Fixture {
         append(
             Some(user),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: text.into(),
                 images: Vec::new(),
                 queued_prompt: None,

@@ -271,6 +271,7 @@ struct LaunchBarrierExecutor {
     crossed: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     release: Option<Arc<tokio::sync::Notify>>,
     interrupt_failure: bool,
+    submit_error: bool,
 }
 
 impl LaunchBarrierExecutor {
@@ -339,7 +340,11 @@ impl RunExecutor for LaunchBarrierExecutor {
             if let Some(release) = &self.release {
                 release.notified().await;
             }
-            Ok(RunSettlement::Completed)
+            if self.submit_error {
+                Err(RunExecutorError::new("provider ended after partial output"))
+            } else {
+                Ok(RunSettlement::Completed)
+            }
         })
     }
 
@@ -454,6 +459,7 @@ async fn cli_background_launch_crosses_execution_barrier_without_collection_futu
         crossed: Mutex::new(None),
         release: None,
         interrupt_failure: false,
+        submit_error: false,
     });
     let crossed = executor.arm();
     let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
@@ -784,9 +790,9 @@ fn durable_compact_is_enabled_when_idle_before_confirmation_resolution_generatio
 }
 
 #[derive(Debug)]
-struct CompactionDecisionSeat {
-    confirm: bool,
-    activate: bool,
+pub(super) struct CompactionDecisionSeat {
+    pub(super) confirm: bool,
+    pub(super) activate: bool,
 }
 
 impl Reads for CompactionDecisionSeat {
@@ -1056,6 +1062,13 @@ fn only_a_long_run_is_worth_interrupting_someone_over() {
         "{long:?}"
     );
 
+    // Catches: the completed-turn notification using a different format from the working row.
+    let hour = loud.postamble(&RunTermination::Done, Duration::from_secs(3900));
+    assert!(
+        hour.contains("\x1b]9;εgo: done after 1h 05m\x07"),
+        "{hour:?}"
+    );
+
     let quiet = Announce::new(&out, capabilities, true);
     assert!(
         !quiet
@@ -1105,6 +1118,16 @@ fn a_long_title_is_cut_where_a_grapheme_ends() {
 
 #[test]
 fn a_duration_is_written_for_a_person() {
+    use crate::render::duration;
+
+    // Catches: turn notifications retaining minutes after the hour boundary.
+    assert_eq!(duration(Duration::from_secs(3600)), "1h 00m");
+    assert_eq!(duration(Duration::from_secs(3900)), "1h 05m");
+    assert_eq!(duration(Duration::from_secs(3959)), "1h 05m");
+    assert_eq!(
+        duration(Duration::from_secs(u64::MAX)),
+        "5124095576030431h 00m"
+    );
     assert_eq!(duration(Duration::from_secs(9)), "9s");
     assert_eq!(duration(Duration::from_secs(60)), "1m 0s");
     assert_eq!(duration(Duration::from_secs(252)), "4m 12s");
@@ -2835,6 +2858,18 @@ impl<'a> DrainFixture<'a> {
                 hooks,
                 CancelToken::new(),
                 Trust::Untrusted,
+            )
+            .with_task_blobs(SessionEvidenceStore::open(root, session, 1024 * 1024).unwrap())
+            .with_task_policy(
+                ego_core::turn::GenerationPolicyCapture::new(
+                    CanonPath::new(root),
+                    Mode::Default,
+                    Ruleset::default(),
+                    None,
+                )
+                .unwrap()
+                .snapshot()
+                .digest(),
             ),
             store,
             session,
@@ -2986,6 +3021,7 @@ fn drain_executor() -> Arc<LaunchBarrierExecutor> {
         crossed: Mutex::new(None),
         release: None,
         interrupt_failure: false,
+        submit_error: false,
     })
 }
 
@@ -3000,6 +3036,7 @@ async fn cli_drain_cancellation_error_wins_without_losing_child_settlement() {
         crossed: Mutex::new(None),
         release: Some(Arc::new(tokio::sync::Notify::new())),
         interrupt_failure: true,
+        submit_error: false,
     });
     let crossed = executor.arm();
     let fixture = DrainFixture::new(root.path(), &store, executor);
@@ -3177,4 +3214,412 @@ fn native_search_registry_does_not_require_or_select_exa() {
             "paid native search requires explicit selection"
         );
     }
+}
+
+#[test]
+fn output_style_precedes_explicit_appends_and_session_replace_suppresses_it() {
+    // Catches: style overriding explicit appends or leaking into a session replacement.
+    #[derive(Default)]
+    struct Notes(Mutex<Vec<String>>);
+    impl crate::output::Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+    let root = tempdir().unwrap();
+    let effective = ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap();
+    let mut args = protocol_args(
+        None,
+        crate::cli::SessionShape {
+            system: Some("base".into()),
+            output_style: Some("concise".into()),
+            append_system: Some("explicit tail".into()),
+            bare: true,
+            ..Default::default()
+        },
+    );
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Append,
+        text: "session tail".into(),
+    });
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        assembled.text,
+        "base\n\nUse concise, direct answers. Omit unnecessary detail, but retain material risks, failures and uncertainty.\n\nexplicit tail\n\nsession tail"
+    );
+    assert_eq!(*notes.0.lock().unwrap(), ["output style concise: builtin"]);
+    args.session_prompt = Some(ego_core::config::SessionSystemPrompt {
+        mode: ego_core::config::SystemPromptMode::Replace,
+        text: "replacement".into(),
+    });
+    // Even a missing launch style must not be loaded after a session replacement.
+    args.output_style = Some("missing".into());
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, root.path(), root.path(), &notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(assembled.text, "replacement");
+    assert!(notes.0.lock().unwrap().is_empty());
+}
+
+// These tests drive the CLI owner over the real durable child service and JSONL store.
+impl DrainFixture<'_> {
+    fn background_task_request(&self) -> ego_core::turn::BackgroundTaskLaunch {
+        let item = ItemId::new();
+        let id = SubagentInvocationId::from_uuid(item.to_string().parse().unwrap()).unwrap();
+        let turn = TurnId::new();
+        let started = self.owner.hooks.hook_state().journal().append(turn, Some(item), None,
+            EventKind::ToolCallStarted { name: "task".to_owned(), args: serde_json::json!({"name":"check", "prompt":"background launch task", "background":true}).to_string(), call_id: Some(format!("call-{id}")) }).unwrap();
+        ego_core::turn::BackgroundTaskLaunch {
+            invocation: id,
+            turn,
+            item,
+            started,
+            prompt: "background launch task".to_owned(),
+            model: None,
+            mode: Mode::Default,
+            policy: self.owner.task_policy.clone().unwrap(),
+            tools: BTreeSet::from(["read".to_owned()]),
+        }
+    }
+
+    async fn background_task(&self) -> SubagentInvocationId {
+        use ego_core::turn::BackgroundTaskPort;
+        let request = self.background_task_request();
+        let (id, turn, item, started) = (
+            request.invocation,
+            request.turn,
+            request.item,
+            request.started,
+        );
+        tokio::time::timeout(Duration::from_secs(5), self.owner.launch_task(request))
+            .await
+            .expect("launch must not wait for child completion")
+            .unwrap();
+        self.owner
+            .hooks
+            .hook_state()
+            .journal()
+            .append(
+                turn,
+                Some(item),
+                Some(started),
+                EventKind::ToolCallCompleted {
+                    ok: true,
+                    result: ego_core::permit::ToolResult::builtin(format!("background agent {id}")),
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    async fn execution_finished(&self, id: SubagentInvocationId) {
+        let task = self
+            .owner
+            .tasks
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .execution
+            .take();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            CliSkillInvocationOwner::await_execution(task),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    fn deliveries(&self) -> usize {
+        self.owner
+            .hooks
+            .hook_state()
+            .state()
+            .items
+            .values()
+            .filter(|item| item.text.contains("completed child answer"))
+            .count()
+    }
+}
+
+#[tokio::test]
+async fn background_task_completion_during_another_parent_turn_waits_for_boundary() {
+    // Catches: a child injecting its completion into a parent generation already in flight.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(release.clone()),
+        interrupt_failure: false,
+        submit_error: false,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.background_task().await;
+    crossed.await.unwrap();
+    let parent_turn = TurnId::new();
+    fixture
+        .owner
+        .hooks
+        .hook_state()
+        .journal()
+        .append(
+            parent_turn,
+            Some(ItemId::new()),
+            None,
+            EventKind::UserPrompt {
+                audio: Vec::new(),
+                text: "another parent turn".to_owned(),
+                images: vec![],
+                queued_prompt: None,
+            },
+        )
+        .unwrap();
+    release.notify_one();
+    fixture.execution_finished(id).await;
+    assert_eq!(
+        fixture.deliveries(),
+        0,
+        "execution must not write parent context"
+    );
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    let state = fixture.owner.hooks.hook_state().state();
+    let (conversation, _) = ego_core::generator::history::conversation_from(&state).unwrap();
+    assert!(
+        serde_json::to_string(&conversation)
+            .unwrap()
+            .contains("completed child answer")
+    );
+}
+
+#[tokio::test]
+async fn background_task_parent_interruption_does_not_cancel_child() {
+    // Catches: Ctrl+Enter's parent token leaking into an admitted background child.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(release.clone()),
+        interrupt_failure: false,
+        submit_error: false,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.background_task().await;
+    crossed.await.unwrap();
+    fixture.owner.parent_cancel.cancel(CancelCause::User);
+    assert!(
+        !fixture
+            .owner
+            .tasks
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .service
+            .is_settled(id)
+            .unwrap()
+    );
+    release.notify_one();
+    fixture.execution_finished(id).await;
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    assert_eq!(fixture.settled().await, [id]);
+}
+
+#[tokio::test]
+async fn background_task_duplicate_crash_recovery_does_not_redeliver_completion() {
+    // Catches: reopening after child settlement launching it again or delivering its answer twice.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let id = fixture.background_task().await;
+    fixture.execution_finished(id).await;
+    let service = fixture
+        .owner
+        .tasks
+        .lock()
+        .unwrap()
+        .get(&id)
+        .unwrap()
+        .service
+        .clone();
+    service
+        .collect_background(id, &fixture.owner.hooks)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.deliveries(),
+        0,
+        "simulate crash between settlement and delivery"
+    );
+    fixture.owner.tasks.lock().unwrap().clear();
+    let stale = fixture.owner.hooks.hook_state().state();
+    fixture.owner.refresh_tasks(stale.clone()).await.unwrap();
+    fixture.owner.refresh_tasks(stale).await.unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    assert_eq!(fixture.settled().await, [id]);
+    assert_eq!(
+        fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::SubagentCompletionDelivered { .. }))
+            .count(),
+        1
+    );
+    let mut replay = SessionState::default();
+    for event in fixture.events().await {
+        replay.apply(&event);
+    }
+    fixture.owner.refresh_tasks(replay.clone()).await.unwrap();
+    assert_eq!(fixture.deliveries(), 1);
+    assert!(replay.delivered_subagents.contains_key(&id));
+    assert!(replay.refusals.is_empty(), "{:?}", replay.refusals);
+}
+
+#[tokio::test]
+async fn background_task_inspect_and_cancel_targets_only_the_selected_agent() {
+    // Catches: /tasks cancellation accidentally cancelling the parent or an unrelated entry.
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(Arc::new(tokio::sync::Notify::new())),
+        interrupt_failure: false,
+        submit_error: false,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.background_task().await;
+    crossed.await.unwrap();
+    let state = fixture.owner.hooks.hook_state().state();
+    assert!(
+        fixture
+            .owner
+            .inspect_tasks("", &state)
+            .await
+            .unwrap()
+            .contains(&format!("agent {id}"))
+    );
+    assert!(
+        fixture
+            .owner
+            .inspect_tasks(&format!("cancel {id}"), &state)
+            .await
+            .unwrap()
+            .contains("cancellation requested")
+    );
+    assert!(!fixture.owner.parent_cancel.is_cancelled());
+    fixture.execution_finished(id).await;
+}
+
+#[tokio::test]
+async fn background_task_changed_parent_policy_is_not_replaced_with_stale_authority() {
+    // Catches: a live parent restriction being dropped by a child composed from epoch defaults.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let mut request = fixture.background_task_request();
+    request.mode = Mode::Plan;
+    request.policy = ego_core::turn::GenerationPolicyCapture::new(
+        CanonPath::new(root.path()),
+        Mode::Plan,
+        Ruleset::default(),
+        None,
+    )
+    .unwrap()
+    .snapshot()
+    .digest();
+    let error = fixture.owner.launch_task(request).await.unwrap_err();
+    assert!(error.contains("policy differs"), "{error}");
+    assert!(fixture.owner.tasks.lock().unwrap().is_empty());
+    assert!(fixture.events().await.iter().all(|event| !matches!(
+        event.kind,
+        EventKind::SubagentRequested { .. } | EventKind::SubagentSpawned { .. }
+    )));
+}
+
+#[tokio::test]
+async fn background_task_uncertain_execution_is_failure_data_not_parent_error() {
+    // Catches: an already delivered Uncertain settlement aborting the unrelated parent turn.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let fixture = DrainFixture::new(
+        root.path(),
+        &store,
+        Arc::new(LaunchBarrierExecutor {
+            crossed: Mutex::new(None),
+            release: None,
+            interrupt_failure: false,
+            submit_error: true,
+        }),
+    );
+    let id = fixture.background_task().await;
+    let service = fixture
+        .owner
+        .tasks
+        .lock()
+        .unwrap()
+        .get(&id)
+        .unwrap()
+        .service
+        .clone();
+    let result = service
+        .collect_background(id, &fixture.owner.hooks)
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        ego_core::subagent::ChildWaitResult::Failed {
+            settlement: RunSettlement::Uncertain { .. }
+        }
+    ));
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .expect("settled child failures are data, not parent errors");
+    let state = fixture.owner.hooks.hook_state().state();
+    assert!(state.delivered_subagents.contains_key(&id));
+    fixture.owner.refresh_tasks(state).await.unwrap();
 }

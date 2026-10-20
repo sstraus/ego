@@ -1,5 +1,6 @@
 use super::edit_mode::PICKER_KEYS;
 use super::permission_modal::{compact_prompt, details_prompt, settled_receipt};
+use super::picker_surface::{PickerRole, picker_capabilities, picker_row};
 use super::*;
 use crate::render::osc::State;
 
@@ -123,7 +124,23 @@ pub(super) fn answer_control(
             return true;
         }
         Control::ActivateSession { target, reply } => {
-            surface.drafts.activate(target);
+            if surface.drafts.active() != target {
+                let text = editor.current_buffer_contents().to_owned();
+                let mut current = surface.status.lock().expect("surface status lock");
+                if !text.is_empty() || !current.images.is_empty() {
+                    surface.drafts.push_active(ComposerDraft {
+                        text,
+                        cursor: editor.current_insertion_point(),
+                        origin: current.origin,
+                        images: std::mem::take(&mut current.images),
+                    });
+                }
+                current.image_chips.clear();
+                drop(current);
+                editor.run_edit_commands(&[EditCommand::Clear]);
+                surface.drafts.activate(target);
+                restore_latest_draft(editor, surface.status, surface.drafts);
+            }
             {
                 let mut current = surface.status.lock().expect("surface status lock");
                 if let Some(base) = current.status_base.as_mut() {
@@ -234,7 +251,10 @@ pub(super) fn answer_control(
             reply,
         } => {
             let prompt = Question::new(
-                format!("{context}\nTrust project files in {workspace}? [y/N] "),
+                crate::output::wrap_notice(
+                    &format!("{context}\nTrust project files in {workspace}? [y/N] "),
+                    Some(picker_capabilities(surface.status).width.saturating_sub(1)),
+                ),
                 Arc::clone(surface.status),
             );
             let trust = loop {
@@ -256,9 +276,12 @@ pub(super) fn answer_control(
         }
         Control::WindowsUnconfined { workspace, reply } => {
             let prompt = Question::new(
-                format!(
-                    "Windows execution is unconfined in {workspace}; filesystem and network \
-                     isolation are not enforced. Continue? [y/N] "
+                crate::output::wrap_notice(
+                    &format!(
+                        "Windows execution is unconfined in {workspace}; filesystem and network \
+                         isolation are not enforced. Continue? [y/N] "
+                    ),
+                    Some(picker_capabilities(surface.status).width.saturating_sub(1)),
                 ),
                 Arc::clone(surface.status),
             );
@@ -576,11 +599,11 @@ fn answer_question_selector(
 
     let outcome = loop {
         let prompt = Question::new(
-            question_selector_prompt(request, &selector),
+            question_selector_prompt(request, &selector, surface.status),
             Arc::clone(surface.status),
         );
         let queued = queued_selector_line(surface.status);
-        match queued.unwrap_or_else(|| modal_line(editor, surface, &prompt)) {
+        match queued.unwrap_or_else(|| permission_line(editor, surface, &prompt)) {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
                 let Some(key) = next_selector_key(surface.status, &command) else {
                     continue;
@@ -749,14 +772,23 @@ pub(super) fn next_selector_key(status: &SharedStatus, _command: &str) -> Option
 pub(super) fn question_selector_prompt(
     request: &QuestionRequest,
     selector: &Arc<Mutex<Selector>>,
+    status: &SharedStatus,
 ) -> String {
+    let caps = picker_capabilities(status);
+    let width = caps.width.saturating_sub(1).max(1);
+    let wrapped = |text: &str, role| {
+        text.lines()
+            .flat_map(|line| crate::render::Line::plain(line).wrap(width))
+            .map(|row| picker_row(row.text(), role, caps.depth))
+            .collect::<Vec<_>>()
+    };
     let selector = selector.lock().expect("question selector lock");
     let current = selector.current_id();
     let selected = selector.selected_ids();
     let multiple = request.mode == QuestionMode::Multiple;
     let other = offers_other(request)
         .then(|| QuestionOption::new(OTHER_ID, OTHER_LABEL).with_description(OTHER_DESCRIPTION));
-    let mut rows = vec![request.prompt.clone()];
+    let mut rows = wrapped(&request.prompt, PickerRole::Question);
     for (index, option) in request.options.iter().chain(other.as_ref()).enumerate() {
         let marker = if current == Some(option.id.as_str()) {
             ">"
@@ -774,20 +806,51 @@ pub(super) fn question_selector_prompt(
             format!("{marker} {}. ", index + 1)
         };
         let indent = " ".repeat(lead.chars().count());
-        rows.push(format!("{lead}{}", option.label));
+        let role = if current == Some(option.id.as_str()) {
+            PickerRole::Selected
+        } else {
+            PickerRole::Label
+        };
+        rows.extend(
+            crate::render::Line::plain(&option.label)
+                .wrap(width.saturating_sub(indent.len()).max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    picker_row(
+                        format!("{}{}", if index == 0 { &lead } else { &indent }, row.text()),
+                        role,
+                        caps.depth,
+                    )
+                }),
+        );
         if let Some(description) = option
             .description
             .as_deref()
             .filter(|text| !text.trim().is_empty())
         {
-            rows.push(format!("{indent}{description}"));
+            rows.extend(
+                crate::render::Line::plain(description)
+                    .wrap(width.saturating_sub(indent.len()).max(1))
+                    .into_iter()
+                    .map(|row| {
+                        picker_row(
+                            format!("{indent}{}", row.text()),
+                            PickerRole::Description,
+                            caps.depth,
+                        )
+                    }),
+            );
         }
     }
-    rows.push(if request.mode == QuestionMode::Multiple {
-        "Up/Down moves; Space or number toggles; Enter answers; Esc cancels. ".to_string()
-    } else {
-        "Up/Down or number selects; Enter answers; Esc cancels. ".to_string()
-    });
+    rows.extend(wrapped(
+        if request.mode == QuestionMode::Multiple {
+            "Up/Down moves; Space or number toggles; Enter answers; Esc cancels."
+        } else {
+            "Up/Down or number selects; Enter answers; Esc cancels."
+        },
+        PickerRole::Hint,
+    ));
     rows.join("\n")
 }
 
@@ -881,8 +944,8 @@ fn parse_question_answer(
     Ok(answer)
 }
 
-/// One read of the approval modal, whose prompt is retired as soon as it
-/// returns: an answered approval must not keep showing answer keys, and the
+/// One read of a transient modal, whose prompt is retired as soon as it
+/// returns: navigation must replace a picker even at the bottom row, and the
 /// next prompt (a follow-up question, the next approval or the composer)
 /// starts on the same row. Its outcome is committed as one receipt row.
 ///
@@ -1430,7 +1493,7 @@ fn remember_permission(
 /// Called only from the terminal owner, between reads, so nothing else is
 /// painting. It does not go through the row output: that holds text until a
 /// newline, and a wait has no more rows coming.
-fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
+pub(super) fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
     let signals = status.lock().expect("surface status lock").signals;
     let Some((osc, quiet)) = signals else {
         return;
@@ -1506,6 +1569,7 @@ pub(super) fn commit_to_transcript(status: &SharedStatus, row: &str) {
         .expect("surface status lock")
         .transcript
         .clone();
+    let row = crate::output::wrap_notice(row, Some(picker_capabilities(status).width));
     if let Some(transcript) = transcript
         && transcript
             .send(SurfaceMessage::Row(format!("{row}\n")))
@@ -1569,6 +1633,31 @@ fn status_right(status: &SharedStatus) -> String {
 }
 
 fn status_row(status: &SurfaceStatus) -> String {
+    let ephemeral = activity_or_status_row(status);
+    if status.activity || status.retry.is_some() || status.shell.is_some() {
+        // The compact default keeps 524's single Working row. Critical state
+        // still survives there; custom layouts retain all their configured rows.
+        let template = if status.template.is_compact() {
+            status
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.critical_values().join("\n"))
+                .unwrap_or_default()
+        } else {
+            status
+                .painter
+                .current_status()
+                .map(|line| line.terminal_text(&status.permission_capabilities))
+                .unwrap_or_default()
+        };
+        if !template.is_empty() {
+            return format!("{template}\n{ephemeral}");
+        }
+    }
+    ephemeral
+}
+
+fn activity_or_status_row(status: &SurfaceStatus) -> String {
     if let Some((message, started, delay_ms)) = &status.retry {
         let remaining = delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
         let message = if let Some((cause, rest)) =
@@ -1587,27 +1676,59 @@ fn status_row(status: &SurfaceStatus) -> String {
         };
         let message = message.replace(['\r', '\n', '\t'], " ");
         let mut line = crate::render::line::Line::empty();
-        line.push(crate::render::line::Span::plain(message));
+        line.push(crate::render::line::Span::new(
+            message,
+            crate::render::style::Style::fg(crate::render::style::Palette::ERROR),
+        ));
         return format!(
             "{}\n",
             line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
-                .text()
+                .render(status.permission_capabilities.depth)
+        );
+    }
+    if let Some(line) = &status.shell {
+        return format!(
+            "{}\n",
+            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
+                .render(status.permission_capabilities.depth)
         );
     }
     if status.activity {
         let elapsed = status
             .activity_since
-            .map(|started| started.elapsed().as_secs())
-            .unwrap_or(0);
-        return format!(
-            "{} Working {elapsed}s \x1b[2m· Esc to interrupt\x1b[22m\n",
-            ACTIVITY_FRAMES[(elapsed as usize) % ACTIVITY_FRAMES.len()]
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let tokens = if status.activity_output_chars > 0 {
+            format!(" · ↓ ~{} tokens", status.activity_output_chars.div_ceil(4))
+        } else {
+            String::new()
+        };
+        let thinking = status
+            .thinking_since
+            .map(|started| format!(" · thinking started {}s ago", started.elapsed().as_secs()))
+            .unwrap_or_default();
+        let activity = format!(
+            "{} Working {}{tokens}{thinking} ",
+            ACTIVITY_FRAMES[(elapsed.as_secs() as usize) % ACTIVITY_FRAMES.len()],
+            crate::render::duration(elapsed)
         );
+        let width = if status.width == 0 {
+            status.permission_capabilities.width
+        } else {
+            status.width
+        }
+        .saturating_sub(1);
+        let hint = "· Esc to interrupt";
+        let line = crate::render::line::Line::plain(&activity);
+        if line.width() + hint.len() <= width {
+            return format!("{activity}\x1b[2m{hint}\x1b[22m\n");
+        }
+        return format!("{}\n", line.truncate_to(width).text());
     }
     let text = status
         .painter
         .current_status()
-        .map(|line| line.text().to_string())
+        .map(|line| line.terminal_text(&status.permission_capabilities))
         .unwrap_or_default();
     if text.is_empty() {
         String::new()
@@ -1617,8 +1738,35 @@ fn status_row(status: &SurfaceStatus) -> String {
 }
 
 impl Prompt for Waiting {
+    fn render_prompt_footer(&self) -> Cow<'_, str> {
+        let status = self.status.lock().expect("surface status lock");
+        if !status.native_status {
+            return Cow::Borrowed("");
+        }
+        Cow::Owned(
+            status
+                .painter
+                .current_status()
+                .map(|line| line.terminal_footer(&status.permission_capabilities))
+                .unwrap_or_default(),
+        )
+    }
+
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
-        background_notice::row(buffer, usize::from(width).saturating_sub(1))
+        let width = usize::from(width).saturating_sub(1);
+        if let Some(receipt) = background_notice::row(buffer, width) {
+            return Some(receipt);
+        }
+        let Some((receipt, detail)) = crate::render::prompt_echo::collapsed(buffer, width) else {
+            // A short submission still retires the live status and notices.
+            return Some(format!("> {}", buffer.replace('\n', "\n… ")));
+        };
+        self.status
+            .lock()
+            .expect("surface status lock")
+            .details
+            .remember(detail);
+        Some(receipt)
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {
@@ -1629,10 +1777,16 @@ impl Prompt for Waiting {
         Cow::Borrowed("")
     }
 
-    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+    fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
         let status = self.status.lock().expect("surface status lock");
         let row = status_row(&status);
-        Cow::Owned(format!("{row}{}> ", status_prefix(&status)))
+        let mode = match mode {
+            PromptEditMode::Vi(reedline::PromptViMode::Normal) => "[NORMAL] ",
+            PromptEditMode::Vi(reedline::PromptViMode::Visual) => "[VISUAL] ",
+            PromptEditMode::Vi(reedline::PromptViMode::Insert) => "[INSERT] ",
+            _ => "",
+        };
+        Cow::Owned(format!("{row}{}{mode}> ", status_prefix(&status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,
@@ -1664,6 +1818,10 @@ impl Question {
 }
 
 impl Prompt for Question {
+    fn get_indicator_color(&self) -> reedline::Color {
+        reedline::Color::Default
+    }
+
     fn render_prompt_left(&self) -> Cow<'_, str> {
         Cow::Borrowed("")
     }
@@ -2001,4 +2159,200 @@ pub(crate) fn test_resumed_round_terminal(mut request: QuestionRequest) {
         matches!(answer_question(&mut editor, &mut surface, &request), QuestionOutcome::Answered(QuestionAnswer::Round(answer)) if answer.confirmed && answer.responses.len() == 2)
     );
     assert!(TERMINAL_SCRIPT.take().unwrap().launches.is_empty());
+}
+
+#[cfg(test)]
+mod image_admission_tests {
+    use super::*;
+
+    fn retained_draft() -> super::super::super::ImageDraft {
+        use ego_core::store::blob::{BlobId, BlobRef};
+        let bytes = b"already published image";
+        let reference = ego_core::generator::types::ImageRef::new(
+            BlobRef::new(
+                BlobId::parse(ego_core::digest::sha256_hex(bytes)).unwrap(),
+                bytes.len() as u64,
+            ),
+            ego_core::generator::types::ImageMediaType::Png,
+            1,
+            1,
+        )
+        .unwrap();
+        super::super::super::ImageDraft::recalled(&[reference])
+    }
+
+    // Catches: waiting only for the image reply deadlocks a question that
+    // must be answered before the driver can finish the admission.
+    #[test]
+    fn pending_image_admission_services_question_before_admission_reply() {
+        rendezvous(false);
+    }
+
+    // Catches: an admission failure or a cancelled reply consumes the text
+    // or attachment while the active turn's modal is being serviced.
+    #[test]
+    fn failed_or_cancelled_image_admission_keeps_the_complete_draft() {
+        rendezvous(true);
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("unsent text".into())]);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            images: retained_draft(),
+            ..SurfaceStatus::default()
+        }));
+        let before = status.lock().unwrap().images.labels();
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let asked = AtomicBool::new(false);
+        let (ingress, _control) = interactive_control();
+        let mut drafts = DraftStash::new(SessionId::new());
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        let (_controls, controls) = crossbeam::channel::unbounded();
+        let (_output, output) = crossbeam::channel::unbounded();
+        let (_signals, signals) = crossbeam::channel::unbounded();
+        let (reply, answer) = crossbeam::channel::bounded(1);
+        drop(reply);
+        let result = wait_image_reply(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            &output,
+            &signals,
+            &answer,
+        )
+        .unwrap();
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert_eq!(editor.current_buffer_contents(), "unsent text");
+        assert_eq!(status.lock().unwrap().images.labels(), before);
+    }
+
+    // Catches: a ready admission reply is starved by continuously ready output.
+    #[test]
+    fn ready_image_admission_is_not_starved_by_sustained_output() {
+        let mut editor = Reedline::create();
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let asked = AtomicBool::new(false);
+        let (ingress, _control) = interactive_control();
+        let mut drafts = DraftStash::new(SessionId::new());
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        let (_control, controls) = crossbeam::channel::unbounded();
+        let (printer, output) = crossbeam::channel::bounded(128);
+        // Empty messages keep the printer ready without emitting test noise.
+        // Disconnect after this finite backlog so a broken priority fails rather
+        // than hanging forever on an actual unbounded producer.
+        for _ in 0..128 {
+            printer.send(String::new()).unwrap();
+        }
+        drop(printer);
+        let (_signal, signals) = crossbeam::channel::unbounded();
+        let (reply, answer) = crossbeam::channel::bounded(1);
+        reply.send(Ok(Vec::new())).unwrap();
+        let result = wait_image_reply(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            &output,
+            &signals,
+            &answer,
+        );
+        assert!(matches!(result, Some(Ok(_))), "ready admission must finish");
+        assert_eq!(output.len(), 128, "output must not precede a ready reply");
+    }
+
+    fn rendezvous(fail: bool) {
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("unsent text".into())]);
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            images: retained_draft(),
+            ..SurfaceStatus::default()
+        }));
+        let before = status.lock().unwrap().images.labels();
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let asked = AtomicBool::new(false);
+        let (ingress, _control) = interactive_control();
+        let mut drafts = DraftStash::new(SessionId::new());
+        let mut surface = ModalSurface {
+            phase: &phase,
+            status: &status,
+            asked_for_image: &asked,
+            ingress: &ingress,
+            drafts: &mut drafts,
+        };
+        let (control, controls) = crossbeam::channel::unbounded();
+        let (_output, output) = crossbeam::channel::unbounded();
+        let (_signals, signals) = crossbeam::channel::unbounded();
+        let (reply, answer) = crossbeam::channel::bounded(1);
+        let (question_reply, mut question_answer) = oneshot::channel();
+        control
+            .send(Control::Question {
+                id: ItemId::new(),
+                request: QuestionRequest::new(
+                    "Question during image admission",
+                    QuestionMode::FreeText,
+                    Vec::new(),
+                    true,
+                ),
+                reply: question_reply,
+            })
+            .unwrap();
+        TERMINAL_SCRIPT.set(Some(TerminalScript {
+            lines: [Line::Submitted("continue".into())].into(),
+            ..TerminalScript::default()
+        }));
+        let driver = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let answered = loop {
+                match question_answer.try_recv() {
+                    Ok(Some(outcome)) => break matches!(outcome, QuestionOutcome::Answered(_)),
+                    Err(_) => break false,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Ok(None) => break false,
+                }
+            };
+            let result = if fail || !answered {
+                Err("image admission refused; draft retained".into())
+            } else {
+                Ok(Vec::new())
+            };
+            reply.send(result).unwrap();
+            // Keep the control sender alive until the terminal has received
+            // the question and the admission result.
+            (answered, control)
+        });
+        let result = wait_image_reply(
+            &mut editor,
+            &phase,
+            &mut surface,
+            &controls,
+            &mut None,
+            &output,
+            &signals,
+            &answer,
+        )
+        .unwrap();
+        let (answered, _control) = driver.join().unwrap();
+        assert!(answered, "question must finish before admission can reply");
+        assert_eq!(result.is_err(), fail);
+        assert_eq!(editor.current_buffer_contents(), "unsent text");
+        assert_eq!(status.lock().unwrap().images.labels(), before);
+        assert_eq!(phase.get(), EditPhase::Busy);
+        assert_eq!(TERMINAL_SCRIPT.take().unwrap().prompts.len(), 1);
+    }
 }

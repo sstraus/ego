@@ -33,6 +33,7 @@ mod exec_status;
 mod glob;
 mod grep;
 mod memory;
+mod notebook_edit;
 mod read;
 mod read_tool_result;
 mod web;
@@ -45,6 +46,7 @@ pub use exec_status::{ExecStatusParams, ExecStatusTool};
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
 pub use memory::{MemoryEntryType, MemoryLookup, MemoryLookupParams};
+pub use notebook_edit::{NotebookEditParams, NotebookEditTool};
 pub use read::{ReadParams, ReadTool};
 pub use read_tool_result::{ReadToolResult, ReadToolResultParams};
 pub use web::{
@@ -80,6 +82,7 @@ pub fn builtins_with_environment(environment: ego_core::permit::EnvPolicy) -> Ve
         Arc::new(Typed(GrepTool)),
         Arc::new(Typed(WriteTool)),
         Arc::new(Typed(EditTool)),
+        Arc::new(Typed(NotebookEditTool)),
         Arc::new(Typed(ExecTool::with_environment(environment))),
         Arc::new(Typed(ExecCancelTool)),
         Arc::new(Typed(ExecStatusTool)),

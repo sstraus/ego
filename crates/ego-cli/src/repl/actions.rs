@@ -14,6 +14,7 @@ pub enum ActionId {
     Help,
     Model,
     Thinking,
+    Fast,
     Mode,
     Plan,
     Yolo,
@@ -39,9 +40,16 @@ pub enum ActionId {
     Expand,
     Skills,
     Hooks,
+    Memory,
+    Init,
     Retry,
     Version,
 }
+
+pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
+pub(crate) const GOAL_GRAMMAR: &str = "usage: /goal [show|set TEXT|achieve|block REASON]";
+pub(crate) const MCP_GRAMMAR: &str =
+    "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
@@ -53,6 +61,7 @@ pub enum ActionKind {
 pub enum Availability {
     Enabled,
     Busy,
+    BusyWithReason { reason: &'static str },
     Disabled { owner: &'static str },
 }
 
@@ -103,6 +112,7 @@ impl Eq for McpContextCommand {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
+    Details(ActionId),
     History(String),
     Resume(Option<String>),
     SessionMetadata(SessionMetadataOperation),
@@ -111,7 +121,11 @@ pub enum Dispatch {
     Export(ExportSelection),
     Fork(ego_core::event::id::ItemId),
     Hooks,
+    Memory(String),
+    Init(String),
     Config(String),
+    Fast(bool),
+    Mode(ego_core::config::Mode),
     Setup(String),
     Tasks(String),
     Mcp(String),
@@ -120,11 +134,13 @@ pub enum Dispatch {
     Immediate,
     InteractiveIngress,
     Refused { reason: &'static str },
+    UnknownSlash(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSurfaceAction {
     List,
+    Details,
     Diagnose,
     Rescan,
 }
@@ -449,6 +465,7 @@ impl std::fmt::Debug for McpCommandView {
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
     bindings: Vec<KeyBinding>,
+    custom_shortcuts: HashMap<ActionId, Vec<super::keyboard::Shortcut>>,
     live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
     skill_view: Arc<Mutex<Option<SkillCatalogueView>>>,
     mcp_view: Arc<Mutex<McpCommandView>>,
@@ -486,6 +503,7 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         Ok(Self {
             registrations: value.into(),
             bindings: Vec::new(),
+            custom_shortcuts: HashMap::new(),
             live_availability: Arc::new(Mutex::new(HashMap::new())),
             skill_view: Arc::new(Mutex::new(None)),
             mcp_view: Arc::new(Mutex::new(McpCommandView::default())),
@@ -506,6 +524,11 @@ impl ActionRegistry {
                 .shortcut('p')
                 .shortcut_hint("models"),
             enabled(Thinking, "thinking", "Choose reasoning effort"),
+            enabled(
+                Fast,
+                "fast",
+                "Set fast tier: /fast on|off (premium token price)",
+            ),
             enabled(Mode, "mode", "Inspect or change execution mode")
                 .unavailable("the interactive mode controller"),
             enabled(Plan, "plan", "Enter plan mode").unavailable("the interactive mode controller"),
@@ -517,11 +540,7 @@ impl ActionRegistry {
                 "Inspect effective permission rules",
             )
             .unavailable("the interactive permission controller"),
-            enabled(
-                Mcp,
-                "mcp",
-                "List MCP servers, toggle session state, or add a server",
-            ),
+            enabled(Mcp, "mcp", MCP_GRAMMAR),
             enabled(Sessions, "sessions", "Browse durable sessions")
                 .alias("history")
                 .alias("resume")
@@ -543,7 +562,7 @@ impl ActionRegistry {
                 "Inspect configuration — /config [perimeter | set KEY VALUE]",
             ),
             enabled(Setup, "setup", "Inspect expected work without effects"),
-            enabled(Doctor, "doctor", "Diagnose local subsystem health"),
+            enabled(Doctor, "doctor", "Show health — /doctor [details]"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(
                 Refresh,
@@ -551,23 +570,29 @@ impl ActionRegistry {
                 "Apply current instructions in a new prompt epoch",
             ),
             enabled(New, "new", "Create a durable session"),
-            enabled(Name, "name", "Set durable session display metadata"),
-            enabled(Goal, "goal", "Manage the persistent goal lifecycle"),
+            enabled(Name, "name", NAME_GRAMMAR),
+            enabled(Goal, "goal", GOAL_GRAMMAR),
             enabled(
                 Tasks,
                 "tasks",
                 "Inspect background exec — /tasks [ID | cancel ID]",
             ),
-            enabled(Tools, "tools", "Inspect available tools"),
+            enabled(Tools, "tools", "Show tools — /tools [details]"),
             enabled(
                 Expand,
                 "expand",
-                "Show the full output of the last tool call",
+                "Show the last tool output or collapsed prompt",
             )
             .shortcut('o'),
-            enabled(Skills, "skills", "List or invoke admitted skills")
-                .unavailable("the skill catalogue"),
+            enabled(
+                Skills,
+                "skills",
+                "Show skills — /skills [details|diagnose|rescan|invoke NAME]",
+            )
+            .unavailable("the skill catalogue"),
             enabled(Hooks, "hooks", "Inspect admitted hooks"),
+            enabled(Memory, "memory", "Review scoped persistent MDKB memories"),
+            enabled(Init, "init", "Review project instruction initialization"),
             enabled(Retry, "retry", "Retry a waiting provider now").shortcut('r'),
             enabled(Version, "version", "Show packaged version information"),
         ])
@@ -624,11 +649,13 @@ impl ActionRegistry {
             description: binding.description,
         });
         let shortcuts = self.iter().flat_map(|action| {
-            action.shortcuts.iter().map(|shortcut| KeyEntry {
-                label: format!("Option+{}", shortcut.to_ascii_uppercase()),
-                hint: action.shortcut_hint,
-                description: action.description,
-            })
+            self.action_shortcuts(action)
+                .into_iter()
+                .map(|shortcut| KeyEntry {
+                    label: shortcut.label,
+                    hint: action.shortcut_hint,
+                    description: action.description,
+                })
         });
         chords.chain(shortcuts).collect()
     }
@@ -663,20 +690,82 @@ impl ActionRegistry {
             .map(|a| a.id)
     }
     pub fn resolve_shortcut(&self, shortcut: char) -> Option<ActionId> {
-        self.iter()
-            .find(|a| a.shortcuts.contains(&shortcut))
-            .map(|a| a.id)
+        self.resolve_key(KeyEvent::new(KeyCode::Char(shortcut), KeyModifiers::ALT))
     }
-    pub fn resolve_key(&self, key: KeyEvent) -> Option<ActionId> {
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('π'), KeyModifiers::NONE) => self.resolve_shortcut('p'),
-            (KeyCode::Char(character), modifiers)
-                if modifiers == KeyModifiers::ALT || modifiers == KeyModifiers::META =>
-            {
-                self.resolve_shortcut(character)
-            }
-            _ => None,
+
+    pub(crate) fn shortcut_labels(&self, id: ActionId) -> Vec<String> {
+        self.action_shortcuts(self.registration(id))
+            .into_iter()
+            .map(|key| key.label)
+            .collect()
+    }
+
+    /// Replace each named action's complete shortcut list. An empty list
+    /// disables its default; validate the final map so atomic swaps are legal.
+    pub fn with_keybindings(
+        mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Result<Self, String> {
+        for (name, keys) in overrides {
+            let action = self
+                .iter()
+                .find(|action| action.name == name)
+                .ok_or_else(|| {
+                    format!("unknown keybinding action `{name}`; use a canonical /help action name")
+                })?;
+            let id = action.id;
+            let shortcuts = keys
+                .iter()
+                .map(|key| super::keyboard::Shortcut::parse(key))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.custom_shortcuts.insert(id, shortcuts);
         }
+        let mut occupied = HashMap::new();
+        for action in self.iter() {
+            for shortcut in self.action_shortcuts(action) {
+                if let Some(previous) =
+                    occupied.insert((shortcut.code, shortcut.modifiers), action.name)
+                {
+                    return Err(format!(
+                        "shortcut {} conflicts between /{previous} and /{}",
+                        shortcut.label, action.name
+                    ));
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    fn action_shortcuts(&self, action: &ActionRegistration) -> Vec<super::keyboard::Shortcut> {
+        self.custom_shortcuts
+            .get(&action.id)
+            .cloned()
+            .unwrap_or_else(|| {
+                action
+                    .shortcuts
+                    .iter()
+                    .map(|letter| super::keyboard::Shortcut {
+                        code: KeyCode::Char(*letter),
+                        modifiers: KeyModifiers::ALT,
+                        label: format!("Option+{}", letter.to_ascii_uppercase()),
+                    })
+                    .collect()
+            })
+    }
+
+    pub fn resolve_key(&self, mut key: KeyEvent) -> Option<ActionId> {
+        // macOS terminals may send Option+P as its text equivalent.
+        if key.code == KeyCode::Char('π') && key.modifiers.is_empty() {
+            key.code = KeyCode::Char('p');
+            key.modifiers = KeyModifiers::ALT;
+        }
+        self.iter()
+            .find(|action| {
+                self.action_shortcuts(action)
+                    .iter()
+                    .any(|shortcut| shortcut.matches(key))
+            })
+            .map(|action| action.id)
     }
     fn registration(&self, id: ActionId) -> &ActionRegistration {
         self.iter()
@@ -887,12 +976,20 @@ impl ActionRegistry {
     }
     pub fn dispatch(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Dispatch {
         let current = self.availability(id);
-        if displayed.availability.get(&id) != Some(&current) || current != Availability::Enabled {
-            Dispatch::Refused {
+        if displayed.availability.get(&id) != Some(&current) {
+            return Dispatch::Refused {
                 reason: "action is no longer available",
-            }
-        } else {
-            self.route(id, false)
+            };
+        }
+        match current {
+            Availability::Busy => Dispatch::Refused {
+                reason: "ego is busy; wait for the current work to finish",
+            },
+            Availability::BusyWithReason { reason } => Dispatch::Refused { reason },
+            Availability::Disabled { .. } => Dispatch::Refused {
+                reason: "action is no longer available",
+            },
+            Availability::Enabled => self.route(id, false),
         }
     }
     pub fn route(&self, id: ActionId, _busy: bool) -> Dispatch {
@@ -927,8 +1024,11 @@ impl ActionRegistry {
             }
             Availability::Busy => {
                 return ActionDispatch::Refused {
-                    reason: "action is no longer available",
+                    reason: "ego is busy; wait for the current work to finish",
                 };
+            }
+            Availability::BusyWithReason { reason } => {
+                return ActionDispatch::Refused { reason };
             }
             Availability::Enabled => {}
         }
@@ -966,6 +1066,7 @@ impl ActionRegistry {
         };
         match raw_arguments {
             "" | "list" => Dispatch::Skills(SkillSurfaceAction::List),
+            "details" => Dispatch::Skills(SkillSurfaceAction::Details),
             "diagnose" => Dispatch::Skills(SkillSurfaceAction::Diagnose),
             "rescan" => Dispatch::Skills(SkillSurfaceAction::Rescan),
             arguments => match parse_skill_invoke(arguments) {
@@ -978,7 +1079,7 @@ impl ActionRegistry {
                     }
                 }
                 None => Dispatch::Refused {
-                    reason: "usage: /skills [list|diagnose|rescan|invoke <name> [arguments]]",
+                    reason: "usage: /skills [list|details|diagnose|rescan|invoke <name> [arguments]]",
                 },
             },
         }
@@ -1041,6 +1142,25 @@ impl ActionRegistry {
         let id = self
             .resolve_slash(name)
             .or_else(|| self.resolve_alias(name))?;
+        if id == ActionId::Fast {
+            return Some(match raw_arguments.trim() {
+                "on" => Dispatch::Fast(true),
+                "off" => Dispatch::Fast(false),
+                _ => Dispatch::Refused {
+                    reason: "usage: /fast on|off; fast uses premium token pricing",
+                },
+            });
+        }
+        if id == ActionId::Mode && !raw_arguments.is_empty() {
+            return Some(
+                match ego_core::config::Mode::parse_selection(raw_arguments.trim()) {
+                    Some(mode) => Dispatch::Mode(mode),
+                    None => Dispatch::Refused {
+                        reason: "usage: /mode [plan|default|auto|accept-edits|yolo]",
+                    },
+                },
+            );
+        }
         if matches!(
             id,
             ActionId::Mode | ActionId::Plan | ActionId::Yolo | ActionId::Permissions
@@ -1053,6 +1173,9 @@ impl ActionRegistry {
                 }
             });
         }
+        if matches!(id, ActionId::Tools | ActionId::Doctor) && raw_arguments.trim() == "details" {
+            return Some(Dispatch::Details(id));
+        }
         Some(if no_arguments {
             Dispatch::Action(id)
         } else if id == ActionId::Mcp {
@@ -1064,6 +1187,28 @@ impl ActionRegistry {
         })
     }
 
+    fn unknown_slash(&self, name: &str) -> Dispatch {
+        let mut candidates = self
+            .names()
+            .into_iter()
+            .chain(self.aliases())
+            .map(str::to_owned)
+            .chain(self.skill_menu("").into_iter().map(|(name, _)| name))
+            .map(|candidate| (command_distance(name, &candidate), candidate))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        let suggestions = candidates
+            .into_iter()
+            .take(3)
+            .map(|(_, name)| format!("/{name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Dispatch::UnknownSlash(format!(
+            "Unknown slash command. Nearest commands: {suggestions}. Use /help for syntax; add a leading space to send literal text that starts with /."
+        ))
+    }
+
     pub fn classify(&self, submission: Submission) -> Dispatch {
         if submission.origin == InputOrigin::Typed
             && let Some(command) = submission.text.strip_prefix('/')
@@ -1073,6 +1218,24 @@ impl ActionRegistry {
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
             if name.starts_with("mcp__") || name.starts_with("mcp_resource__") {
                 return self.classify_mcp_context(name, raw_arguments);
+            }
+            if name == "memory" && self.resolve_slash(name) == Some(ActionId::Memory) {
+                return if self.availability(ActionId::Memory) == Availability::Enabled {
+                    Dispatch::Memory(raw_arguments.trim().to_owned())
+                } else {
+                    Dispatch::Refused {
+                        reason: "memory is unavailable",
+                    }
+                };
+            }
+            if name == "init" && self.resolve_slash(name) == Some(ActionId::Init) {
+                return if self.availability(ActionId::Init) == Availability::Enabled {
+                    Dispatch::Init(raw_arguments.trim().to_owned())
+                } else {
+                    Dispatch::Refused {
+                        reason: "init is unavailable",
+                    }
+                };
             }
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
@@ -1146,7 +1309,7 @@ impl ActionRegistry {
             }
             let capture = match self.skill_capture() {
                 Ok(Some(capture)) => capture,
-                Ok(None) => return Dispatch::Prompt,
+                Ok(None) => return self.unknown_slash(name),
                 Err(_) => {
                     return Dispatch::Refused {
                         reason: "the skill catalogue view is unavailable",
@@ -1156,9 +1319,27 @@ impl ActionRegistry {
             if let Some(operation) = admitted_skill_operation(&capture, name, raw_arguments) {
                 return Dispatch::Skill(operation);
             }
+            return self.unknown_slash(name);
         }
         Dispatch::Prompt
     }
+}
+
+// Bound typo matching independently of a pasted or accidentally huge command name.
+fn command_distance(left: &str, right: &str) -> usize {
+    let mut row = (0..=right.chars().count()).collect::<Vec<_>>();
+    for (i, a) in left.chars().take(64).enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b) in right.chars().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(a != b));
+            diagonal = above;
+        }
+    }
+    row[right.chars().count()]
 }
 
 /// `/export [local|sanitized] [md|json|jsonl]`, in either order.
@@ -1215,7 +1396,7 @@ fn parse_name_action(arguments: &str) -> Dispatch {
             Some(text) => NameOperation::Set(text.to_owned()),
             None => {
                 return Dispatch::Refused {
-                    reason: "usage: /name [show|set TEXT|clear]",
+                    reason: NAME_GRAMMAR,
                 };
             }
         },
@@ -1234,7 +1415,7 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
                 (tail, GoalOperation::Block as fn(String) -> GoalOperation)
             } else {
                 return Dispatch::Refused {
-                    reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                    reason: GOAL_GRAMMAR,
                 };
             };
             match keyword
@@ -1245,7 +1426,7 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
                 Some(text) => operation(text.to_owned()),
                 None => {
                     return Dispatch::Refused {
-                        reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                        reason: GOAL_GRAMMAR,
                     };
                 }
             }
@@ -1281,6 +1462,79 @@ fn admitted_skill_operation(
         .descriptor(name)
         .filter(|spec| spec.descriptor().user_invocable)
         .map(|spec| AdmittedSkillOperation::invoke(spec.descriptor(), raw_arguments))
+}
+
+#[cfg(test)]
+mod unknown_slash_tests {
+    use super::*;
+
+    // Catches: invalid or extra mode arguments escape into a paid model turn.
+    #[test]
+    fn invalid_mode_arguments_are_local_refusals_and_empty_keeps_picker() {
+        let registry = ActionRegistry::final_surface();
+        assert_eq!(
+            registry.classify(registry.submit("/mode", InputOrigin::Typed)),
+            Dispatch::Action(ActionId::Mode)
+        );
+        for input in [
+            "/mode bogus",
+            "/mode edits",
+            "/mode nope",
+            "/mode plan yolo",
+        ] {
+            assert!(matches!(
+                registry.classify(registry.submit(input, InputOrigin::Typed)),
+                Dispatch::Refused { .. }
+            ));
+        }
+        for mode in ego_core::config::Mode::SELECTABLE {
+            assert_eq!(
+                registry.classify(registry.submit(format!("/mode {mode}"), InputOrigin::Typed)),
+                Dispatch::Mode(mode)
+            );
+        }
+    }
+
+    // Catches: literal slash text is refused even when its origin or leading space escapes it.
+    #[test]
+    fn literal_slash_text_keeps_its_prompt_boundary() {
+        let registry = ActionRegistry::final_surface();
+        for (input, origin) in [
+            (" /tmp/x", InputOrigin::Typed),
+            ("/histor", InputOrigin::BracketedPaste),
+            ("ordinary prompt", InputOrigin::Typed),
+        ] {
+            assert_eq!(
+                registry.classify(registry.submit(input, origin)),
+                Dispatch::Prompt
+            );
+        }
+        for input in ["/tmp/x", "/", "/model-only"] {
+            assert!(matches!(
+                registry.classify(registry.submit(input, InputOrigin::Typed)),
+                Dispatch::UnknownSlash(_)
+            ));
+        }
+        assert_eq!(
+            registry.classify(registry.submit("/help", InputOrigin::Typed)),
+            Dispatch::Action(ActionId::Help)
+        );
+    }
+
+    // Catches: a mistyped command crosses the prompt boundary and starts a paid turn.
+    #[test]
+    fn unknown_slash_input_is_refused_locally_with_suggestions() {
+        let registry = ActionRegistry::final_surface();
+        for (input, suggestion) in [("/histor", "/history"), ("/resum", "/resume")] {
+            let dispatch = registry.classify(registry.submit(input, InputOrigin::Typed));
+            assert_ne!(
+                dispatch,
+                Dispatch::Prompt,
+                "{input} must never start a generation"
+            );
+            assert!(format!("{dispatch:?}").contains(suggestion));
+        }
+    }
 }
 
 #[cfg(test)]

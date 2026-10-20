@@ -212,6 +212,7 @@ mod acp_golden {
                 turn1,
                 Some(item_user_1),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "list the files".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -395,6 +396,7 @@ mod acp_golden {
                 turn2,
                 Some(item_user_2),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "thanks".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -459,6 +461,7 @@ mod acp_golden {
         let skill_invocation = ego_core::event::skill::SkillInvocationId::new();
         vec![
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: QueuedPromptId::new(),
                 text: String::new(),
                 images: Vec::new(),
@@ -467,6 +470,7 @@ mod acp_golden {
                 through: QueuedPromptId::new(),
             },
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: String::new(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -718,6 +722,7 @@ mod acp_golden {
     fn caps(max_context_tokens: Option<u64>) -> ModelCapabilities {
         ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens,
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -782,7 +787,7 @@ mod acp_golden {
                 },
             ),
         ]);
-        let plan = ego_acp::project::project_goal_plan_v1(state.goal.as_ref()).unwrap();
+        let plan = ego_acp::project::project_objective_v1(state.goal.as_ref()).unwrap();
         let wire = serde_json::to_value(plan).unwrap();
         assert!(
             wire.to_string()
@@ -810,7 +815,7 @@ mod acp_golden {
             )
             .is_empty()
         );
-        for (state_name, expected_status) in [
+        for (state_name, _expected_status) in [
             ("active", "in_progress"),
             ("achieved", "completed"),
             ("blocked", "pending"),
@@ -874,15 +879,13 @@ mod acp_golden {
                 );
                 assert_eq!(updates.len(), 1, "goal state {state_name}");
                 let plan = serde_json::to_value(&updates[0]).unwrap();
-                assert_eq!(plan["sessionUpdate"], "plan");
-                let entries = plan["entries"].as_array().unwrap();
-                assert_eq!(entries.len(), 1, "goal is one entry, not fabricated steps");
-                assert_eq!(entries[0]["content"], "Deliver the goal");
-                assert_eq!(
-                    entries[0]["status"], expected_status,
-                    "goal state {state_name}"
+                assert_eq!(plan["sessionUpdate"], "session_info_update");
+                assert!(
+                    plan.get("entries").is_none(),
+                    "an objective is not a plan step"
                 );
-                assert_eq!(entries[0]["_meta"]["ego"]["goalState"], state_name);
+                assert_eq!(plan["_meta"]["ego"]["objective"], "Deliver the goal");
+                assert_eq!(plan["_meta"]["ego"]["goalState"], state_name);
             }
         }
     }
@@ -1275,6 +1278,7 @@ mod acp_golden {
     fn an_item_less_event_reaches_neither_protocol_because_the_public_stream_drops_it() {
         let kinds = [
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "orphaned".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -1312,6 +1316,7 @@ mod acp_golden {
     fn every_v2_content_bearing_event_without_item_id_projects_to_none() {
         let kinds = [
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "orphaned".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,

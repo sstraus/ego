@@ -1099,6 +1099,7 @@ pub enum RunAppend {
 pub struct RunPrompt {
     text: String,
     images: Vec<Image>,
+    audio: Vec<crate::generator::audio::Audio>,
 }
 
 impl RunPrompt {
@@ -1106,11 +1107,21 @@ impl RunPrompt {
         Self {
             text: text.into(),
             images,
+            audio: Vec::new(),
         }
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn with_audio(mut self, audio: Vec<crate::generator::audio::Audio>) -> Self {
+        self.audio = audio;
+        self
+    }
+
+    pub fn audio(&self) -> &[crate::generator::audio::Audio] {
+        &self.audio
     }
 
     pub fn images(&self) -> &[Image] {
@@ -1332,6 +1343,7 @@ pub struct RunExecutionBindings {
     mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
+    delegation_allowed: bool,
     human: Option<Arc<dyn HumanApprover>>,
     cancel: crate::turn::CancelToken,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
@@ -1354,6 +1366,7 @@ impl RunExecutionBindings {
             mcp_runtime: None,
             budget_gate: None,
             effect_tools: None,
+            delegation_allowed: true,
             human: None,
             cancel: crate::turn::CancelToken::new(),
             sandbox_grants: None,
@@ -1487,6 +1500,15 @@ impl RunExecutionBindings {
     pub fn with_effect_tools(mut self, tools: BTreeSet<String>) -> Self {
         self.effect_tools = Some(Arc::new(tools));
         self
+    }
+
+    pub fn without_delegation(mut self) -> Self {
+        self.delegation_allowed = false;
+        self
+    }
+
+    pub fn delegation_allowed(&self) -> bool {
+        self.delegation_allowed
     }
 
     /// The exact shared gate used by generation-boundary executors.
@@ -1869,7 +1891,7 @@ enum ExecutionMode {
         root: RunRoot,
         origin: RunOrigin,
         model: ModelRef,
-        prompt: RunPrompt,
+        prompt: Box<RunPrompt>,
         prepared: Box<dyn Any + Send>,
     },
     RecoveredObserve {
@@ -2128,7 +2150,7 @@ where
                     root: request.root.clone(),
                     origin: request.origin.clone(),
                     model,
-                    prompt: request.prompt,
+                    prompt: Box::new(request.prompt),
                     prepared: Box::new(prepared),
                 };
                 Ok(RunCommandOutcome::Admitted(self.admission(
@@ -2259,7 +2281,7 @@ where
                     root: folded.snapshot.root.clone(),
                     origin: folded.snapshot.origin.clone(),
                     model,
-                    prompt: request.prompt,
+                    prompt: Box::new(request.prompt),
                     prepared: Box::new(prepared),
                 };
                 Ok(RunCommandOutcome::Admitted(self.admission(

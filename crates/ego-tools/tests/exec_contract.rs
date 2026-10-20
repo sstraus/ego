@@ -953,6 +953,49 @@ fn __ego_internal_landlock_exec_v1() {
     panic!("the Landlock helper refused execution: {refused:?}");
 }
 
+// Catches: nested read roots abort backend admission, or the selected platform
+// silently changes which authority wins for native writes.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn nested_read_root_native_writes_follow_the_reported_platform_contract() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().canonicalize().unwrap();
+    let uploads = workspace.join("uploads");
+    std::fs::create_dir(&uploads).unwrap();
+    let attachment = uploads.join("attachment");
+    let source = workspace.join("source");
+    let sibling = workspace.join("sibling");
+    std::fs::write(&attachment, "ORIGINAL").unwrap();
+    std::fs::write(&source, "REPLACEMENT").unwrap();
+    let root = CanonPath::new(&workspace);
+    let policy = run_confinement(Confinement::Workspace, false, root.clone()).with_roots(vec![
+        ProfileRoot::new(CanonPath::new(&uploads), RootAccess::Read),
+    ]);
+    let run =
+        open_policy(policy, 1024 * 1024, 1024).expect("nested read roots must not abort startup");
+    execute(
+        &run,
+        mutation_spec("overwrite", &[&source, &sibling], root.clone()),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"REPLACEMENT");
+    let outcome = execute(
+        &run,
+        mutation_spec("overwrite", &[&source, &attachment], root),
+    );
+    #[cfg(target_os = "macos")]
+    {
+        assert!(outcome.is_err());
+        assert_eq!(std::fs::read(&attachment).unwrap(), b"ORIGINAL");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        outcome.expect("Landlock's writable ancestor wins, as the CLI warning states");
+        assert_eq!(std::fs::read(&attachment).unwrap(), b"REPLACEMENT");
+    }
+}
+
 #[test]
 fn guarded_exec_runs_the_exact_argv_without_reparse_or_mutation() {
     let workspace = cwd();
@@ -1571,6 +1614,101 @@ fn child_stdin_is_a_closed_pipe_and_reaches_eof() {
     )))
     .unwrap();
     assert!(format!("{out:?}").contains("stdin-eof:0"));
+}
+
+/// Catches: an early stdin close discards a valid handler verdict, or hides its
+/// unsuccessful exit. The payload exceeds the pipe capacity without a reader.
+#[cfg(unix)]
+#[test]
+fn handler_early_stdin_close_preserves_verdict_and_exit_status() {
+    use ego_core::hook::EffectScope;
+
+    let input = vec![b'x'; 4 * 1024 * 1024];
+    let verdict = r#"{"verdict":"achieved","reason":"verified artifact"}"#;
+    for code in [0, 7] {
+        let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+        let script = format!("exec 0<&-; printf '%s' '{verdict}'; exit {code}");
+        let spec = SpawnSpec::new(
+            ["/bin/sh", "-c", &script].map(OsString::from).to_vec(),
+            Some(cwd()),
+            Some(Duration::from_secs(5)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let result = block_on(run.ports.process().execute_handler(
+            &spec,
+            &input,
+            EffectScope::new(Duration::from_secs(5)),
+        ));
+        let output = match result {
+            Ok(output) if code == 0 => output,
+            Err(ProcessError::Exit {
+                code: actual,
+                result,
+            }) if code == 7 => {
+                assert_eq!(actual, Some(code));
+                result
+            }
+            other => panic!("handler exit {code} lost its result: {other:?}"),
+        };
+        let stdout = output
+            .content
+            .iter()
+            .find(|block| {
+                matches!(
+                    block.provenance,
+                    ToolOutputProvenance::Process {
+                        stream: StreamProvenance::Stdout,
+                        ..
+                    }
+                )
+            })
+            .expect("handler stdout");
+        assert_eq!(stdout.text, verdict, "handler exit {code}");
+    }
+}
+
+/// Catches: treating closed stdin as completion bypasses the handler's deadline
+/// or cancellation while the child is still running.
+#[cfg(unix)]
+#[test]
+fn handler_closed_stdin_still_obeys_scope_stops() {
+    use ego_core::hook::EffectScope;
+
+    let input = vec![b'x'; 4 * 1024 * 1024];
+    for cancelled in [false, true] {
+        let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+        let spec = SpawnSpec::new(
+            ["/bin/sh", "-c", "exec 0<&-; printf not-finished; sleep 30"]
+                .map(OsString::from)
+                .to_vec(),
+            Some(cwd()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let scope = EffectScope::new(if cancelled {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(250)
+        });
+        let cancellation = cancelled.then(|| {
+            let token = scope.cancel_token();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                token.cancel(CancelCause::User);
+            })
+        });
+        let result = block_on(run.ports.process().execute_handler(&spec, &input, scope));
+        if let Some(cancellation) = cancellation {
+            cancellation.join().unwrap();
+        }
+        assert!(
+            matches!(&result, Err(ProcessError::Cancelled)) && cancelled
+                || matches!(&result, Err(ProcessError::Timeout { .. })) && !cancelled,
+            "cancelled={cancelled}: {result:?}"
+        );
+    }
 }
 
 #[cfg(unix)]

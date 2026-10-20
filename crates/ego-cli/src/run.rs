@@ -124,7 +124,7 @@ use turns::{
 pub use turns::{InteractiveSeat, PasteboardKind, Reads, stop_signal};
 
 use crate::budget;
-use crate::cli::{Args, ModelsArgs, Output, ResumeAnswer, SessionChoice, SessionShape, UsageError};
+use crate::cli::{Args, Output, ResumeAnswer, SessionChoice, SessionShape, UsageError};
 use crate::hook::{CliHookInvocationBinding, RunToollessGenerationService};
 use crate::model_picker::{ModelPicker, ModelSwitchRequest};
 use crate::models;
@@ -240,6 +240,14 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
 #[path = "run/tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "run/phase_boundary_tests.rs"]
+mod phase_boundary_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+pub(crate) mod test_support;
+
 /// Inspect only IDs admitted in the current session's durable journal.
 fn background_tasks(
     arguments: &str,
@@ -290,7 +298,7 @@ fn background_tasks(
             }
             Err(error) => return error.to_string(),
         };
-        rows.push(snapshot.model_text());
+        rows.push(format!("exec {}", snapshot.model_text()));
         if cancel && snapshot.outcome.is_none() {
             rows.push("cancellation requested".into());
         }
@@ -299,5 +307,23 @@ fn background_tasks(
         "background tasks: none".into()
     } else {
         rows.join("\n")
+    }
+}
+
+/// Both idle and busy inspection use the same typed task surface.
+async fn task_listing(
+    arguments: &str,
+    state: &SessionState,
+    process: &dyn ego_core::permit::ProcessExecutor,
+    owner: &CliSkillInvocationOwner<'_>,
+) -> String {
+    let agents = owner.inspect_tasks(arguments, state).await;
+    let execs = background_tasks(arguments, state, process);
+    match agents {
+        Some(agents) if arguments.trim().is_empty() && !state.detached_execs.is_empty() => {
+            format!("{execs}\n{agents}")
+        }
+        Some(agents) => agents,
+        None => execs,
     }
 }

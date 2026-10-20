@@ -148,6 +148,7 @@ fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
     };
     let capabilities = ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(8_192),
         max_output_tokens: Some(512),
         max_tools: Some(16),
@@ -319,7 +320,7 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 
 #[test]
 fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_authority_low() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 14);
+    assert_eq!(PUBLIC_EVENT_VERSION, 15);
     let source: SessionId =
         serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let seeded = seeded_event(EventKind::CompactionSeeded {
@@ -482,6 +483,7 @@ fn provider_refusal_invalid_request_and_reservation_failure_never_open_a_target_
 fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
     let capabilities = ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(8_192),
         max_output_tokens: Some(512),
         max_tools: Some(16),
@@ -735,6 +737,7 @@ fn compaction_profile(
             generator: generator.clone(),
             capabilities: ModelCapabilities {
                 schema_version: ModelCapabilities::SCHEMA_VERSION,
+                audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
                 max_context_tokens: Some(max_context_tokens),
                 max_output_tokens: Some(max_output_tokens),
                 max_tools: Some(16),
@@ -864,6 +867,7 @@ fn busy_state(busy: &CompactionBusy) -> SessionState {
         CompactionBusy::AcceptedPrompt => event(
             None,
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: ego_core::event::id::QueuedPromptId::new(),
                 text: "queued".to_string(),
                 images: Vec::new(),
@@ -940,7 +944,7 @@ fn compaction_drains_raced_prompt_before_capturing_source_history() {
     let mut turn = turn.with_interactive_control(&mut control);
     let (accepted, prepared) = futures::executor::block_on(async {
         futures::join!(
-            ingress.submit("REGRESSION-MARKER".to_owned()),
+            ingress.submit("REGRESSION-MARKER".to_owned(), Vec::new()),
             turn.prepare_compaction(None, Vec::new()),
         )
     });
@@ -969,7 +973,7 @@ fn compaction_drains_raced_prompt_before_capturing_source_history() {
     assert!(acknowledged.env.seq <= prepared.source_seq());
     assert!(
         matches!(
-            futures::executor::block_on(ingress.submit("LATE-WORK".into())),
+            futures::executor::block_on(ingress.submit("LATE-WORK".into(), Vec::new())),
             Err(ego_core::turn::ControlError::Closed)
         ),
         "later input must stay owned by the terminal for the successor"

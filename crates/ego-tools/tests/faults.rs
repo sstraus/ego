@@ -127,6 +127,7 @@ mod faults {
         for (kind, ts) in [
             (
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "list the files".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -458,6 +459,7 @@ mod faults {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "and again".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,

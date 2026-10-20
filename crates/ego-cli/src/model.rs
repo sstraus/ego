@@ -312,6 +312,7 @@ struct MainSelection {
 /// Read-only view of the model authority currently installed for main turns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationSelectionSnapshot {
+    pub service_tier: ego_ai::service_tier::ServiceTier,
     pub identity: ModelRef,
     pub thinking: ThinkingLevel,
     pub explicit_thinking: Option<ThinkingLevel>,
@@ -321,11 +322,13 @@ pub struct GenerationSelectionSnapshot {
 #[derive(Debug)]
 pub struct GenerationSelection {
     current: RwLock<Option<MainSelection>>,
+    tiers: RwLock<std::collections::HashMap<String, ego_ai::service_tier::ServiceTier>>,
 }
 
 impl GenerationSelection {
     pub fn new(identity: ModelRef, thinking: ThinkingLevel) -> Self {
         Self {
+            tiers: RwLock::new(Default::default()),
             current: RwLock::new(Some(MainSelection {
                 identity,
                 thinking,
@@ -337,6 +340,7 @@ impl GenerationSelection {
     fn unresolved() -> Self {
         Self {
             current: RwLock::new(None),
+            tiers: RwLock::new(Default::default()),
         }
     }
 
@@ -377,9 +381,63 @@ impl GenerationSelection {
     pub fn snapshot(&self) -> Result<GenerationSelectionSnapshot, GenerationModelError> {
         let current = self.read()?.ok_or_else(unresolved_selection_error)?;
         Ok(GenerationSelectionSnapshot {
+            service_tier: self.service_tier(&current.identity.0)?,
             identity: current.identity,
             thinking: current.thinking,
             explicit_thinking: current.explicit_thinking,
+        })
+    }
+
+    pub fn set_fast(&self, enabled: bool) -> Result<String, GenerationModelError> {
+        let current = self.read()?.ok_or_else(unresolved_selection_error)?;
+        let tier = if enabled {
+            ego_ai::service_tier::ServiceTier::Fast
+        } else {
+            ego_ai::service_tier::ServiceTier::Standard
+        };
+        tier.validate(&current.identity.0).map_err(|message| {
+            GenerationModelError::new(GenerationModelErrorClass::Usage, message)
+        })?;
+        self.tiers
+            .write()
+            .map_err(|_| selection_lock_error())?
+            .insert(current.identity.0.clone(), tier);
+        let pricing = ego_ai::service_tier::fast_support(&current.identity.0)
+            .map(|support| {
+                format!(
+                    "; token price {}x standard{}; {}",
+                    support.token_price_multiplier,
+                    support
+                        .included_usage_multiplier
+                        .map(|value| format!("; included subscription usage {value}x"))
+                        .unwrap_or_default(),
+                    support.account_requirement
+                )
+            })
+            .unwrap_or_default();
+        Ok(format!(
+            "{}: {} (this session only){}",
+            current.identity.0,
+            tier.as_str(),
+            if enabled { pricing } else { String::new() }
+        ))
+    }
+
+    fn service_tier(
+        &self,
+        slug: &str,
+    ) -> Result<ego_ai::service_tier::ServiceTier, GenerationModelError> {
+        if let Some(tier) = self
+            .tiers
+            .read()
+            .map_err(|_| selection_lock_error())?
+            .get(slug)
+            .copied()
+        {
+            return Ok(tier);
+        }
+        facts::service_tier(slug).map_err(|error| {
+            GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
         })
     }
 
@@ -636,6 +694,32 @@ impl CliGenerationModelSource {
                 *revision = rates.quote.revision.clone();
             }
         }
+        let service_tier = self.selection.service_tier(&identity.0)?;
+        service_tier.validate(&identity.0).map_err(|message| {
+            GenerationModelError::new(GenerationModelErrorClass::Usage, message)
+        })?;
+        if service_tier == ego_ai::service_tier::ServiceTier::Fast {
+            let support = ego_ai::service_tier::fast_support(&identity.0).expect("validated tier");
+            if let Some(rates) = &mut resolved.rates {
+                rates.quote = ego_ai::service_tier::fast_quote(&rates.quote, &support).map_err(
+                    |message| GenerationModelError::new(GenerationModelErrorClass::Usage, message),
+                )?;
+                if let ego_core::cost::RateSource::Table { revision } = &mut rates.source {
+                    *revision = rates.quote.revision.clone();
+                }
+            }
+            if let ego_core::budget::Metering::Subscription {
+                equivalent: Some(equivalent),
+                ..
+            } = &mut resolved.metering
+            {
+                equivalent.quote = ego_ai::service_tier::fast_quote(&equivalent.quote, &support)
+                    .map_err(|message| {
+                        GenerationModelError::new(GenerationModelErrorClass::Usage, message)
+                    })?;
+                equivalent.service_tier = "fast".to_owned();
+            }
+        }
         let thinking = if matches!(role, GenerationRole::Judge | GenerationRole::GoalCheck) {
             judge_thinking(&resolved.capabilities)
         } else {
@@ -654,6 +738,7 @@ impl CliGenerationModelSource {
         let mut retained = retained.lock().map_err(|_| selection_lock_error())?;
         let generator: Arc<dyn Generator> = if role == GenerationRole::Main
             && let Some(previous) = retained.as_ref()
+            && previous.generator.service_tier() == service_tier
             && previous.model == request_model
             && previous
                 .generator
@@ -661,12 +746,15 @@ impl CliGenerationModelSource {
         {
             previous.generator.clone()
         } else {
-            let generator = Arc::new(ego_ai::generator::WireGenerator::new(
-                resolved.row,
-                resolved.wire,
-                Arc::clone(http),
-                credential,
-            ));
+            let generator = Arc::new(
+                ego_ai::generator::WireGenerator::new(
+                    resolved.row,
+                    resolved.wire,
+                    Arc::clone(http),
+                    credential,
+                )
+                .with_service_tier(service_tier),
+            );
             if role == GenerationRole::Main {
                 *retained = Some(RetainedGenerator {
                     model: request_model.clone(),
@@ -820,6 +908,7 @@ mod tests {
         HostedModel {
             capabilities: ModelCapabilities {
                 schema_version: ModelCapabilities::SCHEMA_VERSION,
+                audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
                 max_context_tokens: Some(200_000),
                 max_output_tokens: Some(64_000),
                 max_tools: Some(128),
@@ -1416,6 +1505,46 @@ mod tests {
                 "gemini",
             ],
             "the selectable provider table changed"
+        );
+    }
+    #[test]
+    fn fast_contract_catches_session_override_leaking_to_another_model() {
+        let selection =
+            GenerationSelection::new(ModelRef("openai/gpt-6.1-sol".into()), ThinkingLevel::Low);
+        selection.set_fast(true).unwrap();
+        assert_eq!(
+            selection.snapshot().unwrap().service_tier,
+            ego_ai::service_tier::ServiceTier::Fast
+        );
+        selection
+            .install(
+                ModelRef("anthropic/claude-sonnet-5-5".into()),
+                ThinkingLevel::Low,
+            )
+            .unwrap();
+        assert!(
+            selection
+                .set_fast(true)
+                .unwrap_err()
+                .to_string()
+                .contains("no verified fast tier")
+        );
+        selection.set_fast(false).unwrap();
+        assert_eq!(
+            selection.snapshot().unwrap().service_tier,
+            ego_ai::service_tier::ServiceTier::Standard
+        );
+        selection
+            .install(ModelRef("openai/gpt-6.1-sol".into()), ThinkingLevel::Low)
+            .unwrap();
+        assert_eq!(
+            selection.snapshot().unwrap().service_tier,
+            ego_ai::service_tier::ServiceTier::Fast
+        );
+        selection.set_fast(false).unwrap();
+        assert_eq!(
+            selection.snapshot().unwrap().service_tier,
+            ego_ai::service_tier::ServiceTier::Standard
         );
     }
 }

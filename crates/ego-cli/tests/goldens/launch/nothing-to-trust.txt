@@ -1,22 +1,26 @@
 # nothing-to-trust: first launch
+εgo: ego <version>
 εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
-εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
-εgo: ego <version> · ollama/qwen3
+εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem
+access
+εgo: model ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
-Ctrl+Enter steers · Ctrl+S draft · Option+P models · /help
+Ctrl+Enter steers · Ctrl+S draft · Option+P models · Shift+Tab mode · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts discarded; 0 prompts waiting to run.
 εgo: To resume: ego resume <session>
 
 # nothing-to-trust: next launch
+εgo: ego <version>
 εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
-εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access
-εgo: ego <version> · ollama/qwen3
+εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem
+access
+εgo: model ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
-Ctrl+Enter steers · Ctrl+S draft · Option+P models · /help
+Ctrl+Enter steers · Ctrl+S draft · Option+P models · Shift+Tab mode · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts discarded; 0 prompts waiting to run.

@@ -57,6 +57,7 @@ impl Fixture {
         for (kind, ts) in [
             (
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "list the files".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -181,6 +182,7 @@ fn appending_to_an_unrepaired_tear_refuses_before_mutation() {
 
     let failure = fx.append_result(
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "and now the tests".to_string(),
             images: Vec::new(),
             queued_prompt: None,
@@ -268,6 +270,7 @@ fn appends_through_an_opened_writer_survive_the_next_recovery() {
         for (kind, ts) in [
             (
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "and now the tests".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -399,6 +402,7 @@ fn the_writer_refuses_a_session_it_does_not_hold() {
             producer: Producer::Main,
         },
         kind: EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "not your session".to_string(),
             images: Vec::new(),
             queued_prompt: None,

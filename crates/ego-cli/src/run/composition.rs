@@ -210,6 +210,13 @@ pub(super) fn instructions(
 
         system_prompt(&set, root, &selection)
     };
+    if replacing.is_none()
+        && let Some(name) = args.output_style.as_deref()
+    {
+        let style = crate::output_style::load(name, crate::config::ego_home().as_deref())?;
+        diagnostics.note(&format!("output style {name}: {}", style.source));
+        assembled = Some(crate::output_style::overlay(assembled, &style.text));
+    }
     let launch_append = args.append_system.as_ref().filter(|_| replacing.is_none());
     let session_append = session
         .filter(|prompt| prompt.mode == ego_core::config::SystemPromptMode::Append)
@@ -302,6 +309,7 @@ pub(super) fn tools_with_mode(
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     all.push(RegisteredTool::Task);
     all.push(RegisteredTool::Goal);
+    all.push(RegisteredTool::Plan);
     if let Some(source) = history {
         for tool in [
             ego_core::history::HistoryTool::Search,
@@ -539,10 +547,12 @@ pub(super) fn handle_policy_request(
     };
 
     match request {
-        PolicyControlRequest::SetMode(mode) => match apply(PolicyControlRequest::SetMode(mode))? {
-            PolicyControlOutcome::Mode { .. } => Ok(None),
-            _ => Err(mismatch()),
-        },
+        request @ (PolicyControlRequest::SetMode(_) | PolicyControlRequest::CycleMode) => {
+            match apply(request)? {
+                PolicyControlOutcome::Mode { .. } => Ok(None),
+                _ => Err(mismatch()),
+            }
+        }
         PolicyControlRequest::Rule(mutation) => {
             let effect = mutation.effect;
             let PolicyControlOutcome::Rule { receipt, .. } =
@@ -915,6 +925,26 @@ pub(super) fn finish_rooted_settings(
     }
     let roots =
         super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
+
+    #[cfg(target_os = "linux")]
+    for read in roots
+        .iter()
+        .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
+    {
+        if effective.sandbox != Some(ego_core::permit::Confinement::Off)
+            && read.restricts_writes(&CanonPath::new(&root), &roots)
+        {
+            let winner = if effective.sandbox == Some(ego_core::permit::Confinement::Ro) {
+                "executable ancestor wins for exec children; sandbox ro still denies writes"
+            } else {
+                "writable ancestor wins for exec children (including execution)"
+            };
+            diagnostics.note(&format!(
+                "Landlock cannot subtract read-only root {} from an ancestor grant; {winner}; built-in tools remain read-only",
+                read.path()
+            ));
+        }
+    }
 
     let exec_paths = effective
         .exec_paths
@@ -1412,20 +1442,21 @@ pub(super) async fn generation_preflight_inner(
     let judge_identity = effective.judge.clone();
     let mut thinking = effective.thinking;
     let human_picker = if status.as_ref().is_some_and(|status| status.human) {
-        let catalogue_snapshot = Arc::new(
-            models::build_catalogue_snapshot(
-                &ModelsArgs {
-                    provider: None,
-                    refresh: false,
-                    json: false,
-                },
-                &http,
-            )
-            .await?,
-        );
         let home = config::ego_home().ok_or_else(|| RunTermination::Failed {
             message: "the model picker needs EGO_HOME or HOME for user configuration".to_string(),
         })?;
+        let observed = crate::auth::AuthStore::new(&home)
+            .observed_provider_ids()
+            .map_err(|error| RunTermination::UsageError {
+                message: error.to_string(),
+            })?;
+        let (snapshot, _) = models::build_startup_catalogue_snapshot(
+            &http,
+            &crate::onboarding::ProcessEnvironment,
+            &observed,
+        )
+        .await?;
+        let catalogue_snapshot = Arc::new(snapshot);
         let config_store: Arc<dyn UserConfigStore> = Arc::new(OsUserConfigStore::new(
             Arc::new(OsIo),
             home.join("config.toml"),

@@ -368,6 +368,11 @@ impl std::fmt::Display for Seq {
 }
 
 impl Seq {
+    /// The durable session-local position, for public replay cursors.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
     /// The initial sequence value.
     pub const ZERO: Seq = Seq(0);
 

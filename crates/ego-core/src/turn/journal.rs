@@ -149,6 +149,15 @@ impl<'s> SharedJournal<'s> {
         Ok(())
     }
 
+    pub fn cache_observed(
+        &self,
+        prefix: &crate::generator::attempt::CachePrefix,
+        usage: Option<crate::state::Usage>,
+    ) -> Result<(), SharedJournalError> {
+        self.lock()?.sink.cache_observed(prefix, usage);
+        Ok(())
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, Journal<'s>>, SharedJournalError> {
         self.inner
             .lock()

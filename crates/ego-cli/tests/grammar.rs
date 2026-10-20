@@ -64,11 +64,13 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
         Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
         Invocation::SessionMetadata(_) => panic!("metadata is covered by metadata grammar tests"),
+        Invocation::Worktree(_) => panic!("worktree lifecycle does not construct a run"),
         Invocation::Orchestrator(_) => {
             panic!("orchestration inspection is covered by its process tests")
         }
         Invocation::Setup(_) => panic!("setup does not construct a run"),
         Invocation::Doctor(_) => panic!("`doctor` takes no Args: use the doctor tests for it"),
+        Invocation::Checkpoint(_) => panic!("checkpoint does not construct a run"),
     }
 }
 
@@ -389,6 +391,7 @@ fn the_mode_flags_collapse_into_one_value() {
         ("default", Mode::Default),
         ("auto", Mode::Auto),
         ("edits", Mode::Edits),
+        ("accept-edits", Mode::Edits),
         ("yolo", Mode::Yolo),
     ] {
         assert_eq!(
@@ -1196,10 +1199,8 @@ fn the_bare_help_offers_no_command_that_is_not_built() {
 #[test]
 fn the_bare_version_is_answered_with_one() {
     let text = answered(["--version"]);
-    assert!(
-        text.starts_with("ego ") && text.trim().len() > "ego ".len(),
-        "`ego --version` answered with no version: {text}"
-    );
+    // Catches: the CLI reports a literal version instead of the package version.
+    assert_eq!(text.trim(), concat!("ego ", env!("CARGO_PKG_VERSION")));
 }
 
 /// A genuine mistake is still a refusal, so the split above is a split and not
@@ -1377,38 +1378,16 @@ fn doctor_takes_only_json_and_names_anything_else() {
     );
 }
 
-/// The two documents that say which `--allow`/`--deny` heads enforce are held
-/// to the parser's own table, not to each other.
+/// CLI.md names every `--allow`/`--deny` head published by the parser.
 ///
-/// This is the [`BUILT`](cli::BUILT)/[`UNBUILT`](cli::UNBUILT) binding pointed
-/// at prose. `parse.rs`'s `OPERATIONS` table is the only thing that decides
-/// whether a rule with a given head can match anything, and `Rule::load`
-/// refuses one that cannot — so a document naming a smaller set than the table
-/// does is telling an operator that a boundary they can actually have is
-/// unavailable. That is the *safe* direction of the lie and it is still a lie:
-/// someone who reads `docs/18` and concludes `exec` heads do not enforce does
-/// not write `deny exec(**)`, and does not get the boundary they would have
-/// got by trying.
-///
-/// Both documents had drifted, in opposite directions and by different
-/// amounts, which is exactly what happens to two hand-maintained copies of one
-/// fact: `docs/18` named four heads, `CLI.md` named five, and the table has
-/// said all seven since `net` gained `Op::Connect` and `tool` gained
-/// `Op::Opaque`.
+/// The parser's `OPERATIONS` table decides whether each head can match an
+/// operation. Catches public documentation omitting an enforceable head or
+/// describing it as unavailable, which can prevent an operator from using it.
 #[test]
 fn the_documents_name_the_rule_heads_the_parser_actually_enforces() {
-    // The rows are found by their flag pair rather than by line number: these
-    // are living tables and a fixed offset would make an ordinary edit look
-    // like a regression.
-    let rows = [
-        ("CLI.md", row(include_str!("../../../CLI.md"))),
-        (
-            "ARCHITECTURE.md",
-            row(include_str!(
-                "../../../ARCHITECTURE.md"
-            )),
-        ),
-    ];
+    // Find the CLI.md row by its flag pair rather than by line number, so an
+    // ordinary table edit does not look like a regression.
+    let rows = [("CLI.md", row(include_str!("../../../CLI.md")))];
 
     let awaiting: Vec<&str> = Head::ALL
         .iter()
@@ -1428,8 +1407,8 @@ fn the_documents_name_the_rule_heads_the_parser_actually_enforces() {
         }
 
         // The heads are all named; the remaining way to be wrong is to name
-        // one and then take it back. Every refusal word below appeared in one
-        // of these two rows while the table said nothing was awaiting.
+        // one and then take it back. CLI.md must not retract a head while the
+        // parser reports that every head is enforceable.
         if awaiting.is_empty() {
             for retraction in ["refused", "unsupported", "cannot be enforced", "no tool"] {
                 assert!(
@@ -1618,4 +1597,32 @@ fn run_and_compact_accept_positive_output_caps_and_budget() {
     };
     assert_eq!(args.max_output_tokens.unwrap().get(), 100);
     assert_eq!(args.budget.as_deref(), Some("1$"));
+}
+
+// Catches: --vim is rejected interactively or silently accepted by a headless consumer.
+#[test]
+fn vim_flag_selects_only_interactive_composer_editing() {
+    assert!(converses(["--vim"]).vim);
+    assert!(converses(["--vim", "hello"]).vim);
+    assert!(converses(["resume", "--vim"]).vim);
+    assert!(!converses([]).vim);
+    assert!(refused(["run", "--vim", "hello"]).contains("interactive"));
+    assert!(refused(["resume", "--vim", "--", "hello"]).contains("interactive"));
+    assert!(answered(["--help"]).contains("--vim"));
+}
+
+#[test]
+fn output_style_is_shared_by_run_and_served_session_shape() {
+    // Catches: a served session silently dropping the launch output style.
+    let run = parsed(["run", "--output-style", "concise", "hello"]);
+    let acp = served(["acp", "--output-style", "concise"]);
+    assert_eq!(run.output_style.as_deref(), Some("concise"));
+    assert_eq!(acp.shape.output_style, run.output_style);
+    assert_eq!(
+        parsed(["resume", "--output-style", "concise", "next step"])
+            .output_style
+            .as_deref(),
+        Some("concise")
+    );
+    assert!(parsed(["run", "hello"]).output_style.is_none());
 }

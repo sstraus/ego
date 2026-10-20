@@ -116,7 +116,7 @@ higher or lower layer supplies a value.
 | `cache` | `none`, `short`, `long` | `short`; `long` requires explicit user config |
 | `profile.NAME` | Profile table | No selected profile without `--profile`/`EGO_PROFILE` |
 | `auth.PROVIDER` | Credential-command/identity-header table | No override |
-| `ui.statusline.segments` | Ordered array of supported segment names | Built-in order below; `[]` disables the row |
+| `ui.statusline.template` | MiniJinja template string | Compact default; `{{ prompt }}` disables optional status |
 | `mcp.servers.NAME` | Complete tagged server entry (optional `enabled = false` detaches it from session start) or tombstone | No configured external server |
 | `mdkb_prompt_command` | Absolute path to the mdkb executable; user layer only. Enables bounded mdkb warmup, prompt recall, tool hints, and Stop episode observation; returned context is user-role data and cannot grant authority. Command execution remains subject to run policy. | Disabled |
 | `hooks` | Ordered array of hook entries | Empty contribution; hooks combine across admitted sources |
@@ -138,18 +138,25 @@ The first `ego roots add` writes an explicit list and replaces implicit
 express them. Use `ego config set 'exec_paths=["/absolute/path"]'` to edit `exec_paths`. Restart or resume the
 session to apply changed perimeter settings.
 
-Extra roots use canonical paths; conflicting nested read-only/read-write roots
-are refused. See [permissions](../guides/permissions.md).
+Extra roots use canonical paths. A nested read-only root restricts built-in
+writes below a writable root or workspace. macOS Seatbelt also denies native
+writes and execution there. Linux Landlock cannot subtract ancestor grants;
+ego reports that the writable ancestor wins for exec children without exiting.
+The read-only boundary still applies to built-in tools. See
+[permissions](../guides/permissions.md).
 
 `exec.env="core"` retains only present PATH, HOME, USER, LOGNAME, SHELL, TMPDIR,
 TMP, TEMP, LANG, LC_ALL, LC_CTYPE, SYSTEMROOT, WINDIR, COMSPEC, and PATHEXT.
 An empty allowlist keeps no environment variables. This setting affects built-in
 exec children, not provider credentials, hook declarations, or MCP environments.
 
-The default status order is `model`, `effort`, `mode`, `context`, `cost`, `queue`, `drafts`,
-`interrupt`, `cwd`, `git`, `trust`. Unknown and
-duplicate names are errors. Width pressure drops whole segments. Source:
-[status configuration](../../crates/ego-cli/src/repl/seat.rs).
+The default status template is `{{ compact }}\n{{ prompt }}`. The prompt must
+render once on its own line. MiniJinja `{% filter priority(integer) %}` blocks drop as
+whole units in ascending priority order when a row is too wide. Text before the
+prompt goes above the buffer, and text after it goes below. Critical operational
+state remains visible even if omitted. See [CLI section 6.5](../../CLI.mdregression case-status-line)
+for the variables, filters, limits and fallback diagnostics. The unreleased
+`segments` key is no longer accepted.
 
 ## Profiles and managed edits
 
@@ -169,8 +176,8 @@ The CLI managed key set is intentionally smaller than the full file schema:
 
 | Target | Keys accepted by `config set/get/unset` |
 | --- | --- |
-| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec_paths`, `budget`, `bare`, `permissions.judge`, `ui.statusline.segments`, `exec.env`, `exec.env_allowlist`, `network`, `auth.PROVIDER.headers`, `auth.PROVIDER.credential_command` |
-| User profile | Same minus `bare`, `ui.statusline.segments`, and both `auth.PROVIDER.*` keys |
+| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec_paths`, `budget`, `bare`, `permissions.judge`, `ui.statusline.template`, `exec.env`, `exec.env_allowlist`, `network`, `auth.PROVIDER.headers`, `auth.PROVIDER.credential_command` |
+| User profile | Same minus `bare`, `ui.statusline.template`, and both `auth.PROVIDER.*` keys |
 | User `ci` profile | Profile keys plus `session_dir`, `artifact_dir` |
 
 Authentication edits replace the selected provider's complete headers map or
@@ -202,7 +209,7 @@ An invocation-scoped JSON entry cannot be a tombstone.
 | Transport | Keys and defaults |
 | --- | --- |
 | `stdio` | Required `transport="stdio"`, `command`; `args=[]`, `cwd` absent, `inherit_env=[]` |
-| `http` | Required `transport="http"`, `url`; `auth="none"` (or `oauth`), `allow_insecure_loopback=false` |
+| `http` | Required `transport="http"`, `url`; `profile="current"` (or explicit `legacy-sse`), `auth="none"` (or `oauth`), `allow_insecure_loopback=false` |
 | Tombstone | `removed=true`, with no transport fields |
 
 HTTP URLs reject embedded credentials. HTTP without TLS needs the explicit

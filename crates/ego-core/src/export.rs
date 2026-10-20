@@ -236,10 +236,13 @@ pub enum ExportEvent {
     GoalCheckConfigured,
     GoalAllowanceInherited,
     GoalUpdated,
+    PlanUpdated,
     GoalCheckStopped,
     PromptQueued {
         id: QueuedPromptId,
         images: Vec<ImageRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audio: Vec<crate::generator::audio::AudioRef>,
     },
     PromptDeliveryExpedited {
         through: QueuedPromptId,
@@ -249,6 +252,8 @@ pub enum ExportEvent {
     },
     UserPrompt {
         images: Vec<ImageRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audio: Vec<crate::generator::audio::AudioRef>,
         queued_prompt: Option<QueuedPromptId>,
     },
     AssistantDelta,
@@ -381,6 +386,8 @@ pub enum ExportEvent {
     SubagentRequested,
     SubagentSpawned,
     SubagentSettled,
+    SubagentCompletionDelivered,
+    BackgroundTaskRequested,
     SkillCatalogueAdmitted,
     SkillInstructionAdmitted,
     SkillResourceAdmitted,
@@ -840,6 +847,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::GoalContinuation
         }
+        EventKind::PlanUpdated { update: _ } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::PlanUpdated
+        }
         EventKind::GoalUpdated {
             id: _,
             objective: _,
@@ -859,6 +870,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::GoalTransitioned
         }
         EventKind::PromptQueued {
+            audio,
             id,
             text: _,
             images,
@@ -867,6 +879,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::PromptQueued {
                 id: *id,
                 images: images.clone(),
+                audio: audio.clone(),
             }
         }
         EventKind::PromptDeliveryExpedited { through } => {
@@ -874,6 +887,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         }
         EventKind::PromptRetracted { id } => ExportEvent::PromptRetracted { id: *id },
         EventKind::UserPrompt {
+            audio,
             text: _,
             images,
             queued_prompt,
@@ -881,6 +895,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::UserPrompt {
                 images: images.clone(),
+                audio: audio.clone(),
                 queued_prompt: *queued_prompt,
             }
         }
@@ -1216,6 +1231,17 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             invocation: _,
             child: _,
         } => ExportEvent::SubagentSpawned,
+        EventKind::BackgroundTaskRequested {
+            invocation: _,
+            authority: _,
+        } => ExportEvent::BackgroundTaskRequested,
+        EventKind::SubagentCompletionDelivered {
+            invocation: _,
+            text: _,
+        } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::SubagentCompletionDelivered
+        }
         EventKind::SubagentSettled {
             invocation: _,
             child: _,

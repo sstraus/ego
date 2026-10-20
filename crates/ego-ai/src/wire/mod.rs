@@ -52,6 +52,14 @@ pub(crate) fn request_has_images(req: &GenRequest) -> bool {
         .any(|block| matches!(block, ContentBlock::Image { .. }))
 }
 
+pub(crate) fn request_has_audio(req: &GenRequest) -> bool {
+    req.messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .any(|block| matches!(block, ContentBlock::Audio { .. }))
+}
+
 /// One API shape: how a [`GenRequest`] becomes bytes, and how the bytes become
 /// [`AiEvent`]s.
 ///
@@ -86,6 +94,12 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
         target: &RequestTarget<'_>,
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused>;
+
+    /// Digest only a cache-marked prefix that this mapping can identify in
+    /// its actual request bytes. Unsupported mappings report no continuity.
+    fn cache_prefix(&self, _body: &[u8]) -> Option<String> {
+        None
+    }
 
     /// One provider response, decoded into the generation's events.
     ///

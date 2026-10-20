@@ -127,6 +127,7 @@ pub(crate) enum PreparedToolCall {
         objective: String,
     },
     Task(super::task::TaskRequest),
+    Plan(crate::plan::PlanUpdate),
     Effect {
         tool: std::sync::Arc<dyn Tool>,
         call: PreparedCall,
@@ -275,6 +276,7 @@ pub struct Tools<'a> {
     resume: Option<std::sync::Arc<ResumeSealer>>,
     task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
     pub(super) named_agents: Vec<super::NamedAgent>,
+    delegation_host: bool,
     task_tool_ceiling: Option<std::collections::BTreeSet<String>>,
 }
 
@@ -307,6 +309,7 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
+            delegation_host: false,
         }
     }
 
@@ -328,6 +331,7 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
+            delegation_host: false,
         }
     }
 
@@ -350,6 +354,7 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
+            delegation_host: false,
         })
     }
 
@@ -359,16 +364,33 @@ impl<'a> Tools<'a> {
         self
     }
 
+    pub fn with_delegation_host(mut self, tuic: bool) -> Self {
+        self.delegation_host = tuic;
+        self
+    }
+
     fn describe(&self, tool: &RegisteredTool) -> GenToolDescriptor {
         let mut descriptor = tool.descriptor();
-        if matches!(tool, RegisteredTool::Task) && !self.named_agents.is_empty() {
-            let names: Vec<_> = self
-                .named_agents
-                .iter()
-                .map(|agent| agent.name.as_str())
-                .collect();
-            descriptor.parameters["properties"]["agent"]["enum"] = serde_json::json!(names);
-            descriptor.description.push_str(" Select an optional named agent with the agent field; its authority cannot exceed yours.");
+        if matches!(tool, RegisteredTool::Task) {
+            descriptor
+                .description
+                .push_str(super::delegation_guidance(self.delegation_host));
+        }
+        if matches!(tool, RegisteredTool::Task) {
+            if self.named_agents.is_empty() {
+                descriptor.parameters["properties"]
+                    .as_object_mut()
+                    .expect("task properties are an object")
+                    .remove("agent");
+            } else {
+                let names: Vec<_> = self
+                    .named_agents
+                    .iter()
+                    .map(|agent| agent.name.as_str())
+                    .collect();
+                descriptor.parameters["properties"]["agent"]["enum"] = serde_json::json!(names);
+                descriptor.description.push_str(" Select an optional named agent with the agent field; its authority cannot exceed yours.");
+            }
         }
         descriptor
     }
@@ -439,6 +461,7 @@ impl<'a> Tools<'a> {
             task_context: Some((name, serial)),
             named_agents: Vec::new(),
             task_tool_ceiling: ceiling,
+            delegation_host: self.delegation_host,
         })
     }
 
@@ -465,6 +488,7 @@ impl<'a> Tools<'a> {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
                 RegisteredTool::Context
                 | RegisteredTool::Goal
+                | RegisteredTool::Plan
                 | RegisteredTool::Effect(_)
                 | RegisteredTool::HumanInput(_)
                 | RegisteredTool::Task
@@ -660,6 +684,9 @@ impl<'a> Tools<'a> {
             RegisteredTool::Context => {
                 crate::context::ContextRequest::parse(params).map(PreparedToolCall::Context)
             }
+            RegisteredTool::Plan => serde_json::from_value(params)
+                .map(PreparedToolCall::Plan)
+                .map_err(|error| error.to_string()),
             RegisteredTool::Goal => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]

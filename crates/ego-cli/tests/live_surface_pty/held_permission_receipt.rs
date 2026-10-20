@@ -1,8 +1,7 @@
 //! A test-only child runs the real interactive driver and Seat::new. Unlike
 //! the CLI binary, its terminal owner can hold its actual printer deterministically.
 
-#[path = "../support/mod.rs"]
-pub(super) mod support;
+use crate::run::test_support as support;
 
 use std::io::{Read, Write};
 use std::sync::{Arc, mpsc};
@@ -141,7 +140,8 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
     };
     wait("Trust project files", &mut output, &mut screen);
     press(b"yes\r");
-    wait("ctx", &mut output, &mut screen);
+    // The compact status uses a context bar, not the retired ctx label.
+    wait("▱▱▱", &mut output, &mut screen);
     press(b"use the tool\r");
     wait("[y] yes", &mut output, &mut screen);
     press(b"y");

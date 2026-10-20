@@ -217,7 +217,7 @@ fn bare_conflicts_with_explicit_instructions_on_both_surfaces() {
             .run();
         assert_eq!(output.code, Some(2), "{command}: {}", output.stderr);
         assert!(
-            output.stderr.contains("--bare and --instructions"),
+            output.stderr.contains("--bare") && output.stderr.contains("--instructions"),
             "{}",
             output.stderr
         );

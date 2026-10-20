@@ -4,6 +4,8 @@
 //! See `ARCHITECTURE.md` §1 (four serialisations, one semantic model) and
 //! `CLI.md` §4.2. A new internal event never becomes public automatically.
 
+pub mod transcript;
+
 use serde::{Deserialize, Serialize};
 
 use crate::budget::{Ledger, Metering};
@@ -36,6 +38,7 @@ use crate::state::Usage;
 /// adds the sanitized fallback decision event. Version 11 adds the live
 /// provider retry status. Version 13 adds the optional CLI goal outcome report.
 /// Version 14 adds the live provider retry dispatch transition.
+/// Version 15 adds authoritative durable plan operations.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -43,7 +46,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 14;
+pub const PUBLIC_EVENT_VERSION: u32 = 15;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -222,6 +225,11 @@ pub enum CeilingEffect {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicEvent {
+    /// A durable plan operation. Consumers fold it or read the accompanying reduction.
+    PlanUpdated {
+        turn: TurnId,
+        update: crate::plan::PlanUpdate,
+    },
     /// The header event: schema version and session-wide facts known once,
     /// at session start.
     SessionStarted {
@@ -494,6 +502,10 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
     let item = ev.env.item;
 
     match &ev.kind {
+        EventKind::PlanUpdated { update } => Some(PublicEvent::PlanUpdated {
+            turn,
+            update: update.clone(),
+        }),
         // The three pause records join them, and for a reason worth stating
         // rather than inheriting. A pause is answered on the channel the host
         // asked on: `_ego/pause` is idempotent by request id, so a host that
@@ -723,6 +735,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::HookLifecycleReached { .. }
         | EventKind::HookInvocationStarted { .. }
         | EventKind::HookInvocationSettled { .. }
+        | EventKind::BackgroundTaskRequested { .. }
+        | EventKind::SubagentCompletionDelivered { .. }
         | EventKind::SubagentRequested { .. }
         | EventKind::SkillCatalogueAdmitted { .. }
         | EventKind::SkillInstructionAdmitted { .. }

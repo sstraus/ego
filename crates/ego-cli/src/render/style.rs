@@ -71,7 +71,7 @@ impl Rgb {
     ///
     /// **Not** nearest-neighbour in RGB, which is the obvious implementation
     /// and the wrong one. The palette's most-used colour is
-    /// [`Palette::CODE`] — a pale periwinkle — and its nearest of the sixteen,
+    /// [`Palette::CODE`] — a muted blue — and its nearest of the sixteen,
     /// by Euclidean distance and by redmean alike, is *white*: the pale blue
     /// is closer to `(229,229,229)` than to `(92,92,255)` by a factor of
     /// three. That answer is defensible as arithmetic and useless as a
@@ -187,6 +187,7 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    pub reverse: bool,
 }
 
 impl Style {
@@ -198,6 +199,7 @@ impl Style {
         italic: false,
         underline: false,
         strike: false,
+        reverse: false,
     };
 
     pub fn fg(colour: Rgb) -> Self {
@@ -249,6 +251,11 @@ impl Style {
         self
     }
 
+    pub fn reverse(mut self) -> Self {
+        self.reverse = true;
+        self
+    }
+
     fn is_plain(&self) -> bool {
         *self == Style::PLAIN
     }
@@ -275,6 +282,9 @@ impl Style {
         }
         if self.underline {
             parameters.push("4".to_string());
+        }
+        if self.reverse {
+            parameters.push("7".to_string());
         }
         if self.strike {
             parameters.push("9".to_string());
@@ -373,21 +383,21 @@ impl Palette {
     /// weight. Both rules are read off the capture, and together they are what
     /// keeps a sentence containing three identifiers from becoming a ransom
     /// note.
-    pub const CODE: Rgb = Rgb(177, 185, 249);
-    pub const HEADING: Rgb = Rgb(137, 221, 255);
-    pub const LINK: Rgb = Rgb(130, 170, 255);
+    pub const CODE: Rgb = Rgb(174, 185, 213);
+    pub const HEADING: Rgb = Rgb(155, 181, 204);
+    pub const LINK: Rgb = Rgb(150, 173, 209);
     pub const QUOTE: Rgb = Rgb(153, 153, 153);
     pub const RULE: Rgb = Rgb(85, 85, 85);
-    pub const BULLET: Rgb = Rgb(137, 221, 255);
+    pub const BULLET: Rgb = Rgb(155, 181, 204);
     /// Table borders. Dim on purpose: the grid is scaffolding and the cells
     /// are the content, and a full-brightness box wins the eye every time.
     pub const BORDER: Rgb = Rgb(85, 85, 85);
 
     // --- diff -------------------------------------------------------------
-    pub const REMOVED_FG: Rgb = Rgb(220, 90, 90);
+    pub const REMOVED_FG: Rgb = Rgb(216, 150, 154);
     pub const REMOVED_BG: Rgb = Rgb(61, 1, 0);
     pub const REMOVED_SPAN_BG: Rgb = Rgb(92, 2, 0);
-    pub const ADDED_FG: Rgb = Rgb(80, 200, 80);
+    pub const ADDED_FG: Rgb = Rgb(151, 207, 167);
     pub const ADDED_BG: Rgb = Rgb(2, 40, 0);
     pub const ADDED_SPAN_BG: Rgb = Rgb(4, 71, 0);
     pub const GUTTER_FG: Rgb = Rgb(128, 128, 128);
@@ -397,8 +407,9 @@ impl Palette {
     pub const CODE_FG: Rgb = Rgb(248, 248, 242);
 
     // --- diagnostics ------------------------------------------------------
-    pub const TOOL: Rgb = Rgb(137, 221, 255);
-    pub const ERROR: Rgb = Rgb(255, 107, 128);
+    pub const TOOL: Rgb = Rgb(155, 181, 204);
+    pub const ERROR: Rgb = Rgb(221, 151, 158);
+    pub const WARNING: Rgb = Rgb(217, 190, 129);
     pub const NOTE: Rgb = Rgb(153, 153, 153);
 }
 
@@ -444,8 +455,8 @@ mod tests {
     #[test]
     fn one_colour_is_spelled_three_ways() {
         let style = Style::fg(Palette::CODE);
-        assert_eq!(style.open(Depth::TrueColor), "\x1b[38;2;177;185;249m");
-        assert_eq!(style.open(Depth::Ansi256), "\x1b[38;5;147m");
+        assert_eq!(style.open(Depth::TrueColor), "\x1b[38;2;174;185;213m");
+        assert_eq!(style.open(Depth::Ansi256), "\x1b[38;5;146m");
         assert_eq!(style.open(Depth::Ansi16), "\x1b[94m");
     }
 

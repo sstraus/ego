@@ -30,7 +30,12 @@ fn resume_metadata_operations_are_non_interactive_for_every_output_format() {
     ] {
         for output in ["text", "json", "jsonl"] {
             let parsed = parse(argv(&[
-                "resume", SOME_ID, "--goal", operation, "--output", output,
+                "resume",
+                SOME_ID,
+                "--goal-operation",
+                operation,
+                "--output",
+                output,
             ]));
             assert!(parsed.is_ok());
             assert!(!matches!(parsed.unwrap(), Invocation::Interactive(_)));
@@ -42,13 +47,27 @@ fn resume_metadata_operations_are_non_interactive_for_every_output_format() {
 fn resume_metadata_rejects_prompt_answers_mixed_operations_and_malformed_values() {
     for words in [
         vec!["resume", SOME_ID, "prompt", "--name", "show"],
-        vec!["resume", SOME_ID, "--answer", "yes", "--goal", "show"],
-        vec!["resume", SOME_ID, "--name", "show", "--goal", "show"],
+        vec![
+            "resume",
+            SOME_ID,
+            "--answer",
+            "yes",
+            "--goal-operation",
+            "show",
+        ],
+        vec![
+            "resume",
+            SOME_ID,
+            "--name",
+            "show",
+            "--goal-operation",
+            "show",
+        ],
         vec!["resume", SOME_ID, "--name", "set="],
-        vec!["resume", SOME_ID, "--goal", "set="],
-        vec!["resume", SOME_ID, "--goal", "block="],
+        vec!["resume", SOME_ID, "--goal-operation", "set="],
+        vec!["resume", SOME_ID, "--goal-operation", "block="],
         vec!["resume", SOME_ID, "--name", "rename=old"],
-        vec!["resume", SOME_ID, "--goal", "finish"],
+        vec!["resume", SOME_ID, "--goal-operation", "finish"],
     ] {
         assert!(
             parse(argv(&words)).is_err(),

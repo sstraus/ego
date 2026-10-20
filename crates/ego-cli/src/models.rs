@@ -67,7 +67,7 @@ pub async fn build_catalogue_snapshot(
     })?;
     let io = OsIo;
     let cache_store = ModelCatalogueCache::new(&io, &home);
-    let (mut cache, _) = read_cache(&cache_store, args.refresh)?;
+    let (mut cache, _) = read_cache(&cache_store)?;
     let needs_observation = selected
         .iter()
         .any(|row| args.refresh || !cache.providers.contains_key(row.id()));
@@ -90,7 +90,7 @@ pub async fn build_catalogue_snapshot(
             .map_err(internal)?;
         // The lease owner must merge against the newest baseline, not the one
         // read before it waited for another process.
-        let (latest, obsolete) = read_cache(&cache_store, args.refresh)?;
+        let (latest, obsolete) = read_cache(&cache_store)?;
         cache = latest;
         let mut publish = obsolete;
 
@@ -328,7 +328,7 @@ pub(crate) async fn build_startup_catalogue_snapshot(
         }
     }
     let mut cache = match config::ego_home() {
-        Some(home) => read_cache(&ModelCatalogueCache::new(&OsIo, &home), false)?.0,
+        Some(home) => read_cache(&ModelCatalogueCache::new(&OsIo, &home))?.0,
         None => DiscoveryCacheV2::default(),
     };
     let mut current = BTreeSet::new();
@@ -450,22 +450,15 @@ fn select_rows(
         .ok_or_else(|| usage_message(format!("no admitted model provider `{provider}`")))
 }
 
-fn read_cache(
-    cache: &ModelCatalogueCache<'_>,
-    refresh: bool,
-) -> Result<(DiscoveryCacheV2, bool), RunTermination> {
+fn read_cache(cache: &ModelCatalogueCache<'_>) -> Result<(DiscoveryCacheV2, bool), RunTermination> {
     match cache.read_bytes().map_err(internal)? {
         Some(bytes) => match DiscoveryCacheV2::decode(&bytes) {
             Ok(cache) => Ok((cache, false)),
-            Err(DiscoveryCacheDecodeError::ObsoleteSchema { .. }) if refresh => {
+            // Discovery facts are derived data. An older schema is a cache miss,
+            // not an upgrade failure. Startup observes without publishing; the
+            // ordinary catalogue path rebuilds under its existing lease.
+            Err(DiscoveryCacheDecodeError::ObsoleteSchema { .. }) => {
                 Ok((DiscoveryCacheV2::default(), true))
-            }
-            Err(error @ DiscoveryCacheDecodeError::ObsoleteSchema { .. }) => {
-                Err(RunTermination::UsageError {
-                    message: format!(
-                        "{error}; run `ego models --refresh` to rebuild the current cache"
-                    ),
-                })
             }
             Err(error @ DiscoveryCacheDecodeError::UnsupportedSchema { .. })
             | Err(error @ DiscoveryCacheDecodeError::Corrupt(_)) => Err(RunTermination::Failed {
@@ -639,6 +632,7 @@ fn render_text(snapshot: &ModelCatalogueSnapshot) -> Vec<String> {
             "OUTPUT".into(),
             "REASONING".into(),
             "METERING".into(),
+            "FAST".into(),
             "SOURCE".into(),
             "FRESHNESS".into(),
             "AVAILABILITY".into(),
@@ -651,6 +645,19 @@ fn render_text(snapshot: &ModelCatalogueSnapshot) -> Vec<String> {
                 ceiling(entry.capabilities.max_output_tokens),
                 reasoning(&entry.capabilities.reasoning_efforts),
                 metering(entry.metering).into(),
+                entry
+                    .fast_support()
+                    .map(|support| {
+                        format!(
+                            "{}x tokens{}",
+                            support.token_price_multiplier,
+                            support
+                                .included_usage_multiplier
+                                .map(|usage| format!(", {usage}x included usage"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or_else(|| "unsupported: no verified tier/price".into()),
                 provenance(&entry.provenance),
                 freshness(entry.freshness).into(),
                 availability(&entry.availability),

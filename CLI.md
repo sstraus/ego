@@ -28,22 +28,25 @@ proposed.
 
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
-ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
-ego continue [ID] [PROMPT]    continue the latest saved session; shares resume options
+ego run [PROMPT]              headless one-shot; PROMPT from argv or stdin; -f FILE loads an agent file
+ego continue [ID] [PROMPT]    alias of resume; same session selection and options
 ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
                               --answer QUESTION_ID=JSON answers pending input;
-                              --name and --goal are metadata-only operations
+                              --name and --goal-operation are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
 ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
                               --force acknowledges an uncertain run
 ego fork <ID> [--at ITEM_ID]   branch after a completed turn
+ego checkpoint [-C DIR] <ID> preview|restore COMMIT|close
+                              inspect or selectively undo builtin file edits
 ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
                               publish one idempotent checkpoint target
-ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
+ego export <ID> [--sanitize] [--format md|json|jsonl|transcript] [--file PATH]
+                [--follow] [--after SEQ]
                 [-C DIR] [--session-dir DIR]
                               render a session; Markdown is the default
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
-        add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
+        add NAME --http URL [--profile current|legacy-sse] [--auth none|oauth] [--allow-insecure-loopback]
         rm NAME | ls [--json] | login NAME | reload [NAME]
                               shared configuration and live admission service;
                               login NAME --client-id ID | --cimd URL | --dcr
@@ -56,14 +59,14 @@ ego mcp-server --max-concurrent-runs N --retained-requests N
 ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
 ego hooks  ls [--json]                     read-only admitted hook catalogue
-ego config get|set|unset|ls|edit
+ego config capabilities|snapshot|batch|get|set|unset|ls|edit
 ego roots  add|rm|ls                         user perimeter roots
 ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
                               canonical intent + matching rule, dry)
 ego usage  [--period P] [--all-roles] [--json] cost and token report
 ego acp [--tools LIST | --no-tools] [--allow RULE] [--deny RULE]
-        [--profile NAME] [--append-system TEXT|@file]
+        [--profile NAME] [--append-system TEXT|@file] [--output-style NAME]
         [--instructions FILE]
         [--listen ENDPOINT [--allow-public-bind]
          [--max-connections N] [--connection-lifetime DURATION]
@@ -88,6 +91,7 @@ ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               credential in EGO_A2A_TOKEN. An address reachable
                               from outside this machine is refused by name
                               unless the operator asks for it
+ego worktree show|cleanup RECEIPT_UUID   inspect or safely remove a retained local checkout
 ego orchestrator brief [--root PATH]  read-only TUIC children and unread results
 ego doctor [--json]           read-only redacted health snapshot
 ego setup [PROMPT] [--profile NAME] [--directory PATH]
@@ -100,9 +104,18 @@ Notes:
   scripted multi-turn conversations — a pipeline can carry a session through
   several stages. One session pool across interactive and headless runs
   (Codex split them and had to add `--include-non-interactive` to re-merge).
+- For an installation-free IDE custom-agent setup over native ACP, see
+  [IDE setup](docs/integrations/ide.md); no `--ide` auto-connect flag is required.
+- For standard ACP client libraries and runnable isolated examples, see
+  [ACP client libraries](docs/integrations/acp-clients.md).
 - There is deliberately **no bespoke RPC mode**: embedders get `ego acp`.
   pi invented `rpc`/`json` modes; ACP is that, standardised.
-- An ACP host may supply a stateless HTTP MCP server in `session/new`. HTTPS
+  Headless multi-turn streaming uses this same ACP stdio connection, not an
+  `--input-format stream-json` selector. See [the headless transcript](docs/integrations/acp.md#headless-multi-turn-stdio)
+  for framing, attachments, cancellation, and permission answers.
+- An ACP host may supply a stateless HTTP or explicit SSE MCP server in
+  `session/new`. The ACP `sse` variant selects the legacy profile; `http`
+  stays current-only. HTTPS
   remains the default. Plain HTTP is admitted only for the exact loopback
   hosts `localhost`, an IPv4 loopback literal, or an IPv6 loopback literal;
   other plaintext hosts are refused. The host does not send ego's
@@ -113,6 +126,9 @@ Notes:
   is appended as a delimited context block.
 - `ego export --sanitize` emits the producer-only version-1 structural bundle;
   unsanitized export is an explicit local transcript with no safety claim.
+  `--format transcript` emits [local transcript v1](docs/reference/transcript.md),
+  with stable event identity, lineage, goals, `--follow`, and `--after SEQ` replay.
+  Transcript mode excludes `--sanitize` and `--file`.
   Canonical JSON ends in one newline, JSONL is the same single bundle line, and
   Markdown embeds that same bundle. `--file` suppresses stdout; JSONL with a
   file is a usage error. Relative files resolve from canonical `-C`. Existing
@@ -120,19 +136,60 @@ Notes:
   published-but-durability-uncertain file remains visible and is not retried.
 - Metadata-only session operations reuse `resume` and never start a model turn:
   `ego resume ID --name show|set=TEXT|clear [--output text|json|jsonl]` and
-  `ego resume ID --goal show|set=TEXT|achieve|block=REASON` with optional
+  `ego resume ID --goal-operation show|set=TEXT|achieve|block=REASON` with optional
   `--output text|json|jsonl`. They do not accept a prompt or `--answer` in the
   same invocation.
 
+### Headless ACP stdio example
+
+Launch `ego acp`. Each line below is a separate host-to-agent JSON-RPC frame,
+not one batch to paste into a pipe. Wait for initialization and session creation;
+replace `SESSION` with the returned `sessionId`. Wait for prompt 3 to settle
+before sending prompt 4. While prompt 4 runs, the host can answer an incoming
+permission request and send cancellation:
+
+```jsonl
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[]}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Summarize this repository"}]}}
+{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"SESSION","prompt":[{"type":"text","text":"Check the summary"}]}}
+{"jsonrpc":"2.0","id":"PERMISSION_ID","result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"SESSION"}}
+```
+
+The permission response is conditional: copy the exact ID (including its JSON
+type) from the agent's `session/request_permission`, and select only an offered
+option. Do not send the placeholder literally. Cancellation is a notification;
+if it cancels the active run, the pending prompt response reports
+`stopReason: "cancelled"` (a run that already finished may return `end_turn`).
+Read stdout continuously for responses, `session/update` notifications, and agent requests.
+Close stdin after pending work settles; EOF ends the connection, not a user
+turn. `ego run --output jsonl` remains one-shot event output, not this input
+protocol. The [integration guide](docs/integrations/acp.md#headless-multi-turn-stdio)
+shows both directions, attachment blocks, and flow control.
+
+`-f` / `--file` loads a strict version-1 agent file, including its invocation
+settings and declared template variables. It is not a plain-text prompt-file
+reader. For example, save this as `reviewer.md`:
+
+```markdown
+---
+version: 1
+---
+Review the current change for defects.
+```
+
+Then run `ego run --file reviewer.md`. Use `ego run -` to read a plain-text
+prompt from stdin. An argv prompt cannot be combined with an agent file.
+
 ### 2.1 Availability — what ships today
 
-The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-seventeen commands; this build implements **fourteen**. The remaining three are
-refused **by name**, each naming the subsystem it waits on, from the `UNBUILT`
-table in `crates/ego-cli/src/cli.rs`. A test binds that table to this section,
-so a command can be refused as documented only while this list still offers it.
-M5 must enable all seventeen from their final owners; this count is current
-availability, not permission to ship a fourteen-command product.
+The current command inventory comes from `BUILT` and `UNBUILT` in
+`crates/ego-cli/src/cli.rs`. All commands in the current `BUILT` table are
+implemented; `UNBUILT` is empty. Tests bind the command set below to those
+tables. If an unavailable command is added, its refusal must name the command
+and the subsystem it waits on. Availability does not remove a required
+capability from the final product.
 
 A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
@@ -180,6 +237,10 @@ milestones remain dependencies of the final product.
 The final root grammar is exact:
 
 ```text
+ego config capabilities
+ego config snapshot [--profile NAME]
+ego config batch [--profile NAME] [--set KEY=TOML_VALUE]...
+                 [--unset KEY]... [--if-revision REVISION]
 ego config get   [--profile NAME] [--json] KEY
 ego config set   [--profile NAME] KEY=TOML_VALUE
 ego config unset [--profile NAME] KEY
@@ -207,20 +268,47 @@ lists empty, `get` reports absence, `set` creates it, and `unset` is unchanged
 success. For `rules`, the selected user contribution is empty but effective
 list/explain still includes applicable system rules.
 
-`config set` accepts one assignment and parses its value as TOML. Its closed
-key set is `model`, `thinking`, `mode`, `sandbox`, `budget`, `bare`,
-`permissions.judge`, and `ui.statusline.segments` at base user scope; profiles
-accept `model`, `thinking`, `mode`, `sandbox`, `budget`, and
-`permissions.judge`, with `session_dir` and `artifact_dir` accepted only for
-explicit profile `ci`. Permission arrays, credentials, MCP, and hooks remain
-owned by their dedicated commands. `unset` is the only null operation and
-prunes empty managed tables. There are no table fragments, list indices,
-aliases, or arbitrary dotted keys.
+`config set` accepts one assignment and parses its value as TOML. The closed
+managed key set and writable scopes are listed below. `PROVIDER` stands for a
+provider-qualified authentication key, not a literal provider name. The table
+is checked against `ManagedConfigKey`; it is not a separate runtime allowlist.
+
+<!-- ego-managed-config-keys:start -->
+| Key | User base | User profile | ci profile |
+|---|---|---|---|
+| `model` | yes | yes | yes |
+| `thinking` | yes | yes | yes |
+| `mode` | yes | yes | yes |
+| `sandbox` | yes | yes | yes |
+| `roots` | yes | yes | yes |
+| `exec_paths` | yes | yes | yes |
+| `exec.env` | yes | yes | yes |
+| `exec.env_allowlist` | yes | yes | yes |
+| `network` | yes | yes | yes |
+| `budget` | yes | yes | yes |
+| `bare` | yes | no | no |
+| `permissions.judge` | yes | yes | yes |
+| `ui.statusline.template` | yes | no | no |
+| `ui.keybindings` | yes | no | no |
+| `ui.vim` | yes | no | no |
+| `session_dir` | no | no | yes |
+| `artifact_dir` | no | no | yes |
+| `auth.PROVIDER.headers` | yes | no | no |
+| `auth.PROVIDER.credential_command` | yes | no | no |
+<!-- ego-managed-config-keys:end -->
+
+Permission arrays, interactive authentication login, MCP, and hooks retain their
+dedicated commands. `unset` is the only null operation and prunes empty managed
+tables. There are no table fragments, list indices, aliases, or arbitrary dotted
+keys. `config capabilities` reports transaction support; `snapshot` reads a
+managed document revision and `batch` applies its bounded edits atomically,
+optionally conditional on `--if-revision`. These commands do not change which
+authority owns a key.
 
 The standalone runner also accepts `exec_paths = ["/absolute/tools/root"]`
 in `~/.ego/config.toml` (or `$EGO_HOME/config.toml`), selected user/system
-profiles, and explicit `-c` overrides. Edit the TOML with `ego config edit`;
-`config set` does not manage this key. Higher layers replace the whole list;
+profiles, and explicit `-c` overrides. Use `ego config set exec_paths='["/absolute/tools/root"]'`
+for a managed user edit, or edit the TOML with `ego config edit`. Higher layers replace the whole list;
 an explicit empty list clears configured roots. Project and project-local
 configuration cannot add exec roots. Paths must be absolute and must exist;
 the runner canonicalizes symlinks before creating the confinement policy.
@@ -325,12 +413,13 @@ the final grammar.
     --thinking L        off|minimal|low|medium|high|xhigh|max   (pi's scale)
     --system TEXT|@file          replace system prompt
     --append-system TEXT|@file   append to it
+    --output-style NAME         select a trusted prompt-only response style
 ```
 
 **Permissions and confinement** (one axis pair, Codex-style)
 
 ```
-    --mode M            plan|default|auto|edits|yolo   shortcuts: --plan, --yolo
+    --mode M            plan|default|auto|accept-edits|yolo   shortcuts: --plan, --yolo
                         trusted interactive sessions default to auto when no
                         mode is configured; deterministic low/bounded calls
                         need no judge, while unknown calls may use the
@@ -420,10 +509,50 @@ confined execs. The launcher was subsequently fixed.
     --artifact-dir DIR  override the sanitized artifact root; valid only for
                         the explicit `ci` profile
     --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
-    --name OP           resume only; show|set=TEXT|clear, metadata-only
-    --goal OP           resume only; show|set=TEXT|achieve|block=REASON,
+    --name OP           resume/continue only; show|set=TEXT|clear, metadata-only
+    --goal-operation OP resume/continue only; show|set=TEXT|achieve|block=REASON,
                         metadata-only
 ```
+
+### Managed worktree launch
+
+`ego --worktree BRANCH [PROMPT]` and `ego run --worktree BRANCH [PROMPT]`
+create a new Git branch and linked worktree before session admission. The exact
+branch argument is the operator's approval; ego never invents a branch name.
+This option conflicts with resume, named sessions and caller-supplied session IDs.
+`-C` selects the source repository, including an existing linked worktree or a
+submodule. Tracked files come from HEAD, not from uncommitted source changes.
+Submodules are not initialized or fetched automatically.
+
+Standalone launches retain worktrees on every exit, including startup failure.
+Versioned receipts live under `$EGO_HOME/worktrees` (default `~/.ego/worktrees`),
+and identify the Git common directory, exact checkout, branch, source ref and
+creation state. Standalone processes hold a checkout lease until shutdown; local
+cleanup refuses an active lease. The receipt is durable before Git creation; an interrupted launch
+can be inspected without starting a model:
+
+```
+ego worktree show RECEIPT_UUID
+ego worktree cleanup RECEIPT_UUID
+```
+
+Cleanup is explicit, receipt-targeted and never forced. It refuses dirty state,
+changed repository/branch identity, and commits not reachable from the recorded
+source branch (or the initial commit when the source was detached). It also refuses new commits without upstream reachability evidence from the
+recorded source branch. It retains the branch, never discards unpushed commits,
+and records successful removal. Ignored files also prevent local cleanup.
+Pending receipts survive failures for inspection and recovery. A repeated cleanup
+of a removed receipt is unchanged success. No background or exit cleanup runs.
+Do not edit a checkout concurrently with cleanup; Git performs the final
+non-forced removal check. A cleanup refusal never grants force authority.
+
+With `TUIC_SOCKET` set, launch uses TUIC `repo.worktree_create` and its receipt,
+not a second local ownership record. No fallback to local Git occurs on host
+failure. Hosted cleanup stays with TUIC `repo.worktree_remove` and its lifecycle
+checks; the local receipt commands refuse under TUIC. Launch receipts and retained
+paths are written to stderr, never to protocol or headless result stdout.
+ACP hosts keep their existing explicit workspace ownership; `ego acp` does not
+accept `--worktree` or create a hidden second checkout.
 
 **Scripting contract**
 
@@ -439,7 +568,7 @@ confined execs. The launcher was subsequently fixed.
                         transient failure that was unsent or showed no
                         output retries, with backoff (default 0; ACP 6)
     --fallback P/M      ordered model degradation chain (repeatable)
--f, --file FILE         prompt/agent file (§5)
+-f, --file FILE         strict version-1 agent file with invocation settings (§5)
     --var K=V           template variable for agent files (repeatable)
 -C DIR                  run as if started in DIR (git-style)
 -c, --set K=V           dotted-path config override, value parsed as TOML
@@ -492,6 +621,7 @@ and what it is told about where it is working.
     --allow RULE / --deny RULE   what it is allowed to do
     --profile NAME               which stored configuration layer applies
     --append-system TEXT|@file   what it is told, appended to the prompt
+    --output-style NAME         trusted prompt-only response style
     --instructions FILE          which instruction file, named not discovered
 ```
 
@@ -591,7 +721,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--session-dir` | **yes** | |
 | `--artifact-dir` | **yes** | `ego run`/`ego resume` only, and only with the exact selected profile name `ci`; flags override `[profile.ci].artifact_dir` |
 | `--answer` | **yes** | `ego resume --answer QUESTION_ID=JSON` validates and durably settles pending questions before continuing the session |
-| `--name`, `--goal` | **yes** | metadata-only `ego resume ID` operations from §2; they cannot be combined with a prompt, answer, or run-only override |
+| `--name`, `--goal-operation` | **yes** | metadata-only `ego resume ID` / `ego continue ID` operations from §2; they cannot be combined with a prompt, answer, or run-only override |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
@@ -609,6 +739,23 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `-v`, `--verbose` | excluded | the binary refuses this legacy placeholder by name, and the exclusion regression case recorded stands. What it once waited on now exists and is not a flag: `EGO_LOG` (an `EnvFilter` string) installs a subscriber for the `tracing` events this build emits and `EGO_LOG_FILE` collects them to a file, because a diagnostic level is not an argument of a run — see §4.8. regression case was expected to retire the spelling and did not; it stays in the unavailable table rather than the retired one, because retiring a flag requires naming its replacement and there is deliberately no replacement flag to name |
 
 The model can also call `task` with a printable `name` and a `prompt` to run a depth-one, in-process child. The child inherits the parent mode, sandbox, offline posture and workspace ceilings, shares its budget and cancellation scope, and has no `task` tool. Task-only provider batches run concurrently. A batch that mixes `task` with other tool calls is refused with failed tool feedback for every call; no child or sibling tool runs. Child tool rows are nested under their names; permission prompts identify the child through the existing human seat. Only the final answer, bounded to the existing 64 KiB tool-result limit, enters the parent context. Child usage is booked once to the parent; child conversation state is held in memory and is not resumable.
+
+Set `task.background` to `true` to launch a durable standalone child without waiting.
+The tool returns `background agent ID`. The child has its own journal and run lineage,
+shares the parent budget and authority ceilings, cannot delegate, and emits no child
+tool rows in the parent. Parent-turn interruption (including Ctrl+Enter) does not
+cancel this child. `/tasks` lists typed exec and agent entries; `/tasks ID` inspects
+one entry and `/tasks cancel ID` cancels that entry independently.
+A completed child enters parent context once at the next generation boundary, not
+in the middle of another generation. Recovery uses the durable task ID, original
+parent run and captured tool ceiling. An uncertain interrupted child is not rerun.
+Closing a session waits for its admitted children to settle. A new background launch
+refuses if live permission policy differs from the admitted session epoch; start a
+new session to inherit that changed authority. Background tasks do
+not accept `agent` or `plan_step`; use an explicit prompt instead.
+Inside TUIC (`TUIC_SESSION` is set), use `orchestrator_active` for long delegated
+work and `task` for short in-turn work. Managed peer results resume the conversation.
+Live task conversion with Ctrl+B and child transcript navigation are not included.
 
 `task` also accepts `agent`, the filename stem of a named definition. Ego discovers
 `*.md` files in the trusted workspace's `.ego/agents`, then `$EGO_HOME/agents`
@@ -633,6 +780,22 @@ parent perimeter unchanged. The existing sandbox, offline posture,
 shared budget, cancellation, result bounds and depth-one limit remain in force.
 `tools` and `roots` are named-task ceilings, not supported by explicit `--file`.
 
+The `plan` tool owns one durable ordered plan, separate from the checked goal.
+Call `{"operation":"replace","steps":[{"id":"inspect","text":"Inspect the source","status":"pending"}]}`
+to replace it, or `{"operation":"step","id":"inspect","status":"in_progress"}`
+to update an existing ID. Statuses are `pending`, `in_progress`, `completed`, and
+`blocked`. Keep IDs stable when reordering or replacing steps. IDs are unique,
+printable, nonempty strings of at most 80 bytes; step text must not be empty.
+The plan is limited to 128 steps and 16 KiB of combined IDs and text. An empty
+replacement clears it. Updates are journal events (`plan_updated` in JSONL),
+survive replay, fork, and compaction, and appear as terminal progress rows and
+ACP plan replacements. Plan completion does not achieve the goal.
+
+An optional `task.plan_step` names an existing plan step. The parent records
+`in_progress` before the child runs, then `completed` on success or `blocked`
+on failure. An unknown ID or a second child assigned the same ID in one batch
+is refused before that child runs. Child progress changes only its linked step,
+not the objective or sibling steps. Child-authored plans stay local to the child.
 
 The table distinguishes implemented flags, intentional refusals, frozen M5
 target spellings, and the excluded verbose placeholder. The defect would be §3
@@ -648,7 +811,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 14,
+  "v": 15,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -796,6 +959,27 @@ A read, list or search the boundary refuses is the one exception to exit 3: it
 changed nothing, so the refusal is returned to the model as a failed tool
 result and the turn continues (regression case). Writes and spawns outside the
 workspace still end the run.
+
+### Host PID-to-session index
+
+While ego holds a session writer lease, it atomically publishes
+`$EGO_HOME/pids/<pid>.json` (default `~/.ego/pids/<pid>.json`):
+
+```json
+{"pid":12345,"session_id":"01900000-0000-7000-8000-000000000001","cwd":"/absolute/workspace"}
+```
+
+`pid` is the process ID, `session_id` is the leased session UUID, and `cwd` is
+its absolute workspace path. Publication writes a temporary file beside the
+index, then renames it into place. Opening the initial session successfully
+publishes its binding. A replacement session replaces the binding only after
+it becomes active; opening or rejecting a candidate does not change it. Releasing the last owner of that lease removes its
+binding; releasing an older session does not remove a newer binding. Normal
+exit releases these owners. A crash or forced termination can leave an index.
+The index is only a lookup hint, not a liveness or ownership guarantee: hosts
+must verify that the selected session's `lease` records the same PID and that
+the process is live. The session lease remains the source of truth. A custom
+`--session-dir` does not move this index out of `$EGO_HOME/pids`.
 
 ### 4.5 Parse and lifecycle contract (normative before release)
 
@@ -959,6 +1143,11 @@ when its last row does — so the output is live without a half-built table ever
 reaching the screen. Colour depth is whatever the gate found: 24-bit, 256, 16,
 or none.
 
+Top-level prose paragraphs stay on one logical line. The terminal or narrower
+viewer owns their soft wrapping; ego adds no continuation indentation. Explicit
+Markdown hard breaks and paragraph boundaries remain. Lists, block quotes,
+fenced code, and tables keep their structured layout.
+
 **One gate decides, once** (`crates/ego-cli/src/render/caps.rs`). In precedence
 order: `--no-color`, then `NO_COLOR` (presence, not value), then whether stdout
 is a terminal, then `TERM`, then `COLORTERM`, then `TERM_PROGRAM`. No other
@@ -992,6 +1181,20 @@ The human-facing product name is `εgo`, and every window title begins with the
 exact prefix `ɛ । `. Every payload is stripped of control characters before it
 goes into a sequence: a tool name, an error message and an intent line all come
 from somewhere that is not ego.
+
+On-screen text output also reports prompt-cache hits from provider usage, with
+compact token counts. For Anthropic Messages requests with an explicit cache
+boundary, a hit followed by a miss on the same marked input produces a qualified
+warning: the provider may have expired or changed its cached entries. A changed
+session, provider, model, or marked prefix starts a new comparison. Missing input
+usage is unknown, not a miss. These observations do not change public JSON events
+or durable accounting and are suppressed by `-q`.
+
+When a turn ends, on-screen text output prints elapsed time, completion status,
+and local time. Successful builtin `edit` calls contribute measured added and
+removed lines to a `tracked edits +N -M` receipt. These counts are not a Git diff:
+repeated edits are accumulated, and unmeasured tools do not contribute. Colour
+follows the terminal gate. Quiet and redirected output omit these receipts.
 
 ### 4.8 Diagnostics (`EGO_LOG`, `EGO_LOG_FILE`)
 
@@ -1034,7 +1237,7 @@ family as skills; `--var` fills `{{placeholders}}`; shebang makes it a program:
 ---
 version: 1
 model: anthropic/claude-sonnet-5
-mode: edits
+mode: accept-edits
 sandbox: workspace
 allow: ["exec(cargo *)"]
 schema: "@review-schema.json"
@@ -1106,6 +1309,11 @@ History, completion, multiline editing, bracketed paste, and concurrent output
 use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
+Interactive startup prints the application name and version before configuration,
+trust, provider, or MCP notices. It reports the selected model, effective posture,
+and key hints after admission. Startup notices remain visible; `--quiet` keeps
+its existing announcement policy. The name does not require a resolved model.
+
 The live seat enters raw mode before startup discovery, so lines typed before
 the composer appears retain their Enter boundaries without cooked terminal
 echo. The first starts a turn; further submitted lines enter the busy FIFO.
@@ -1122,28 +1330,72 @@ model call. They use the existing effect permission path and refuse a command
 from a generation that is no longer admitted. ACP announces the same commands
 and their JSON argument schemas when the admitted runtime opens a prompt.
 
-Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /history QUERY /fork [message-id] /compact /refresh /clear /usage /statusline /export /config /doctor /quit /new
-/name /goal /tasks /tools /expand /skills /hooks /version`. These 28 commands are the complete
+Slash commands: `/help /model /thinking /fast on|off /mode /plan /yolo /permissions /mcp
+/sessions /history QUERY /resume [ID] /continue [ID] /fork [message-id]
+/compact /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
+/name /goal /tasks /tools /expand /skills /hooks /memory /init /retry /version`. These commands and aliases form the
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
 checks are projections of one action registry rather than parallel command
 implementations. An exact registered action executes with one `Enter`; a
 partial completion remains inert until explicitly submitted, and pasted slash
-text remains ordinary prompt input.
+text remains ordinary prompt input. A submitted unknown slash command is refused
+locally with the nearest command names and never starts a model generation.
+To send literal text that starts with `/` (for example `/tmp/x`), add a leading
+space. Bracketed paste also remains literal prompt input.
 
 That paragraph is the final contract. The current implementation has the shared
-25-command action registry: a typed complete slash is classified as an action,
+action registry: a typed complete slash is classified as an action,
 while bracketed paste and non-command text remain ordinary prompts. Completion,
 menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
 
+### Reviewed persistent memory and project initialization
+
+`/memory [project|user] [list | show ID | set ID TITLE CONTENT | disable ID | delete ID]`
+uses the native MDKB index in the workspace or ego user directory. The selected
+scope must already have a `.mdkb` index; initialize it explicitly with `mdkb init`.
+Quote a title or content that contains spaces. `set` creates or replaces the
+record as an operator-authored `topic` with `user_statement` provenance and the
+`ego-reviewed` tag. `list` and `show` expose native provenance and lifecycle
+metadata. Every mutation requires review of the exact proposed content and
+scope. Disable preserves the record and source provenance, adds `ego-disabled`,
+and sets native TTL to zero so ordinary MDKB retrieval excludes it. Native
+MDKB expiry and archive rules still apply. Delete uses native MDKB removal;
+native archive and history may retain content. It is not secure erasure.
+
+These actions require workspace trust. Plan mode, read-only confinement, root
+limits, and explicit write denies remain effective. No model response, tool
+result, or conversation is automatically saved. Review must exclude secrets and
+untrusted tool instructions. Memory bodies are not automatically promoted to
+system instructions. This surface adds no second memory store.
+
+`/init` builds a deterministic, local `AGENTS.md` proposal and shows the diff
+before confirmation. It creates `CLAUDE.md` only as the relative sibling symlink
+`AGENTS.md`. Existing `AGENTS.md` content is preserved. An independent
+`CLAUDE.md`, an unexpected symlink, denied write, or changed reviewed state is
+refused. No model call is required. This explicit operator control-file workflow
+does not grant general directory-write authority to tools or setup. Partial I/O
+failures are reported and existing files are never overwritten. Use `/refresh`
+after initialization to request the normal trust admission in a new prompt epoch.
+Both commands are refused while a turn is running; a non-human seat cannot
+confirm a mutation.
+
 Arguments that do not belong to a selected local action are usage errors, not
 model prompts. In particular, `/mcp` inspects the admitted runtime snapshot;
-configuration remains explicit through `ego mcp add|rm|ls`, and `/mcp add`
-points to that root syntax without consuming a provider turn.
+`/mcp add NAME --http URL` and `/mcp add NAME --stdio -- COMMAND ...` parse
+the same add grammar as `ego mcp add` and persist configuration through the same
+transaction and live-admission service. `/mcp toggle NAME` changes enablement
+only for this session and does not edit stored configuration. Both are local
+commands, not provider prompts; MCP mutations require an idle turn.
+
+Read-only `/tasks [ID]`, `/config`, `/config perimeter`, and `/usage` answer
+while a turn runs. They read the current session journal, admitted configuration,
+and durable usage records without starting a generation. State-changing commands
+remain on their existing host-command path; an inspection does not cancel,
+restart, or complete the active turn.
 
 `/help` renders task-oriented Discover, Model, Control, Session, Integrations
 and Surface groups from that registry into transcript scrollback. `/doctor`
@@ -1151,15 +1403,35 @@ wraps the shared health snapshot at the live terminal width. Both preserve
 every field at 120, 80, 60, and 40 columns instead of relying on terminal
 reflow or attaching multiline output to the composer.
 
-`/mode`, `/plan`, `/yolo`, and `/permissions` are argument-free local modal
-actions. A direct-argument form such as `/mode edits` or `/permissions allow
-...` is rejected as action usage and never submitted as a prompt. `/mode`
-selects one of `plan`, `default`, `auto`, `edits`, or `yolo` for this session;
-`/plan` stages plan idempotently. `/yolo`, the Yolo palette action, and Yolo
-selected through `/mode` stage yolo directly and produce one receipt; they do
-not open a second confirmation ritual. Selecting auto validates a configured
-judge and its current model/request without a provider effect; deterministic
-local calls remain available when no judge is configured.
+`/mode` opens the permission picker. `/mode <name>` selects exactly one of
+`plan`, `default`, `auto`, `accept-edits`, and `yolo` (bypass permissions).
+Unknown names and extra arguments are local usage errors, never model input.
+`/plan`, `/yolo`, and `/permissions` still take no arguments.
+Shift+Tab cycles in this order: plan → default → auto → accept-edits → yolo → plan.
+It preserves the composer draft and attachments and does not submit them, in both
+Emacs and Vim editing. While a picker, permission prompt, or other modal is open,
+Shift+Tab does nothing. During an active turn it queues a local selection until
+the turn ends; it does not change that turn's captured policy. Repeated selections
+start from the last accepted staged mode. A receipt shows the selected mode and
+its next-generation boundary. Fixed sandbox, system max_mode and profile ceilings
+still apply. A refused selection leaves the prior selection intact and reports why.
+Auto selection validates its configured judge without a provider effect.
+`/plan` stages plan idempotently. `/yolo` and picker selection stage yolo directly;
+they do not ask for a second confirmation.
+
+Default keeps its existing policy: reads are admitted without a human prompt,
+uncovered writes ask, explicit allow rules are honored, and coordinator bounded
+calls retain their deterministic admission. Explicit denies and hard boundaries
+still win. This selection feature does not add a new approval mechanism or change
+existing ACP/session permission answers.
+
+Configuration, CLI flags, ACP controls and saved selections use the same public
+names. `edits` remains an input alias for `accept-edits`; saved config emits
+`accept-edits`. The private content-addressed snapshot v1 wire retains `edits` to
+preserve saved authority digests. Missing mode still falls back to default except
+for the existing trusted-interactive auto default. Session resume keeps its
+recorded policy and confinement; selection never widens them implicitly.
+
 `/permissions`
 exposes the same list, allow, deny, revoke, remember, and explain services and
 DTOs as the root `rules` command. List/explain use the session's
@@ -1249,10 +1521,16 @@ it is drawn (a resize applies to later rows): the target gives way first, the
 mark, verb, outcome and duration last. Text from a tool result is shown with
 control characters replaced, never passed to the terminal.
 
+A submitted prompt that exceeds three terminal rows shows its first three rows
+and a count of hidden rows. Short prompts keep their normal echo. This changes
+only the displayed receipt, not the prompt sent to the model or saved in history.
+`/expand` shows the full prompt if it is the most recent expandable entry; a
+later tool call replaces it as the expansion target.
+
 `/expand`, also `Alt-O`, prints the full result of the most recent tool call
 under its row: for `edit`, the line diff; for every other tool, the whole
-result text the model received, up to 256 KiB. Only the 16 most recent calls of
-the session are kept, and only the latest can be shown. It runs between turns,
+result text the model received, up to 256 KiB. Only the 16 most recent tool calls
+and collapsed prompts of the session are kept, and only the latest can be shown. It runs between turns,
 like `/help`. Headless runs write each row to stderr, prefixed `εgo:`, and have
 no expand key.
 
@@ -1286,7 +1564,11 @@ sequence.
 bracketed paste that names an existing supported image file, stages a
 removable chip and submits with the next turn through the same durable
 `--attach` path (`ARCHITECTURE.md`).
-Escape removes the newest staged chip. Pasteboard text, and a path that is
+Idle Escape removes the newest staged chip; busy Escape still interrupts
+active work. Image paste is available while a turn is running. Text and
+images remain one draft through stash, restore, clear, and queue recall.
+Enter validates and queues the complete draft before clearing it; an
+admission failure retains it. Pasteboard text, and a path that is
 missing or not a supported image, remain ordinary editor text; an
 unsupported or unknown model capability refuses staging before any bytes are
 read; an oversized image is refused with its observed size. Image input also
@@ -1311,12 +1593,78 @@ bounded channels.
 | Ctrl+V | **yes** | reads the OS pasteboard; an image stages a removable chip and submits with the next turn through the `--attach` path, text inserts at the cursor |
 | Ctrl+Z | **yes** (Unix) | stops ego as a shell job with the terminal back in cooked mode; `fg` restores raw mode and repaints the composer or the open modal, which stays unanswered. A running `exec` keeps running in its own process group, and its timeout does not count the time ego was stopped. Windows has no job control: the key reports that it is unsupported |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
-| Slash commands | **yes** | one shared 25-command registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
+| Slash commands | **yes** | one shared action registry drives typed-slash classification, completion, menu, grouped help, and local dispatch. Exact actions use one Enter; partial completion and pasted slash text do not execute accidentally |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
 | `--attach` | **yes** | §3.1's durable image path; interactive `Ctrl+V` and bracketed image paths use the same admission and blob commit |
 | OSC 133 A (prompt mark), OSC 7 (cwd) | excluded | not part of the final M5 terminal contract. `ego run` retains 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
+
+### 6.2.1 Keyboard preferences and Vim editing
+
+The default composer uses Emacs editing. Start `ego --vim` for Vim editing,
+or save `ego config set ui.vim=true` to select it for future interactive
+processes. `--vim` overrides a saved `false` value. The composer starts in
+insert mode; idle `Esc` selects normal mode, and `i` returns to insert mode.
+The prompt shows `[INSERT]`, `[NORMAL]`, or `[VISUAL]`. Vim editing uses the
+bundled Reedline editor, including its motions, operators, counts, and undo.
+Headless `run` and prompted `resume` reject `--vim`; ACP has no terminal
+composer and does not apply keyboard preferences.
+
+Customize action shortcuts in the **user** `config.toml`:
+
+```toml
+[ui]
+vim = true
+keybindings = { model = ["Ctrl+P", "F2"], expand = [] }
+```
+
+The same map can be saved atomically:
+
+```sh
+ego config set 'ui.keybindings={model=["Ctrl+P","F2"],expand=[]}'
+ego config get ui.keybindings
+ego config unset ui.keybindings
+```
+
+Keys in the map are canonical slash action names from `/help`, without the
+slash. Each array replaces that action's complete shortcut list; `[]` removes
+its shortcuts. Unspecified actions keep their defaults: `Option+P` opens the
+model picker, `Option+O` expands tool output, and `Option+R` retries provider
+recovery. `/help` and the startup key hints show the effective shortcuts.
+Unset `ui.keybindings` to restore all defaults.
+
+Supported chords are `Ctrl+LETTER`, `Alt+LETTER`, and `F1` through `F12`.
+Spellings are case-insensitive; `Option` and `Meta` are aliases for `Alt`.
+Letter shortcuts require one ASCII letter. Bare text, mixed modifiers such as
+AltGr, arbitrary escape sequences, and shifted chords cannot be configured.
+This keeps committed Unicode/IME text and terminal paste outside shortcut
+matching. Use a chord that the terminal can transmit; modified Enter reporting
+is not required for configurable shortcuts. The macOS `π` spelling of
+`Option+P` follows the effective binding, not the retired default.
+
+Unknown action names, invalid chords, and duplicate effective chords are
+refused before terminal activation. The check includes unchanged defaults;
+change both actions in one map to swap their keys. Managed `config set` and
+`config batch` also reject invalid maps before publication. Permission,
+picker, paste, draft, suspend, and busy-input controls cannot be remapped;
+terminal aliases such as `Ctrl+I`, `Ctrl+J`, `Ctrl+M`, and `Ctrl+H` are reserved.
+
+Keyboard preferences are user/process-only. They are read before the terminal
+owner starts, apply at the next process start, and remain stable when a session
+or project root changes. Project, local, system, and profile settings do not
+select the keyboard map; `-c` keyboard overrides are refused. These preferences
+do not change the permission mode or confinement.
+
+Vim runs **below** host input routing. Busy `Esc` still interrupts or expedites
+pending input; it does not select normal mode. Modal `Esc` still cancels or
+settles the current decision. Idle `Esc` removes a staged image chip before
+changing Vim mode. Busy Enter queues, Ctrl+Enter steers, Up on an empty composer
+recalls queued input, and Ctrl+S parks/restores drafts in either Vim mode.
+Permission keys and modal text forms keep their existing editing behavior.
+Bracketed paste inserts literal multiline text in both Vim modes; Ctrl+J
+inserts a newline without submitting. Terminal/OS IME pre-edit is owned by the
+terminal; the composer receives its committed Unicode characters.
 
 ### 6.3 Live composer, drafts, queue, and steering
 
@@ -1329,6 +1677,16 @@ prompt, so control input remains responsive without reordering the transcript.
 In interactive mode reedline is therefore the terminal writer. In headless
 modes the existing renderer remains the writer. There is never one of each
 writing the same terminal.
+
+The default interactive presentation uses one live row for consecutive successful
+shell commands (`exec`) that produce no output in the same turn. Each such
+completion replaces the live row. Before a failed command, command output,
+another tool, agent prose, or the end of the turn, the last live command becomes
+a transcript row. Failed commands and output previews remain visible. Nested
+child-tool rows keep their existing grouping. `--plain`, `TERM=dumb`, and
+headless output remain append-only; `--no-color` only removes colour. This
+presentation does not change durable events, transcript replay/export, or the
+bounded tool-detail history used by the expand key.
 
 `Ctrl-S` with a non-empty composer pushes the exact multiline buffer onto a
 session-local LIFO draft stash and clears the composer. `Ctrl-S` with an empty
@@ -1420,37 +1778,78 @@ the same question degrades to a numbered plain prompt.
 
 ### 6.5 Native status line
 
-The status line is one width-aware row owned by the interactive surface, not a
-shell subprocess and not model output. It renders ordered segments from a
-snapshot; expensive producers such as Git update asynchronously and never
-block input. The built-in segment names are `model`, `effort`, `mode`,
-`context`, `cost`, `queue`, `drafts`, `interrupt`, `cwd`, `git`, and `trust`.
-The queue snapshot distinguishes pending steers from ordinary queued prompts,
-and the interrupt segment remains visible while expedited or ordinary
-interruption is pending. `trust` renders `trusted` or `untrusted` and counts as
-inactive while trusted, so width pressure drops it from exactly the sessions
-whose posture is not worth reporting.
+The status line is owned by the interactive surface, not a shell subprocess or
+model output. It renders a value-only MiniJinja template from an immutable
+snapshot. Git and external providers update asynchronously and never block input.
 
-Configuration stores one final resolved shape rather than a preset plus a
-second override language:
+The compact default reads as:
+
+```text
+gpt-6-sol · medium · yolo ▰▰▱▱▱▱▱▱▱▱ 58k/272k ≈$0.66 ~/G/p/mdkb ⎇ feat/configurable-embedder●
+```
+
+The ten context cells fill in proportion to measured occupancy. The meter is
+green below 60%, yellow from 60%, and red from 85%. Missing occupancy reads
+`▱▱▱▱▱▱▱▱▱▱ ?/272k` when the window is known. Colour is optional; the count
+and window remain visible without it. `≈$` means subscription-equivalent cost
+at standard API prices, not billed spend. `$` means billed cost. `(partial)`
+marks an estimate that excludes mixed or unpriced usage; `unpriced` means no
+complete price is available. `/statusline` explains these symbols in its setup
+selector. Home is `~`, intermediate path components use their first letter,
+and the final component stays complete. `⎇` precedes the branch; `●` means
+uncommitted changes. These symbols are standard single-cell BMP characters,
+not emoji or private font glyphs. Under width pressure, branch, cwd, and cost
+drop in that order before model, reasoning, mode, and context. At widths too
+small for that core, whole fields still drop rather than wrap or truncate.
+
+Configuration stores a complete template:
 
 ```toml
 [ui.statusline]
-segments = ["model", "effort", "mode", "context", "queue", "drafts", "interrupt", "cwd", "git", "trust"]
+template = """
+{% filter priority(20) %}{{ model }} · {{ effort }} · {{ mode }}{% endfilter %}{% filter priority(10) %} {{ ctx.percent|bar(10) }} {{ ctx.used|tokens }}/{{ ctx.window|tokens }}{% endfilter %}
+{{ prompt }}
+{% filter priority(0) %}{{ git.branch }}{% endfilter %}
+"""
 ```
 
-When `ui.statusline.segments` is absent, the surface uses that `default` order
-in memory and does not mutate configuration. An explicitly stored empty list
-is distinct and disables the row.
+`{{ prompt }}` must render once on its own line. Text before it goes above the
+editable buffer; text after it goes below. Filter blocks use `priority(integer)`:
+lower priorities disappear first when a row is too wide. Blocks cannot nest or
+contain the prompt. Unblocked rows are indivisible. Values are never truncated.
+Active queue, draft and interrupt state is added even when the template omits it.
+At a width too small for one critical value, that value remains whole.
 
-`/statusline` offers named setup presets but writes that ordered list. An empty
-list disables the row. When width is insufficient, lower-priority segments
-disappear as units; semantic values are never truncated into ambiguity. Queue
-and draft counts, and interrupt-pending state, remain visible while active
-whenever the terminal can represent their combined whole segments. If physical
-width cannot represent that critical set, whole segments degrade in the order
-drafts, queue, interrupt; the retained priority is interrupt, then queue, then
-drafts, and the surface emits one overflow diagnostic.
+Variables: `model`, `effort`, `fast`, `mode`, `ctx.used`, `ctx.window`,
+`ctx.percent`, `cost.amount`, `cost.equivalent`, `cwd`, `git.branch`, `git.dirty`,
+`queue`, `drafts`, `interrupt`, `trust`, `goal.active`, `goal.objective`,
+`goal.turns_used`, `goal.turns_max`, and `providers.NAME`. Unknown measured
+numbers, inactive goal fields and an unavailable Git branch are `none`.
+`queue` is pending steers plus queued prompts. `cost.amount` is the numeric
+amount represented by the visible cost; `cost.equivalent` distinguishes a
+subscription estimate from billed cost. `cwd` is the full working directory.
+
+Filters: `tokens` abbreviates counts, `money` formats a dollar amount,
+`short_path` abbreviates a path, `bar(n)` renders a percent with `n` cells
+(maximum 256), and `color(name)` accepts `green`, `yellow` or `red`.
+`text|threshold(ctx.percent)` applies the context thresholds to text. Colours
+respect the terminal colour policy and add no display width.
+
+With no template configured, `{{ compact }}\n{{ prompt }}` is the built-in
+default. `compact` preserves the 524 layout, including its width priorities.
+`/statusline` presets write templates. The Off preset stores `{{ prompt }}`;
+critical operational state remains visible. The unreleased `segments` key is
+removed, without compatibility parsing. An invalid template retains the compact
+default and emits one diagnostic with the error and source line. The environment
+has no filesystem loader, network functions or subprocess functions. Source is
+limited to 65536 bytes, output to 65536 bytes, evaluation to 10000 fuel units,
+and recursion to 32 levels.
+
+The live Working row also shows an approximate output-token count from model
+text (four characters per token, rounded up), not provider usage. Tool output is
+excluded. Reasoning deltas start a thinking interval; answer text, tool starts,
+and turn completion clear it. A new turn resets progress. The row is bounded to
+the terminal width and omits the interruption hint when it does not fit.
 
 ### 6.6 Prompted compaction starts a clean session
 
@@ -1479,7 +1878,13 @@ or retained-tail item is replayed. The checkpoint is context, not a
 user-authored prompt or higher-authority instruction.
 
 The source session remains complete and resumable. The target records the
-source session and source sequence. A tool-use or truncated response, empty or
+source session and source sequence. Event parents stay within their session:
+`PreCompact` belongs to the source, while `PostCompact` starts a root occurrence
+in the clean target. Both hooks retain the compaction request identity; target
+lineage records the source boundary, not an event-parent edge into its log.
+This also applies after automatic goal continuations. Metadata operations and
+cold resume validate the target without replaying the source conversation.
+A tool-use or truncated response, empty or
 invalid checkpoint, provider/budget/cancellation failure, target-baseline
 capability or encoding failure, or pre-publication target-store failure creates
 no usable target and leaves the operator in the source session. At compaction
@@ -1659,8 +2064,8 @@ Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
-System policy can also set `max_mode="edits"`, using the order
-plan < default < edits < auto < yolo. A selected mode above the maximum is
+System policy can also set `max_mode="accept-edits"`, using the order
+plan < default < accept-edits < auto < yolo. A selected mode above the maximum is
 refused before run effects, including live ACP and REPL selections. A refused
 selection preserves the current and pending mode. `max_mode` is system-only and does not change
 the default mode; a plan maximum must be paired with `mode="plan"`.
@@ -1691,8 +2096,8 @@ explicit `--offline` invocation.
 `--read-only-dir DIR` grants reads of one session upload directory at launch.
 It is available to interactive runs, `run`, `resume`, and served protocols.
 DIR must be an existing canonical absolute directory: relative paths, `..`,
-symlink aliases, home/administrator ancestors, and directories beneath a
-writable workspace or root are refused. This launch grant does not make
+symlink aliases and home/administrator ancestors are refused. Nested directories
+beneath a writable workspace or root follow the platform rules below. This launch grant does not make
 configuration `roots` writable from flags. System and host profile ceilings
 still bind; credential denials remain in force. The grant adds neither writes
 nor executable uploads. It does not change the selected sandbox level. On Linux, confined read roots
@@ -1709,9 +2114,16 @@ when loading a session that has not yet started a run. Paths inside the grant
 are still canonicalized by each built-in tool, so symlinks cannot open siblings.
 
 Effective perimeter inspection warns when canonical roots overlap the workspace.
-A read root beneath a read-write root is refused with `nested-read-only-root`,
-including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
-remains an admission error; it is never shown as an admitted root.
+A read root beneath a writable root or the workspace is admitted. Built-in tools
+keep that subtree read-only, even if a deeper write root exists. On macOS,
+Seatbelt denies writes and execution in the subtree; later grants cannot reopen
+it, and its ancestors cannot be renamed to bypass the restriction. On Linux,
+Landlock grants are additive: the writable ancestor wins for exec children,
+including execution in the read subtree. Ego reports that limitation without
+exiting; built-in tools still enforce read-only access. With `sandbox=ro`, the
+global native write denial remains in force. With `sandbox=off`, native writes
+are not confined. A missing or unresolvable configured path is reported as a
+warning and remains an admission error; it is never shown as an admitted root.
 
 `/config` lists Model, Mode, Sandbox, Perimeter, and Budget from the session's
 captured startup configuration. Each declaration names its origin layer and
@@ -1815,6 +2227,25 @@ kind and an expiry, never a header.
 
 ### 7.2 `models.toml` — hosted model capabilities, in three layers
 
+Per-model execution tier defaults use a separate map in the system or user model
+file. `standard` is the default; `fast` is refused unless the shared catalogue
+has verified support and pricing for that full slug:
+
+```toml
+[service_tier]
+"openai/gpt-6.1-sol" = "fast"
+"openai-codex/gpt-6.1-sol" = "standard"
+```
+
+`/fast on` and `/fast off` override the current model's tier for this session at
+an idle boundary. The receipt names the token-price premium and any distinct
+included-subscription usage multiplier. The status snapshot exposes `fast`, and
+the default status row includes it when enabled. Token quotes and Codex's
+separate API-equivalent estimate use the selected tier; unavailable prices stay
+unknown, not zero. `ego models` lists verified fast support and its multiplier.
+See `ARCHITECTURE.md` for provider evidence and account limits.
+
+
 Hosted providers do not tell ego what their models can do, so those facts are
 *supplied*: stated by an authority rather than guessed. There are three, and
 the weakest is compiled into the binary:
@@ -1905,7 +2336,7 @@ A full entry, with every field the schema accepts:
 ```toml
 # `provider/model`. The model half is what goes on the wire.
 [model."openai/gpt-5.6-sol".capabilities]
-schema_version = 5                 # required; rejects an older document
+schema_version = 6                 # required; rejects an older document
 max_context_tokens = 1050000       # omit if the vendor does not state it
 max_output_tokens = 128000
 # max_tools = 128                  # most tools accepted in one request
@@ -1956,6 +2387,11 @@ a cached row is never handed to a request
 Only supplied rows come from this file, and they are rebuilt on every
 invocation rather than cached at all; the cache holds only *discovered* rows,
 from providers that enumerate themselves.
+
+An obsolete discovery-cache schema is ignored at startup. Supplied facts and
+bounded local discovery remain available, and an ordinary catalogue read can
+rebuild the cache without `--refresh`. Startup does not replace the old bytes.
+A corrupt or newer-schema cache still reports an error and is not overwritten.
 
 ### Interactive session picker
 
@@ -2089,8 +2525,12 @@ instructions, tool definitions, accounting, and auditable lineage use the same
 transition as `/compact`.
 
 Pending prompts, questions, or live attempts prevent the transition. A failed
-automatic compaction is shown and is not automatically retried in that source
-epoch. Unknown occupancy is not estimated. A known full context still refuses
+automatic compaction at measured context pressure stops the session with an
+explicit diagnostic and a nonzero process exit, so managed parents can observe
+the failure instead of sending prompts that cannot run. The durable source is
+retained for resume; no automatic retry loop runs in that source epoch. Explicit
+operator cancellation and failed manual compaction remain interactive. Unknown
+occupancy is not estimated. A known full context still refuses
 before any request, including a compaction request: automatic recovery must
 start before exhaustion, and the threshold is not an exact fit guarantee for
 unsent growth. A 272000-token window triggers at 244800 measured tokens.
@@ -2133,19 +2573,45 @@ operator prompt. Five consecutive observations of the same normalized condition
 block the goal. A changed condition resets that count. The default allowance is
 20 automatic work turns per goal identity; `--goal-turns N` sets it when
 checks first start. The allowance and consumed count survive resume. Internal
-continuations count toward `--max-turns`. `ego run --goal TEXT`
+continuations count toward `--max-turns`. `ego run --goal TEXT` (also `ego resume ID --goal TEXT` and
+`ego continue ID --goal TEXT`)
 sets an operator-owned objective. The `goal` tool sets or updates a model-authored
-objective, but cannot replace an operator-owned active goal. Provider, permission,
-pause, cancellation and budget stops do not admit automatic work. Invalid checks
-and exhausted allowances emit a visible diagnostic and retain the active goal;
-they never claim achievement. ACP managed plan metadata exposes `goalStatus`,
+objective, but cannot replace an operator-owned active goal. Text output shows a
+`Goal (operator|automated): OBJECTIVE` receipt when a goal first appears and when
+the model updates it. Each automatic turn shows `Goal turn n of N: CONDITION`
+before its work output. A goal-check stop shows the objective, turns used, stop
+reason, last unmet condition and next actions: `/goal show`, `/goal achieve`,
+`/goal block`, and `--goal-turns N` (which sets the allowance when checks first
+start, not after it is exhausted). These receipts remain visible with `--quiet`;
+headless text sends them to stderr, not answer stdout. JSON/JSONL and ACP keep
+their existing structured contracts.
+
+The native status row includes `goal n/N` while a goal is active, including when
+a check stop retains that active goal. Until checks configure the durable
+allowance, the denominator is `pending`. The segment uses the existing
+width-bounded renderer; a disabled status row stays disabled. Achieved and
+blocked goals do not retain this active segment.
+
+Provider, permission, pause, cancellation and budget stops do not admit automatic
+work. Invalid checks and exhausted allowances emit a visible diagnostic and retain the active goal;
+they never claim achievement. ACP session objective metadata exposes `goalStatus`,
 `goalStop`, and `goalContinuationTurns` separately from work-turn completion.
 
 `--goal-check-command '["/path/to/check", "arg"]'` selects a command evaluator
 instead of a model. It receives objective and session evidence JSON on stdin
-and returns only `{ "achieved": true|false, "reason": "evidence or unmet condition" }`
-on stdout. Its exact exec authority must be granted by ordinary policy; it uses
-the same confinement and cancellation scope, with a 60-second timeout. Command
+and returns only
+`{ "verdict": "achieved|continue|needs_operator", "reason": "evidence or unmet condition" }`.
+The `verdict` is required and must be exactly one of those three values; the old
+`achieved` boolean is not accepted. `achieved` requires evidence of success.
+`continue` admits automatic work only when the agent can act on the unmet
+condition. `needs_operator` blocks the goal at once, records the reason and
+shows an actionable stop receipt without consuming an automatic work turn.
+Use it for login, approval, decisions or input that requires a person. A blocked
+goal is terminal: after resolving the blocker, `/goal set TEXT` starts a new
+goal. The stop receipt states this; `/goal achieve` and `/goal block` require an
+active goal. Model checks use the same contract and receive these instructions. The command writes
+its verdict on stdout. Its exact exec authority must be granted by ordinary
+policy; it uses the same confinement and cancellation scope, with a 60-second timeout. Command
 checks do not incur model cost. Model checks remain accounted generations.
 Stderr is not part of the verdict. If the command exits unsuccessfully, the
 visible goal-check diagnostic includes at most 4096 UTF-8 bytes from the end of
@@ -2153,10 +2619,15 @@ its bounded stderr preview. An exec allow rule does not grant filesystem access:
 the evaluator script and its inputs must be readable under the run confinement.
 
 
-Usage report v2 is the current closed contract: its role lines are `main`,
+Usage report v3 is the current closed contract: its role lines are `main`,
 `judge`, `goal_check`, `compaction`, `subagent`, `hook`, and `total`.
-`goal_check` is required in v2 reports, including zero usage; no legacy-report
+`goal_check` is required in v3 reports, including zero usage; no legacy-report
 decoder or compatibility default is provided.
+Cost `known` and `unknown` describe monetary spend only. Display-only standard
+API estimates are separate `subscription_equivalent` totals by currency, with
+missing or overflowing estimates in `subscription_unknown`. The text view labels
+them `subscription-equivalent (standard API)` and never presents subscription
+accounting zero as known monetary spend.
 
 ### Model-requested context changes
 
@@ -2253,3 +2724,164 @@ this locator after restart. Expired access tokens refresh before MCP dispatch.
 HTTP 401 triggers refresh without replaying the operation; retry the operation
 when requested. Missing or revoked credentials require a new explicit login.
 Servers that advertise only confidential-client authentication are not supported.
+
+
+### Session-owned file checkpoints
+
+Builtin `write` and `edit` save pre-edit bytes in private Git commit objects before
+changing files. This works in Git worktrees, including dirty and untracked files,
+without changing HEAD or the user's index. Outside Git, builtin results explicitly
+state that no checkpoint is available.
+
+```text
+ego checkpoint [-C DIR] SESSION_ID preview
+ego checkpoint [-C DIR] SESSION_ID restore CHECKPOINT_COMMIT
+ego checkpoint [-C DIR] SESSION_ID close
+```
+
+Preview emits JSON with each checkpoint's path, restore effect, and conflict state.
+Restore selects exactly one checkpoint and refuses external changes, missing edited
+files, external atomic replacements, symlinks, and permission changes. There is no force flag: preserve or resolve
+an external edit before retrying. Restore successive edits to a file newest first.
+A created file is deleted when its creation checkpoint is restored. Repeating a
+completed restore is safe. Binary preimages are preserved byte-for-byte.
+
+Refs live at `refs/ego/checkpoints/SESSION_ID`; normal exit keeps them for recovery.
+Explicit checkpoint close or `ego rm` removes the selected repository's session
+ref, without changing files. Git GC later removes unreachable objects. Child
+sessions own separate refs. With multiple repositories, close each with `-C`.
+Exec commands, MCP effects, arbitrary deletes, and external editors are not captured.
+Checkpoint objects contain original file bytes; do not push private checkpoint refs.
+### Named output styles
+
+`--output-style NAME` selects a response-style overlay for a CLI session or a
+served session launch (`ego acp`). With no selection, the prompt
+is unchanged. The built-in catalogue contains `concise` and `explanatory`.
+These names are reserved and cannot be overridden by user files.
+
+For a custom style, create `$EGO_HOME/output-styles/NAME.md` (or
+`~/.ego/output-styles/NAME.md` when `EGO_HOME` is unset). The file is plain
+UTF-8 prompt text, not a configuration or agent envelope. Names contain 1–80
+ASCII letters, digits, underscores or hyphens. Files must be nonempty, contain
+no NUL bytes, and be at most 64 KiB. Operator-owned catalogue and file symlinks
+are followed; the opened target must be a regular file. Missing or invalid styles
+refuse the run; there is no fallback to a workspace file. Install only styles you
+trust.
+
+The selected name and source (`builtin` or the user file path) appear in a
+diagnostic, not protocol stdout. Styles are explicit launch selections; they
+are not discovered from workspace files or stored as a session preference.
+To resume with a style, pass the flag again.
+
+Composition order is base instructions or `--system`, then the selected style,
+then `--append-system`, then a session prompt in append mode. A session prompt
+in replace mode suppresses the launch style and launch append. An explicit
+style is available with `--bare`, which disables ambient discovery, not launch
+options. Styles do not select tools, change permission policy, execute commands
+or expand `@file` text inside the style. The overlay affects model instructions,
+not the terminal renderer or the machine-readable output format.
+
+### Notebook cell edits
+
+`notebook_edit` is a builtin available through the same tool registry to CLI,
+ACP, and runtime consumers. Use `--tools notebook_edit` to select it explicitly.
+It accepts `path`, an explicit `edit_mode`, and mode-specific fields:
+
+- `replace`: `cell_id` and `new_source`. Change only the source of that cell.
+- `insert`: `cell_type` (`code` or `markdown`), `new_source`, and optional
+  `cell_id`. Insert after that ID, or at the start when the ID is omitted/null.
+- `delete`: `cell_id`. Remove that cell only.
+
+The file must be a valid UTF-8 nbformat 4.5 notebook with unique stable IDs,
+no larger than 16 MiB before or after the edit. Invalid files and missing IDs
+are refused without a write. Notebooks with integer tokens outside the i64/u64
+range are also refused to prevent rounding saved data. Inserted cells receive a
+new random ID. Existing IDs, metadata, outputs, execution counts, and attachments remain unchanged
+unless their cell is deleted. The tool does not execute a kernel or clear old
+outputs. JSON formatting can change; preservation is semantic, not byte-for-byte.
+
+Each call declares read and write effects on the same resolved file. A matching
+`write(pattern)` allow covers the supporting read, as for `edit`. Explicit read
+and write denies, workspace confinement, and plan mode still apply. Concurrent
+`notebook_edit` calls in one ego process are serialized. Do not edit the notebook
+from another process during a call: external writers do not share that lock,
+and a pre-publication reread is not an operating-system compare-and-swap.
+
+Reference contracts captured 2026-10-16:
+
+- <https://code.claude.com/docs/en/tools-reference.md>, NotebookEdit section:
+  cell-ID targeting, replace/insert/delete, and UTF-8 refusal. ego uses its own
+  lowercase tool name and requires an explicit edit mode.
+- <https://nbformat.readthedocs.io/en/latest/format_description.html>:
+  source representation, metadata, outputs, and stable ID rules.
+- `crates/ego-tools/src/tools/nbformat.v4.schema.json` is the Jupyter v4.5
+  schema recorded from
+  <https://raw.githubusercontent.com/jupyter/nbformat/main/nbformat/v4/nbformat.v4.schema.json>.
+  The upstream BSD license is stored beside it as `nbformat.LICENSE`.
+### External status producers
+
+Only system/user configuration or explicit flags can install
+`ui.statusline.providers.NAME = { argv = ["program", "arg"], timeout_ms = 250 }`.
+Project, local and agent-file configuration cannot install executable providers.
+A trusted interactive session runs each provider once when its session epoch
+opens, through the current exec policy and confinement. Rendering, resize and
+Git-status refresh never execute providers. Permission requests that do not
+settle under current policy omit the value and emit a diagnostic; no hidden
+human or model approval is requested.
+
+There are at most four providers, each with a timeout from 1 to 1000 ms (default
+250), at most 32 argv items and 4096 total argument bytes. The command must exit
+successfully, emit no stderr, and return one UTF-8 stdout line of at most 1024
+bytes, including an optional final newline. Binary, truncated, multiline and
+oversized output is omitted. Terminal controls are sanitized and known secrets
+are masked. Values are cached in the live seat, not persisted or admitted as
+instructions. Providers inherit the normal admitted exec environment; there is
+no shell expansion unless the operator explicitly selects a shell executable.
+
+
+### ACP audio input
+
+The durable ACP surface advertises audio input. This is a surface capability,
+not a promise that every selected model accepts audio. Submitting audio grants
+consent for durable session storage and provider transmission; the ACP host must
+obtain user-facing consent. Ego checks the resolved model on each generation,
+including resumed history and fallback. Unsupported or unknown models refuse
+before audio is sent; ego does not drop or transcribe audio.
+
+The supported contract is public OpenAI Chat Completions, exact model
+`openai/gpt-audio-1.5`, with text output. Supply its row in `models.toml` because
+the pinned builtin catalogue does not contain it:
+
+```toml
+[model."openai/gpt-audio-1.5".capabilities]
+schema_version = 6
+max_context_tokens = 128000
+max_output_tokens = 16384
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["off"] }
+default_reasoning_effort = "off"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+image_input = "unsupported"
+audio_input = "supported_wav"
+```
+
+Audio requires explicit ACP `mimeType: "audio/wav"` and base64 data. Ego admits
+PCM16 WAV only, mono or stereo, at most 48 kHz and sixty seconds per clip. A prompt
+can contain at most four clips and 10 MiB of decoded audio in total. These are ego
+limits, not documented provider maxima. Mixed image/audio prompts are refused.
+No remote URLs, inferred MIME, transcoding or raw PCM input is accepted.
+
+Exact validated bytes are committed into the session blob store before the
+journal references them. Replay checks the reference and encoding again. Missing
+or corrupt blobs cause an explicit refusal; they are never fetched again or
+silently omitted. The operator must preserve the session blob store with its log.
+
+Audio-specific pricing is not represented by text-token quotes. Monetary ceilings
+fail closed for this model; no-ceiling runs can report unknown cost. No paid audio
+acceptance probe is part of this feature's validation. Provider contract sources:
+<https://developers.openai.com/api/docs/models/gpt-audio-1.5.md> and
+<https://developers.openai.com/api/docs/guides/audio-chat-completions.md>, read
+2026-10-20.

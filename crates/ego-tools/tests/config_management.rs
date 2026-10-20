@@ -219,7 +219,7 @@ fn nested_insertion_pruning_preserves_unrelated_profile_content_and_comments() {
             .unwrap()
             .mode
             .map(|mode| mode.as_str()),
-        Some("edits")
+        Some("accept-edits")
     );
     assert!(after_set.contains("# retain this valid field"));
     store
@@ -238,7 +238,7 @@ fn nested_insertion_pruning_preserves_unrelated_profile_content_and_comments() {
             .unwrap()
             .mode
             .map(|mode| mode.as_str()),
-        Some("edits")
+        Some("accept-edits")
     );
     assert!(text.contains("# retain this valid field"));
 }
@@ -251,16 +251,16 @@ fn invalid_target_key_and_value_are_refused_before_replace() {
     let store = adapter(&path, &io);
     assert!(ManagedConfigValue::parse(ManagedConfigKey::Budget, "'not-a-budget'").is_err());
     assert!(
-        ManagedConfigValue::parse(ManagedConfigKey::StatuslineSegments, "['model', 'model']")
+        ManagedConfigValue::parse(ManagedConfigKey::StatuslineTemplate, "['model', 'model']")
             .is_err()
     );
     let valid =
-        ManagedConfigValue::parse(ManagedConfigKey::StatuslineSegments, "['model']").unwrap();
+        ManagedConfigValue::parse(ManagedConfigKey::StatuslineTemplate, "'{{ prompt }}'").unwrap();
     assert!(
         store
             .mutate(UserConfigMutation::ManagedSet {
                 target: UserConfigTarget::Profile(ProfileName::parse("dev").unwrap()),
-                key: ManagedConfigKey::StatuslineSegments,
+                key: ManagedConfigKey::StatuslineTemplate,
                 value: valid,
             })
             .is_err()
@@ -361,7 +361,7 @@ fn concurrent_distinct_managed_writes_serialize_without_lost_updates() {
     }
     let text = std::fs::read_to_string(&path).unwrap();
     let parsed = ConfigLayer::parse(Source::User, &text).unwrap().value;
-    assert_eq!(parsed.mode.map(|mode| mode.as_str()), Some("edits"));
+    assert_eq!(parsed.mode.map(|mode| mode.as_str()), Some("accept-edits"));
     assert_eq!(parsed.bare, Some(true));
 }
 

@@ -22,7 +22,7 @@ fn trust_prompt_names_absolute_files_and_explains_yes_and_no() {
             "No: continue without project files.",
         ] {
             assert!(
-                result.stdout.contains(expected),
+                support::notice_prose(&result.stdout).contains(expected),
                 "missing {expected}: {}",
                 result.stdout
             );

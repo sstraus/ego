@@ -7,10 +7,11 @@ use ego_cli::repl::actions::{
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
-const NAMES: [&str; 30] = [
+const NAMES: [&str; 33] = [
     "help",
     "model",
     "thinking",
+    "fast",
     "mode",
     "plan",
     "yolo",
@@ -36,6 +37,8 @@ const NAMES: [&str; 30] = [
     "expand",
     "skills",
     "hooks",
+    "memory",
+    "init",
     "retry",
     "version",
 ];
@@ -125,6 +128,49 @@ fn menu_display_is_not_authorization_and_dispatch_rechecks_current_snapshot() {
             reason: "action is no longer available",
         }
     );
+}
+
+#[test]
+fn busy_compact_refusal_is_not_reported_as_a_stale_action() {
+    // Catches: typing /compact during active work reports a removed menu action.
+    let registry =
+        ActionRegistry::final_surface().with_availability(ActionId::Compact, Availability::Busy);
+    let displayed = registry.snapshot();
+    assert_eq!(
+        registry.dispatch(ActionId::Compact, &displayed),
+        Dispatch::Refused {
+            reason: "ego is busy; wait for the current work to finish"
+        }
+    );
+    let selection = registry.select(ActionId::Compact, &displayed).unwrap();
+    let mut sink = RecordingSink { calls: Vec::new() };
+    assert_eq!(
+        registry.dispatch_to(selection, &displayed, true, &mut sink),
+        ActionDispatch::Refused {
+            reason: "ego is busy; wait for the current work to finish"
+        }
+    );
+    assert!(sink.calls.is_empty());
+}
+
+#[test]
+fn busy_compact_refusal_preserves_the_coordinator_reason() {
+    // Catches: a known compaction is reduced to an unhelpful generic busy notice.
+    let reason = "ego is busy; compaction already running";
+    let registry = ActionRegistry::final_surface()
+        .with_availability(ActionId::Compact, Availability::BusyWithReason { reason });
+    let displayed = registry.snapshot();
+    assert_eq!(
+        registry.dispatch(ActionId::Compact, &displayed),
+        Dispatch::Refused { reason }
+    );
+    let selection = registry.select(ActionId::Compact, &displayed).unwrap();
+    let mut sink = RecordingSink { calls: Vec::new() };
+    assert_eq!(
+        registry.dispatch_to(selection, &displayed, true, &mut sink),
+        ActionDispatch::Refused { reason }
+    );
+    assert!(sink.calls.is_empty());
 }
 
 #[test]
@@ -334,5 +380,159 @@ fn resume_accepts_repeatable_answer_flags_without_splitting_json_values() {
             "0192f3a1-0000-7000-8000-000000000002=not-json".into(),
         ])
         .is_err()
+    );
+}
+
+#[test]
+fn fast_contract_catches_invalid_or_prompt_routed_tier_commands() {
+    let registry = ActionRegistry::final_surface();
+    for (text, enabled) in [("/fast on", true), ("/fast off", false)] {
+        assert_eq!(
+            registry.classify(registry.submit(text, InputOrigin::Typed)),
+            Dispatch::Fast(enabled)
+        );
+    }
+    for text in ["/fast", "/fast turbo", "/fast on extra"] {
+        assert!(matches!(
+            registry.classify(registry.submit(text, InputOrigin::Typed)),
+            Dispatch::Refused { .. }
+        ));
+    }
+    assert_eq!(
+        registry.classify(registry.submit("/fast on", InputOrigin::BracketedPaste)),
+        Dispatch::Prompt
+    );
+}
+
+// Catches: a remapped action dispatches its stale default, or help advertises it.
+#[test]
+fn custom_shortcuts_replace_defaults_and_publish_the_effective_keys() {
+    let registry = ActionRegistry::final_surface()
+        .with_keybindings(&std::collections::BTreeMap::from([
+            (
+                "model".to_owned(),
+                vec!["Ctrl+P".to_owned(), "F2".to_owned()],
+            ),
+            ("expand".to_owned(), Vec::new()),
+        ]))
+        .unwrap();
+    for code in [KeyCode::Char('p'), KeyCode::Char('P')] {
+        assert_eq!(
+            registry.resolve_key(KeyEvent::new(code, KeyModifiers::CONTROL)),
+            Some(ActionId::Model)
+        );
+    }
+    assert_eq!(
+        registry.resolve_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+        Some(ActionId::Model)
+    );
+    assert_eq!(registry.resolve_shortcut('p'), None);
+    assert_eq!(registry.resolve_shortcut('o'), None);
+    assert_eq!(
+        registry.resolve_key(KeyEvent::new(KeyCode::Char('π'), KeyModifiers::NONE)),
+        None
+    );
+    let labels = registry
+        .keys()
+        .into_iter()
+        .map(|key| key.label)
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"Ctrl+P".to_owned()));
+    assert!(labels.contains(&"F2".to_owned()));
+    assert!(!labels.contains(&"Option+P".to_owned()));
+    assert!(!labels.contains(&"Option+O".to_owned()));
+}
+
+// Catches: normalized aliases collide, or overriding one action steals another's default.
+#[test]
+fn custom_shortcuts_reject_conflicts_but_allow_atomic_swaps() {
+    let map = |pairs: &[(&str, &[&str])]| {
+        pairs
+            .iter()
+            .map(|(name, keys)| {
+                (
+                    (*name).to_owned(),
+                    keys.iter().map(|key| (*key).to_owned()).collect(),
+                )
+            })
+            .collect()
+    };
+    for bindings in [
+        map(&[("model", &["Alt+O"])]),
+        map(&[("model", &["Alt+X", "Option+x"])]),
+        map(&[("model", &["Ctrl+P"]), ("help", &["ctrl+p"])]),
+    ] {
+        assert!(
+            ActionRegistry::final_surface()
+                .with_keybindings(&bindings)
+                .unwrap_err()
+                .contains("conflicts")
+        );
+    }
+    let swapped = ActionRegistry::final_surface()
+        .with_keybindings(&map(&[("model", &["Option+O"]), ("expand", &["Meta+P"])]))
+        .unwrap();
+    assert_eq!(swapped.resolve_shortcut('o'), Some(ActionId::Model));
+    assert_eq!(swapped.resolve_shortcut('p'), Some(ActionId::Expand));
+    assert_eq!(
+        swapped.resolve_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::META)),
+        Some(ActionId::Expand)
+    );
+}
+
+// Catches: a custom shortcut consumes human text, a terminal alias or a reserved host control.
+#[test]
+fn custom_shortcuts_cannot_capture_text_ime_or_reserved_controls() {
+    for key in [
+        "p",
+        "é",
+        "Ctrl+I",
+        "Ctrl+J",
+        "Ctrl+M",
+        "Ctrl+H",
+        "Ctrl+C",
+        "Ctrl+D",
+        "Ctrl+Z",
+        "Ctrl+S",
+        "Ctrl+B",
+        "Ctrl+V",
+        "Esc",
+        "Enter",
+        "Up",
+        "Ctrl+Enter",
+        "Ctrl+[",
+        "Ctrl+Alt+E",
+        "F0",
+        "F13",
+    ] {
+        let map = std::collections::BTreeMap::from([("model".into(), vec![key.into()])]);
+        assert!(
+            ActionRegistry::final_surface()
+                .with_keybindings(&map)
+                .is_err(),
+            "{key}"
+        );
+    }
+    let registry = ActionRegistry::final_surface()
+        .with_keybindings(&Default::default())
+        .unwrap();
+    for (code, modifiers) in [
+        (KeyCode::Char('é'), KeyModifiers::NONE),
+        (
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ),
+        (KeyCode::Char('p'), KeyModifiers::NONE),
+    ] {
+        assert_eq!(registry.resolve_key(KeyEvent::new(code, modifiers)), None);
+    }
+    assert!(
+        ActionRegistry::final_surface()
+            .with_keybindings(&std::collections::BTreeMap::from([(
+                "history".into(),
+                vec!["F2".into()]
+            ),]))
+            .unwrap_err()
+            .contains("unknown keybinding action")
     );
 }

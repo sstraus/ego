@@ -40,11 +40,35 @@ pub enum Mode {
     Plan,
     Default,
     Auto,
+    #[serde(rename = "accept-edits", alias = "edits")]
     Edits,
     Yolo,
 }
 
 impl Mode {
+    /// Public selection and cycle order. Default is the ordinary deterministic permission policy.
+    pub const SELECTABLE: [Self; 5] = [
+        Self::Plan,
+        Self::Default,
+        Self::Auto,
+        Self::Edits,
+        Self::Yolo,
+    ];
+
+    pub fn parse_selection(value: &str) -> Option<Self> {
+        Self::SELECTABLE
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::SELECTABLE
+            .iter()
+            .position(|mode| *mode == self)
+            .expect("every permission mode is selectable");
+        Self::SELECTABLE[(index + 1) % Self::SELECTABLE.len()]
+    }
+
     /// Whether this mode stays under the approved system maximum.
     pub const fn within(self, maximum: Self) -> bool {
         self.ceiling_rank() <= maximum.ceiling_rank()
@@ -65,7 +89,7 @@ impl Mode {
             Mode::Plan => "plan",
             Mode::Default => "default",
             Mode::Auto => "auto",
-            Mode::Edits => "edits",
+            Mode::Edits => "accept-edits",
             Mode::Yolo => "yolo",
         }
     }
@@ -354,7 +378,7 @@ pub enum McpLayerEntry {
     Tombstone,
 }
 
-/// One current MCP transport configuration.
+/// One explicitly selected MCP transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpServerConfig {
     Stdio(McpStdioConfig),
@@ -503,9 +527,28 @@ impl<'de> Deserialize<'de> for McpHttpUrl {
     }
 }
 
-/// A stateless HTTP MCP server after URL-policy validation.
+/// Wire contract for an HTTP server. Errors never change this selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpHttpProfile {
+    #[default]
+    Current,
+    LegacySse,
+}
+
+impl McpHttpProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::LegacySse => "legacy-sse",
+        }
+    }
+}
+
+/// An HTTP MCP server after URL-policy validation and explicit profile selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpHttpConfig {
+    pub profile: McpHttpProfile,
     pub url: McpHttpUrl,
     pub auth: McpHttpAuth,
     pub allow_insecure_loopback: bool,
@@ -518,6 +561,7 @@ impl McpHttpConfig {
         allow_insecure_loopback: bool,
     ) -> Result<Self, McpValueError> {
         let config = Self {
+            profile: McpHttpProfile::Current,
             url: url.into(),
             auth,
             allow_insecure_loopback,
@@ -610,6 +654,8 @@ enum McpStdioTransport {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct McpHttpWire {
+    #[serde(default)]
+    profile: McpHttpProfile,
     transport: McpHttpTransport,
     url: McpHttpUrl,
     #[serde(default)]
@@ -652,7 +698,10 @@ impl McpEntryWire {
             Self::Http(wire) => {
                 let _ = wire.transport;
                 McpHttpConfig::new(wire.url, wire.auth, wire.allow_insecure_loopback)
-                    .map(McpServerConfig::Http)
+                    .map(|mut config| {
+                        config.profile = wire.profile;
+                        McpServerConfig::Http(config)
+                    })
                     .map(|server| layer_entry(server, wire.enabled))
             }
             Self::Tombstone(wire) if wire.removed => Ok(McpLayerEntry::Tombstone),
@@ -707,6 +756,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
 /// row on every launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusSegmentName {
+    Fast,
     Model,
     Effort,
     Mode,
@@ -740,38 +790,12 @@ impl<'de> Deserialize<'de> for StatusSegmentName {
     }
 }
 
-pub(super) fn validate_status_segment_names(names: &[String]) -> Result<(), String> {
-    let segments = names
-        .iter()
-        .map(|name| {
-            StatusSegmentName::from_name(name)
-                .ok_or_else(|| format!("unknown status-line segment `{name}`"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    validate_unique_status_segments(&segments)
-}
-
-pub(super) fn validate_unique_status_segments(
-    segments: &[StatusSegmentName],
-) -> Result<(), String> {
-    let mut unique = Vec::with_capacity(segments.len());
-    for segment in segments {
-        if unique.contains(segment) {
-            return Err(format!(
-                "duplicate status-line segment `{}`",
-                segment.as_str()
-            ));
-        }
-        unique.push(*segment);
-    }
-    Ok(())
-}
-
 impl StatusSegmentName {
     /// Every accepted persisted spelling.
     pub const NAMES: &[&str] = &[
         "model",
         "effort",
+        "fast",
         "mode",
         "context",
         "cost",
@@ -788,6 +812,7 @@ impl StatusSegmentName {
         match name {
             "model" => Some(Self::Model),
             "effort" => Some(Self::Effort),
+            "fast" => Some(Self::Fast),
             "mode" => Some(Self::Mode),
             "context" => Some(Self::Context),
             "cost" => Some(Self::Cost),
@@ -806,6 +831,7 @@ impl StatusSegmentName {
         match self {
             Self::Model => "model",
             Self::Effort => "effort",
+            Self::Fast => "fast",
             Self::Mode => "mode",
             Self::Context => "context",
             Self::Cost => "cost",
@@ -823,19 +849,50 @@ impl StatusSegmentName {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatuslineLayer {
-    #[serde(default, deserialize_with = "status_segments")]
-    pub segments: Option<Vec<StatusSegmentName>>,
+    pub template: Option<String>,
+    #[serde(default, deserialize_with = "status_providers")]
+    pub providers: Option<std::collections::BTreeMap<String, StatusProvider>>,
 }
 
-fn status_segments<'de, D>(deserializer: D) -> Result<Option<Vec<StatusSegmentName>>, D::Error>
+/// One opt-in argv-native status producer; never evaluated while painting.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusProvider {
+    pub argv: Vec<String>,
+    #[serde(default = "status_provider_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn status_provider_timeout() -> u64 {
+    250
+}
+
+fn status_providers<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::collections::BTreeMap<String, StatusProvider>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let segments = Option::<Vec<StatusSegmentName>>::deserialize(deserializer)?;
-    if let Some(segments) = &segments {
-        validate_unique_status_segments(segments).map_err(serde::de::Error::custom)?;
+    let providers =
+        Option::<std::collections::BTreeMap<String, StatusProvider>>::deserialize(deserializer)?;
+    if let Some(providers) = &providers
+        && (providers.len() > 4
+            || providers.iter().any(|(name, provider)| {
+                name.is_empty()
+                    || name.len() > 40
+                    || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    || provider.argv.is_empty()
+                    || provider.argv.len() > 32
+                    || provider.argv.iter().any(|arg| arg.contains('\0'))
+                    || provider.argv.iter().map(String::len).sum::<usize>() > 4096
+                    || !(1..=1000).contains(&provider.timeout_ms)
+            }))
+    {
+        return Err(serde::de::Error::custom(
+            "status providers require at most four named argv commands, each at most 4096 bytes and 1..1000ms",
+        ));
     }
-    Ok(segments)
+    Ok(providers)
 }
 
 /// The strict `[ui]` schema.
@@ -843,6 +900,9 @@ where
 #[serde(deny_unknown_fields)]
 pub struct UiLayer {
     pub statusline: Option<StatuslineLayer>,
+    /// User/process-only keyboard preferences; not merged into session policy.
+    pub keybindings: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    pub vim: Option<bool>,
 }
 
 /// Non-secret authentication overrides for one provider.
@@ -1037,14 +1097,6 @@ impl ConfigLayer {
                         source,
                         message: "roots paths must be absolute or start with ~/".into(),
                     });
-                }
-                if root.access == crate::permit::RootAccess::Read
-                    && roots.iter().any(|other| {
-                        other.access == crate::permit::RootAccess::ReadWrite
-                            && root.path.starts_with(&other.path)
-                    })
-                {
-                    return Err(ConfigError::Invalid { source, message: "nested-read-only-root: a read root beneath a read-write root cannot be enforced by Landlock".into() });
                 }
             }
         }

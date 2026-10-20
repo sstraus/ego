@@ -470,12 +470,31 @@ mod registration {
                 "exec_status",
                 "glob",
                 "grep",
+                "notebook_edit",
                 "read",
                 "read_tool_result",
                 "web_fetch",
                 "write"
             ]
         );
+    }
+
+    // Catches: the model-facing schema hides bulk mode or makes safe omitted mode invalid.
+    #[test]
+    fn replace_all_descriptor_exposes_an_optional_false_default_boolean() {
+        let ws = Workspace::new();
+        let descriptor = ws.tool("edit").descriptor();
+        let schema = descriptor.schema.to_value();
+        assert_eq!(schema["properties"]["replace_all"]["type"], "boolean");
+        assert_eq!(schema["properties"]["replace_all"]["default"], false);
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("replace_all"))
+        );
+        assert!(descriptor.description.contains("replace_all=true"));
+        assert!(descriptor.description.contains("original non-overlapping"));
     }
 
     #[test]
@@ -530,6 +549,7 @@ mod registration {
     #[test]
     fn the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for() {
         let ws = populated();
+        ws.file("sample.ipynb", &notebook_edit::notebook().to_string());
         // One representative call per builtin. Not exhaustive over arguments
         // — a tool that asked for a *different* op shape depending on its
         // parameters would be a tool whose authority is unpredictable, which
@@ -543,6 +563,11 @@ mod registration {
             ("grep", json!({ "query": "TODO", "path": "src" })),
             ("web_fetch", json!({ "url": "https://example.com/" })),
             ("write", json!({ "path": "src/new.rs", "contents": "hi\n" })),
+            (
+                "notebook_edit",
+                json!({"path": "sample.ipynb", "edit_mode": "replace",
+                    "cell_id": "code-1", "new_source": "print(2)"}),
+            ),
             (
                 "edit",
                 json!({ "path": "src/main.rs", "old_string": "hello", "new_string": "goodbye" }),
@@ -1098,6 +1123,165 @@ mod edit {
         );
     }
 
+    // Catches: a guarded edit changing the file but dropping its measured
+    // line metadata before the turn's terminal receipt can read the result.
+    #[test]
+    fn guarded_edit_result_carries_the_lines_it_changed() {
+        let ws = editable();
+        let tool = ws.tool("edit");
+        let call = tool
+            .prepare(
+                json!({
+                    "path": "src/main.rs",
+                    "old_string": "    todo!()\n",
+                    "new_string": "    println!(\"done\");\n",
+                }),
+                &ws.ctx(),
+            )
+            .unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &ws.fs,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        let ToolExecution::Complete(result) = block_on(tool.execute(call, &guarded)).unwrap()
+        else {
+            panic!("edit must complete without input");
+        };
+        assert_eq!(
+            result.line_change(),
+            Some(ego_core::permit::LineChange {
+                added: 1,
+                removed: 1,
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    println!(\"done\");\n}\n"
+        );
+    }
+
+    // Catches: explicit bulk edits are rejected as ambiguous instead of replacing original matches.
+    #[test]
+    fn replace_all_edits_original_non_overlapping_matches_and_reports_lines() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        ws.file("src/main.rs", "aaaa\naaaa\n");
+        let tool = ws.tool("edit");
+        let call = ws.prepare("edit", json!({
+            "path": "src/main.rs", "old_string": "aa", "new_string": "aaa", "replace_all": true
+        })).unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &ws.fs,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        let ToolExecution::Complete(result) = block_on(tool.execute(call, &guarded)).unwrap()
+        else {
+            panic!("edit must complete");
+        };
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "aaaaaa\naaaaaa\n"
+        );
+        assert_eq!(
+            result.line_change(),
+            Some(ego_core::permit::LineChange {
+                added: 2,
+                removed: 2
+            })
+        );
+        assert!(result.model_text().contains("replaced 4 occurrences"));
+    }
+
+    // Catches: false mode silently inherits bulk behavior or absent text creates content.
+    #[test]
+    fn replace_all_keeps_default_unique_safety_and_rejects_invalid_text() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "old old\n");
+        for params in [
+            json!({"old_string":"old", "new_string":"new"}),
+            json!({"old_string":"old", "new_string":"new", "replace_all":false}),
+            json!({"old_string":"missing", "new_string":"new", "replace_all":true}),
+            json!({"old_string":"", "new_string":"new", "replace_all":true}),
+            json!({"old_string":"old", "new_string":"old", "replace_all":true}),
+        ] {
+            let mut params = params;
+            params["path"] = json!("src/main.rs");
+            assert!(ws.call("edit", params).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), "old old\n");
+        }
+        fs::write(&path, [0xff, b'o', b'l', b'd']).unwrap();
+        assert!(ws.call("edit", json!({"path":"src/main.rs", "old_string":"old", "new_string":"new", "replace_all":true})).is_err());
+        assert_eq!(fs::read(&path).unwrap(), [0xff, b'o', b'l', b'd']);
+    }
+
+    // Catches: bulk mode bypasses explicit read or write denies through write support authority.
+    #[test]
+    fn replace_all_respects_read_and_write_denials() {
+        for deny in ["read(src/**)", "write(src/**)"] {
+            let rules = Ruleset::from_layer(
+                PermCfg {
+                    judge: None,
+                    allow: vec![Rule::load("write(src/**)").unwrap()],
+                    deny: vec![Rule::load(deny).unwrap()],
+                },
+                Source::Project,
+            );
+            let ws = Workspace::with_rules(Mode::Edits, rules);
+            let path = ws.file("src/main.rs", "old old\n");
+            let call = ws.prepare("edit", json!({"path":"src/main.rs", "old_string":"old", "new_string":"new", "replace_all":true})).unwrap();
+            assert!(ws.authorize(call).is_err(), "{deny}");
+            assert_eq!(fs::read_to_string(path).unwrap(), "old old\n");
+        }
+    }
+
+    // Catches: bulk preparation reads content before authorization or loses mode in the pending call.
+    #[test]
+    fn replace_all_prepares_without_reading_file_contents_and_exposes_mode() {
+        let ws = Workspace::in_mode(Mode::Default);
+        let path = ws.file("src/main.rs", "old old\n");
+        fs::write(&path, [0xff]).unwrap();
+        let prepare = |mode| {
+            ws.prepare("edit", json!({"path":"src/main.rs", "old_string":"old", "new_string":"new", "replace_all":mode})).unwrap()
+        };
+        let bulk = prepare(true);
+        let unique = prepare(false);
+        assert_ne!(bulk.authority_fingerprint(), unique.authority_fingerprint());
+        let Classification::Ask(pending) = ws.policy.classify(bulk) else {
+            panic!("default mode asks");
+        };
+        let Resolution::Ask(request) = block_on(ws.policy.settle(pending)) else {
+            panic!("permission stays open");
+        };
+        assert!(
+            request
+                .request()
+                .to_string()
+                .contains("all original non-overlapping occurrences")
+        );
+        assert_eq!(fs::read(path).unwrap(), [0xff]);
+    }
+
+    // Catches: replacement deletions or Unicode multiline boundaries corrupt unaffected content.
+    #[test]
+    fn replace_all_handles_unicode_multiline_and_deletion() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "head\nα\nβ\nkeep\nα\nβ\ntail\n");
+        let result = ws.call("edit", json!({"path":"src/main.rs", "old_string":"α\nβ\n", "new_string":"", "replace_all":true})).unwrap();
+        assert!(result.contains("replaced 2 occurrences"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "head\nkeep\ntail\n");
+    }
+
     #[test]
     fn edit_refuses_text_that_is_not_in_the_file_and_changes_nothing() {
         // The whole reason `edit` is not `write`: it may only land where the
@@ -1177,6 +1361,7 @@ mod edit {
                 Op::Write {
                     path,
                     change: Change::Replace {
+                        replace_all: false,
                         old_string: "todo!()".to_string(),
                         new_string: "ok()".to_string(),
                     },
@@ -2349,6 +2534,7 @@ mod end_to_end {
     fn caps() -> ModelCapabilities {
         ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens: Some(200_000),
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -2791,5 +2977,289 @@ mod native_web {
             .prepare(json!({"url":"https://blocked.test/"}), &ws.ctx())
             .unwrap();
         assert!(ws.authorize(call).is_err());
+    }
+}
+
+#[test]
+fn builtin_write_and_edit_checkpoint_real_preimages_but_failed_edit_does_not() {
+    // Catches: wiring capture only to write, or capturing an edit that never mutates.
+    use ego_tools::checkpoint::CheckpointFs;
+    let ws = Workspace::in_mode(Mode::Yolo);
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&ws.root)
+        .args(["init", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let path = ws.file("target", "original bytes");
+    let session = SessionId::new();
+    let filesystem = CheckpointFs::new(session);
+    let invoke = |name: &str, params| {
+        let tool = ws.tool(name);
+        let call = tool.prepare(params, &ws.ctx()).unwrap();
+        let (call, permit) = ws.authorize(call).unwrap().into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &filesystem,
+            &ws.process,
+            &ws.evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        );
+        block_on(tool.execute(call, &guarded))
+    };
+    invoke("write", json!({"path":"target", "contents":"one"})).unwrap();
+    invoke(
+        "edit",
+        json!({"path":"target", "old_string":"one", "new_string":"two"}),
+    )
+    .unwrap();
+    assert!(
+        invoke(
+            "edit",
+            json!({"path":"target", "old_string":"missing", "new_string":"three"})
+        )
+        .is_err()
+    );
+    let preview = CheckpointFs::preview(&ws.root, session).unwrap();
+    assert_eq!(preview.len(), 2);
+    assert_eq!(fs::read(&path).unwrap(), b"two");
+    CheckpointFs::restore(&ws.root, session, &preview[0].checkpoint).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"one");
+    CheckpointFs::restore(&ws.root, session, &preview[1].checkpoint).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"original bytes");
+}
+
+mod notebook_edit {
+    use super::*;
+
+    pub(super) fn notebook() -> serde_json::Value {
+        json!({
+            "nbformat": 4, "nbformat_minor": 5,
+            "metadata": {"custom": {"owner": "user"}},
+            "cells": [
+                {"id": "code-1", "cell_type": "code", "source": ["print(1)\n"],
+                 "metadata": {"custom": true}, "execution_count": 7,
+                 "outputs": [{"output_type": "stream", "name": "stdout", "text": ["1\n"]}]},
+                {"id": "markdown-1", "cell_type": "markdown", "source": "# Title",
+                 "metadata": {"tags": ["keep"]}, "attachments": {"image.png": {"image/png": "AA=="}}}
+            ]
+        })
+    }
+
+    fn setup() -> (Workspace, PathBuf, serde_json::Value) {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let before = notebook();
+        let path = ws.file("sample.ipynb", &serde_json::to_string(&before).unwrap());
+        (ws, path, before)
+    }
+
+    fn disk(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    // Catches: replacing a code cell drops outputs, IDs, or unrelated metadata.
+    #[test]
+    fn replace_preserves_everything_except_the_target_source() {
+        let (ws, path, mut expected) = setup();
+        ws.call(
+            "notebook_edit",
+            json!({"path": "sample.ipynb", "edit_mode": "replace",
+            "cell_id": "code-1", "new_source": "print(2)\n"}),
+        )
+        .unwrap();
+        expected["cells"][0]["source"] = json!("print(2)\n");
+        assert_eq!(disk(&path), expected);
+    }
+
+    // Catches: the Value codec rounds large integers in untouched notebook state.
+    #[test]
+    fn out_of_range_integers_refuse_edits_without_rounding_original_text() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        for numeral in ["18446744073709551617", "-9223372036854775809"] {
+            for location in ["metadata", "output"] {
+                let template = if location == "metadata" {
+                    r#"{"nbformat":4,"nbformat_minor":5,"metadata":{"seed":NUMBER},"cells":[{"id":"target","cell_type":"code","source":"old","metadata":{},"execution_count":null,"outputs":[]}]}"#
+                } else {
+                    r#"{"nbformat":4,"nbformat_minor":5,"metadata":{},"cells":[{"id":"target","cell_type":"code","source":"old","metadata":{},"execution_count":null,"outputs":[{"output_type":"display_data","metadata":{},"data":{"application/json":{"seed":NUMBER}}}]}]}"#
+                };
+                let before = template.replace("NUMBER", numeral);
+                let path = ws.file("sample.ipynb", &before);
+                let error = ws
+                    .call(
+                        "notebook_edit",
+                        json!({"path": "sample.ipynb", "edit_mode": "replace",
+                        "cell_id": "target", "new_source": "new"}),
+                    )
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("integer outside"), "{error}");
+                let after = fs::read_to_string(path).unwrap();
+                assert!(after.contains(numeral), "{after}");
+                assert_eq!(after, before);
+            }
+        }
+    }
+
+    // Catches: the loss-prevention scan rejects exact boundary integers or string contents.
+    #[test]
+    fn exact_integer_boundaries_and_escaped_numeral_strings_remain_editable() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let before = r#"{"nbformat":4,"nbformat_minor":5,"metadata":{"min":-9223372036854775808,"max":18446744073709551615,"float":1.5e+20,"text":"quoted \"18446744073709551617\" and slash \\"},"cells":[{"id":"target","cell_type":"markdown","source":"old","metadata":{}}]}"#;
+        let path = ws.file("sample.ipynb", before);
+        ws.call(
+            "notebook_edit",
+            json!({"path": "sample.ipynb", "edit_mode": "replace",
+                "cell_id": "target", "new_source": "new"}),
+        )
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains("-9223372036854775808"), "{after}");
+        assert!(after.contains("18446744073709551615"), "{after}");
+        let mut expected: serde_json::Value = serde_json::from_str(before).unwrap();
+        expected["cells"][0]["source"] = json!("new");
+        assert_eq!(disk(&path), expected);
+    }
+
+    // Catches: replacing markdown strips attachments or changes the neighboring code cell.
+    #[test]
+    fn markdown_replace_preserves_attachments_and_code_outputs() {
+        let (ws, path, mut expected) = setup();
+        ws.call(
+            "notebook_edit",
+            json!({"path": "sample.ipynb", "edit_mode": "replace",
+            "cell_id": "markdown-1", "new_source": "# Updated"}),
+        )
+        .unwrap();
+        expected["cells"][1]["source"] = json!("# Updated");
+        assert_eq!(disk(&path), expected);
+    }
+
+    // Catches: insertion uses the wrong anchor or renumbers existing stable IDs.
+    #[test]
+    fn insert_code_and_markdown_then_delete_preserves_original_cells() {
+        let (ws, path, before) = setup();
+        for (anchor, kind, expected_index) in [(None, "markdown", 0), (Some("code-1"), "code", 2)] {
+            ws.call(
+                "notebook_edit",
+                json!({"path": "sample.ipynb", "edit_mode": "insert",
+                "cell_id": anchor, "cell_type": kind, "new_source": "new cell"}),
+            )
+            .unwrap();
+            let after = disk(&path);
+            let cell = &after["cells"][expected_index];
+            assert_eq!(cell["cell_type"], kind);
+            assert_eq!(cell["source"], "new cell");
+            let id = cell["id"].as_str().unwrap();
+            assert!(!["code-1", "markdown-1"].contains(&id));
+            if kind == "code" {
+                assert_eq!(cell["outputs"], json!([]));
+                assert!(cell["execution_count"].is_null());
+            }
+        }
+        let ids: Vec<String> = disk(&path)["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|cell| cell["id"].as_str())
+            .filter(|id| !["code-1", "markdown-1"].contains(id))
+            .map(str::to_owned)
+            .collect();
+        for id in ids {
+            ws.call(
+                "notebook_edit",
+                json!({"path": "sample.ipynb", "edit_mode": "delete", "cell_id": id}),
+            )
+            .unwrap();
+        }
+        assert_eq!(disk(&path), before);
+    }
+
+    // Catches: schema errors or stale IDs fall through to a whole-file write.
+    #[test]
+    fn invalid_notebooks_and_missing_ids_never_write() {
+        let (ws, path, before) = setup();
+        let mut invalid_output = before.clone();
+        invalid_output["cells"][0]["outputs"] = json!([{"output_type": "stream", "text": 3}]);
+        let mut duplicate = before.clone();
+        duplicate["cells"][1]["id"] = json!("code-1");
+        let mut missing = before.clone();
+        missing["cells"][0].as_object_mut().unwrap().remove("id");
+        let mut unsupported = before.clone();
+        unsupported["nbformat_minor"] = json!(4);
+        for bytes in [
+            b"not json".to_vec(),
+            vec![0xff],
+            serde_json::to_vec(&invalid_output).unwrap(),
+            serde_json::to_vec(&duplicate).unwrap(),
+            serde_json::to_vec(&missing).unwrap(),
+            serde_json::to_vec(&unsupported).unwrap(),
+            serde_json::to_vec(&before).unwrap(),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(
+                ws.call(
+                    "notebook_edit",
+                    json!({"path": "sample.ipynb", "edit_mode": "replace",
+                "cell_id": "missing", "new_source": "new"})
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    // Catches: two notebook calls read the same snapshot and lose one edit.
+    #[test]
+    fn concurrent_notebook_edits_keep_both_cell_changes() {
+        let (ws, path, mut expected) = setup();
+        std::thread::scope(|scope| {
+            for id in ["code-1", "markdown-1"] {
+                let ws = &ws;
+                scope.spawn(move || {
+                    ws.call(
+                        "notebook_edit",
+                        json!({"path": "sample.ipynb", "edit_mode": "replace",
+                        "cell_id": id, "new_source": id}),
+                    )
+                    .unwrap();
+                });
+            }
+        });
+        expected["cells"][0]["source"] = json!("code-1");
+        expected["cells"][1]["source"] = json!("markdown-1");
+        assert_eq!(disk(&path), expected);
+    }
+
+    // Catches: a notebook mutation bypasses plan mode or fails its write-rule supporting read.
+    #[test]
+    fn notebook_edits_use_existing_write_authority_and_plan_floor() {
+        let rules = Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![Rule::load("write(**/*.ipynb)").unwrap()],
+                deny: vec![],
+            },
+            Source::Project,
+        );
+        let ws = Workspace::with_rules(Mode::Default, rules);
+        ws.file("sample.ipynb", &notebook().to_string());
+        ws.call(
+            "notebook_edit",
+            json!({"path": "sample.ipynb", "edit_mode": "delete", "cell_id": "code-1"}),
+        )
+        .unwrap();
+        let ws = Workspace::in_mode(Mode::Plan);
+        ws.file("sample.ipynb", &notebook().to_string());
+        let call = ws
+            .prepare(
+                "notebook_edit",
+                json!({"path": "sample.ipynb", "edit_mode": "delete", "cell_id": "code-1"}),
+            )
+            .unwrap();
+        assert!(ws.authorize(call).is_err());
+        assert_eq!(disk(&ws.root.join("sample.ipynb")), notebook());
     }
 }

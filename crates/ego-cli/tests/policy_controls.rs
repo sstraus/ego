@@ -808,3 +808,59 @@ fn registry_routes_four_controls_and_canonical_names_refuse_direct_arguments() {
         ));
     }
 }
+
+// Catches: multiple queued cycles are collapsed by resolving against stale editor status.
+#[test]
+fn queued_cycles_resolve_in_owner_order_against_the_last_staged_mode() {
+    let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+    let store = Arc::new(RecordingStore::published(
+        UserConfigPublication::NotPublished,
+    ));
+    let resolver = Arc::new(RecordingResolver {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        next: selection.snapshot().unwrap(),
+    });
+    let application =
+        PolicyApplicationOwner::new(selection.clone(), store, Arc::new(AllowingJudge), resolver);
+    for command in [
+        PolicyControlRequest::CycleMode,
+        PolicyControlRequest::CycleMode,
+    ] {
+        application.apply(command).unwrap();
+    }
+    assert_eq!(application.selected_mode().unwrap(), Mode::Edits);
+    assert_eq!(
+        selection.snapshot().unwrap().mode,
+        Mode::Default,
+        "active generation remains immutable"
+    );
+    application
+        .apply(PolicyControlRequest::SetMode(Mode::Plan))
+        .unwrap();
+    application.apply(PolicyControlRequest::CycleMode).unwrap();
+    assert_eq!(application.selected_mode().unwrap(), Mode::Default);
+    application.apply(PolicyControlRequest::CycleMode).unwrap();
+    assert_eq!(selection.capture().unwrap().mode, Mode::Auto);
+}
+
+// Catches: a failed queued cycle advances state or allows a later cycle to skip the refused mode.
+#[test]
+fn refused_cycle_preserves_the_last_accepted_mode() {
+    let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+    let store = Arc::new(RecordingStore::published(
+        UserConfigPublication::NotPublished,
+    ));
+    let resolver = Arc::new(RecordingResolver {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        next: selection.snapshot().unwrap(),
+    });
+    let application = owner(selection.clone(), store, resolver);
+    for _ in 0..2 {
+        assert!(matches!(
+            application.apply(PolicyControlRequest::CycleMode),
+            Err(PolicyControlError::JudgeUnavailable { .. })
+        ));
+        assert_eq!(application.selected_mode().unwrap(), Mode::Default);
+    }
+    assert_eq!(selection.capture().unwrap().mode, Mode::Default);
+}
