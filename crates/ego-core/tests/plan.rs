@@ -121,3 +121,46 @@ fn invalid_plan_updates_are_atomic_and_clear_is_an_explicit_replacement() {
     plan.apply(&PlanUpdate::Replace { steps: vec![] }).unwrap();
     assert!(plan.steps.is_empty());
 }
+
+// Catches: stale model or child status updates reopen completed work without replacement.
+#[test]
+fn completed_plan_step_requires_explicit_replacement_to_reopen() {
+    for status in [
+        StepStatus::Pending,
+        StepStatus::InProgress,
+        StepStatus::Blocked,
+    ] {
+        let mut plan = Plan {
+            steps: vec![step("a", StepStatus::Completed)],
+        };
+        let before = plan.clone();
+        assert!(
+            plan.apply(&PlanUpdate::Step {
+                id: "a".into(),
+                status
+            })
+            .is_err()
+        );
+        assert_eq!(plan, before);
+        let replay = SessionState::replay(events(vec![
+            PlanUpdate::Replace {
+                steps: before.steps.clone(),
+            },
+            PlanUpdate::Step {
+                id: "a".into(),
+                status,
+            },
+        ]));
+        assert_eq!(replay.plan, before);
+        plan.apply(&PlanUpdate::Step {
+            id: "a".into(),
+            status: StepStatus::Completed,
+        })
+        .unwrap();
+        plan.apply(&PlanUpdate::Replace {
+            steps: vec![step("a", status)],
+        })
+        .unwrap();
+        assert_eq!(plan.steps[0].status, status);
+    }
+}

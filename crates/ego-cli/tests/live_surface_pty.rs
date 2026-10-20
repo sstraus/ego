@@ -38,6 +38,8 @@ mod notice_wrap;
 mod permission_receipts;
 #[path = "live_surface_pty/picker_roles.rs"]
 mod picker_roles;
+#[path = "live_surface_pty/pinned_plan.rs"]
+mod pinned_plan;
 #[path = "live_surface_pty/plan_denial.rs"]
 mod plan_denial;
 #[path = "live_surface_pty/prompt_echo.rs"]
