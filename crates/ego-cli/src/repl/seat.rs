@@ -997,6 +997,7 @@ impl SurfaceOutput {
         if text.is_empty() {
             return Ok(());
         }
+        self.settle_shell()?;
         let text = if !self.answer_block {
             self.begin_block()?;
             if !self.wrote {
