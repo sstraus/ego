@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 const OPENAI_CODEX_FACTS: &str = r#"
 [model."openai-codex/gpt-5.1".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128

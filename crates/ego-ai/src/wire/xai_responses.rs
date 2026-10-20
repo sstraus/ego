@@ -56,6 +56,7 @@ pub const PATH: &str = "responses";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Inexpressible {
+    AudioNotSupported,
     ReasoningStateNotCarriable,
     ReasoningEffortNotSupported(ThinkingLevel),
     ImageMediaTypeNotSupported(ImageMediaType),
@@ -66,6 +67,9 @@ pub enum Inexpressible {
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AudioNotSupported => {
+                f.write_str("this wire contract does not support audio input")
+            }
             Self::ReasoningStateNotCarriable => write!(
                 f,
                 "xai-responses has no established projection for ego's opaque reasoning state; dropping it is forbidden"
@@ -219,6 +223,7 @@ fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
                             "output": output,
                         }));
                     }
+                    ContentBlock::Audio { .. } => return Err(Inexpressible::AudioNotSupported),
                     ContentBlock::Image { .. }
                     | ContentBlock::Text { .. }
                     | ContentBlock::Reasoning { .. }
@@ -230,6 +235,7 @@ fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
         for block in &message.content {
             match block {
                 ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. } => {}
+                ContentBlock::Audio { .. } => return Err(Inexpressible::AudioNotSupported),
                 ContentBlock::Image { .. } => return Err(Inexpressible::ImageRoleNotSupported),
                 ContentBlock::Text { text } => match message.role {
                     Role::System | Role::User => items.push(serde_json::json!({
@@ -266,6 +272,9 @@ fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
 }
 
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     if carries_reasoning(req) {
         return Err(Inexpressible::ReasoningStateNotCarriable);
     }

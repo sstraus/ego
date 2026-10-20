@@ -19,6 +19,7 @@ use support::{server, unasked};
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: None,
         max_output_tokens: None,
         max_tools: None,

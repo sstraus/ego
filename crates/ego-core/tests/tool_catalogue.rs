@@ -302,6 +302,7 @@ impl ego_core::generation_model_source::GenerationModelSource for TestGeneration
     > {
         let capabilities = ego_core::generator::capabilities::ModelCapabilities {
             schema_version: ego_core::generator::capabilities::ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens: Some(8_192),
             max_output_tokens: Some(256),
             max_tools: Some(32),

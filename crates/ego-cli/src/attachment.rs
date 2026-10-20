@@ -613,6 +613,7 @@ mod tests {
     fn image_capabilities() -> ModelCapabilities {
         ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens: Some(8192),
             max_output_tokens: Some(128),
             max_tools: None,

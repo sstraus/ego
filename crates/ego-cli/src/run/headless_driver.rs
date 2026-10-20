@@ -134,6 +134,18 @@ pub(super) async fn drive_headless_turn(
         active.evidence().blob_store(),
     )
     .await?;
+    let audio = super::port_adapters::acquire_audio(
+        match &input {
+            HeadlessInput::Prompt(prompt) => prompt.audio(),
+            _ => &[],
+        },
+        &source,
+        &ports,
+        cancel,
+        run_deadline,
+        active.evidence().blob_store(),
+    )
+    .await?;
     let execution_capabilities = observation.capabilities();
     let http =
         Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
@@ -273,9 +285,9 @@ pub(super) async fn drive_headless_turn(
         }),
         HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => None,
     };
-    if (command.is_some() || mcp_command.is_some()) && !images.is_empty() {
+    if (command.is_some() || mcp_command.is_some()) && (!images.is_empty() || !audio.is_empty()) {
         return Err(RunTermination::UsageError {
-            message: "custom commands do not accept image attachments".to_owned(),
+            message: "custom commands do not accept image or audio attachments".to_owned(),
         });
     }
     let tools = match admitted_tools {
@@ -387,7 +399,14 @@ pub(super) async fn drive_headless_turn(
             }
             None => {
                 turns
-                    .drive_with_images(&mut loop_, prompt.text(), images, cancel, diagnostics)
+                    .drive_with_media(
+                        &mut loop_,
+                        prompt.text(),
+                        images,
+                        audio,
+                        cancel,
+                        diagnostics,
+                    )
                     .await
             }
         },

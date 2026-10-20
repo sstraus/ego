@@ -2096,8 +2096,8 @@ explicit `--offline` invocation.
 `--read-only-dir DIR` grants reads of one session upload directory at launch.
 It is available to interactive runs, `run`, `resume`, and served protocols.
 DIR must be an existing canonical absolute directory: relative paths, `..`,
-symlink aliases, home/administrator ancestors, and directories beneath a
-writable workspace or root are refused. This launch grant does not make
+symlink aliases and home/administrator ancestors are refused. Nested directories
+beneath a writable workspace or root follow the platform rules below. This launch grant does not make
 configuration `roots` writable from flags. System and host profile ceilings
 still bind; credential denials remain in force. The grant adds neither writes
 nor executable uploads. It does not change the selected sandbox level. On Linux, confined read roots
@@ -2114,9 +2114,16 @@ when loading a session that has not yet started a run. Paths inside the grant
 are still canonicalized by each built-in tool, so symlinks cannot open siblings.
 
 Effective perimeter inspection warns when canonical roots overlap the workspace.
-A read root beneath a read-write root is refused with `nested-read-only-root`,
-including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
-remains an admission error; it is never shown as an admitted root.
+A read root beneath a writable root or the workspace is admitted. Built-in tools
+keep that subtree read-only, even if a deeper write root exists. On macOS,
+Seatbelt denies writes and execution in the subtree; later grants cannot reopen
+it, and its ancestors cannot be renamed to bypass the restriction. On Linux,
+Landlock grants are additive: the writable ancestor wins for exec children,
+including execution in the read subtree. Ego reports that limitation without
+exiting; built-in tools still enforce read-only access. With `sandbox=ro`, the
+global native write denial remains in force. With `sandbox=off`, native writes
+are not confined. A missing or unresolvable configured path is reported as a
+warning and remains an admission error; it is never shown as an admitted root.
 
 `/config` lists Model, Mode, Sandbox, Perimeter, and Budget from the session's
 captured startup configuration. Each declaration names its origin layer and
@@ -2329,7 +2336,7 @@ A full entry, with every field the schema accepts:
 ```toml
 # `provider/model`. The model half is what goes on the wire.
 [model."openai/gpt-5.6-sol".capabilities]
-schema_version = 5                 # required; rejects an older document
+schema_version = 6                 # required; rejects an older document
 max_context_tokens = 1050000       # omit if the vendor does not state it
 max_output_tokens = 128000
 # max_tools = 128                  # most tools accepted in one request
@@ -2825,3 +2832,51 @@ oversized output is omitted. Terminal controls are sanitized and known secrets
 are masked. Values are cached in the live seat, not persisted or admitted as
 instructions. Providers inherit the normal admitted exec environment; there is
 no shell expansion unless the operator explicitly selects a shell executable.
+
+
+### ACP audio input
+
+The durable ACP surface advertises audio input. This is a surface capability,
+not a promise that every selected model accepts audio. Submitting audio grants
+consent for durable session storage and provider transmission; the ACP host must
+obtain user-facing consent. Ego checks the resolved model on each generation,
+including resumed history and fallback. Unsupported or unknown models refuse
+before audio is sent; ego does not drop or transcribe audio.
+
+The supported contract is public OpenAI Chat Completions, exact model
+`openai/gpt-audio-1.5`, with text output. Supply its row in `models.toml` because
+the pinned builtin catalogue does not contain it:
+
+```toml
+[model."openai/gpt-audio-1.5".capabilities]
+schema_version = 6
+max_context_tokens = 128000
+max_output_tokens = 16384
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["off"] }
+default_reasoning_effort = "off"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+image_input = "unsupported"
+audio_input = "supported_wav"
+```
+
+Audio requires explicit ACP `mimeType: "audio/wav"` and base64 data. Ego admits
+PCM16 WAV only, mono or stereo, at most 48 kHz and sixty seconds per clip. A prompt
+can contain at most four clips and 10 MiB of decoded audio in total. These are ego
+limits, not documented provider maxima. Mixed image/audio prompts are refused.
+No remote URLs, inferred MIME, transcoding or raw PCM input is accepted.
+
+Exact validated bytes are committed into the session blob store before the
+journal references them. Replay checks the reference and encoding again. Missing
+or corrupt blobs cause an explicit refusal; they are never fetched again or
+silently omitted. The operator must preserve the session blob store with its log.
+
+Audio-specific pricing is not represented by text-token quotes. Monetary ceilings
+fail closed for this model; no-ceiling runs can report unknown cost. No paid audio
+acceptance probe is part of this feature's validation. Provider contract sources:
+<https://developers.openai.com/api/docs/models/gpt-audio-1.5.md> and
+<https://developers.openai.com/api/docs/guides/audio-chat-completions.md>, read
+2026-10-20.

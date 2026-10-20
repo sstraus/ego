@@ -148,6 +148,7 @@ fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
     };
     let capabilities = ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(8_192),
         max_output_tokens: Some(512),
         max_tools: Some(16),
@@ -482,6 +483,7 @@ fn provider_refusal_invalid_request_and_reservation_failure_never_open_a_target_
 fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
     let capabilities = ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(8_192),
         max_output_tokens: Some(512),
         max_tools: Some(16),
@@ -735,6 +737,7 @@ fn compaction_profile(
             generator: generator.clone(),
             capabilities: ModelCapabilities {
                 schema_version: ModelCapabilities::SCHEMA_VERSION,
+                audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
                 max_context_tokens: Some(max_context_tokens),
                 max_output_tokens: Some(max_output_tokens),
                 max_tools: Some(16),
@@ -864,6 +867,7 @@ fn busy_state(busy: &CompactionBusy) -> SessionState {
         CompactionBusy::AcceptedPrompt => event(
             None,
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: ego_core::event::id::QueuedPromptId::new(),
                 text: "queued".to_string(),
                 images: Vec::new(),

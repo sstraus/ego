@@ -276,6 +276,7 @@ fn normal_manifest_cadence_preserves_the_latest_execution_observation() {
                 turn,
                 2,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "prompt".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -332,6 +333,7 @@ fn recovery_clears_a_stale_manifest_observation_when_the_event_is_not_in_valid_l
                 turn,
                 1,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "baseline".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -438,6 +440,7 @@ fn historical_log_without_execution_observed_reconstructs_without_observation() 
                 turn,
                 1,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "old".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,

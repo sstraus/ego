@@ -34,6 +34,7 @@ fn entry(
         slug: ModelSlug::parse(slug).expect("a provider/model slug"),
         capabilities: ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens: None,
             max_output_tokens: None,
             max_tools: None,

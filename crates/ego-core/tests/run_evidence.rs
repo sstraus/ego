@@ -43,6 +43,7 @@ fn model() -> ModelRef {
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(8192),
         max_output_tokens: Some(1024),
         max_tools: Some(32),
@@ -814,7 +815,7 @@ fn manifest_evidence_rebuilds_from_ordered_records_and_refuses_unknown_prefix() 
 #[test]
 fn persisted_evidence_read_rejects_old_outer_and_inner_schema_versions() {
     assert_eq!(EVIDENCE_SCHEMA_VERSION, 3);
-    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 5);
+    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 6);
     let session = SessionId::new();
     let id = invocation();
     let record = EvidenceRecord::GenerationAdmission(generation(
@@ -859,7 +860,7 @@ fn generation_evidence_version_and_manifest_rebuild_use_current_authorities() {
 #[test]
 fn manifest_projection_refuses_typed_old_outer_and_inner_versions() {
     assert_eq!(EVIDENCE_SCHEMA_VERSION, 3);
-    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 5);
+    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 6);
     let session = SessionId::new();
     let id = invocation();
     let attempt = attempt();
@@ -871,7 +872,7 @@ fn manifest_projection_refuses_typed_old_outer_and_inner_versions() {
     let manifest = ManifestEvidence::from_records(&current_records).unwrap();
     assert_eq!(manifest.generations().len(), 1);
 
-    for (outer, inner, expected_found, expected_required) in [(3, 4, 4, 5), (2, 5, 2, 3)] {
+    for (outer, inner, expected_found, expected_required) in [(3, 5, 5, 6), (2, 6, 2, 3)] {
         let mut wire = serde_json::to_value(&current).unwrap();
         wire["version"] = serde_json::json!(outer);
         wire["capabilities"]["schema_version"] = serde_json::json!(inner);

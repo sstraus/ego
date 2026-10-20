@@ -28,18 +28,6 @@ pub(crate) fn apply(
             "requires an existing canonical directory, without symlink aliases",
         ));
     }
-    let roots =
-        super::profile_roots::admit(effective, &ego_core::permit::CanonPath::new(workspace))
-            .map_err(|error| refuse(&error))?;
-    if canonical.starts_with(workspace)
-        || roots.iter().any(|root| {
-            root.access() == RootAccess::ReadWrite && canonical.starts_with(root.path().as_path())
-        })
-    {
-        return Err(refuse(
-            "cannot enforce a read-only directory beneath a writable root",
-        ));
-    }
     let mut candidate = effective.clone();
     candidate.roots.push(RootCfg {
         path: canonical,

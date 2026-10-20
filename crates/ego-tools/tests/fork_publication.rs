@@ -45,6 +45,7 @@ fn source_event() -> DomainEvent {
             producer: Producer::Main,
         },
         kind: EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "source must remain unchanged".to_owned(),
             images: Vec::new(),
             queued_prompt: None,

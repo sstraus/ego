@@ -209,6 +209,60 @@ pub(super) async fn acquire_image_inputs(
     .map_err(usage)
 }
 
+/// Host submission is consent. Publish exact audio through the session CAS,
+/// only after resolving this model's admitted input contract.
+pub(super) async fn acquire_audio(
+    audio: &[ego_core::generator::audio::Audio],
+    source: &Arc<model::CliGenerationModelSource>,
+    ports: &Arc<RunEffectPorts>,
+    cancel: &CancelToken,
+    deadline: Option<std::time::Instant>,
+    blobs: &dyn ego_core::store::blob::BlobStore,
+) -> Result<Vec<ego_core::generator::audio::AudioRef>, RunTermination> {
+    use ego_core::generator::audio::{AudioRef, MAX_AUDIO_BYTES, MAX_AUDIO_PER_PROMPT};
+    use ego_core::generator::capabilities::AudioInputSupport;
+    if audio.is_empty() {
+        return Ok(Vec::new());
+    }
+    let refusal = |message| RunTermination::UsageError { message };
+    let total = audio
+        .iter()
+        .try_fold(0usize, |sum, clip| sum.checked_add(clip.bytes().len()));
+    if audio.len() > MAX_AUDIO_PER_PROMPT || total.is_none_or(|total| total > MAX_AUDIO_BYTES) {
+        return Err(refusal(
+            "audio prompt exceeds product count or aggregate byte bound".into(),
+        ));
+    }
+    let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
+    let profile = source
+        .bind(http, cancel.clone(), deadline)
+        .resolve(GenerationModelRequest::new(GenerationRole::Main))
+        .await
+        .map_err(generation_refusal)?;
+    if profile.capabilities.audio_input != AudioInputSupport::SupportedWav {
+        return Err(refusal(format!(
+            "profile {} model {} has unknown or unsupported audio input; audio was not sent",
+            profile.identity.0, profile.request_model
+        )));
+    }
+    let mut references = Vec::with_capacity(audio.len());
+    for clip in audio {
+        let mut writer = blobs.begin().map_err(|error| refusal(error.to_string()))?;
+        writer
+            .append(clip.bytes())
+            .map_err(|error| refusal(error.to_string()))?;
+        let reference = writer
+            .commit()
+            .map_err(|error| refusal(error.to_string()))?;
+        references.push(
+            AudioRef::new(reference, clip.media_type())
+                .map(|reference| reference.with_text_offset(clip.text_offset()))
+                .map_err(refusal)?,
+        );
+    }
+    Ok(references)
+}
+
 /// Map the first latched cancellation cause to the CLI termination contract.
 pub fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
     match cancel.cause() {

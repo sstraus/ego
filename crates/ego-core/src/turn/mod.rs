@@ -25,6 +25,14 @@ mod task;
 pub use task::{BackgroundTaskLaunch, BackgroundTaskPort, NamedAgent, delegation_guidance};
 mod tools;
 
+/// One ordered durable user prompt, optionally consuming a queue acceptance.
+type PendingPrompt = (
+    String,
+    Vec<crate::generator::types::ImageRef>,
+    Vec<crate::generator::audio::AudioRef>,
+    Option<crate::event::id::QueuedPromptId>,
+);
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -604,7 +612,12 @@ fn apply_intent(
                 turn,
                 None,
                 None,
-                EventKind::PromptQueued { id, text, images },
+                EventKind::PromptQueued {
+                    audio: Vec::new(),
+                    id,
+                    text,
+                    images,
+                },
             ) {
                 Ok(_) => {
                     control.refresh(
@@ -2290,7 +2303,20 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         prompt: &str,
         images: Vec<crate::generator::types::ImageRef>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
-        self.run_prompts(vec![(prompt.to_string(), images, None)])
+        self.run_with_media(prompt, images, Vec::new()).await
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "durable turn state is returned on abandonment"
+    )]
+    pub async fn run_with_media(
+        &mut self,
+        prompt: &str,
+        images: Vec<crate::generator::types::ImageRef>,
+        audio: Vec<crate::generator::audio::AudioRef>,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
+        self.run_prompts(vec![(prompt.to_string(), images, audio, None)])
             .await
     }
 
@@ -3210,6 +3236,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 (
                     prompt.text().to_string(),
                     prompt.images().to_vec(),
+                    prompt.audio().to_vec(),
                     Some(prompt.id()),
                 )
             })
@@ -3227,11 +3254,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     )]
     async fn run_prompts(
         &mut self,
-        prompts: Vec<(
-            String,
-            Vec<crate::generator::types::ImageRef>,
-            Option<crate::event::id::QueuedPromptId>,
-        )>,
+        prompts: Vec<PendingPrompt>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
         if let Err(cause) = self.journal.recover_interrupted_attempts(turn) {
@@ -3852,11 +3875,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     async fn drive(
         &mut self,
         turn: TurnId,
-        prompts: &[(
-            String,
-            Vec<crate::generator::types::ImageRef>,
-            Option<crate::event::id::QueuedPromptId>,
-        )],
+        prompts: &[PendingPrompt],
     ) -> Result<DriveOutcome, StoreError> {
         if let Some(outcome) = self.admit_turn_prompts(turn, prompts).await? {
             return Ok(outcome);
@@ -4225,19 +4244,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     async fn admit_turn_prompts(
         &mut self,
         turn: TurnId,
-        prompts: &[(
-            String,
-            Vec<crate::generator::types::ImageRef>,
-            Option<QueuedPromptId>,
-        )],
+        prompts: &[PendingPrompt],
     ) -> Result<Option<DriveOutcome>, StoreError> {
-        for (index, (text, images, queued_prompt)) in prompts.iter().enumerate() {
+        for (index, (text, images, audio, queued_prompt)) in prompts.iter().enumerate() {
             let item = ItemId::new();
             let admitted = self.journal.append(
                 turn,
                 Some(item),
                 None,
                 EventKind::UserPrompt {
+                    audio: audio.clone(),
                     text: text.clone(),
                     images: images.clone(),
                     queued_prompt: *queued_prompt,
@@ -4362,15 +4378,17 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     prompt.id(),
                     prompt.text().to_string(),
                     prompt.images().to_vec(),
+                    prompt.audio().to_vec(),
                 )
             })
             .collect();
-        for (id, text, images) in &pending {
+        for (id, text, images, audio) in &pending {
             self.journal.append(
                 turn,
                 Some(ItemId::new()),
                 None,
                 EventKind::UserPrompt {
+                    audio: audio.clone(),
                     text: text.clone(),
                     images: images.clone(),
                     queued_prompt: Some(*id),

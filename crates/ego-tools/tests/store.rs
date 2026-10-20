@@ -827,6 +827,7 @@ mod store {
             seq.next(),
             turn,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "hi".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -873,6 +874,7 @@ mod store {
             seq.next(),
             turn,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "hi".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -909,6 +911,7 @@ mod store {
                         seq.next(),
                         turn,
                         EventKind::UserPrompt {
+                            audio: Vec::new(),
                             text: text.to_string(),
                             images: Vec::new(),
                             queued_prompt: None,
@@ -978,6 +981,7 @@ mod store {
                         seq.next(),
                         turn,
                         EventKind::UserPrompt {
+                            audio: Vec::new(),
                             text: marker.to_string(),
                             images: Vec::new(),
                             queued_prompt: None,
@@ -1005,6 +1009,7 @@ mod store {
             Ok(SessionEntry::Event(e)) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "first-event-marker".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -1024,6 +1029,7 @@ mod store {
             Ok(SessionEntry::Event(e)) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "third-event-marker".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -1057,6 +1063,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,
@@ -1090,6 +1097,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::PromptQueued {
+                        audio: Vec::new(),
                         id: queued,
                         text: "follow up".to_owned(),
                         images: Vec::new(),
@@ -1126,6 +1134,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "follow up".to_owned(),
                         images: Vec::new(),
                         queued_prompt: Some(queued),
@@ -1163,6 +1172,7 @@ mod store {
     fn queue_durability_failure_rejects_each_stable_storage_gate() {
         for kind in [
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: QueuedPromptId::new(),
                 text: "accepted only after fsync".to_owned(),
                 images: Vec::new(),
@@ -1171,6 +1181,7 @@ mod store {
                 through: QueuedPromptId::new(),
             },
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "consumed only after fsync".to_owned(),
                 images: Vec::new(),
                 queued_prompt: Some(QueuedPromptId::new()),
@@ -1313,6 +1324,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,
@@ -1395,6 +1407,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,
@@ -1436,6 +1449,7 @@ mod store {
                         seq.next(),
                         turn,
                         EventKind::UserPrompt {
+                            audio: Vec::new(),
                             text: "hi".to_string(),
                             images: Vec::new(),
                             queued_prompt: None,
@@ -1492,6 +1506,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,

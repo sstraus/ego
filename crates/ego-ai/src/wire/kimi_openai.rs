@@ -21,6 +21,11 @@ impl WireFormat for KimiOpenAi {
         target: &RequestTarget<'_>,
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused> {
+        if super::request_has_audio(req) {
+            return Err(RequestRefused::new(
+                "this wire contract does not support audio input",
+            ));
+        }
         let body = request_body(req)?;
         Ok(target.post_json("chat/completions", body))
     }

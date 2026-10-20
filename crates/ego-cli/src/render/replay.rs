@@ -323,6 +323,7 @@ mod tests {
             let tool_item = ItemId::new();
             let events = [
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "first".into(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -343,6 +344,7 @@ mod tests {
                     text: "Done".into(),
                 },
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "second".into(),
                     images: Vec::new(),
                     queued_prompt: None,

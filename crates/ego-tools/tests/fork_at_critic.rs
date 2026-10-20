@@ -83,6 +83,7 @@ fn deleting_and_recovering_the_source_preserves_the_fork_image_bytes() {
             (
                 Some(ItemId::new()),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "describe this picture".into(),
                     images: vec![
                         ImageRef::new(reference.clone(), ImageMediaType::Png, 1, 1).unwrap(),

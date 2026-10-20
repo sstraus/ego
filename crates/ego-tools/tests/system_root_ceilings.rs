@@ -26,19 +26,15 @@ fn system_root_ceilings_use_canonical_paths_and_preserve_access() {
         path: path.into(),
         access,
     };
-    assert!(
-        ConfigLayer::parse(
-            Source::User,
-            &format!(
-                "roots=[{{path='{}',access='read-write'}},{{path='{}',access='read'}}]",
-                writable.display(),
-                frozen.display()
-            )
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("nested-read-only-root")
-    );
+    ConfigLayer::parse(
+        Source::User,
+        &format!(
+            "roots=[{{path='{}',access='read-write'}},{{path='{}',access='read'}}]",
+            writable.display(),
+            frozen.display()
+        ),
+    )
+    .expect("nested read-only roots are admitted for platform enforcement");
     let system = ConfigLayer::parse(
         Source::System,
         &format!(

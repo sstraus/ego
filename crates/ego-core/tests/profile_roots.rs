@@ -87,6 +87,26 @@ fn a_read_root_nested_in_a_read_write_root_stays_read_only() {
     assert!(verdict(&engine, read("/home/u/out/frozen/a")).is_ok());
 }
 
+// Catches: equal workspace roots or deeper writable roots undo a nested restriction.
+#[test]
+fn nested_read_restrictions_win_over_equal_and_deeper_write_authority() {
+    for frozen in ["/ws", "/ws/frozen", "/extra/frozen"] {
+        let child = format!("{frozen}/child");
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Yolo, Ruleset::default())
+            .with_profile_roots(vec![
+                root("/extra", RootAccess::ReadWrite),
+                root(frozen, RootAccess::Read),
+                root(&child, RootAccess::ReadWrite),
+            ]);
+        assert!(verdict(&engine, read(&format!("{child}/file"))).is_ok());
+        assert!(
+            verdict(&engine, write(&format!("{child}/file"))).is_err(),
+            "{frozen}"
+        );
+        assert!(verdict(&engine, write("/extra/sibling")).is_ok());
+    }
+}
+
 #[test]
 fn the_workspace_stays_writable_inside_a_read_root() {
     let engine = PolicyEngine::new(

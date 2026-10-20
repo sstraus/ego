@@ -643,6 +643,8 @@ pub enum UnknownCost {
     /// No pricing quote was resolved before the request, so there is nothing
     /// to compute a cost from and nothing to reconcile against.
     NoPricingQuote,
+    /// The text-token quote cannot bound audio-specific token prices.
+    AudioPricingUnavailable,
     /// The pricing quote exists but does not price one of the token
     /// categories the provider reported, so any total would be an undercount
     /// presented as a fact.

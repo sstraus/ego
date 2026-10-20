@@ -209,6 +209,7 @@ mod public_golden {
                 turn1,
                 Some(item_user_1),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "list the files".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -447,6 +448,7 @@ mod public_golden {
                 turn2,
                 Some(item_user_2),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "thanks".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,

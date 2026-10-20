@@ -411,6 +411,7 @@ fn capabilities_from(tag: &Tag, served_context: Option<u64>) -> ModelCapabilitie
     let sees_images = tag.capabilities.iter().any(|cap| cap == "vision");
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: served_context,
         max_output_tokens: None,
         max_tools: None,

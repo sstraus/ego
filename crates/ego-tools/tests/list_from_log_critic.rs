@@ -59,6 +59,7 @@ impl World {
         for (kind, ts) in [
             (
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "hello".to_owned(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -248,6 +249,7 @@ fn a_deleted_session_stays_hidden_without_its_manifest() {
                 seq.next(),
                 turn,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "x".to_owned(),
                     images: Vec::new(),
                     queued_prompt: None,

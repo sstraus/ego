@@ -68,6 +68,7 @@ fn model() -> ModelRef {
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(8192),
         max_output_tokens: Some(1024),
         max_tools: Some(32),
@@ -669,7 +670,7 @@ fn final_codec_evidence_is_tagged_and_does_not_infer_from_lifecycle_events() {
 #[test]
 fn generation_evidence_rejects_old_outer_and_inner_versions_at_every_authority() {
     assert_eq!(EVIDENCE_SCHEMA_VERSION, 3);
-    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 5);
+    assert_eq!(ModelCapabilities::SCHEMA_VERSION, 6);
 
     let root = tempdir().unwrap();
     let session = SessionId::new();
