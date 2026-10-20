@@ -514,16 +514,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                     .await?;
                     perimeter =
                         perimeter.with_execution_observation(&observation, probe_evidence.as_ref());
-                    let recovered_epoch_policy = match resumed.as_ref() {
-                        Some(RuntimeResume::Foreign { policy, .. }) => Some(Arc::clone(policy)),
-                        Some(RuntimeResume::Model(_)) | None => None,
-                    };
-                    let session_policy = match recovered_epoch_policy.as_ref() {
-                        Some(policy) => Arc::clone(policy),
-                        None => policy_source
-                            .current()
-                            .map_err(|message| RunTermination::Failed { message })?,
-                    };
+                    let (recovered_epoch_policy, session_policy) =
+                        recover_epoch_policy(resumed.as_ref(), policy_source.as_ref())?;
                     collect_epoch_status_providers(
                         status.as_ref(),
                         &effective,
@@ -884,6 +876,23 @@ pub(super) async fn drive_execution<S: EventSink>(
             }
         }
     }
+}
+
+fn recover_epoch_policy(
+    resumed: Option<&RuntimeResume>,
+    policy_source: &dyn GenerationPolicySource,
+) -> Result<(Option<Arc<PolicyEngine>>, Arc<PolicyEngine>), RunTermination> {
+    let recovered = match resumed {
+        Some(RuntimeResume::Foreign { policy, .. }) => Some(Arc::clone(policy)),
+        Some(RuntimeResume::Model(_)) | None => None,
+    };
+    let policy = match recovered.as_ref() {
+        Some(policy) => Arc::clone(policy),
+        None => policy_source
+            .current()
+            .map_err(|message| RunTermination::Failed { message })?,
+    };
+    Ok((recovered, policy))
 }
 
 async fn collect_epoch_status_providers(
@@ -2615,7 +2624,6 @@ async fn dispatch_workspace_command<'session: 'a, 'a, 'store: 'session>(
     line: repl::Line,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
-        seat,
         diagnostics,
         status,
         selection,
