@@ -832,7 +832,7 @@ mod store {
         assert_eq!(recovered.state.title.as_deref(), Some("Indexed session"));
         assert_eq!(
             block_on(store.read(&session).unwrap().collect::<Vec<_>>()).len(),
-            6
+            7
         );
     }
 
