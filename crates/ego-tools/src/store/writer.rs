@@ -148,6 +148,20 @@ pub struct SessionWriter<'a> {
     reachable_blobs: Vec<BlobRef>,
     /// Rebuilt once from log truth and discarded with this lease.
     evidence_index: Mutex<EvidenceIndex>,
+    snapshot_revision: Option<super::FileRevision>,
+    snapshot: Option<SnapshotRejection>,
+}
+
+impl Drop for SessionWriter<'_> {
+    fn drop(&mut self) {
+        self.store.cache_writer(
+            self.id,
+            &self._appender,
+            self.snapshot_revision.take(),
+            self.snapshot.take(),
+            std::mem::take(&mut self.reachable_blobs),
+        );
+    }
 }
 
 impl SessionWriter<'_> {
@@ -170,15 +184,25 @@ impl SessionWriter<'_> {
             Arc::clone(&self._lease),
         )?;
         let mut reachable = self.reachable_blobs.clone();
-        match self.store.read_events(&self.id) {
-            Ok(events) => {
-                reachable.extend(events.iter().flat_map(|event| event.kind.blob_references()))
-            }
-            Err(StoreError::NotFound) => {}
-            Err(error) => {
-                return Err(BlobEvidenceError::Io {
-                    message: error.to_string(),
-                });
+        let indexed = self
+            .store
+            .indexed_reachable_blobs(&self.id)
+            .map_err(|error| BlobEvidenceError::Io {
+                message: error.to_string(),
+            })?;
+        if let Some(references) = indexed {
+            reachable.extend(references);
+        } else {
+            match self.store.read_events(&self.id) {
+                Ok(events) => {
+                    reachable.extend(events.iter().flat_map(|event| event.kind.blob_references()))
+                }
+                Err(StoreError::NotFound) => {}
+                Err(error) => {
+                    return Err(BlobEvidenceError::Io {
+                        message: error.to_string(),
+                    });
+                }
             }
         }
         store.collect_garbage(&reachable)?;
@@ -351,6 +375,30 @@ impl JsonlStore {
         )
         .map_err(OpenError::Lease)?;
 
+        let snapshot_revision = self
+            .io
+            .file_revision(&self.snapshot_path(id))
+            .ok()
+            .flatten();
+        if let Some(indexed) = self.open_indexed_writer(id).map_err(OpenError::Recover)? {
+            return Ok(OpenSession {
+                state: indexed.state,
+                repair: indexed.repair,
+                snapshot: indexed.snapshot.clone(),
+                writer: SessionWriter {
+                    store: self,
+                    id: *id,
+                    pid: lease.pid,
+                    _lease: Arc::new(held),
+                    _appender: indexed.appender,
+                    reachable_blobs: indexed.reachable_blobs,
+                    evidence_index: Mutex::new(indexed.evidence_index),
+                    snapshot_revision,
+                    snapshot: indexed.snapshot,
+                },
+            });
+        }
+
         let repair = self.recover(id).map_err(OpenError::Recover)?;
 
         let (state, snapshot) = match self.resume(id) {
@@ -379,7 +427,7 @@ impl JsonlStore {
         Ok(OpenSession {
             state,
             repair,
-            snapshot,
+            snapshot: snapshot.clone(),
             writer: SessionWriter {
                 store: self,
                 id: *id,
@@ -388,6 +436,8 @@ impl JsonlStore {
                 _appender: appender,
                 reachable_blobs,
                 evidence_index: Mutex::new(evidence_index),
+                snapshot_revision,
+                snapshot,
             },
         })
     }

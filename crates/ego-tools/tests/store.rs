@@ -401,6 +401,14 @@ mod store {
     }
 
     impl StoreIo for ReadCountingIo {
+        fn visit_file(
+            &self,
+            path: &std::path::Path,
+            visitor: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+        ) -> std::io::Result<bool> {
+            self.inner.visit_file(path, visitor)
+        }
+
         fn list_files(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             self.inner.list_files(path)
         }
@@ -675,6 +683,33 @@ mod store {
             .unwrap();
         let mut seq = Seq::ZERO;
         let turn = TurnId::new();
+        use ego_core::store::blob::BlobStore as _;
+        let blobs = ego_tools::store::SessionBlobStore::open(dir.path(), session, 1024).unwrap();
+        let mut blob = blobs.begin().unwrap();
+        blob.append(b"reachable image").unwrap();
+        let reference = blob.commit().unwrap();
+        let mut orphan = blobs.begin().unwrap();
+        orphan.append(b"orphan image").unwrap();
+        let orphan = orphan.commit().unwrap();
+        let image = ego_core::generator::types::ImageRef::new(
+            reference.clone(),
+            ego_core::generator::types::ImageMediaType::Png,
+            1,
+            1,
+        )
+        .unwrap();
+        let mut prompt = ev(
+            seq.next(),
+            turn,
+            EventKind::UserPrompt {
+                text: "Describe this".to_owned(),
+                images: vec![image],
+                audio: Vec::new(),
+                queued_prompt: None,
+            },
+        );
+        prompt.env.item = Some(ego_core::event::id::ItemId::new());
+        opened.writer.append(&session, &prompt).unwrap();
         opened
             .writer
             .append(
@@ -700,11 +735,24 @@ mod store {
             .unwrap();
         drop(opened);
         reads.lock().unwrap().clear();
+        // ACP admission and settlement CAS can run between writer leases.
+        store
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(2)),
+                admitted_run_transaction(&session, 3, Some(2), false),
+            )
+            .unwrap();
         let reopened = store.open_writer(&session, evidence_lease()).unwrap();
         assert_eq!(reopened.repair.truncated_bytes, 0);
         assert_eq!(reopened.repair.dropped_lines, 0);
         assert_eq!(reopened.state.title.as_deref(), Some("Indexed session"));
         reopened.writer.evidence_store(1024 * 1024).unwrap();
+        assert_eq!(blobs.read(&reference).unwrap(), b"reachable image");
+        assert!(
+            blobs.read(&orphan).is_err(),
+            "indexed GC must still collect unreferenced blobs"
+        );
         EvidenceAdmissionService::new()
             .admit_run_context(&reopened.writer, context)
             .unwrap();
@@ -737,8 +785,55 @@ mod store {
             Some("Indexed session")
         );
         let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
-        assert_eq!(entries.len(), 5);
+        assert_eq!(entries.len(), 7);
         assert!(entries.iter().all(Result::is_ok));
+        drop(reopened);
+
+        // Catches: the fast path mistakes a valid log index for a valid manifest.
+        let manifest = log_path(dir.path(), &session).with_file_name("manifest.json");
+        std::fs::write(&manifest, b"{").unwrap();
+        std::fs::write(ego_tools::store::tmp_path_for(&manifest), b"orphan").unwrap();
+        reads.lock().unwrap().clear();
+        let repaired = store.open_writer(&session, evidence_lease()).unwrap();
+        assert!(repaired.repair.manifest_rebuilt);
+        assert!(repaired.repair.removed_tmp);
+        assert_eq!(repaired.state.title.as_deref(), Some("Indexed session"));
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        let snapshot_state = repaired.state.clone();
+        drop(repaired);
+
+        // Catches: a cached open ignores a snapshot installed between leases.
+        store
+            .write_snapshot(&session, snapshot_state.last_seq, &snapshot_state)
+            .unwrap();
+        let snapshotted = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(snapshotted.snapshot, None);
+        assert_eq!(snapshotted.state.title.as_deref(), Some("Indexed session"));
+        drop(snapshotted);
+
+        // Catches: a stale in-memory index bypasses repair after an external tear.
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log_path(dir.path(), &session))
+            .unwrap()
+            .write_all(b"torn")
+            .unwrap();
+        let recovered = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(recovered.repair.truncated_bytes, 4);
+        assert_eq!(recovered.state.title.as_deref(), Some("Indexed session"));
+        assert_eq!(
+            block_on(store.read(&session).unwrap().collect::<Vec<_>>()).len(),
+            6
+        );
     }
 
     // Catches: a lease-held append reopens the header and tail for every event.
