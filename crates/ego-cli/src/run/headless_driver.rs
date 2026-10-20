@@ -297,6 +297,7 @@ pub(super) async fn drive_headless_turn(
             binary,
             Arc::clone(&policy_source),
             effect_ports.clone(),
+            ports.process(),
         )) as Arc<dyn ego_core::turn::PromptContextSource>
     });
     let tools = match admitted_tools {

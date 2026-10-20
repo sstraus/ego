@@ -220,3 +220,46 @@ fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
         }
     }
 }
+
+/// Catches: selecting a context executable bypasses an explicit exec denial.
+#[test]
+fn mdkb_configuration_does_not_grant_exec_authority() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    let marker = ego.workspace_path().join("unexpected-exec");
+    let script = ego.file(
+        "mdkb-fixture",
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '{}'\n",
+            marker.display(),
+            RECALL
+        ),
+    );
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ego.home_file(
+        "config.toml",
+        &format!(
+            "mdkb_prompt_command = {:?}\npermissions.deny = [\"exec(**)\"]\n",
+            script
+        ),
+    );
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+            "Continue without recall",
+        ])
+        .run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert!(!marker.exists(), "denied source executed");
+    assert_eq!(stub.generations().len(), 1);
+    assert!(
+        !stub.generations()[0]
+            .to_string()
+            .contains("mdkb recall data")
+    );
+}

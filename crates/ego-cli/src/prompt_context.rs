@@ -8,8 +8,8 @@ use std::time::Duration;
 use ego_core::event::id::SessionId;
 use ego_core::hook::EffectScope;
 use ego_core::permit::{
-    CanonPath, Classification, EnvPolicy, Op, PreparedCall, SpawnSpec, StreamProvenance,
-    ToolOutputProvenance,
+    CanonPath, Classification, EnvPolicy, Op, PreparedCall, ProcessExecutor, Resolution, SpawnSpec,
+    StreamProvenance, ToolOutputProvenance,
 };
 use ego_core::turn::{GenerationPolicySource, PromptContextSource, ToolEffectPorts};
 
@@ -21,6 +21,7 @@ pub(crate) struct MdkbPromptContext<'a> {
     binary: PathBuf,
     policy: Arc<dyn GenerationPolicySource>,
     effects: ToolEffectPorts<'a>,
+    process: &'a dyn ProcessExecutor,
 }
 
 impl<'a> MdkbPromptContext<'a> {
@@ -28,11 +29,13 @@ impl<'a> MdkbPromptContext<'a> {
         binary: PathBuf,
         policy: Arc<dyn GenerationPolicySource>,
         effects: ToolEffectPorts<'a>,
+        process: &'a dyn ProcessExecutor,
     ) -> Self {
         Self {
             binary,
             policy,
             effects,
+            process,
         }
     }
 
@@ -68,13 +71,17 @@ impl<'a> MdkbPromptContext<'a> {
             "PostToolUse" | "PostToolUseFailure" => "mdkb_tool_observation",
             _ => "mdkb_prompt_recall",
         };
-        let prepared = PreparedCall::new(effect_name, Op::Spawn { spec });
+        let prepared = PreparedCall::new(effect_name, Op::Spawn { spec })
+            .observe_processes(self.process)
+            .map_err(|error| error.to_string())?;
         let policy = self.policy.current()?;
         let authorized = match policy.classify(prepared) {
             Classification::Settled(Ok(authorized)) => authorized,
-            Classification::Settled(Err(_)) | Classification::Ask(_) => {
-                return Err("mdkb context process is not authorized".into());
-            }
+            Classification::Ask(pending) => match policy.settle(pending).await {
+                Resolution::Settled(Ok(authorized)) => authorized,
+                _ => return Err("mdkb context process requires permission or was denied".into()),
+            },
+            Classification::Settled(Err(error)) => return Err(error.to_string()),
         };
         let (prepared, effects) = self.effects.clone().bind(authorized);
         let spec = prepared

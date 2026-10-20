@@ -1935,6 +1935,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
             binary.clone(),
             Arc::clone(&policy_source),
             effect_ports.clone(),
+            ports.process(),
         )) as Arc<dyn ego_core::turn::PromptContextSource>
     });
     let tools = match admitted_tools.as_ref() {
