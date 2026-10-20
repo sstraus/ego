@@ -975,17 +975,16 @@ impl JsonlStore {
     fn validate_run_cursor(&self, id: &SessionId, cursor: &mut AppendCursor) {
         // This check must resolve the path: fstat on a retained descriptor
         // cannot detect an atomic replacement at events.jsonl.
-        if let Some(run) = &cursor.run {
-            if self
+        if let Some(run) = &cursor.run
+            && self
                 .io
                 .file_revision(&self.log_path(id))
                 .ok()
                 .flatten()
                 .as_ref()
                 != Some(&run.signature)
-            {
-                *cursor = AppendCursor::default();
-            }
+        {
+            *cursor = AppendCursor::default();
         }
     }
 
