@@ -94,6 +94,7 @@ fn workspace_file_uri(name: &str) -> String {
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -1057,13 +1058,10 @@ async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
     connection.finish().await;
 }
 
-/// A block kind this build cannot read is refused by name, and no turn runs.
-///
-/// Both halves matter. `initialize` advertises no audio capability, so a
-/// conforming client never sends one; a client that does must not have its
-/// prompt silently answered without the recording it asked about.
+/// Malformed audio is refused by name before a turn starts.
+/// A declared WAV media type must never make arbitrary bytes admissible.
 #[tokio::test]
-async fn audio_is_refused_by_name_and_no_turn_is_started() {
+async fn malformed_audio_is_refused_by_name_and_no_turn_is_started() {
     let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
     let session = connection.open(WORKSPACE).await;
@@ -2300,5 +2298,69 @@ async fn editor_context_fixture_preserves_untrusted_ordered_snapshots() {
         assert!(!prompt.contains(uri), "acquisition URI leaked");
     }
     assert_eq!(prompt, expected);
+    connection.finish().await;
+}
+
+// Catches the real ACP dispatch path losing admitted audio before the executor.
+#[tokio::test]
+async fn valid_audio_bytes_reach_the_turn_without_a_paid_call() {
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open(WORKSPACE).await;
+    let bytes = include_bytes!("../../ego-core/tests/fixtures/audio/pcm16-mono.wav");
+    let (response, _) = connection.request("session/prompt", serde_json::json!({
+        "sessionId":session, "prompt":[{"type":"audio","mimeType":"audio/wav","data":BASE64.encode(bytes)}]
+    })).await;
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(turns.turns()[0].0.audio()[0].bytes(), bytes);
+    assert!(turns.turns()[0].0.text().is_empty());
+    let (response, _) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId":session, "prompt":[{"type":"text","text":"é"},
+                {"type":"audio","mimeType":"audio/wav","data":BASE64.encode(bytes)},
+                {"type":"text","text":"after"}]
+            }),
+        )
+        .await;
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(turns.turns()[1].0.audio()[0].text_offset(), Some(2));
+    assert_eq!(turns.turns()[1].0.audio()[0].bytes(), bytes);
+    assert_eq!(turns.turns()[1].0.text(), "é\nafter");
+    connection.finish().await;
+}
+
+// Catches MIME inference, malformed input or unbounded audio decoding through public ACP.
+#[tokio::test]
+async fn invalid_and_over_limit_audio_never_starts_an_executor_turn() {
+    use ego_core::generator::audio::MAX_AUDIO_BYTES;
+    let turns = PromptExecutor::publishing();
+    let mut connection = Connected::to(turns.clone());
+    let session = connection.open(WORKSPACE).await;
+    let bytes = include_bytes!("../../ego-core/tests/fixtures/audio/pcm16-mono.wav");
+    let block =
+        |mime: &str, data: String| serde_json::json!({"type":"audio","mimeType":mime,"data":data});
+    for blocks in [
+        vec![block("audio/mp3", BASE64.encode(bytes))],
+        vec![block("", BASE64.encode(bytes))],
+        vec![block("audio/wav", "%%%".into())],
+        vec![block("audio/wav", "aGk=".into())],
+        vec![block(
+            "audio/wav",
+            "A".repeat(MAX_AUDIO_BYTES.div_ceil(3) * 4 + 1),
+        )],
+        vec![block("audio/wav", BASE64.encode(bytes)); 5],
+    ] {
+        let (response, notifications) = connection
+            .request(
+                "session/prompt",
+                serde_json::json!({"sessionId":session,"prompt":blocks}),
+            )
+            .await;
+        assert!(response.get("error").is_some(), "{response}");
+        assert!(turns.turns().is_empty());
+        assert!(notifications.is_empty());
+    }
     connection.finish().await;
 }

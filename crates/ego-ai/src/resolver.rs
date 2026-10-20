@@ -196,6 +196,46 @@ impl ModelResolver for Supplied {
     }
 }
 
+/// Public OpenAI model-specific contracts: audio uses Chat Completions, not Responses.
+#[derive(Debug)]
+pub struct OpenAiSupplied;
+impl OpenAiSupplied {
+    fn mapping(model: &str) -> &'static dyn WireFormat {
+        if model == "gpt-audio-1.5" {
+            &crate::wire::openai_completions::OpenAiCompletions
+        } else {
+            &crate::wire::openai_responses::OpenAiResponses
+        }
+    }
+}
+impl ModelResolver for OpenAiSupplied {
+    fn supplied_request_mapping(
+        &self,
+        at: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        at.catalogue
+            .static_request_profile_with_mapping(at.slug, Self::mapping(&at.slug.model))
+            .map(Some)
+    }
+    fn resolve<'a>(
+        &'a self,
+        at: &'a Resolution<'a>,
+    ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
+        Box::pin(std::future::ready(
+            at.catalogue
+                .resolve_hosted(at.slug, Self::mapping(&at.slug.model)),
+        ))
+    }
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
+        Box::pin(std::future::ready(
+            at.catalogue.enumerate_hosted(at.row.id(), None),
+        ))
+    }
+}
+
 /// Builtin- or operator-supplied capabilities under a provider subscription
 /// policy. Rates in `models.toml` cannot turn a flat-fee row back into
 /// currency.

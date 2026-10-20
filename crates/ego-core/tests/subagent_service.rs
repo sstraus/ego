@@ -1080,6 +1080,7 @@ fn generation_request(prompt: &str) -> GenRequest {
 fn generation_capabilities() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(4096),
         max_output_tokens: Some(1024),
         max_tools: Some(128),

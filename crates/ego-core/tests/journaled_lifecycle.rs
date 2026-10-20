@@ -172,6 +172,7 @@ fn journal_orders_ordinary_lifecycle_ordinary_and_replays_exactly() {
             None,
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "one".into(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -186,6 +187,7 @@ fn journal_orders_ordinary_lifecycle_ordinary_and_replays_exactly() {
             None,
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "three".into(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -237,6 +239,7 @@ fn frozen_ordinary_append_prevents_lifecycle_delegation() {
                 None,
                 None,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "x".into(),
                     images: Vec::new(),
                     queued_prompt: None
@@ -278,6 +281,7 @@ fn unpublished_lifecycle_does_not_fold_or_consume_sequence() {
             None,
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "x".into(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -313,6 +317,7 @@ fn uncertain_publication_folds_once_and_next_append_follows() {
             None,
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "x".into(),
                 images: Vec::new(),
                 queued_prompt: None,

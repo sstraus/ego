@@ -26,7 +26,7 @@ const ECHO_ARGV: &[&str] = &[
 
 const ANTHROPIC_FACTS: &str = r#"
 [model."anthropic/claude-test-5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
@@ -49,7 +49,7 @@ output = "0.00001"
 
 const XAI_FACTS: &str = r#"
 [model."xai-oauth/grok-code-fast-1".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128

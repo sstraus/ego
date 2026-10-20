@@ -70,6 +70,7 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
     };
     let caps = ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(1024),
         max_output_tokens: Some(32),
         max_tools: Some(8),
@@ -157,6 +158,7 @@ fn admitted_stream(root: &SharedBudgetGate, model: &str) -> (AttemptStream, Gate
     };
     let caps = ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(1024),
         max_output_tokens: Some(32),
         max_tools: Some(8),

@@ -164,6 +164,7 @@ mod snapshot {
             turn1,
             Some(item_msg),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "list the files".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,

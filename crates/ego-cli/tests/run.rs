@@ -88,7 +88,7 @@ fn the_version_in_the_document_is_the_version_the_binary_writes() {
 /// small enough to be crossed without arithmetic nobody can follow.
 const ANTHROPIC_FACTS: &str = r#"
 [model."anthropic/claude-test-5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128

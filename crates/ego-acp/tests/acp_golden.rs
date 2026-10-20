@@ -212,6 +212,7 @@ mod acp_golden {
                 turn1,
                 Some(item_user_1),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "list the files".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -395,6 +396,7 @@ mod acp_golden {
                 turn2,
                 Some(item_user_2),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "thanks".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -459,6 +461,7 @@ mod acp_golden {
         let skill_invocation = ego_core::event::skill::SkillInvocationId::new();
         vec![
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: QueuedPromptId::new(),
                 text: String::new(),
                 images: Vec::new(),
@@ -467,6 +470,7 @@ mod acp_golden {
                 through: QueuedPromptId::new(),
             },
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: String::new(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -718,6 +722,7 @@ mod acp_golden {
     fn caps(max_context_tokens: Option<u64>) -> ModelCapabilities {
         ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens,
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -1273,6 +1278,7 @@ mod acp_golden {
     fn an_item_less_event_reaches_neither_protocol_because_the_public_stream_drops_it() {
         let kinds = [
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "orphaned".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -1310,6 +1316,7 @@ mod acp_golden {
     fn every_v2_content_bearing_event_without_item_id_projects_to_none() {
         let kinds = [
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "orphaned".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,

@@ -40,6 +40,7 @@ impl Fixture {
             (
                 Some(ItemId::new()),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "acp trust userneedle".into(),
                     images: Vec::new(),
                     queued_prompt: None,

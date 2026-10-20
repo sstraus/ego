@@ -23,6 +23,11 @@ impl WireFormat for KimiAnthropic {
         target: &RequestTarget<'_>,
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused> {
+        if super::request_has_audio(req) {
+            return Err(RequestRefused::new(
+                "this wire contract does not support audio input",
+            ));
+        }
         let mut request = target.post_json("messages?beta=true", request_body(req)?);
         request.headers.push(crate::http::public_header(
             anthropic_messages::VERSION_HEADER,

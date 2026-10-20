@@ -353,6 +353,7 @@ impl GenerationModelSource for FixedSource {
             generator: self.generator.clone(),
             capabilities: ModelCapabilities {
                 schema_version: ModelCapabilities::SCHEMA_VERSION,
+                audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
                 max_context_tokens: Some(10_000),
                 max_output_tokens: Some(1_000),
                 max_tools: Some(16),

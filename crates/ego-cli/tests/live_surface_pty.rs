@@ -670,6 +670,7 @@ fn across_root_picker_contract(case: &str) {
             (
                 Some(ItemId::new()),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: format!("REGRESSION-MARKER {label}"),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -883,6 +884,7 @@ fn resume_replay_contract(turns: usize, unrenderable: bool) {
         append(
             Some(user),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: format!("REPLAY-USER-{n:02}"),
                 images: Vec::new(),
                 queued_prompt: None,

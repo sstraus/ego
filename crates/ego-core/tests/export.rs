@@ -116,6 +116,7 @@ fn generation_for(
             ),
             ModelCapabilities {
                 schema_version: ModelCapabilities::SCHEMA_VERSION,
+                audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
                 max_context_tokens: Some(8192),
                 max_output_tokens: Some(1024),
                 max_tools: Some(32),
@@ -199,6 +200,7 @@ fn fixture() -> (ExportFixture, SessionId, Vec<u8>) {
     let source_entries = vec![event(
         &mut source_seq,
         EventKind::UserPrompt {
+            audio: Vec::new(),
             text: "SECRET-PROMPT".to_owned(),
             images: vec![image],
             queued_prompt: None,

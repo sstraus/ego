@@ -32,6 +32,7 @@ use crate::wire::WireFormat;
 /// This is deliberately not a resolved generation model: it carries no
 /// credential, metering, rates, pricing or generation authority.
 pub struct StaticRequestProfile {
+    base: Url,
     request_model: String,
     capabilities: ModelCapabilities,
     wire: &'static dyn WireFormat,
@@ -39,11 +40,13 @@ pub struct StaticRequestProfile {
 
 impl StaticRequestProfile {
     pub(crate) fn new(
+        base: Url,
         request_model: String,
         capabilities: ModelCapabilities,
         wire: &'static dyn WireFormat,
     ) -> Self {
         Self {
+            base,
             request_model,
             capabilities,
             wire,
@@ -70,9 +73,7 @@ impl StaticRequestProfile {
         &self,
         request: &GenRequest,
     ) -> Result<(), RequestExpressibilityError> {
-        let base = Url::parse("https://request-shape.invalid/")
-            .expect("the static request-shape base is a URL");
-        let target = wire::RequestTarget::new(&base, &[]);
+        let target = wire::RequestTarget::new(&self.base, &[]);
         self.wire
             .build_request(&target, &ToolNames::new(request).encode(request))
             .map(drop)

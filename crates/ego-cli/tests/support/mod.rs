@@ -47,7 +47,7 @@ pub fn vision_model_facts(image_input: &str) -> String {
     format!(
         r#"
 [model."anthropic/fixture-vision".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 128000
 max_output_tokens = 4096
 max_tools = 32
