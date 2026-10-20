@@ -750,10 +750,23 @@ fn exec_contract_fixture_terminates_by_signal() {
 fn exec_contract_fixture_rejects_inherited_fds() {
     use std::os::unix::fs::MetadataExt;
 
+    let descriptor_metadata = |path: &std::path::Path| -> std::io::Result<std::fs::Metadata> {
+        let metadata = std::fs::metadata(path)?;
+        // macOS /dev/fd stat uses a synthetic device for regular files. Opening
+        // those files gives the original identity; sockets and pipes must only
+        // be inspected with nonblocking path metadata, never reopened.
+        #[cfg(target_os = "macos")]
+        if metadata.is_file() {
+            return std::fs::File::open(path)?.metadata();
+        }
+        Ok(metadata)
+    };
     let owned_files = std::env::args_os()
         .skip_while(|arg| arg != "--")
         .skip(1)
-        .map(|path| std::fs::metadata(path).expect("owned descriptor identity"))
+        .map(|path| {
+            descriptor_metadata(std::path::Path::new(&path)).expect("owned descriptor identity")
+        })
         .collect::<Vec<_>>();
     assert!(!owned_files.is_empty(), "the fixture needs owned files");
     // Drop the enumeration handle before checking candidates. Descriptor numbers
@@ -767,10 +780,7 @@ fn exec_contract_fixture_rejects_inherited_fds() {
             continue;
         };
         if fd.parse::<u32>().is_ok_and(|fd| fd >= 3)
-            && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file())
-            // macOS /dev/fd stat reports the synthetic fd filesystem's device;
-            // fstat on the opened file reports the original device identity.
-            && let Ok(actual) = std::fs::File::open(&path).and_then(|file| file.metadata())
+            && let Ok(actual) = descriptor_metadata(&path)
             && owned_files
                 .iter()
                 .any(|owned| actual.dev() == owned.dev() && actual.ino() == owned.ino())
