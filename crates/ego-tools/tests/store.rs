@@ -1583,6 +1583,106 @@ mod store {
         );
     }
 
+    // Catches: evidence publication or an idempotent retry discards the domain
+    // projection and makes the next non-boundary event replay the whole log.
+    #[test]
+    fn evidence_between_domain_appends_preserves_synopsis_without_log_replay() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/ws",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: reads.clone(),
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let log = log_path(dir.path(), &session);
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::UserPrompt {
+                        audio: Vec::new(),
+                        text: "first question".into(),
+                        images: Vec::new(),
+                        queued_prompt: None,
+                    },
+                ),
+            )
+            .unwrap();
+        let before = *reads.lock().unwrap().get(&log).unwrap_or(&0);
+        let service = EvidenceAdmissionService::new();
+        for _ in 0..4 {
+            let invocation = RunInvocationId::new();
+            let context = RunContextEvidence::new(
+                session,
+                invocation,
+                RunId::new(session, invocation.uuid()),
+                ConfigProvenance::default(),
+            );
+            for expected in [
+                ego_core::evidence::EvidenceWrite::Published,
+                ego_core::evidence::EvidenceWrite::AlreadyRecorded,
+            ] {
+                assert_eq!(
+                    service
+                        .admit_run_context(&opened.writer, context.clone())
+                        .unwrap(),
+                    expected
+                );
+                opened
+                    .writer
+                    .append(
+                        &session,
+                        &ev(
+                            seq.next(),
+                            turn,
+                            EventKind::AssistantMessage {
+                                text: "first answer".into(),
+                            },
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            *reads.lock().unwrap().get(&log).unwrap_or(&0),
+            before,
+            "evidence interleaving must not trigger whole-log replay"
+        );
+        let meta = store.list().unwrap().remove(0);
+        assert_eq!(meta.title.as_deref(), Some("first question"));
+        assert_eq!(
+            meta.summary.as_deref(),
+            Some("first question — first answer")
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 14);
+        assert!(entries.iter().all(Result::is_ok));
+    }
+
     // -- manifest / list -----------------------------------------------------
 
     #[test]
