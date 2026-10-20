@@ -402,6 +402,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                     gate: gate.clone(),
                     hook_layers: skill_profile_layers.as_deref(),
                     hook_trust: skill_trust,
+                    mdkb_prompt_command: effective.mdkb_prompt_command.clone(),
                     policy_source: Arc::clone(&policy_source),
                     judge_available,
                 },
@@ -493,6 +494,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             // Only owned transition data crosses the boundary where the
             // replaceable ActiveSession is mutated or replaced.
             'sessions: loop {
+                let prompt_warmup_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 // A new, forked, compacted or resumed epoch is another
                 // session, so the judge's grants do not cross into it.
                 let residual = judge_available.then(ResidualWriteDesk::new);
@@ -731,6 +733,7 @@ pub(super) async fn drive_execution<S: EventSink>(
 
                             let (exit, next_perimeter) = drive_interactive_turn_phase(
                                 InteractiveTurnPhase {
+                                    prompt_warmup_attempted: &prompt_warmup_attempted,
                                     seat: seat.as_ref(),
                                     status: status.as_ref(),
                                     confinement: &confinement,
@@ -1851,6 +1854,7 @@ async fn report_session_usage(
 }
 
 struct InteractiveTurnBuild<'a, 'session> {
+    prompt_warmup_attempted: &'a Arc<std::sync::atomic::AtomicBool>,
     args: &'a Args,
     effective: &'a Effective,
     source: &'a Arc<model::CliGenerationModelSource>,
@@ -1885,6 +1889,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     ),
 ) -> Result<TurnLoop<'session, 'turn>, RunTermination> {
     let InteractiveTurnBuild {
+        prompt_warmup_attempted,
         args,
         effective,
         source,
@@ -1929,6 +1934,14 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     )
     .with_secret_values(ego_tools::secrets::from_env())
     .with_cancel(cancel.clone());
+    let prompt_context = effective.mdkb_prompt_command.as_ref().map(|binary| {
+        Arc::new(crate::prompt_context::MdkbPromptContext::new(
+            binary.clone(),
+            Arc::clone(policy_source),
+            effect_ports.clone(),
+            ports.process(),
+        )) as Arc<dyn ego_core::turn::PromptContextSource>
+    });
     let tools = match admitted_tools.as_ref() {
         Some(source) => Tools::from_registry_with_source(
             registry,
@@ -1964,6 +1977,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?
+    .with_prompt_warmup_state(Arc::clone(prompt_warmup_attempted))
     .with_context_policy(args.context_clear, args.context_interval)
     .with_goal(args.goal.clone(), args.goal_turns)
     .with_goal_policy(effective.ceilings.clone(), args.goal_check_command.clone())
@@ -1976,6 +1990,10 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         message: error.to_string(),
     })?;
 
+    let loop_ = match prompt_context {
+        Some(source) => loop_.with_prompt_context(source),
+        None => loop_,
+    };
     let loop_ = loop_
         .with_provider_recovery(
             args.provider_recovery
@@ -3720,6 +3738,7 @@ fn activate_compaction_transition<'store>(
 }
 
 struct InteractiveTurnPhase<'a, 'session, 'store> {
+    prompt_warmup_attempted: &'a Arc<std::sync::atomic::AtomicBool>,
     seat: &'a dyn InteractiveSeat,
     status: Option<&'a InteractiveStatus>,
     confinement: &'a RunConfinement,
@@ -3772,6 +3791,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     asked: Option<InteractiveTurnInput>,
 ) -> Result<(bool, crate::perimeter::Perimeter), RunTermination> {
     let InteractiveTurnPhase {
+        prompt_warmup_attempted,
         seat,
         status,
         confinement,
@@ -3859,6 +3879,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         .collect::<std::collections::HashSet<_>>();
     let loop_ = build_interactive_turn(
         InteractiveTurnBuild {
+            prompt_warmup_attempted,
             args,
             effective,
             source,
