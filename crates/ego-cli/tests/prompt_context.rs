@@ -149,7 +149,16 @@ fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
     for exists in [true, false] {
         let stub = Stub::start(Plan {
             completions: vec![
-                Reply::Sse(tool_call("call_read", "read", r#"{"path":"notes.md"}"#)),
+                Reply::Sse(if exists {
+                    tool_call("call_read", "read", r#"{"path":"notes.md"}"#)
+                } else {
+                    // A missing read is rejected during preparation, not executed.
+                    tool_call(
+                        "call_exec",
+                        "exec",
+                        r#"{"argv":["/bin/sh","-c","printf known-failure >&2; exit 7"]}"#,
+                    )
+                }),
                 Reply::Sse(text("Done")),
             ],
             ..Plan::default()
@@ -203,8 +212,13 @@ fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
                 "PostToolUseFailure"
             }
         );
-        assert_eq!(observation["tool_name"], "Read");
-        assert_eq!(observation["tool_input"]["path"], "notes.md");
+        if exists {
+            assert_eq!(observation["tool_name"], "Read");
+            assert_eq!(observation["tool_input"]["path"], "notes.md");
+        } else {
+            assert_eq!(observation["tool_name"], "exec");
+            assert_eq!(observation["tool_input"]["argv"][0], "/bin/sh");
+        }
         let result = observation["tool_response"]
             .as_str()
             .expect("settled model-visible result");
@@ -216,6 +230,7 @@ fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
             );
             assert!(observation.get("error").is_none());
         } else {
+            assert!(result.contains("known-failure"), "{result}");
             assert_eq!(observation["error"], observation["tool_response"]);
         }
     }
