@@ -648,6 +648,31 @@ mod store {
         assert_eq!(entries.len(), 9);
         assert!(entries.iter().all(Result::is_ok));
         assert_eq!(store.list().unwrap()[0].summary_failures, 4);
+
+        // Catches: fstat on an old append descriptor misses atomic path replacement.
+        let log = log_path(dir.path(), &session);
+        let bytes = std::fs::read_to_string(&log).unwrap();
+        let replacement = bytes.replacen(
+            "\"workspace_root\":\"/workspace\"",
+            "\"workspace_root\":\"/elsewhere\"",
+            1,
+        );
+        assert_ne!(replacement, bytes);
+        assert_eq!(replacement.len(), bytes.len());
+        let staging = log.with_extension("replacement");
+        std::fs::write(&staging, &replacement).unwrap();
+        std::fs::rename(staging, &log).unwrap();
+        assert!(
+            opened
+                .writer
+                .compare_and_append_run(
+                    &session,
+                    Some(RunRevision::new(4)),
+                    admitted_run_transaction(&session, 5, Some(4), false)
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(log).unwrap(), replacement);
     }
 
     // Catches: reopening an unchanged, locally indexed writer replays recovery,

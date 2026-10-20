@@ -973,6 +973,8 @@ impl JsonlStore {
     }
 
     fn validate_run_cursor(&self, id: &SessionId, cursor: &mut AppendCursor) {
+        // This check must resolve the path: fstat on a retained descriptor
+        // cannot detect an atomic replacement at events.jsonl.
         if let Some(run) = &cursor.run {
             if self
                 .io
@@ -987,11 +989,26 @@ impl JsonlStore {
         }
     }
 
+    fn appended_revision(
+        &self,
+        id: &SessionId,
+        cursor: &AppendCursor,
+    ) -> Option<super::FileRevision> {
+        cursor
+            .log
+            .as_ref()
+            .and_then(|log| log.file_revision().ok().flatten())
+            .or_else(|| self.io.file_revision(&self.log_path(id)).ok().flatten())
+    }
+
     fn advance_run_signature(&self, id: &SessionId, cursor: &mut AppendCursor) {
-        if let Some(run) = &mut cursor.run {
-            match self.io.file_revision(&self.log_path(id)) {
-                Ok(Some(signature)) => run.signature = signature,
-                _ => cursor.run = None,
+        if cursor.run.is_some() {
+            let revision = self.appended_revision(id, cursor);
+            match revision {
+                Some(signature) => {
+                    cursor.run.as_mut().expect("indexed cursor").signature = signature
+                }
+                None => cursor.run = None,
             }
         }
     }
@@ -2363,7 +2380,7 @@ impl JsonlStore {
         }
         self.validate_run_cursor(session, cursor);
         let path = self.log_path(session);
-        let Some(_) = self.io.file_revision(&path).ok().flatten() else {
+        if cursor.run.is_none() && self.io.file_revision(&path).ok().flatten().is_none() {
             // Non-filesystem adapters and an initial publication keep the original path.
             cursor.run = None;
             cursor.next = None;
@@ -2373,7 +2390,7 @@ impl JsonlStore {
                 expected_revision,
                 transaction,
             );
-        };
+        }
         let mut run = match cursor.run.take() {
             Some(mut run) => {
                 self.sync_run_cursor(session, &mut run)?;
@@ -2430,7 +2447,7 @@ impl JsonlStore {
             tracing::warn!(session = %session_dir_name(session), error = %error,
                 "run transaction committed but its manifest projection failed");
         }
-        if let Ok(Some(signature)) = self.io.file_revision(&path) {
+        if let Some(signature) = self.appended_revision(session, cursor) {
             run.signature = signature;
             cursor.run = Some(run);
         }

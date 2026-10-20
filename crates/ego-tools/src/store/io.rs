@@ -169,11 +169,19 @@ pub trait PrivateLogWriter: Send {
 /// A session append descriptor owned by a writer lease. Writes are immediately
 /// visible to readers; durability barriers use this same descriptor.
 pub trait SessionLogWriter: Send {
+    /// Inspect this descriptor after a known append, without resolving its path.
+    fn file_revision(&self) -> io::Result<Option<FileRevision>> {
+        Ok(None)
+    }
     fn append_line(&mut self, line: &[u8]) -> io::Result<()>;
     fn fsync(&self) -> io::Result<()>;
 }
 
 impl SessionLogWriter for fs::File {
+    fn file_revision(&self) -> io::Result<Option<FileRevision>> {
+        FileRevision::from_metadata(&self.metadata()?).map(Some)
+    }
+
     fn append_line(&mut self, line: &[u8]) -> io::Result<()> {
         use io::Write as _;
         self.write_all(line)?;
