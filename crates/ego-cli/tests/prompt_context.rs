@@ -296,7 +296,7 @@ fn mdkb_configuration_does_not_grant_exec_authority() {
 fn executed_grep_and_edit_deliver_native_fields_and_provider_visible_hints() {
     use support::{Reply, text, tool_call};
     for (tool, args, expected_name) in [
-        ("grep", r#"{"query":"needle","path":"notes.md"}"#, "Grep"),
+        ("grep", r#"{"query":"needle","path":"data"}"#, "Grep"),
         (
             "edit",
             r#"{"path":"notes.md","old_string":"needle","new_string":"replacement"}"#,
@@ -311,7 +311,14 @@ fn executed_grep_and_edit_deliver_native_fields_and_provider_visible_hints() {
             ..Plan::default()
         });
         let ego = Ego::against(&stub);
-        ego.file("notes.md", "needle\n");
+        ego.file(
+            if tool == "grep" {
+                "data/notes.md"
+            } else {
+                "notes.md"
+            },
+            "needle\n",
+        );
         let log = ego.workspace_path().join("mdkb-inputs.jsonl");
         let script = ego.file("mdkb-fixture", &format!(r###"#!/bin/sh
 cat >> '{}'
@@ -349,7 +356,10 @@ fi
             .find(|input| input["hook_event_name"] == "PostToolUse")
             .unwrap_or_else(|| panic!("{tool}: {inputs:?}"));
         assert_eq!(post["tool_name"], expected_name);
-        assert_eq!(post["tool_input"]["path"], "notes.md");
+        assert_eq!(
+            post["tool_input"]["path"],
+            if tool == "grep" { "data" } else { "notes.md" }
+        );
         if tool == "grep" {
             assert_eq!(post["tool_input"]["query"], "needle");
             assert_eq!(post["tool_input"]["pattern"], "needle");
