@@ -1227,6 +1227,22 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
     }
 }
 
+/// Completed current-turn observations for an external episode consumer.
+/// Host context and private reasoning are not episode content.
+#[derive(Debug, Clone)]
+pub enum EpisodeItem {
+    User(String),
+    Assistant(String),
+    Tool {
+        id: ItemId,
+        name: String,
+        args: String,
+        ok: bool,
+        result: String,
+        completed_at: Option<crate::event::time::Timestamp>,
+    },
+}
+
 /// Optional, non-authoritative external prompt and tool context.
 /// Failures mean no context; they never become hook decisions.
 pub trait PromptContextSource: Send + Sync {
@@ -1257,6 +1273,16 @@ pub trait PromptContextSource: Send + Sync {
         _result: &'a str,
     ) -> futures::future::BoxFuture<'a, Result<Option<String>, String>> {
         Box::pin(async { Ok(None) })
+    }
+
+    /// An admitted model Stop is observational; failure cannot veto completion.
+    fn stop<'a>(
+        &'a self,
+        _cwd: &'a std::path::Path,
+        _session: SessionId,
+        _items: Vec<EpisodeItem>,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -4046,9 +4072,47 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     {
                         continue;
                     }
-                    // DEFERRED (2026-10-20) — episode settlement/mining waits for an
-                    // mdkb endpoint that accepts the episode inline. The existing
-                    // Stop hook reads a transcript path asynchronously instead.
+                    if let Some(source) = &self.prompt_context {
+                        let items = self.journal.inspect(|state| {
+                            let mut ordered: Vec<_> = state
+                                .items
+                                .iter()
+                                .filter(|(_, item)| item.turn == turn)
+                                .collect();
+                            ordered.sort_by_key(|(_, item)| item.seq);
+                            ordered
+                                .into_iter()
+                                .filter_map(|(id, item)| match item.kind {
+                                    crate::state::ItemKind::UserPrompt => {
+                                        Some(EpisodeItem::User(item.text.clone()))
+                                    }
+                                    crate::state::ItemKind::Assistant => {
+                                        Some(EpisodeItem::Assistant(item.text.clone()))
+                                    }
+                                    crate::state::ItemKind::ToolCall => Some(EpisodeItem::Tool {
+                                        id: *id,
+                                        name: item.tool_name.clone()?,
+                                        args: item.args.clone(),
+                                        ok: item.ok?,
+                                        result: item.tool_result.as_ref()?.model_text(),
+                                        completed_at: item.completed_at,
+                                    }),
+                                    _ => None,
+                                })
+                                .collect()
+                        });
+                        match items {
+                            Ok(items) => {
+                                if let Err(error) = source
+                                    .stop(self.tools.cwd().as_path(), self.session_id, items)
+                                    .await
+                                {
+                                    tracing::warn!(%error, "mdkb Stop observation unavailable");
+                                }
+                            }
+                            Err(error) => tracing::warn!(%error, "episode projection unavailable"),
+                        }
+                    }
                 } else if exit != ExitReason::Completed {
                     let _ = self
                         .dispatch_hook(

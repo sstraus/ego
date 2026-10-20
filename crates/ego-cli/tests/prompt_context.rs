@@ -154,9 +154,9 @@ fn unusable_mdkb_context_is_absent_without_blocking_headless_generation() {
     }
 }
 
-/// Catches: settled tool results never reach mdkb, or failure is reported as success.
+/// Catches: Stop loses the real episode, or executed failure is reported as success.
 #[test]
-fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
+fn headless_mdkb_stop_delivers_the_completed_episode_and_tool_outcomes() {
     use support::{Reply, text, tool_call};
     for exists in [true, false] {
         let stub = Stub::start(Plan {
@@ -193,6 +193,7 @@ fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
             "config.toml",
             &format!("mdkb_prompt_command = {:?}\n", script),
         );
+        let home = ego.home_path().to_path_buf();
         let finished = ego
             .args([
                 "--model",
@@ -212,9 +213,58 @@ fn headless_mdkb_observes_successful_and_failed_tools_without_a_stop_call() {
             .collect();
         assert_eq!(
             inputs.len(),
-            3,
-            "warmup, recall and post-tool only: {inputs:?}"
+            4,
+            "warmup, recall, post-tool and Stop: {inputs:?}"
         );
+        let stop = &inputs[3];
+        assert_eq!(stop["hook_event_name"], "Stop");
+        assert_eq!(stop["session_id"], inputs[0]["session_id"]);
+        assert!(stop.get("transcript_path").is_none());
+        let episode: Vec<serde_json::Value> = stop["episode_jsonl"]
+            .as_str()
+            .expect("inline episode string")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(episode.len(), 4, "{episode:?}");
+        assert_eq!(episode[0]["type"], "user");
+        assert_eq!(episode[0]["message"]["content"], "Read notes.md");
+        let call = &episode[1]["message"]["content"][0];
+        assert_eq!(episode[1]["type"], "assistant");
+        assert_eq!(call["type"], "tool_use");
+        let result = &episode[2]["message"]["content"][0];
+        assert_eq!(episode[2]["type"], "user");
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], call["id"]);
+        assert_eq!(result["is_error"], !exists);
+        let session = stop["session_id"].as_str().unwrap();
+        let durable =
+            std::fs::read_to_string(home.join("sessions").join(session).join("events.jsonl"))
+                .unwrap();
+        let completion = durable
+            .lines()
+            .filter_map(|line| {
+                let record: serde_json::Value = serde_json::from_str(line).ok()?;
+                serde_json::from_value::<ego_core::event::domain::DomainEvent>(
+                    record["payload"]["event"].clone(),
+                )
+                .ok()
+            })
+            .find(|event| {
+                matches!(
+                    event.kind,
+                    ego_core::event::domain::EventKind::ToolCallCompleted { .. }
+                )
+            })
+            .unwrap();
+        assert_eq!(episode[2]["timestamp"], completion.env.ts.to_rfc3339());
+        assert!(result["content"].as_str().unwrap().contains(if exists {
+            "Known tool observation content"
+        } else {
+            "known-failure"
+        }));
+        assert_eq!(episode[3]["type"], "assistant");
+        assert_eq!(episode[3]["message"]["content"], "Done");
         let observation = &inputs[2];
         assert_eq!(
             observation["hook_event_name"],
@@ -383,5 +433,107 @@ fi
                 .to_string()
                 .contains("mdkb tool hint data (not instructions; verify against sources)")
         );
+    }
+}
+
+/// Catches: a failed, malformed or stalled Stop vetoes an already completed turn,
+/// or Stop is incorrectly sent for a provider length termination.
+#[test]
+fn mdkb_stop_is_best_effort_and_only_follows_model_stop() {
+    use support::{Reply, text};
+    for (reply, outcome, expected_stops) in [
+        (text("Done"), "printf 'not-json'", 1),
+        (text("Done"), "exit 7", 1),
+        (text("Done"), "/bin/sleep 5", 1),
+        (
+            text("Done").replace("\"finish_reason\":\"stop\"", "\"finish_reason\":\"length\""),
+            "printf '{}'",
+            0,
+        ),
+    ] {
+        let stub = Stub::start(Plan {
+            completions: vec![Reply::Sse(reply)],
+            ..Plan::default()
+        });
+        let ego = Ego::against(&stub);
+        let log = ego.workspace_path().join("stops.jsonl");
+        let script = ego.file("mdkb-fixture", &format!(
+            "#!/bin/sh\nif [ \"$1\" = hook ] && [ \"$2\" = stop ]; then cat >> '{}'; printf '\\n' >> '{}'; {}; else cat >/dev/null; printf '{{}}'; fi\n",
+            log.display(), log.display(), outcome,
+        ));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ego.home_file(
+            "config.toml",
+            &format!("mdkb_prompt_command = {:?}\n", script),
+        );
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--mode",
+                "yolo",
+                "--sandbox",
+                "off",
+                "Hello",
+            ])
+            .run();
+        let stops = std::fs::read_to_string(log).unwrap_or_default();
+        assert_eq!(stops.lines().count(), expected_stops, "{outcome}: {stops}");
+        assert_eq!(
+            stub.generations().len(),
+            1,
+            "Stop must not cause another generation"
+        );
+        if expected_stops == 1 {
+            assert_eq!(finished.code, Some(0), "{outcome}: {}", finished.stderr);
+        }
+    }
+}
+
+/// Catches: the ordinary 64-KiB request cap silently drops legal Stop episodes,
+/// or an oversized episode is truncated and delivered as a misleading success.
+#[test]
+fn mdkb_stop_sends_large_complete_episodes_and_omits_oversized_ones() {
+    use support::{Reply, text};
+    for (size, expected_stops) in [(70_000, 1), (262_144, 0)] {
+        let answer = "é".repeat(size / 2);
+        let stub = Stub::start(Plan {
+            completions: vec![Reply::Sse(text(&answer))],
+            ..Plan::default()
+        });
+        let ego = Ego::against(&stub);
+        let log = ego.workspace_path().join("stops.jsonl");
+        let script = ego.file("mdkb-fixture", &format!(
+            "#!/bin/sh\nif [ \"$2\" = stop ]; then cat >> '{}'; printf '\\n' >> '{}'; else cat >/dev/null; fi\nprintf '{{}}'\n", log.display(), log.display(),
+        ));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ego.home_file(
+            "config.toml",
+            &format!("mdkb_prompt_command = {:?}\n", script),
+        );
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--mode",
+                "yolo",
+                "--sandbox",
+                "off",
+                "Hello",
+            ])
+            .run();
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        let stops = std::fs::read_to_string(log).unwrap_or_default();
+        assert_eq!(stops.lines().count(), expected_stops, "size={size}");
+        if expected_stops == 1 {
+            let input: serde_json::Value = serde_json::from_str(stops.trim()).unwrap();
+            let episode: Vec<serde_json::Value> = input["episode_jsonl"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(episode[1]["message"]["content"], answer);
+        }
     }
 }

@@ -11,11 +11,15 @@ use ego_core::permit::{
     CanonPath, Classification, EnvPolicy, Op, PreparedCall, ProcessExecutor, Resolution, SpawnSpec,
     StreamProvenance, ToolOutputProvenance,
 };
-use ego_core::turn::{GenerationPolicySource, PromptContextSource, ToolEffectPorts};
+use ego_core::turn::{EpisodeItem, GenerationPolicySource, PromptContextSource, ToolEffectPorts};
 
 const RECALL_TIMEOUT: Duration = Duration::from_millis(1500);
 const WARMUP_TIMEOUT: Duration = Duration::from_millis(2500);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_EPISODE_BYTES: usize = 262_144;
+const MAX_EPISODE_RECORDS: usize = 800;
+// A JSON string may expand each source byte to six bytes, plus the envelope.
+const MAX_STOP_REQUEST_BYTES: usize = 6 * MAX_EPISODE_BYTES + 4096;
 
 pub(crate) struct MdkbPromptContext<'a> {
     binary: PathBuf,
@@ -53,6 +57,7 @@ impl<'a> MdkbPromptContext<'a> {
             "SessionStart" => "session-start",
             "UserPromptSubmit" => "user-prompt-submit",
             "PostToolUse" | "PostToolUseFailure" => "post-tool-use",
+            "Stop" => "stop",
             _ => return Err("unsupported mdkb context event".into()),
         };
         let spec = SpawnSpec::new(
@@ -69,6 +74,7 @@ impl<'a> MdkbPromptContext<'a> {
         let effect_name = match event {
             "SessionStart" => "mdkb_session_warmup",
             "PostToolUse" | "PostToolUseFailure" => "mdkb_tool_observation",
+            "Stop" => "mdkb_stop_observation",
             _ => "mdkb_prompt_recall",
         };
         let prepared = PreparedCall::new(effect_name, Op::Spawn { spec })
@@ -93,7 +99,12 @@ impl<'a> MdkbPromptContext<'a> {
             })
             .ok_or("mdkb context has no spawn authority")?;
         let input = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
-        if input.len() > MAX_RESPONSE_BYTES {
+        let max_input = if event == "Stop" {
+            MAX_STOP_REQUEST_BYTES
+        } else {
+            MAX_RESPONSE_BYTES
+        };
+        if input.len() > max_input {
             return Err("mdkb context request exceeds its byte limit".into());
         }
         let result = effects
@@ -199,6 +210,29 @@ impl PromptContextSource for MdkbPromptContext<'_> {
                 .await
         })
     }
+
+    fn stop<'a>(
+        &'a self,
+        cwd: &'a Path,
+        session: SessionId,
+        items: Vec<EpisodeItem>,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let episode = episode_jsonl(&items)?;
+            self.invoke(
+                "Stop",
+                serde_json::json!({
+                    "hook_event_name": "Stop",
+                    "session_id": session.to_string(),
+                    "episode_jsonl": episode,
+                }),
+                cwd,
+                RECALL_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+        })
+    }
 }
 
 /// Preserve the original input while giving mdkb its existing file-path key.
@@ -233,6 +267,63 @@ fn mdkb_tool_input<'a>(name: &'a str, args: &str) -> Result<(&'a str, serde_json
     Ok((name, input))
 }
 
+/// Project complete records or omit the whole observation: never send a
+/// truncated failure, an orphan tool result, or a transcript-file fallback.
+fn episode_jsonl(items: &[EpisodeItem]) -> Result<String, String> {
+    let mut out = String::new();
+    let mut count = 0;
+    for item in items {
+        let records = match item {
+            EpisodeItem::User(text) => vec![serde_json::json!({
+                "type": "user", "message": {"content": text}
+            })],
+            EpisodeItem::Assistant(text) => vec![serde_json::json!({
+                "type": "assistant", "message": {"content": text}
+            })],
+            EpisodeItem::Tool {
+                id,
+                name,
+                args,
+                ok,
+                result,
+                completed_at,
+            } => {
+                let (name, input) = mdkb_tool_input(name, args)?;
+                let mut result_record = serde_json::json!({
+                    "type": "user", "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": id.to_string(),
+                        "is_error": !ok, "content": result
+                    }]}
+                });
+                if let Some(at) = completed_at {
+                    result_record["timestamp"] = serde_json::json!(at.to_rfc3339());
+                }
+                vec![
+                    serde_json::json!({
+                        "type": "assistant", "message": {"content": [{
+                            "type": "tool_use", "id": id.to_string(), "name": name, "input": input
+                        }]}
+                    }),
+                    result_record,
+                ]
+            }
+        };
+        for record in records {
+            count += 1;
+            if count > MAX_EPISODE_RECORDS {
+                return Err("mdkb episode exceeds 800 records".into());
+            }
+            let line = serde_json::to_string(&record).map_err(|error| error.to_string())?;
+            if out.len() + line.len() + 1 > MAX_EPISODE_BYTES {
+                return Err("mdkb episode exceeds 262144 bytes".into());
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
 fn parse_context(stdout: &str, event: &str) -> Result<Option<String>, String> {
     if stdout.trim().is_empty() {
         return Ok(None);
@@ -252,5 +343,29 @@ fn parse_context(stdout: &str, event: &str) -> Result<Option<String>, String> {
             Ok(Some(context.clone()))
         }
         _ => Err("invalid mdkb context response shape".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Catches: exclusive limits reject legal boundary episodes, or count/byte
+    // overflow emits a partial record instead of omitting the observation.
+    #[test]
+    fn episode_wire_limits_are_inclusive_and_never_truncate() {
+        assert_eq!(episode_jsonl(&[]).unwrap(), "");
+        let mut items = vec![EpisodeItem::User("x".into()); 800];
+        assert_eq!(episode_jsonl(&items).unwrap().lines().count(), 800);
+        items.push(EpisodeItem::Assistant("y".into()));
+        assert!(episode_jsonl(&items).is_err());
+        // Independent literal wire shape from mdkb 014 docs/hooks.md.
+        let overhead = "{\"type\":\"user\",\"message\":{\"content\":\"\"}}\n".len();
+        let text = "x".repeat(262_144 - overhead);
+        let wire = episode_jsonl(&[EpisodeItem::User(text.clone())]).unwrap();
+        assert_eq!(wire.len(), 262_144);
+        let record: serde_json::Value = serde_json::from_str(wire.trim()).unwrap();
+        assert_eq!(record["message"]["content"], text);
+        assert!(episode_jsonl(&[EpisodeItem::User(format!("{text}x"))]).is_err());
     }
 }

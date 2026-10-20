@@ -31,7 +31,7 @@ model-visible result. Only the matching event's
 untrusted user-role data. It never becomes a lifecycle decision or permission.
 
 The warmup deadline is 2500 ms; recall and tool observation deadlines are 1500 ms.
-Each request and response is limited to 64 KiB. Over-limit data is rejected,
+Warmup, recall and tool requests, and all responses, are limited to 64 KiB. Over-limit data is rejected,
 not silently shortened into a successful tool outcome. Admitted context is limited
 to 16 KiB per contribution. A denied command, timeout, invalid reply or execution
 failure means absent context, not a blocked prompt. Normal guarded process policy
@@ -39,10 +39,21 @@ still applies: this setting does not grant execution permission. The
 `MDKB_DISTILLER_ACTIVE` environment marker disables this source to avoid recursion.
 Remove the key to disable it; unrelated lifecycle hooks are not changed.
 
-**Stop episode delivery is deferred (2026-10-20).** The current mdkb Stop hook
-requires a transcript file path and does not accept an inline ego episode.
-Ego does not invoke a Stop command or deliver episodes for prior settlement/mining.
-This data source has best-effort delivery, not replay-safe external receipts.
+After an admitted model Stop, the source calls `mdkb hook stop` with the real
+`session_id` and an `episode_jsonl` string. This requires mdkb's inline Stop
+contract (regression case). The episode contains the current turn's durable user text,
+assistant text, and settled tool uses/results in item order. Tool result records
+retain their actual completion timestamps. Host context, private reasoning,
+images, audio and evidence blobs are not sent. Native tool input is retained;
+file tools also carry mdkb's `file_path` field.
+
+The complete episode must fit **800 records and 262144 UTF-8 bytes**, inclusive.
+If either limit is exceeded, ego omits the whole Stop observation. It never
+truncates a record or substitutes a transcript file. The JSON stdin envelope has
+a separate bounded allowance for escaping (six times the episode byte limit plus
+4096 bytes). Stop uses the same guarded process policy, recursion marker and
+1500 ms deadline. Stop output never enters generation history and cannot veto a
+completed turn. Delivery is best-effort, not replay-safe or exactly-once.
 
 ## Declare a hook
 
