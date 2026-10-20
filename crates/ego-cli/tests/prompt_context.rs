@@ -277,6 +277,11 @@ fn headless_mdkb_stop_delivers_the_completed_episode_and_tool_outcomes() {
         if exists {
             assert_eq!(observation["tool_name"], "Read");
             assert_eq!(observation["tool_input"]["path"], "notes.md");
+            // Catches: Read loses the file_path used by mdkb path priors and episodes.
+            assert_eq!(call["name"], "Read");
+            assert_eq!(call["input"]["path"], "notes.md");
+            assert_eq!(call["input"]["file_path"], "notes.md");
+            assert_eq!(observation["tool_input"]["file_path"], "notes.md");
         } else {
             assert_eq!(observation["tool_name"], "exec");
             assert_eq!(observation["tool_input"]["argv"][0], "/bin/sh");

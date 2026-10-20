@@ -255,7 +255,7 @@ fn mdkb_tool_input<'a>(name: &'a str, args: &str) -> Result<(&'a str, serde_json
     {
         input["pattern"] = serde_json::json!(query);
     }
-    if matches!(name, "Edit" | "Write")
+    if matches!(name, "Read" | "Edit" | "Write")
         && input.get("file_path").is_none()
         && let Some(path) = input
             .get("path")

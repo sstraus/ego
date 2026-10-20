@@ -3996,6 +3996,103 @@ mod turn {
         )));
     }
 
+    // Catches: busy-turn admission skips recall before the follow-up provider request.
+    #[test]
+    fn queued_steer_recall_reaches_follow_up_without_repeating_warmup() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::TextDelta {
+                    text: "the final answer".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "the queued follow-up".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        struct SteerRecall {
+            warmups: AtomicUsize,
+        }
+        impl PromptContextSource for SteerRecall {
+            fn warmup<'a>(
+                &'a self,
+                _cwd: &'a Path,
+                _session: SessionId,
+            ) -> BoxFuture<'a, Result<Option<String>, String>> {
+                self.warmups.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(None) })
+            }
+
+            fn recall<'a>(
+                &'a self,
+                prompt: &'a str,
+                _cwd: &'a Path,
+                _session: SessionId,
+            ) -> BoxFuture<'a, Result<Option<String>, String>> {
+                Box::pin(async move { Ok(Some(format!("Recall for: {prompt}"))) })
+            }
+        }
+        let source = Arc::new(SteerRecall {
+            warmups: AtomicUsize::new(0),
+        });
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control)
+        .with_prompt_context(Arc::clone(&source) as Arc<dyn PromptContextSource>);
+        let mut submit =
+            Box::pin(ingress.submit("deliver this after the final".to_owned(), Vec::new()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(submit.as_mut().poll(&mut cx), Poll::Pending));
+        let (outcome, accepted) =
+            block_on(async { futures::join!(turn.run("initial prompt"), submit) });
+        assert_eq!(outcome.unwrap().exit_reason, ExitReason::Completed);
+        assert_eq!(accepted.unwrap().pending_steers, 1);
+        let generations = fx.generator.calls();
+        assert_eq!(generations.len(), 2);
+        assert_eq!(source.warmups.load(Ordering::Relaxed), 1);
+        assert!(
+            generations[1]
+                .messages
+                .messages()
+                .iter()
+                .any(|message| message.role == Role::User
+                    && format!("{:?}", message.content)
+                        .contains("Recall for: deliver this after the final")),
+            "the follow-up must receive recall for the newly admitted steer"
+        );
+        assert!(
+            !format!("{:?}", generations[0].messages.messages())
+                .contains("Recall for: deliver this after the final")
+        );
+    }
+
     #[test]
     fn an_ordinary_sibling_batch_delivers_a_pending_steer_at_the_safe_boundary() {
         let (ingress, mut control) = ego_core::turn::interactive_control();
