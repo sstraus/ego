@@ -514,6 +514,9 @@ pub(super) struct AppendState {
 struct AppendCursor {
     next: Option<Seq>,
     log: Option<Box<dyn SessionLogWriter>>,
+    // Derived by the existing reducer, never an authority separate from the log.
+    // This avoids replaying the growing log for every turn-boundary synopsis.
+    state: Option<SessionState>,
 }
 
 /// The filesystem `SessionStore`. Real I/O goes through the injected
@@ -668,10 +671,14 @@ impl JsonlStore {
     pub(super) fn retain_appender(
         &self,
         id: &SessionId,
+        replayed: &SessionState,
     ) -> Result<Arc<Mutex<AppendState>>, StoreError> {
         let state = Arc::new(Mutex::new(AppendState {
             lock: self.open_events_lock(id)?,
-            cursor: AppendCursor::default(),
+            cursor: AppendCursor {
+                state: Some(replayed.clone()),
+                ..AppendCursor::default()
+            },
         }));
         let mut appenders = self
             .appenders
@@ -1290,6 +1297,7 @@ impl JsonlStore {
         id: &SessionId,
         ev: &DomainEvent,
         is_new_session: bool,
+        projected: Option<&SessionState>,
     ) -> Result<(), StoreError> {
         let previous = self.read_manifest(id)?;
         // A missing cache is not evidence of an empty catalogue. Consult the
@@ -1303,7 +1311,9 @@ impl JsonlStore {
                 | EventKind::CompactionSeeded { .. }
                 | EventKind::Compacted { .. }
         );
-        let log_facts = if (previous.is_none() && !is_new_session) || refresh_synopsis {
+        let log_facts = if (previous.is_none() && !is_new_session)
+            || (refresh_synopsis && projected.is_none())
+        {
             match self.io.read(&self.log_path(id))? {
                 Some(bytes) => self.catalogue_facts(&bytes)?,
                 None => None,
@@ -1355,31 +1365,35 @@ impl JsonlStore {
             updated: ev.env.ts,
             title: match &ev.kind {
                 EventKind::SessionTitleChanged { title } => title.clone(),
-                _ => log_facts
-                    .as_ref()
-                    .and_then(|facts| facts.title.clone())
+                _ => projected
+                    .and_then(|state| state.title.clone())
+                    .or_else(|| log_facts.as_ref().and_then(|facts| facts.title.clone()))
                     .or_else(|| {
                         previous
                             .as_ref()
                             .and_then(|manifest| manifest.meta.title.clone())
                     }),
             },
-            summary: log_facts
-                .as_ref()
-                .and_then(|facts| facts.summary.clone())
+            summary: projected
+                .and_then(|state| state.summary.clone())
+                .or_else(|| log_facts.as_ref().and_then(|facts| facts.summary.clone()))
                 .or_else(|| {
                     previous
                         .as_ref()
                         .and_then(|manifest| manifest.meta.summary.clone())
                 }),
-            summary_failures: log_facts.as_ref().map_or_else(
-                || {
-                    previous
-                        .as_ref()
-                        .map_or(0, |manifest| manifest.meta.summary_failures)
-                },
-                |facts| facts.summary_failures,
-            ),
+            summary_failures: projected
+                .map(|state| state.summary_failures)
+                .unwrap_or_else(|| {
+                    log_facts.as_ref().map_or_else(
+                        || {
+                            previous
+                                .as_ref()
+                                .map_or(0, |manifest| manifest.meta.summary_failures)
+                        },
+                        |facts| facts.summary_failures,
+                    )
+                }),
             lineage: match &ev.kind {
                 EventKind::CompactionSeeded {
                     source,
@@ -1792,6 +1806,9 @@ impl JsonlStore {
         }
         let record_line = encode_record(position, &SessionEntry::Event(ev.clone()))?;
         append_line(&record_line)?;
+        if let Some(state) = cursor.state.as_mut() {
+            state.apply(ev);
+        }
         let mut next = position;
         cursor.next = Some(next.next());
 
@@ -1840,7 +1857,7 @@ impl JsonlStore {
             || is_execution_observation
             || is_hook_admission
         {
-            self.write_manifest(id, ev, is_new_session)?;
+            self.write_manifest(id, ev, is_new_session, cursor.state.as_ref())?;
         }
 
         Ok(())
@@ -2088,6 +2105,13 @@ impl SessionStore for JsonlStore {
                 .map_err(|_| invalid_log("session appender poisoned"))?;
             let AppendState { lock, cursor } = &mut *state;
             let _guard = lock.write()?;
+            if cursor.state.is_none() {
+                cursor.state = Some(match self.resume(id) {
+                    Ok((state, _)) => state,
+                    Err(StoreError::NotFound) => SessionState::default(),
+                    Err(error) => return Err(error),
+                });
+            }
             let result = self.append_already_locked(id, ev, cursor);
             if result.is_err() {
                 // A failed write may have left a torn tail. Revalidate before

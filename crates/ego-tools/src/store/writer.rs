@@ -373,7 +373,7 @@ impl JsonlStore {
             .map_err(|source| OpenError::Resume { source, repair })?;
 
         let appender = self
-            .retain_appender(id)
+            .retain_appender(id, &state)
             .map_err(|source| OpenError::Resume { source, repair })?;
 
         Ok(OpenSession {

@@ -469,9 +469,6 @@ fn replace_atomic_publication_with_privacy(
     barrier: Barrier,
     private: bool,
 ) -> io::Result<ReplacePublication> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let tmp_path = tmp_path_for(path);
 
     // Write *and fsync* the scratch file before renaming it into place.
@@ -482,17 +479,29 @@ fn replace_atomic_publication_with_privacy(
     // do.
     {
         use std::io::Write;
-        let mut file = if private {
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+        let open = || {
+            if private {
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                options.open(&tmp_path)
+            } else {
+                fs::File::create(&tmp_path)
             }
-            options.open(&tmp_path)?
-        } else {
-            fs::File::create(&tmp_path)?
+        };
+        let mut file = match open() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                open()?
+            }
+            Err(error) => return Err(error),
         };
         if private {
             harden_private_path(&tmp_path, PrivatePathKind::File)?;

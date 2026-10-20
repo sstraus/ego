@@ -563,9 +563,69 @@ mod store {
             "steady-state append must not reopen the log tail"
         );
         drop(counts);
+        assert_eq!(
+            store.list().unwrap()[0].summary_failures,
+            33,
+            "cached synopsis must apply every completed turn exactly once"
+        );
         let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
         assert_eq!(entries.len(), 33);
         assert!(entries.iter().all(Result::is_ok));
+    }
+
+    // Catches: replacing boundary replay with a cursor drops title/summary after invalidation or reopen.
+    #[test]
+    fn leased_append_projects_synopsis_across_invalidation_and_reopen() {
+        use ego_core::config::ModelRef;
+        use ego_core::event::id::ItemId;
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let mut opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        for (index, prompt, answer) in [
+            (0, "first question", "first answer"),
+            (1, "next question", "next answer"),
+        ] {
+            if index == 1 {
+                store
+                    .record_model_selection(&session, ModelRef("ollama/first".into()))
+                    .unwrap();
+                drop(opened);
+                opened = store.open_writer(&session, evidence_lease()).unwrap();
+            }
+            let turn = TurnId::new();
+            for kind in [
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: prompt.into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+                EventKind::AssistantMessage {
+                    text: answer.into(),
+                },
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            ] {
+                let mut event = ev(seq.next(), turn, kind);
+                event.env.item = Some(ItemId::new());
+                opened.writer.append(&session, &event).unwrap();
+            }
+            let meta = store.list().unwrap().remove(0);
+            assert_eq!(meta.title.as_deref(), Some("first question"));
+            assert_eq!(
+                meta.summary.as_deref(),
+                Some(if index == 0 {
+                    "first question — first answer"
+                } else {
+                    "next question — next answer"
+                })
+            );
+            assert_eq!(meta.summary_failures, 0);
+        }
     }
 
     // Catches: cached physical positions ignore non-event records or survive recovery.
