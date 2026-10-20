@@ -123,6 +123,124 @@ mod permit {
         )
     }
 
+    // Catches: cancellation reporting success without reaching the process owner,
+    // or accepting inspect authority / another process ID as cancel authority.
+    #[test]
+    fn background_cancel_requires_exact_authority_and_reaches_the_owner() {
+        use ego_core::event::id::DetachedExecId;
+        use ego_core::permit::SessionProcessAction;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Owner(Mutex<Vec<DetachedExecId>>);
+        impl ProcessExecutor for Owner {
+            fn execute<'a>(
+                &'a self,
+                _: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                unreachable!("cancellation never spawns")
+            }
+            fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
+                self.0.lock().unwrap().push(id);
+                Err(ProcessError::UnknownBackground { id })
+            }
+        }
+        let id = DetachedExecId::new();
+        let other = DetachedExecId::new();
+        let owner = Owner::default();
+        let fs = FakeFs::default();
+        let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Yolo, Ruleset::default());
+        for (action, requested, reaches_owner) in [
+            (SessionProcessAction::Inspect, id, false),
+            (SessionProcessAction::Cancel, other, false),
+            (SessionProcessAction::Cancel, id, true),
+        ] {
+            let call = PreparedCall::new("exec_cancel", Op::SessionProcess { id, action });
+            let Classification::Settled(Ok(granted)) = policy.classify(call) else {
+                panic!("session process control must be authorized");
+            };
+            let (_, permit) = granted.into_parts();
+            let io = GuardedEffects::new(
+                permit,
+                &fs,
+                &owner,
+                &NO_EVIDENCE,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            );
+            let result = io.background_cancel(requested);
+            if reaches_owner {
+                assert!(
+                    matches!(result, Err(ProcessError::UnknownBackground { id: actual }) if actual == id)
+                );
+                assert_eq!(*owner.0.lock().unwrap(), vec![id]);
+            } else {
+                assert!(matches!(result, Err(ProcessError::Invariant(_))));
+                assert!(owner.0.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    // Catches: a GuardedIo implementation without an owner claiming it cancelled a job.
+    #[test]
+    fn background_cancel_without_an_owner_fails_closed() {
+        use ego_core::permit::{Found, LineMatcher, McpHttpClaim, OneHopResponse};
+        struct NoOwner;
+        impl<'s> GuardedIo<'s> for NoOwner {
+            fn write(&self, _: &CanonPath, _: &[u8]) -> Result<(), IoDenied> {
+                unreachable!()
+            }
+            fn read(&self, _: &CanonPath) -> Result<Vec<u8>, IoDenied> {
+                unreachable!()
+            }
+            fn list(&self, _: &ScanRequest) -> Result<Scan, IoDenied> {
+                unreachable!()
+            }
+            fn search(&self, _: &ScanRequest, _: &dyn LineMatcher) -> Result<Found, IoDenied> {
+                unreachable!()
+            }
+            fn exec<'a>(
+                &'a self,
+                _: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                unreachable!()
+            }
+            fn read_evidence<'a>(
+                &'a self,
+                _: &'a EvidenceRead,
+            ) -> BoxFuture<'a, Result<EvidencePage, ToolError>> {
+                unreachable!()
+            }
+            fn guarded_http(
+                &self,
+                _: PreparedCall,
+                _: HttpRequest,
+            ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+                unreachable!()
+            }
+            fn claim_mcp_http(&self, _: PreparedCall) -> Result<McpHttpClaim, TransportError> {
+                unreachable!()
+            }
+            fn guarded_duplex(
+                &self,
+                _: PreparedCall,
+            ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+                unreachable!()
+            }
+            fn store_evidence(
+                &self,
+                _: &[u8],
+            ) -> Result<ego_core::store::evidence::EvidenceRef, ToolError> {
+                unreachable!()
+            }
+        }
+        let result = NoOwner.background_cancel(ego_core::event::id::DetachedExecId::new());
+        assert!(
+            matches!(result, Err(ProcessError::Invariant(message)) if message == "guarded I/O has no background process owner")
+        );
+    }
+
     fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {
         PrepareCtx {
             cwd: CanonPath::new("/ws"),

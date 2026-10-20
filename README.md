@@ -91,6 +91,17 @@ instructions do not silently become script authority. See
 - Load named skills and lifecycle hooks under the same authority boundaries.
 - Inspect configuration, effective perimeter, usage, and redacted health facts.
 
+The public permission modes are `plan`, `default`, `auto`, `accept-edits`, and
+`yolo`. Select them with `--mode NAME` or live `/mode NAME`; Shift+Tab cycles
+the same modes without submitting the draft. Mode selection comes from
+[the shared mode definition](crates/ego-core/src/config/layer.rs); terminal
+routing is in [REPL actions](crates/ego-cli/src/repl/actions.rs).
+
+Codex subscription generation uses WebSocket continuation with guarded SSE
+fallback; see [Codex transport](docs/guides/providers.md#codex-transport).
+Remote MCP OAuth login and runtime attachment are code-landed, but the real
+operator login/restart check remains pending; see [MCP login](docs/integrations/mcp.md#remote-oauth-login).
+
 Permission mode and operating-system confinement are separate choices. A relaxed
 permission mode does not remove a sandbox or an administrator's ceilings.
 
