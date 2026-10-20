@@ -170,6 +170,8 @@ fn transcript_snapshot(
     after: u64,
     header: bool,
 ) -> Result<(String, u64), RunTermination> {
+    #[cfg(test)]
+    follow_tests::REPLAYS.with(|count| count.set(count.get() + 1));
     let entries = ReplaySource::entries(store, &session)
         .map_err(local_replay_error)?
         .ok_or_else(|| RunTermination::Failed {
@@ -199,20 +201,40 @@ fn transcript_snapshot(
     Ok((rendered, cursor))
 }
 
+struct TranscriptFollow {
+    cursor: u64,
+    header: bool,
+}
+
+impl TranscriptFollow {
+    fn new(after: u64) -> Self {
+        Self {
+            cursor: after,
+            header: true,
+        }
+    }
+
+    fn snapshot(
+        &mut self,
+        store: &JsonlStore,
+        session: SessionId,
+    ) -> Result<String, RunTermination> {
+        let (bytes, next) = transcript_snapshot(store, session, self.cursor, self.header)?;
+        self.cursor = next;
+        self.header = false;
+        Ok(bytes)
+    }
+}
+
 fn follow_transcript(args: &ExportArgs, out: &Stdout) -> RunTermination {
     let store = match export_store(args) {
         Ok(store) => store,
         Err(error) => return error,
     };
-    let mut cursor = args.after.unwrap_or(0);
-    let mut header = true;
+    let mut follow = TranscriptFollow::new(args.after.unwrap_or(0));
     loop {
-        match transcript_snapshot(&store, args.source, cursor, header) {
-            Ok((bytes, next)) => {
-                out.write(&bytes);
-                cursor = next;
-                header = false;
-            }
+        match follow.snapshot(&store, args.source) {
+            Ok(bytes) => out.write(&bytes),
             Err(error) => return error,
         }
         if let Some(message) = out.broken() {
@@ -701,4 +723,63 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
         Ok(()) => RunTermination::Done,
         Err(message) => RunTermination::Failed { message },
     })
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+    use ego_core::event::id::{EventId, Producer, Seq, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::store::session_store::SessionStore;
+
+    thread_local! {
+        pub(super) static REPLAYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn append(store: &JsonlStore, id: SessionId, seq: Seq, text: &str) {
+        store
+            .append(
+                &id,
+                &DomainEvent {
+                    env: Envelope {
+                        seq,
+                        id: EventId::new(),
+                        turn: TurnId::new(),
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::EPOCH,
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::UserPrompt {
+                        audio: Vec::new(),
+                        text: text.into(),
+                        images: Vec::new(),
+                        queued_prompt: None,
+                    },
+                },
+            )
+            .unwrap();
+    }
+
+    // Catches: idle export --follow replays the growing log every 250 ms.
+    #[test]
+    fn follow_unchanged_transcript_does_not_replay_log() {
+        let home = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(home.path(), "/workspace", Box::new(OsIo));
+        let id = SessionId::new();
+        let mut seq = Seq::ZERO;
+        append(&store, id, seq.next(), "first");
+        let mut follow = TranscriptFollow::new(0);
+        assert!(!follow.snapshot(&store, id).unwrap().is_empty());
+        REPLAYS.with(|count| count.set(0));
+        for _ in 0..4 {
+            assert!(follow.snapshot(&store, id).unwrap().is_empty());
+        }
+        assert_eq!(
+            REPLAYS.with(std::cell::Cell::get),
+            0,
+            "unchanged follow polls must not replay file content"
+        );
+    }
 }
