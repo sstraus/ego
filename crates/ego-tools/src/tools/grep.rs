@@ -33,7 +33,11 @@ impl TypedTool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents for a regular expression. Returns one matching line per result, as path:line:text."
+        "Search file contents under a directory using a line-by-line regular expression. \
+         Returns path:line:text, not surrounding context. path defaults to the working directory; \
+         choose a narrower directory for large trees. Ignore rules and traversal limits apply. \
+         An incomplete result is marked; it does not prove no further matches exist. Use read \
+         to inspect a matching file."
     }
 
     fn prepare_typed(

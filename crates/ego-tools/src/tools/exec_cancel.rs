@@ -26,7 +26,9 @@ impl TypedTool for ExecCancelTool {
     }
 
     fn description(&self) -> &str {
-        "Cancel one background exec owned by this session"
+        "Request cancellation of one background exec owned by this session. Use the ID \
+         returned by exec. A cancellation request does not prove that earlier effects were \
+         undone; use exec_status to inspect settlement."
     }
 
     fn prepare_typed(

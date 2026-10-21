@@ -977,9 +977,15 @@ impl fmt::Display for PermissionRequest {
                         Change::Replace {
                             old_string,
                             new_string,
+                            replace_all,
                         } => write!(
                             f,
-                            "\n  replace old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
+                            "\n  replace {} old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
+                            if *replace_all {
+                                "all occurrences of"
+                            } else {
+                                "one unique occurrence of"
+                            },
                             TerminalSafe(old_string),
                             TerminalSafe(new_string)
                         )?,
@@ -2403,6 +2409,7 @@ mod tests {
                     change: Change::Replace {
                         old_string: "old\n".to_string(),
                         new_string: "new\t".to_string(),
+                        replace_all: false,
                     },
                 },
             ],
@@ -2423,7 +2430,7 @@ mod tests {
                 "- list /ws/src matching *.rs\\n\n",
                 "- search /ws/src for unsafe\\u{1b}\n",
                 "- write /ws/edit.txt\n",
-                "  replace old text: old\\n\n",
+                "  replace one unique occurrence of old text: old\\n\n",
                 "  with new text: new\\t\n",
                 "  final content depends on the file at execution time",
             )

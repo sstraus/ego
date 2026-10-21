@@ -270,6 +270,15 @@ impl Workspace {
     /// gentler pipeline than a builtin: prepare, authorize, mint, execute, in
     /// that order, with the permit going into the seam and nowhere else.
     fn run(&self, tool: &dyn Tool, params: serde_json::Value) -> Result<String, ToolError> {
+        self.run_result(tool, params)
+            .map(|result| result.model_text())
+    }
+
+    fn run_result(
+        &self,
+        tool: &dyn Tool,
+        params: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
         let call = tool.prepare(params, &self.ctx())?;
         let granted = self.authorize(call).expect("policy admits this");
         let (call, permit) = granted.into_parts();
@@ -283,7 +292,7 @@ impl Workspace {
             Arc::new(NoDuplex),
         );
         block_on(tool.execute(call, &guarded)).and_then(|execution| match execution {
-            ToolExecution::Complete(result) => Ok(result.model_text()),
+            ToolExecution::Complete(result) => Ok(result),
             ToolExecution::InputRequired(_) => Err(ToolError::InvalidParams(
                 "builtin tool unexpectedly requested input".to_owned(),
             )),
@@ -1203,6 +1212,212 @@ mod edit {
         );
     }
 
+    // Catches: replace-all changes only the first occurrence or reports one fragment's lines.
+    #[test]
+    fn edit_replace_all_changes_original_matches_and_reports_actual_lines() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "let a = 1; let b = 1;\nlet c = 1;\nkeep\n");
+        let result = ws.run_result(ws.tool("edit"), json!({
+            "path": "src/main.rs", "old_string": "= 1;", "new_string": "= 2;", "replace_all": true
+        })).unwrap();
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "let a = 2; let b = 2;\nlet c = 2;\nkeep\n"
+        );
+        assert!(
+            result
+                .model_text()
+                .starts_with("replaced 3 occurrences in ")
+        );
+        assert_eq!(
+            result.line_change(),
+            Some(ego_core::permit::LineChange {
+                added: 2,
+                removed: 2
+            })
+        );
+    }
+
+    // Catches: replacement scans newly inserted bytes or treats overlapping matches as separate.
+    #[test]
+    fn edit_replace_all_does_not_rescan_insertions_or_overlap_matches() {
+        for (before, old, new, after, count) in [
+            ("aa aa", "a", "aa", "aaaa aaaa", 4),
+            ("aaa", "aa", "b", "ba", 1),
+            ("éé\n", "é", "", "\n", 2),
+        ] {
+            let ws = Workspace::in_mode(Mode::Edits);
+            let path = ws.file("src/main.rs", before);
+            let result = ws.call("edit", json!({
+                "path": "src/main.rs", "old_string": old, "new_string": new, "replace_all": true
+            })).unwrap();
+            assert_eq!(fs::read_to_string(path).unwrap(), after);
+            assert!(
+                result.starts_with(&format!("replaced {count} occurrence")),
+                "{result}"
+            );
+        }
+    }
+
+    // Catches: lossy decoding corrupts invalid bytes during an all-match edit.
+    #[test]
+    fn edit_replace_all_refuses_invalid_utf8_without_writing() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "x x");
+        let before = b"x\xffx";
+        fs::write(&path, before).unwrap();
+        let error = ws
+            .call(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": "x", "new_string": "y", "replace_all": true
+                }),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("not UTF-8"));
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    // Catches: all-match edits accept a file above their advertised input limit.
+    #[test]
+    fn edit_replace_all_refuses_oversized_input_without_writing() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let before = "x".repeat(16 * 1024 * 1024 + 1);
+        let path = ws.file("src/main.rs", &before);
+        assert!(
+            ws.call(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": "x", "new_string": "y", "replace_all": true
+                })
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
+    }
+
+    // Catches: explicitly false mode bypasses the unique-match refusal.
+    #[test]
+    fn edit_replace_all_false_keeps_unique_match_requirement() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "x x");
+        let error = ws.call("edit", json!({
+            "path": "src/main.rs", "old_string": "x", "new_string": "y", "replace_all": false
+        })).unwrap_err();
+        assert!(error.to_string().contains("2 times"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "x x");
+    }
+
+    // Catches: mode escalation reuses the reviewed unique-replacement authority.
+    #[test]
+    fn edit_replace_all_is_bound_into_authority_and_permission_preview() {
+        let ws = Workspace::new();
+        ws.file("src/main.rs", "x x");
+        let unique = ws
+            .prepare(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": "x", "new_string": "y"
+                }),
+            )
+            .unwrap();
+        let all = ws
+            .prepare(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": "x", "new_string": "y", "replace_all": true
+                }),
+            )
+            .unwrap();
+        assert_ne!(unique.authority_fingerprint(), all.authority_fingerprint());
+        let pending = ws.asks(all);
+        assert!(pending.request().to_string().contains("all occurrences"));
+    }
+
+    // Catches: replace-all loses same-file supporting-read authority.
+    #[test]
+    fn edit_replace_all_keeps_same_file_write_allow() {
+        let ws = Workspace::with_rules(Mode::Default, allowing(&["write(src/**)"]));
+        let path = ws.file("src/main.rs", "x x");
+        ws.call(
+            "edit",
+            json!({
+                "path": "src/main.rs", "old_string": "x", "new_string": "y", "replace_all": true
+            }),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "y y");
+    }
+
+    // Catches: a short repeated input expands into an unbounded allocation before refusal.
+    #[test]
+    fn edit_replace_all_refuses_oversized_output_before_writing() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let before = "a".repeat(4097);
+        let path = ws.file("src/main.rs", &before);
+        let error = ws
+            .call(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": "a", "new_string": "b".repeat(4097),
+                    "replace_all": true
+                }),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("16 MiB"));
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
+    }
+
+    // Catches: all-match mode converts a missing match into a successful no-op write.
+    #[test]
+    fn edit_replace_all_missing_text_leaves_bytes_unchanged() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let path = ws.file("src/main.rs", "unchanged");
+        assert!(ws.call("edit", json!({
+            "path": "src/main.rs", "old_string": "missing", "new_string": "x", "replace_all": true
+        })).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "unchanged");
+    }
+
+    // Catches: all-match edits treat an explicit read/write deny as covered by an allow.
+    #[test]
+    fn edit_replace_all_cannot_bypass_read_or_write_denials() {
+        for denied in ["read(src/**)", "write(src/**)"] {
+            let rules = Ruleset::from_layer(
+                PermCfg {
+                    judge: None,
+                    allow: vec![Rule::load("write(src/**)").unwrap()],
+                    deny: vec![Rule::load(denied).unwrap()],
+                },
+                Source::Project,
+            );
+            let ws = Workspace::with_rules(Mode::Yolo, rules);
+            let path = ws.file("src/main.rs", "x x");
+            let call = ws.prepare("edit", json!({
+                "path": "src/main.rs", "old_string": "x", "new_string": "y", "replace_all": true
+            })).unwrap();
+            assert!(ws.authorize(call).is_err());
+            assert_eq!(fs::read_to_string(path).unwrap(), "x x");
+        }
+    }
+
+    // Catches: a misspelled mode is silently ignored and the advertised boolean is required.
+    #[test]
+    fn edit_replace_all_schema_and_dispatch_agree_on_optional_mode() {
+        let ws = editable();
+        let schema = ws.tool("edit").descriptor().schema.to_value();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let base = json!({"path":"src/main.rs","old_string":"todo!()","new_string":"ok()"});
+        assert!(validator.is_valid(&base));
+        let mut all = base.clone();
+        all["replace_all"] = json!(true);
+        assert!(validator.is_valid(&all));
+        let mut typo = base;
+        typo["replaceAll"] = json!(true);
+        assert!(!validator.is_valid(&typo));
+        assert!(ws.prepare("edit", typo).is_err());
+    }
+
     #[test]
     fn edit_prepares_a_read_and_a_write_of_the_file_it_names() {
         // `ARCHITECTURE.md` Step C, first invariant. The operation
@@ -1229,6 +1444,7 @@ mod edit {
                     change: Change::Replace {
                         old_string: "todo!()".to_string(),
                         new_string: "ok()".to_string(),
+                        replace_all: false,
                     },
                 },
             ]

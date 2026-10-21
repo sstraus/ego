@@ -37,9 +37,10 @@ impl TypedTool for WriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write a file, replacing its entire contents. Creates the file if it does not exist; \
-         its parent directory must already exist. The path may be absolute or relative to the \
-         working directory."
+        "Create or replace one UTF-8 text file with the complete contents supplied. This \
+         overwrites an existing file; it does not append or create parent directories. Use \
+         edit for targeted changes to existing text. The path may be absolute or relative \
+         to the working directory."
     }
 
     fn prepare_typed(
