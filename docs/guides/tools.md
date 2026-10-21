@@ -16,7 +16,7 @@ can add admitted operations, subject to the same ceilings.
 | `glob` | `pattern`, optional `path` | Find names, not file contents; root defaults to working directory |
 | `grep` | `query`, optional `path` | Search contents under a bounded traversal; root defaults to working directory |
 | `write` | `path`, `contents` | Create/replace a file with durable replacement semantics; parent must exist |
-| `edit` | `path`, `old_string`, `new_string` | Conditional literal replacement; requires both read and write authority |
+| `edit` | `path`, `old_string`, `new_string`, optional `replace_all` | Conditional literal replacement; requires both read and write authority |
 | `notebook_edit` | `path`, cell edit operation | Replace, insert, or delete one nbformat 4.5 cell by stable ID; preserve other cells and do not execute code |
 | `exec` | `argv`, optional `cwd`, `timeout_ms`, `background` | Execute exact argv with admitted environment, confinement, deadline, and process-tree ownership |
 | `exec_status`, `exec_cancel` | `id` | Inspect or cancel a background process owned by this session |
@@ -29,6 +29,16 @@ These are usability limits, not security boundaries. Incomplete traversals state
 that their output was truncated. Symlinks/canonical paths are checked at
 preparation and guarded execution. A tool cannot replace the prepared target
 with a wider one after permission.
+
+`edit` requires an existing UTF-8 file and rejects unknown input fields. By default,
+`old_string` must occur exactly once. Set `replace_all=true` for all original
+non-overlapping matches of one nonempty string. Inserted text is not searched
+again. An empty `new_string` deletes the matched text; missing matches fail
+without writing. All-match edits limit both input and output to 16 MiB.
+The permission preview states the scope without reading the file. Successful
+results report actual occurrence and changed-line counts. Bulk edit transcript
+rows show the execution receipt, not statistics inferred from one fragment.
+Use `write` to create a file or replace its complete contents.
 
 `exec` does not implicitly interpret a shell string. An explicit interpreter in
 argv is a process request with its own risk and confinement. A timeout is not

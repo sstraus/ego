@@ -12,7 +12,10 @@ use serde::Deserialize;
 
 use super::{resolve, wrong_op};
 
+const MAX_REPLACE_ALL_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditParams {
     /// The file to edit. Absolute, or relative to the working directory. It
     /// must already exist.
@@ -48,7 +51,8 @@ impl TypedTool for EditTool {
         "Replace exact text in one existing UTF-8 file. By default old_string must occur exactly \
          once; include surrounding context to disambiguate. Set replace_all=true to replace all \
          original non-overlapping matches, not matches introduced by the replacement. Returns \
-         actual occurrence and changed-line counts. Use write for new files or whole-file replacement."
+         actual occurrence and changed-line counts. Use write for new files or whole-file replacement. \
+         In replace_all mode, input and output are limited to 16 MiB."
     }
 
     fn prepare_typed(
@@ -104,7 +108,11 @@ impl TypedTool for EditTool {
         Box::pin(async move {
             let (path, old_string, new_string, replace_all) = self.decode(call)?;
 
-            let bytes = io.read(&path)?;
+            let bytes = if replace_all {
+                io.read_bounded(&path, MAX_REPLACE_ALL_BYTES)?
+            } else {
+                io.read(&path)?
+            };
             // `old_string` is a string, so the file has to be one. A lossy
             // decode would write back a file that differs everywhere the
             // decode guessed, at every byte the tool was never asked about.
@@ -134,6 +142,19 @@ impl TypedTool for EditTool {
                 }
             }
 
+            if replace_all {
+                // Original matches are disjoint, so their total length fits in before.
+                // Check the expanded size before allocating the replacement string.
+                let retained = before.len() - occurrences * old_string.len();
+                let output_bytes = occurrences
+                    .checked_mul(new_string.len())
+                    .and_then(|inserted| retained.checked_add(inserted));
+                if output_bytes.is_none_or(|bytes| bytes > MAX_REPLACE_ALL_BYTES) {
+                    return Err(ToolError::InvalidParams(
+                        "replace_all output exceeds 16 MiB; use a smaller substitution".into(),
+                    ));
+                }
+            }
             let after = before.replace(&old_string, &new_string);
             let change = if replace_all {
                 diff_lines(&before, &after)
