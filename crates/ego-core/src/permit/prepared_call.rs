@@ -117,12 +117,12 @@ pub enum Change {
     Whole(Vec<u8>),
     /// One ID-addressed notebook cell operation; other state is retained.
     Notebook(NotebookCellEdit),
-    /// Exact replacement: one unique occurrence, or all original non-overlapping
-    /// occurrences when explicitly requested. Neither mode selects the first match.
+    /// Exact text replacement. Unless `replace_all` is true, exactly one
+    /// occurrence must exist. Bulk mode replaces original non-overlapping matches.
     Replace {
+        replace_all: bool,
         old_string: String,
         new_string: String,
-        replace_all: bool,
     },
 }
 
@@ -812,14 +812,14 @@ impl PreparedCall {
                         frame(&mut digest, bytes);
                     }
                     Change::Replace {
+                        replace_all,
                         old_string,
                         new_string,
-                        replace_all,
                     } => {
                         frame(&mut digest, b"replace");
+                        frame(&mut digest, &[u8::from(*replace_all)]);
                         frame(&mut digest, old_string.as_bytes());
                         frame(&mut digest, new_string.as_bytes());
-                        frame(&mut digest, &[u8::from(*replace_all)]);
                     }
                 },
                 Op::Spawn { spec } => {

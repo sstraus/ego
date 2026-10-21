@@ -321,6 +321,34 @@ fn working_indicator_formats_long_elapsed_time() {
     }
 }
 
+// Catches: prose after a shell command is printed before that command's receipt
+// when earlier prose left an answer block open.
+#[test]
+fn shell_receipt_precedes_prose_after_an_existing_answer_block() {
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    let (sender, rows) = crossbeam::channel::unbounded();
+    let mut output = SurfaceOutput::new(sender, CancelToken::new());
+    output.status = Some(status);
+    output.write_answer("before command\n").unwrap();
+    output
+        .write_shell(
+            "$ completed command",
+            crate::render::Line::plain("$ completed command"),
+        )
+        .unwrap();
+    output.write_answer("after command\n").unwrap();
+    let shown = rows.try_iter().collect::<String>();
+    let before = shown.find("before command").unwrap();
+    let command = shown
+        .find("$ completed command")
+        .expect("shell receipt must settle before visible prose");
+    let after = shown.find("after command").unwrap();
+    assert!(
+        before < command && command < after,
+        "receipt order: {shown}"
+    );
+}
+
 #[test]
 fn failed_answer_output_does_not_claim_a_visible_reply() {
     use crate::output::{InteractiveOutput, TextOutput};
@@ -1693,4 +1721,28 @@ fn session_switch_restores_text_and_attachments_as_one_draft() {
     assert_eq!(editor.current_buffer_contents(), "source text");
     assert_eq!(status.lock().unwrap().images.labels(), ["recalled 1"]);
     assert_eq!(drafts.active_count(), 0);
+}
+
+// Catches: Shift+Tab edits/submits a draft or changes authority behind an open modal.
+#[test]
+fn shift_tab_is_a_local_command_in_idle_and_busy_but_not_modals() {
+    for phase in [EditPhase::Idle, EditPhase::Busy, EditPhase::Modal] {
+        for vim in [false, true] {
+            let state = SurfacePhase::new(phase);
+            let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+            let mut mode = if vim {
+                vim_surface(state, status)
+            } else {
+                SurfaceEditMode::with_status(emacs_composer(), state, status)
+            };
+            assert_eq!(
+                mode.parse_event(keyboard_event(KeyCode::BackTab, KeyModifiers::SHIFT)),
+                if phase == EditPhase::Modal {
+                    ReedlineEvent::None
+                } else {
+                    ReedlineEvent::ExecuteHostCommand(MODE_CYCLE_COMMAND.into())
+                }
+            );
+        }
+    }
 }

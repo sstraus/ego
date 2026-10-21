@@ -605,9 +605,9 @@ mod permission_modal_diff_tests {
     #[test]
     fn permission_modal_edit_diff_catches_escaped_string_dump() {
         let request = request(Change::Replace {
+            replace_all: false,
             old_string: "def subtract(a, b):\n    return a - b\n".into(),
             new_string: "def subtract(a, b):\n    return b - a\n".into(),
-            replace_all: false,
         });
         let out = details_prompt(&request, Capabilities::plain());
         assert!(
@@ -628,9 +628,9 @@ mod permission_modal_diff_tests {
     #[test]
     fn permission_modal_colour_catches_escapes_in_plain_output() {
         let request = request(Change::Replace {
+            replace_all: false,
             old_string: "old\n".into(),
             new_string: "new\n".into(),
-            replace_all: false,
         });
         for (tty, no_color, term, flag, coloured) in [
             (true, None, "xterm-256color", false, true),

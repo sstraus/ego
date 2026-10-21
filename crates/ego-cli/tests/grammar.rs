@@ -391,6 +391,7 @@ fn the_mode_flags_collapse_into_one_value() {
         ("default", Mode::Default),
         ("auto", Mode::Auto),
         ("edits", Mode::Edits),
+        ("accept-edits", Mode::Edits),
         ("yolo", Mode::Yolo),
     ] {
         assert_eq!(
@@ -1198,10 +1199,8 @@ fn the_bare_help_offers_no_command_that_is_not_built() {
 #[test]
 fn the_bare_version_is_answered_with_one() {
     let text = answered(["--version"]);
-    assert!(
-        text.starts_with("ego ") && text.trim().len() > "ego ".len(),
-        "`ego --version` answered with no version: {text}"
-    );
+    // Catches: the CLI reports a literal version instead of the package version.
+    assert_eq!(text.trim(), concat!("ego ", env!("CARGO_PKG_VERSION")));
 }
 
 /// A genuine mistake is still a refusal, so the split above is a split and not

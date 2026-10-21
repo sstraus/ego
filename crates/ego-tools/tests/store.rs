@@ -401,6 +401,45 @@ mod store {
     }
 
     impl StoreIo for ReadCountingIo {
+        fn visit_file(
+            &self,
+            path: &std::path::Path,
+            visitor: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+        ) -> std::io::Result<bool> {
+            self.inner.visit_file(path, visitor)
+        }
+
+        fn list_files(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.list_files(path)
+        }
+
+        fn file_revision(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Option<ego_tools::store::FileRevision>> {
+            self.inner.file_revision(path)
+        }
+        fn read_from(
+            &self,
+            path: &std::path::Path,
+            offset: u64,
+        ) -> std::io::Result<Option<Vec<u8>>> {
+            self.inner.read_from(path, offset)
+        }
+
+        fn open_session_log(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Option<Box<dyn ego_tools::store::SessionLogWriter>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("open"))
+                .or_insert(0) += 1;
+            self.inner.open_session_log(path)
+        }
+
         fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
             self.inner.append_line(path, line)
         }
@@ -420,10 +459,22 @@ mod store {
         }
 
         fn read_first_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("first"))
+                .or_insert(0) += 1;
             self.inner.read_first_line(path)
         }
 
         fn read_last_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.with_extension("last"))
+                .or_insert(0) += 1;
             self.inner.read_last_line(path)
         }
 
@@ -454,6 +505,616 @@ mod store {
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             self.inner.list_dirs(path)
         }
+    }
+
+    // Catches: run CAS rereads the complete log and discards the domain projection.
+    #[test]
+    fn leased_run_cas_between_domain_appends_does_not_replay_log() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        store
+            .compare_and_append_run(
+                &session,
+                None,
+                admitted_run_transaction(&session, 1, None, true),
+            )
+            .unwrap();
+        let opened = store
+            .open_writer(
+                &session,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::EPOCH,
+                    stale_after: Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        let completed = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            )
+        };
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        opened
+            .writer
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(1)),
+                admitted_run_transaction(&session, 2, Some(1), false),
+            )
+            .unwrap();
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        reads.lock().unwrap().clear();
+        let invocation = RunInvocationId::new();
+        EvidenceAdmissionService::new()
+            .admit_run_context(
+                &opened.writer,
+                RunContextEvidence::new(
+                    session,
+                    invocation,
+                    RunId::new(session, invocation.uuid()),
+                    ConfigProvenance::default(),
+                ),
+            )
+            .unwrap();
+        let transaction = admitted_run_transaction(&session, 3, Some(2), false);
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(&session, Some(RunRevision::new(2)), transaction.clone())
+                .unwrap(),
+            RunAppend::Committed {
+                revision: RunRevision::new(3)
+            }
+        );
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(&session, Some(RunRevision::new(2)), transaction)
+                .unwrap(),
+            RunAppend::Conflict {
+                actual: RunRevision::new(3)
+            }
+        );
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state run CAS and following domain append must not replay the log"
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 7);
+        assert!(entries.iter().all(Result::is_ok));
+        assert_eq!(store.list().unwrap()[0].summary_failures, 3);
+
+        // Catches: a cached revision accepts a stale CAS after another store writes.
+        let other = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        other
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(3)),
+                admitted_run_transaction(&session, 4, Some(3), false),
+            )
+            .unwrap();
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(
+                    &session,
+                    Some(RunRevision::new(3)),
+                    admitted_run_transaction(&session, 4, Some(3), false)
+                )
+                .unwrap(),
+            RunAppend::Conflict {
+                actual: RunRevision::new(4)
+            }
+        );
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 9);
+        assert!(entries.iter().all(Result::is_ok));
+        assert_eq!(store.list().unwrap()[0].summary_failures, 4);
+
+        // Catches: fstat on an old append descriptor misses atomic path replacement.
+        let log = log_path(dir.path(), &session);
+        let bytes = std::fs::read_to_string(&log).unwrap();
+        let replacement = bytes.replacen(
+            "\"workspace_root\":\"/workspace\"",
+            "\"workspace_root\":\"/elsewhere\"",
+            1,
+        );
+        assert_ne!(replacement, bytes);
+        assert_eq!(replacement.len(), bytes.len());
+        let staging = log.with_extension("replacement");
+        std::fs::write(&staging, &replacement).unwrap();
+        std::fs::rename(staging, &log).unwrap();
+        assert!(
+            opened
+                .writer
+                .compare_and_append_run(
+                    &session,
+                    Some(RunRevision::new(4)),
+                    admitted_run_transaction(&session, 5, Some(4), false)
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(log).unwrap(), replacement);
+    }
+
+    // Catches: reopening an unchanged, locally indexed writer replays recovery,
+    // resume, evidence indexing and blob reachability instead of using validated facts.
+    #[test]
+    fn indexed_writer_reopen_and_evidence_store_do_not_replay_log() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        store
+            .compare_and_append_run(
+                &session,
+                None,
+                admitted_run_transaction(&session, 1, None, true),
+            )
+            .unwrap();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        opened
+            .writer
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(1)),
+                admitted_run_transaction(&session, 2, Some(1), false),
+            )
+            .unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        use ego_core::store::blob::BlobStore as _;
+        let blobs = ego_tools::store::SessionBlobStore::open(dir.path(), session, 1024).unwrap();
+        let mut blob = blobs.begin().unwrap();
+        blob.append(b"reachable image").unwrap();
+        let reference = blob.commit().unwrap();
+        let mut orphan = blobs.begin().unwrap();
+        orphan.append(b"orphan image").unwrap();
+        let orphan = orphan.commit().unwrap();
+        let image = ego_core::generator::types::ImageRef::new(
+            reference.clone(),
+            ego_core::generator::types::ImageMediaType::Png,
+            1,
+            1,
+        )
+        .unwrap();
+        let mut prompt = ev(
+            seq.next(),
+            turn,
+            EventKind::UserPrompt {
+                text: "Describe this".to_owned(),
+                images: vec![image],
+                audio: Vec::new(),
+                queued_prompt: None,
+            },
+        );
+        prompt.env.item = Some(ego_core::event::id::ItemId::new());
+        opened.writer.append(&session, &prompt).unwrap();
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::SessionTitleChanged {
+                        title: Some("Indexed session".to_owned()),
+                    },
+                ),
+            )
+            .unwrap();
+        let invocation = RunInvocationId::new();
+        let context = RunContextEvidence::new(
+            session,
+            invocation,
+            RunId::new(session, invocation.uuid()),
+            ConfigProvenance::default(),
+        );
+        EvidenceAdmissionService::new()
+            .admit_run_context(&opened.writer, context.clone())
+            .unwrap();
+        drop(opened);
+        reads.lock().unwrap().clear();
+        // ACP admission and settlement CAS can run between writer leases.
+        store
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(2)),
+                admitted_run_transaction(&session, 3, Some(2), false),
+            )
+            .unwrap();
+        let reopened = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(reopened.repair.truncated_bytes, 0);
+        assert_eq!(reopened.repair.dropped_lines, 0);
+        assert_eq!(reopened.state.title.as_deref(), Some("Indexed session"));
+        reopened.writer.evidence_store(1024 * 1024).unwrap();
+        assert_eq!(blobs.read(&reference).unwrap(), b"reachable image");
+        assert!(
+            blobs.read(&orphan).is_err(),
+            "indexed GC must still collect unreferenced blobs"
+        );
+        EvidenceAdmissionService::new()
+            .admit_run_context(&reopened.writer, context)
+            .unwrap();
+        reopened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "indexed reopen and evidence-store opening must not replay the whole log"
+        );
+        assert_eq!(
+            store.list().unwrap()[0].title.as_deref(),
+            Some("Indexed session")
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 7);
+        assert!(entries.iter().all(Result::is_ok));
+        drop(reopened);
+
+        // Catches: the fast path mistakes a valid log index for a valid manifest.
+        let manifest = log_path(dir.path(), &session).with_file_name("manifest.json");
+        std::fs::write(&manifest, b"{").unwrap();
+        std::fs::write(ego_tools::store::tmp_path_for(&manifest), b"orphan").unwrap();
+        reads.lock().unwrap().clear();
+        let repaired = store.open_writer(&session, evidence_lease()).unwrap();
+        assert!(repaired.repair.manifest_rebuilt);
+        assert!(repaired.repair.removed_tmp);
+        assert_eq!(repaired.state.title.as_deref(), Some("Indexed session"));
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        let snapshot_state = repaired.state.clone();
+        drop(repaired);
+
+        // Catches: a cached open ignores a snapshot installed between leases.
+        store
+            .write_snapshot(&session, snapshot_state.last_seq, &snapshot_state)
+            .unwrap();
+        let snapshotted = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(snapshotted.snapshot, None);
+        assert_eq!(snapshotted.state.title.as_deref(), Some("Indexed session"));
+        drop(snapshotted);
+
+        // Catches: a stale in-memory index bypasses repair after an external tear.
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log_path(dir.path(), &session))
+            .unwrap()
+            .write_all(b"torn")
+            .unwrap();
+        let recovered = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(recovered.repair.truncated_bytes, 4);
+        assert_eq!(recovered.state.title.as_deref(), Some("Indexed session"));
+        assert_eq!(
+            block_on(store.read(&session).unwrap().collect::<Vec<_>>()).len(),
+            7
+        );
+    }
+
+    // Catches: a lease-held append reopens the header and tail for every event.
+    #[test]
+    fn leased_append_does_not_reread_log_per_event() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store
+            .open_writer(
+                &session,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::EPOCH,
+                    stale_after: Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        reads.lock().unwrap().clear();
+        for _ in 0..32 {
+            opened
+                .writer
+                .append(
+                    &session,
+                    &ev(
+                        seq.next(),
+                        turn,
+                        EventKind::TurnCompleted {
+                            ok: true,
+                            exit_reason: ExitReason::Completed,
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        let log = log_path(dir.path(), &session);
+        let counts = reads.lock().unwrap();
+        assert_eq!(
+            counts.get(&log).copied().unwrap_or(0),
+            0,
+            "turn-boundary synopsis projection must not replay the session log"
+        );
+        assert_eq!(
+            counts
+                .get(&log.with_extension("first"))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state append must not reopen the log header"
+        );
+        assert_eq!(
+            counts
+                .get(&log.with_extension("last"))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state append must not reopen the log tail"
+        );
+        drop(counts);
+        assert_eq!(
+            store.list().unwrap()[0].summary_failures,
+            33,
+            "cached synopsis must apply every completed turn exactly once"
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 33);
+        assert!(entries.iter().all(Result::is_ok));
+    }
+
+    // Catches: replacing boundary replay with a cursor drops title/summary after invalidation or reopen.
+    #[test]
+    fn leased_append_projects_synopsis_across_invalidation_and_reopen() {
+        use ego_core::config::ModelRef;
+        use ego_core::event::id::ItemId;
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let mut opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        for (index, prompt, answer) in [
+            (0, "first question", "first answer"),
+            (1, "next question", "next answer"),
+        ] {
+            if index == 1 {
+                store
+                    .record_model_selection(&session, ModelRef("ollama/first".into()))
+                    .unwrap();
+                drop(opened);
+                opened = store.open_writer(&session, evidence_lease()).unwrap();
+            }
+            let turn = TurnId::new();
+            for kind in [
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: prompt.into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+                EventKind::AssistantMessage {
+                    text: answer.into(),
+                },
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            ] {
+                let mut event = ev(seq.next(), turn, kind);
+                event.env.item = Some(ItemId::new());
+                opened.writer.append(&session, &event).unwrap();
+            }
+            let meta = store.list().unwrap().remove(0);
+            assert_eq!(meta.title.as_deref(), Some("first question"));
+            assert_eq!(
+                meta.summary.as_deref(),
+                Some(if index == 0 {
+                    "first question — first answer"
+                } else {
+                    "next question — next answer"
+                })
+            );
+            assert_eq!(meta.summary_failures, 0);
+        }
+    }
+
+    // Catches: cached physical positions ignore non-event records or survive recovery.
+    #[test]
+    fn leased_append_revalidates_after_other_records_and_recovery() {
+        use ego_core::config::ModelRef;
+        use std::io::Write as _;
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: "visible".into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            )
+        };
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        store
+            .record_model_selection(&session, ModelRef("ollama/first".into()))
+            .unwrap();
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let path = log_path(dir.path(), &session);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"torn")
+            .unwrap();
+        assert_eq!(store.recover(&session).unwrap().truncated_bytes, 4);
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let positions: Vec<_> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| match decode_line(line).unwrap() {
+                StoreLine::Record(record) => Some(record.seq.get()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, [1, 2, 3, 4]);
+        // A retained descriptor must not retain the exclusive operation lock.
+        assert!(
+            ego_core::session::ReplaySource::entries(&store, &session)
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.open_writer(&session, evidence_lease()).is_err());
+        drop(opened);
+        let resumed = store.open_writer(&session, evidence_lease()).unwrap();
+        resumed.writer.append(&session, &event(seq.next())).unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().all(Result::is_ok));
+    }
+
+    // Catches: a published append with a failed durability barrier reuses its position.
+    #[test]
+    fn leased_append_revalidates_after_failed_fsync() {
+        let dir = tempdir().unwrap();
+        let fsyncs = Arc::new(AtomicUsize::new(0));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(FailingFsyncIo {
+                inner: CountingIo {
+                    inner: OsIo,
+                    fsyncs,
+                },
+                fail_on: 1,
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            )
+        };
+        assert!(opened.writer.append(&session, &event(seq.next())).is_err());
+        opened.writer.append(&session, &event(seq.next())).unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(Result::is_ok));
+        let bytes = std::fs::read(log_path(dir.path(), &session)).unwrap();
+        let positions: Vec<_> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| match decode_line(line).unwrap() {
+                StoreLine::Record(record) => Some(record.seq.get()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, [1, 2]);
     }
 
     /// A [`StoreIo`] that fails `read` for one specific path (simulating,
@@ -827,6 +1488,7 @@ mod store {
             seq.next(),
             turn,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "hi".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -873,6 +1535,7 @@ mod store {
             seq.next(),
             turn,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "hi".to_string(),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -909,6 +1572,7 @@ mod store {
                         seq.next(),
                         turn,
                         EventKind::UserPrompt {
+                            audio: Vec::new(),
                             text: text.to_string(),
                             images: Vec::new(),
                             queued_prompt: None,
@@ -978,6 +1642,7 @@ mod store {
                         seq.next(),
                         turn,
                         EventKind::UserPrompt {
+                            audio: Vec::new(),
                             text: marker.to_string(),
                             images: Vec::new(),
                             queued_prompt: None,
@@ -1005,6 +1670,7 @@ mod store {
             Ok(SessionEntry::Event(e)) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "first-event-marker".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -1024,6 +1690,7 @@ mod store {
             Ok(SessionEntry::Event(e)) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: "third-event-marker".to_string(),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -1057,6 +1724,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,
@@ -1090,6 +1758,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::PromptQueued {
+                        audio: Vec::new(),
                         id: queued,
                         text: "follow up".to_owned(),
                         images: Vec::new(),
@@ -1126,6 +1795,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "follow up".to_owned(),
                         images: Vec::new(),
                         queued_prompt: Some(queued),
@@ -1163,6 +1833,7 @@ mod store {
     fn queue_durability_failure_rejects_each_stable_storage_gate() {
         for kind in [
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: QueuedPromptId::new(),
                 text: "accepted only after fsync".to_owned(),
                 images: Vec::new(),
@@ -1171,6 +1842,7 @@ mod store {
                 through: QueuedPromptId::new(),
             },
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "consumed only after fsync".to_owned(),
                 images: Vec::new(),
                 queued_prompt: Some(QueuedPromptId::new()),
@@ -1288,6 +1960,108 @@ mod store {
         );
     }
 
+    // Catches: evidence publication or an idempotent retry discards the domain
+    // projection and makes the next non-boundary event replay the whole log.
+    #[test]
+    fn evidence_between_domain_appends_preserves_synopsis_without_log_replay() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/ws",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: reads.clone(),
+            }),
+        );
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let log = log_path(dir.path(), &session);
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        let event = |seq, kind| {
+            let mut event = ev(seq, turn, kind);
+            event.env.item = Some(ego_core::event::id::ItemId::new());
+            event
+        };
+        opened
+            .writer
+            .append(
+                &session,
+                &event(
+                    seq.next(),
+                    EventKind::UserPrompt {
+                        audio: Vec::new(),
+                        text: "first question".into(),
+                        images: Vec::new(),
+                        queued_prompt: None,
+                    },
+                ),
+            )
+            .unwrap();
+        let before = *reads.lock().unwrap().get(&log).unwrap_or(&0);
+        let service = EvidenceAdmissionService::new();
+        for _ in 0..4 {
+            let invocation = RunInvocationId::new();
+            let context = RunContextEvidence::new(
+                session,
+                invocation,
+                RunId::new(session, invocation.uuid()),
+                ConfigProvenance::default(),
+            );
+            for expected in [
+                ego_core::evidence::EvidenceWrite::Published,
+                ego_core::evidence::EvidenceWrite::AlreadyRecorded,
+            ] {
+                assert_eq!(
+                    service
+                        .admit_run_context(&opened.writer, context.clone())
+                        .unwrap(),
+                    expected
+                );
+                opened
+                    .writer
+                    .append(
+                        &session,
+                        &event(
+                            seq.next(),
+                            EventKind::AssistantMessage {
+                                text: "first answer".into(),
+                            },
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        opened
+            .writer
+            .append(
+                &session,
+                &event(
+                    seq.next(),
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            *reads.lock().unwrap().get(&log).unwrap_or(&0),
+            before,
+            "evidence interleaving must not trigger whole-log replay"
+        );
+        let meta = store.list().unwrap().remove(0);
+        assert_eq!(meta.title.as_deref(), Some("first question"));
+        assert_eq!(
+            meta.summary.as_deref(),
+            Some("first question — first answer")
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 14);
+        assert!(entries.iter().all(Result::is_ok));
+    }
+
     // -- manifest / list -----------------------------------------------------
 
     #[test]
@@ -1313,6 +2087,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,
@@ -1395,6 +2170,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,
@@ -1436,6 +2212,7 @@ mod store {
                         seq.next(),
                         turn,
                         EventKind::UserPrompt {
+                            audio: Vec::new(),
                             text: "hi".to_string(),
                             images: Vec::new(),
                             queued_prompt: None,
@@ -1492,6 +2269,7 @@ mod store {
                     seq.next(),
                     turn,
                     EventKind::UserPrompt {
+                        audio: Vec::new(),
                         text: "hi".to_string(),
                         images: Vec::new(),
                         queued_prompt: None,

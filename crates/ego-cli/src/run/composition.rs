@@ -547,10 +547,12 @@ pub(super) fn handle_policy_request(
     };
 
     match request {
-        PolicyControlRequest::SetMode(mode) => match apply(PolicyControlRequest::SetMode(mode))? {
-            PolicyControlOutcome::Mode { .. } => Ok(None),
-            _ => Err(mismatch()),
-        },
+        request @ (PolicyControlRequest::SetMode(_) | PolicyControlRequest::CycleMode) => {
+            match apply(request)? {
+                PolicyControlOutcome::Mode { .. } => Ok(None),
+                _ => Err(mismatch()),
+            }
+        }
         PolicyControlRequest::Rule(mutation) => {
             let effect = mutation.effect;
             let PolicyControlOutcome::Rule { receipt, .. } =
@@ -923,6 +925,26 @@ pub(super) fn finish_rooted_settings(
     }
     let roots =
         super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
+
+    #[cfg(target_os = "linux")]
+    for read in roots
+        .iter()
+        .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
+    {
+        if effective.sandbox != Some(ego_core::permit::Confinement::Off)
+            && read.restricts_writes(&CanonPath::new(&root), &roots)
+        {
+            let winner = if effective.sandbox == Some(ego_core::permit::Confinement::Ro) {
+                "executable ancestor wins for exec children; sandbox ro still denies writes"
+            } else {
+                "writable ancestor wins for exec children (including execution)"
+            };
+            diagnostics.note(&format!(
+                "Landlock cannot subtract read-only root {} from an ancestor grant; {winner}; built-in tools remain read-only",
+                read.path()
+            ));
+        }
+    }
 
     let exec_paths = effective
         .exec_paths
@@ -1420,20 +1442,21 @@ pub(super) async fn generation_preflight_inner(
     let judge_identity = effective.judge.clone();
     let mut thinking = effective.thinking;
     let human_picker = if status.as_ref().is_some_and(|status| status.human) {
-        let catalogue_snapshot = Arc::new(
-            models::build_catalogue_snapshot(
-                &ModelsArgs {
-                    provider: None,
-                    refresh: false,
-                    json: false,
-                },
-                &http,
-            )
-            .await?,
-        );
         let home = config::ego_home().ok_or_else(|| RunTermination::Failed {
             message: "the model picker needs EGO_HOME or HOME for user configuration".to_string(),
         })?;
+        let observed = crate::auth::AuthStore::new(&home)
+            .observed_provider_ids()
+            .map_err(|error| RunTermination::UsageError {
+                message: error.to_string(),
+            })?;
+        let (snapshot, _) = models::build_startup_catalogue_snapshot(
+            &http,
+            &crate::onboarding::ProcessEnvironment,
+            &observed,
+        )
+        .await?;
+        let catalogue_snapshot = Arc::new(snapshot);
         let config_store: Arc<dyn UserConfigStore> = Arc::new(OsUserConfigStore::new(
             Arc::new(OsIo),
             home.join("config.toml"),

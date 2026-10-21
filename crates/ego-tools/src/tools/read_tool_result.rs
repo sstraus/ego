@@ -14,7 +14,6 @@ pub struct ReadToolResultParams {
     /// The exact full-output reference returned by a prior tool result.
     pub reference: EvidenceRef,
     /// Original-byte offset of the fixed-size page to retrieve.
-    #[serde(default)]
     pub offset: u64,
 }
 
@@ -29,10 +28,7 @@ impl TypedTool for ReadToolResult {
     }
 
     fn description(&self) -> &str {
-        "Read one 32 KiB page of retained process output from this session. Copy reference \
-         exactly from an earlier tool result; it is not a filesystem path. offset is a \
-         zero-based byte position and defaults to zero. Follow the returned next offset \
-         until EOF instead of rerunning a command to recover truncated output."
+        "Read one fixed 32 KiB page of process output owned by this session. Copy the exact full-output reference from a prior tool result and use original-byte offsets to continue; do not invent references"
     }
 
     fn prepare_typed(

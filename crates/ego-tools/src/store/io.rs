@@ -166,8 +166,86 @@ pub trait PrivateLogWriter: Send {
     fn append(&mut self, line: &[u8]) -> io::Result<()>;
 }
 
+/// A session append descriptor owned by a writer lease. Writes are immediately
+/// visible to readers; durability barriers use this same descriptor.
+pub trait SessionLogWriter: Send {
+    /// Inspect this descriptor after a known append, without resolving its path.
+    fn file_revision(&self) -> io::Result<Option<FileRevision>> {
+        Ok(None)
+    }
+    fn append_line(&mut self, line: &[u8]) -> io::Result<()>;
+    fn fsync(&self) -> io::Result<()>;
+}
+
+impl SessionLogWriter for fs::File {
+    fn file_revision(&self) -> io::Result<Option<FileRevision>> {
+        FileRevision::from_metadata(&self.metadata()?).map(Some)
+    }
+
+    fn append_line(&mut self, line: &[u8]) -> io::Result<()> {
+        use io::Write as _;
+        self.write_all(line)?;
+        self.write_all(b"\n")
+    }
+
+    fn fsync(&self) -> io::Result<()> {
+        self.sync_all()
+    }
+}
+
+/// An in-memory file invalidation hint, never a durable content identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRevision {
+    pub(crate) modified: std::time::SystemTime,
+    created: Option<std::time::SystemTime>,
+    pub(crate) length: u64,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl FileRevision {
+    pub(crate) fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
+        Ok(Self {
+            modified: metadata.modified()?,
+            created: metadata.created().ok(),
+            length: metadata.len(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt as _;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        })
+    }
+}
+
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
+    /// Inspect an invalidation hint without opening the file's content.
+    fn file_revision(&self, _path: &Path) -> io::Result<Option<FileRevision>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file revisions unavailable",
+        ))
+    }
+
+    /// Read an appended suffix. Adapters without ranged reads retain the safe fallback.
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Option<Vec<u8>>> {
+        self.read(path).map(|bytes| {
+            bytes.map(|bytes| bytes.get(offset as usize..).unwrap_or_default().to_vec())
+        })
+    }
+
+    /// Retain an append descriptor when the adapter supports it. The parent
+    /// directory already exists. Other adapters keep their observable I/O seam.
+    fn open_session_log(&self, _path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {
+        Ok(None)
+    }
+
     /// Exclusively create one retained owner file; never reopen an existing log.
     fn open_private_log(
         &self,
@@ -406,9 +484,6 @@ fn replace_atomic_publication_with_privacy(
     barrier: Barrier,
     private: bool,
 ) -> io::Result<ReplacePublication> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let tmp_path = tmp_path_for(path);
 
     // Write *and fsync* the scratch file before renaming it into place.
@@ -419,17 +494,29 @@ fn replace_atomic_publication_with_privacy(
     // do.
     {
         use std::io::Write;
-        let mut file = if private {
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+        let open = || {
+            if private {
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                options.open(&tmp_path)
+            } else {
+                fs::File::create(&tmp_path)
             }
-            options.open(&tmp_path)?
-        } else {
-            fs::File::create(&tmp_path)?
+        };
+        let mut file = match open() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                open()?
+            }
+            Err(error) => return Err(error),
         };
         if private {
             harden_private_path(&tmp_path, PrivatePathKind::File)?;
@@ -597,6 +684,35 @@ fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
 pub struct OsIo;
 
 impl StoreIo for OsIo {
+    fn file_revision(&self, path: &Path) -> io::Result<Option<FileRevision>> {
+        match fs::metadata(path) {
+            Ok(metadata) => FileRevision::from_metadata(&metadata).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Option<Vec<u8>>> {
+        use io::{Read as _, Seek as _, SeekFrom};
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
+    }
+
+    fn open_session_log(&self, path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Some(Box::new(file)))
+    }
+
     fn open_private_log(
         &self,
         root: &Path,

@@ -144,6 +144,7 @@ fn pessimistic_quote() -> PricingQuote {
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(8_192),
         max_output_tokens: Some(TOOL_CEILING),
         max_tools: Some(8),

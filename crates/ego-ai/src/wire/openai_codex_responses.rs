@@ -54,12 +54,16 @@ pub const PATH: &str = "codex/responses";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
+    AudioNotSupported,
     ReasoningStateNotCarriable,
 }
 
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AudioNotSupported => {
+                f.write_str("this wire contract does not support audio input")
+            }
             Inexpressible::ReasoningStateNotCarriable => write!(
                 f,
                 "openai-codex-responses requires valid encrypted reasoning items from its own dialect"
@@ -159,6 +163,9 @@ fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
                     }
                     items.push(item);
                 }
+                ContentBlock::Audio { .. } => {
+                    unreachable!("audio is refused before wire serialization")
+                }
                 ContentBlock::Image { image } => items.push(serde_json::json!({
                     "role": "user",
                     "content": [{
@@ -202,6 +209,9 @@ fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
 }
 
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     let tools: Vec<WireTool<'_>> = req
         .tools
         .iter()

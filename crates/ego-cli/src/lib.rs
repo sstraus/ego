@@ -54,6 +54,7 @@ pub mod output;
 pub(crate) mod output_style;
 pub mod perimeter;
 pub mod prompt;
+pub(crate) mod prompt_context;
 pub mod provider_http;
 pub mod reference;
 pub mod render;

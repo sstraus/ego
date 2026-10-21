@@ -126,6 +126,7 @@ fn read_tool_result_params_require_a_bounded_offset_and_deny_unknown_fields() {
     );
     let tools = tools(&run, root);
     for params in [
+        serde_json::json!({"reference": reference.to_string()}),
         serde_json::json!({"reference": reference.to_string(), "offset": 5}),
         serde_json::json!({
             "reference": {
@@ -167,17 +168,13 @@ fn tools<'a>(run: &'a Run, root: CanonPath) -> TurnTools<'a> {
 }
 
 #[test]
-// Catches: omitted offsets reject a valid first-page request or escape session authority.
 fn read_tool_result_prepares_exact_reference_and_session_authority() {
     let root = cwd();
     let run = open_run().unwrap();
     let reference = store_evidence(&run.evidence, &[b"complete evidence bytes"]);
     let tools = tools(&run, root);
     let (tool, call) = tools
-        .prepare(
-            "read_tool_result",
-            &serde_json::json!({"reference": reference.to_string()}).to_string(),
-        )
+        .prepare("read_tool_result", &request(&reference, 0))
         .expect("read_tool_result prepares");
     assert_eq!(
         call.ops(),

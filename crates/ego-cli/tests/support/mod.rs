@@ -47,7 +47,7 @@ pub fn vision_model_facts(image_input: &str) -> String {
     format!(
         r#"
 [model."anthropic/fixture-vision".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 128000
 max_output_tokens = 4096
 max_tools = 32
@@ -202,6 +202,8 @@ pub fn ready_prompt_count(output: &[u8]) -> usize {
 pub enum Reply {
     /// A whole SSE body, written in one go.
     Sse(String),
+    /// Close a successful HTTP response before its declared body is complete.
+    TruncatedSse,
     /// An SSE body in two parts with a pause between them.
     ///
     /// This is what makes liveness testable from outside: the consumer has a
@@ -803,6 +805,7 @@ fn sse(stream: &mut TcpStream, reply: Reply, path: &str) -> std::io::Result<()> 
     let reply = if path.ends_with("/messages") {
         match reply {
             Reply::Sse(body) => Reply::Sse(as_messages(&body)),
+            Reply::TruncatedSse => Reply::TruncatedSse,
             Reply::Status(status) => Reply::Status(status),
             retry @ Reply::StatusRetryAfter { .. } => retry,
             Reply::Paced { .. } | Reply::GatedPaced { .. } => {
@@ -813,6 +816,13 @@ fn sse(stream: &mut TcpStream, reply: Reply, path: &str) -> std::io::Result<()> 
         reply
     };
     match reply {
+        Reply::TruncatedSse => {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 100\r\nconnection: close\r\n\r\n"
+            )?;
+            stream.flush()
+        }
         Reply::Status(status) => {
             let body = format!("the stub was told to answer {status}");
             write!(

@@ -63,6 +63,11 @@ impl Plan {
                     .iter_mut()
                     .find(|step| &step.id == id)
                     .ok_or_else(|| format!("unknown plan step: {id}"))?;
+                if step.status == StepStatus::Completed && *status != StepStatus::Completed {
+                    return Err(format!(
+                        "plan step {id} is completed; explicitly replace the plan to reopen it"
+                    ));
+                }
                 step.status = *status;
             }
         }
@@ -73,7 +78,7 @@ impl Plan {
 pub(crate) fn descriptor() -> crate::generator::types::ToolDescriptor {
     crate::generator::types::ToolDescriptor {
         name: "plan".into(),
-        description: "Replace the durable ordered plan or update one step status. Keep IDs stable across replacements. An empty replacement clears the plan. This does not change or achieve the session goal. Link task.plan_step to an existing ID for child progress.".into(),
+        description: "Replace the durable ordered plan or update one step status. Keep IDs stable across replacements. Completed steps cannot be reopened by a step update; explicitly replace the plan to revise completed work. An empty replacement clears the plan. This does not change or achieve the session goal. Link task.plan_step to an existing ID for child progress.".into(),
         parameters: serde_json::json!({"oneOf":[
             {"type":"object","additionalProperties":false,"required":["operation","steps"],"properties":{
                 "operation":{"const":"replace"},"steps":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","text","status"],"properties":{

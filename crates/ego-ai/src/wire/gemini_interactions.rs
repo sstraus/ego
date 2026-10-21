@@ -97,17 +97,26 @@ const LEVELS: [&str; 4] = ["minimal", "low", "medium", "high"];
 /// A `GenRequest` this format cannot express without lying about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
+    AudioNotSupported,
     /// `thinking_level` has no spelling for this level.
-    ThinkingLevelUnavailable { level: ThinkingLevel },
+    ThinkingLevelUnavailable {
+        level: ThinkingLevel,
+    },
     /// Reasoning state minted by a different wire format.
-    ReasoningStateFromAnotherDialect { dialect: String },
+    ReasoningStateFromAnotherDialect {
+        dialect: String,
+    },
     /// Reasoning state that is not JSON, so it cannot be a step.
     ReasoningStateNotJson,
     /// Tool arguments that are not JSON. This API wants an object, and a
     /// string that only looks like one cannot become it.
-    ArgumentsNotJson { call_id: String },
+    ArgumentsNotJson {
+        call_id: String,
+    },
     /// Valid JSON that is not the object this API requires for arguments.
-    ArgumentsNotObject { call_id: String },
+    ArgumentsNotObject {
+        call_id: String,
+    },
     /// A system turn carrying something that is not text.
     SystemTurnIsTextOnly,
 }
@@ -115,6 +124,9 @@ pub enum Inexpressible {
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AudioNotSupported => {
+                f.write_str("this wire contract does not support audio input")
+            }
             Inexpressible::ThinkingLevelUnavailable { level } => write!(
                 f,
                 "the Interactions API has no spelling for thinking level {level:?}: \
@@ -295,6 +307,9 @@ fn project<'a>(messages: &'a [Message]) -> Result<(Option<String>, Vec<Step<'a>>
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => pending.push(turn_text(text)),
+                ContentBlock::Audio { .. } => {
+                    unreachable!("audio is refused before wire serialization")
+                }
                 ContentBlock::Image { image } => pending.push(WireContent::Image {
                     kind: "image",
                     data: base64::engine::general_purpose::STANDARD.encode(image.bytes()),
@@ -391,6 +406,9 @@ fn name_of_call<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
 
 /// The exact JSON bytes this format would send for `req`.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     let (system_instruction, input) = project(req.messages.messages())?;
     let body = WireRequest {
         model: &req.model,

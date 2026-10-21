@@ -339,7 +339,11 @@ fn readable_keeps_answer_text_that_looks_like_a_prompt_echo() {
 
 #[test]
 fn readable_keeps_the_last_complete_trust_modal_frame() {
-    let raw = "εgo: ego 0.1.0\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] Project files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n";
+    let raw = concat!(
+        "εgo: ego ",
+        env!("CARGO_PKG_VERSION"),
+        "\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] Project files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n"
+    );
     assert_eq!(
         readable(raw),
         "εgo: ego <version>\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n"
@@ -385,7 +389,7 @@ fn regenerate() {
 // Catches: a version-only bump breaks launch golden comparisons.
 #[test]
 fn readable_redacts_version_bumps_only_in_banner_identity() {
-    for version in ["0.1.0", "9.42.17", "10.0.0-rc.2"] {
+    for version in [env!("CARGO_PKG_VERSION"), "9.42.17", "10.0.0-rc.2"] {
         for identity in [
             format!("ego {version} · ollama/qwen3"),
             format!("εgo: ego {version}"),

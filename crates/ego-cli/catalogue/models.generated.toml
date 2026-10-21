@@ -8,7 +8,7 @@
 
 # models.dev 0598d41d read 2026-10-11: anthropic/claude-fable-5-1
 [model."anthropic/claude-fable-5-1".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -30,7 +30,7 @@ max_height = 8000
 
 # models.dev 0598d41d read 2026-10-11: anthropic/claude-haiku-5-5
 [model."anthropic/claude-haiku-5-5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -51,7 +51,7 @@ max_height = 8000
 
 # models.dev 0598d41d read 2026-10-11: anthropic/claude-opus-5-5
 [model."anthropic/claude-opus-5-5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -73,7 +73,7 @@ max_height = 8000
 
 # models.dev 0598d41d read 2026-10-11: anthropic/claude-sonnet-5-5
 [model."anthropic/claude-sonnet-5-5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -95,7 +95,7 @@ max_height = 8000
 
 # models.dev 0598d41d read 2026-10-11: google/gemini-3.1-pro-preview
 [model."gemini/gemini-3.1-pro-preview".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1048576
 max_output_tokens = 65536
 supports_parallel_tool_calls = true
@@ -108,7 +108,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: google/gemini-3.5-flash-lite
 [model."gemini/gemini-3.5-flash-lite".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1048576
 max_output_tokens = 65536
 supports_parallel_tool_calls = true
@@ -121,7 +121,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: google/gemini-3.8-flash
 [model."gemini/gemini-3.8-flash".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1048576
 max_output_tokens = 65536
 supports_parallel_tool_calls = true
@@ -135,7 +135,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/claude-fable-5.1
 [model."github-copilot/claude-fable-5.1".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -147,7 +147,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/claude-haiku-5.5
 [model."github-copilot/claude-haiku-5.5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -159,7 +159,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/claude-opus-5.5
 [model."github-copilot/claude-opus-5.5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -171,7 +171,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/claude-sonnet-5.5
 [model."github-copilot/claude-sonnet-5.5".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -183,7 +183,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/gemini-3.8-flash
 [model."github-copilot/gemini-3.8-flash".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 64000
 supports_parallel_tool_calls = false
@@ -195,7 +195,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/gpt-6-astra
 [model."github-copilot/gpt-6-astra".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -207,7 +207,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/gpt-6-luna
 [model."github-copilot/gpt-6-luna".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -219,7 +219,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/gpt-6-sol
 [model."github-copilot/gpt-6-sol".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -231,7 +231,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/gpt-6.1-sol
 [model."github-copilot/gpt-6.1-sol".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -243,7 +243,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/grok-4.7
 [model."github-copilot/grok-4.7".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 500000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -255,7 +255,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/kimi-k3
 [model."github-copilot/kimi-k3".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1048576
 max_output_tokens = 131072
 supports_parallel_tool_calls = false
@@ -267,7 +267,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: github-copilot/mai-code-1.1-flash
 [model."github-copilot/mai-code-1.1-flash".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 256000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -279,7 +279,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: minimax-coding-plan/MiniMax-M3.1-Flash-Preview
 [model."minimax-oauth/MiniMax-M3.1-Flash-Preview".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1000000
 max_output_tokens = 512000
 supports_parallel_tool_calls = false
@@ -291,7 +291,7 @@ transport = "sse"
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-astra
 [model."openai/gpt-6-astra".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -308,7 +308,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-luna
 [model."openai/gpt-6-luna".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -326,7 +326,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-sol
 [model."openai/gpt-6-sol".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -344,7 +344,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6.1-sol
 [model."openai/gpt-6.1-sol".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 1050000
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -362,7 +362,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-astra
 [model."openai-codex/gpt-6-astra".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 272000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -380,7 +380,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-luna
 [model."openai-codex/gpt-6-luna".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 272000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -398,7 +398,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6-sol
 [model."openai-codex/gpt-6-sol".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 272000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -417,7 +417,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: openai/gpt-6.1-sol
 [model."openai-codex/gpt-6.1-sol".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 272000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false
@@ -436,7 +436,7 @@ max_images = 100
 
 # models.dev 0598d41d read 2026-10-11: xai/grok-4.7
 [model."xai-oauth/grok-4.7".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 500000
 max_output_tokens = 500000
 supports_parallel_tool_calls = false
@@ -448,7 +448,7 @@ transport = "sse"
 
 # https://developers.openai.com/api/docs/models/chat-latest read 2026-10-15: openai/chat-latest
 [model."openai/chat-latest".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 supports_parallel_tool_calls = false

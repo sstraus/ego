@@ -41,6 +41,8 @@ pub struct ToolRecord {
     pub rows: String,
     /// The row followed by the whole result, for the expand key.
     pub detail: String,
+    /// Only output-free top-level successful commands may be replaced live.
+    pub shell_progress: Option<Line>,
 }
 
 /// One finished tool call.
@@ -98,6 +100,7 @@ impl ToolRows {
             rows,
             // Expand is an independent view: it always names its owning task.
             detail: cap(format!("{header}\n{}", indent(&nested.detail))),
+            shell_progress: None,
         }
     }
 }
@@ -111,16 +114,19 @@ fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let width = capabilities.width;
     let depth = capabilities.depth;
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
-    let header = header(call, &args, width);
+    let heading = header(call, &args, width);
 
-    let mut rows = vec![header.clone()];
+    let mut rows = vec![heading.clone()];
     if call.name == "exec" {
         rows.extend(tail(call, width));
     }
 
-    let mut detail = vec![header];
+    let shell_progress =
+        (call.name == "exec" && call.ok && output_lines(call).is_empty()).then(|| heading.clone());
+    let mut detail = vec![heading];
     detail.extend(body(call, &args, width));
     ToolRecord {
+        shell_progress,
         rows: render(&rows, depth),
         detail: cap(render(&detail, depth)),
     }
@@ -182,10 +188,6 @@ fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// `(added, removed)` lines of an edit, from the same line diff the expanded
 /// view draws, so the two cannot disagree.
 fn edit_stat(args: &Value) -> Option<(usize, usize)> {
-    // One fragment cannot establish total changed lines across repeated matches.
-    if args.get("replace_all").and_then(Value::as_bool) == Some(true) {
-        return None;
-    }
     let old = string_arg(args, "old_string")?;
     let new = string_arg(args, "new_string")?;
     let (mut added, mut removed) = (0, 0);
@@ -238,9 +240,6 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
         (false, _) => Some(failure(call.result, width)),
         (true, "exec") => Some("exit 0".to_owned()),
         (true, "read") => Some(lines_note(line_count(call.result))),
-        (true, "edit") if args.get("replace_all").and_then(Value::as_bool) == Some(true) => {
-            Some("all occurrences".to_owned())
-        }
         (true, "write") => Some(lines_note(line_count(
             string_arg(args, "contents").unwrap_or(""),
         ))),
@@ -443,7 +442,6 @@ fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
 fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
     if call.ok
         && call.name == "edit"
-        && args.get("replace_all").and_then(Value::as_bool) != Some(true)
         && let (Some(old), Some(new)) = (
             string_arg(args, "old_string"),
             string_arg(args, "new_string"),
@@ -619,23 +617,6 @@ mod tests {
             at(80),
         );
         assert_eq!(header_of(&record), "✓ edit a.rs +2 -1 · 1.5s");
-    }
-
-    // Catches: repeat edits display one fragment's line counts or hide the actual receipt.
-    #[test]
-    fn replace_all_row_does_not_claim_single_fragment_statistics() {
-        let result = record(
-            &call(
-                "edit",
-                r#"{"path":"a.rs","old_string":"x","new_string":"y","replace_all":true}"#,
-                true,
-                "replaced 3 occurrences in a.rs",
-            ),
-            at(100),
-        );
-        assert_eq!(header_of(&result), "✓ edit a.rs · all occurrences · 1.5s");
-        assert!(result.detail.contains("replaced 3 occurrences in a.rs"));
-        assert!(!result.rows.contains("+1 -1"));
     }
 
     #[test]

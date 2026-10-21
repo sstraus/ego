@@ -35,10 +35,7 @@ impl TypedTool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find file paths by glob, without reading contents. Patterns are relative to path \
-         (default working directory): src/*.rs matches one level, **/*.rs includes descendants. \
-         Respects ignore rules. Stops after 512 visited entries, not 512 matches; an incomplete \
-         result is marked. Narrow path when truncated. Use grep to search contents."
+        "Find paths by glob pattern, not file contents (use grep for content). Returns paths relative to the search root, one per line; it does not read the files. Stops after 512 visited entries and marks an incomplete result."
     }
 
     fn prepare_typed(

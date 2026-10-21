@@ -437,6 +437,8 @@ pub struct ItemState {
     /// Ordered durable image metadata for a user prompt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<crate::generator::audio::AudioRef>,
     /// The final evidence returned by a completed tool call.
     pub tool_result: Option<ToolResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -454,6 +456,9 @@ pub struct ItemState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_content: Option<ReasoningState>,
     pub completed: bool,
+    /// Observation time of the applied tool completion, not the later Stop call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<Timestamp>,
     pub ok: Option<bool>,
     /// The generation this item came out of, when the log says which.
     ///
@@ -487,11 +492,13 @@ impl ItemState {
             args: String::new(),
             text: String::new(),
             images: Vec::new(),
+            audio: Vec::new(),
             tool_result: None,
             tool_timing: None,
             reasoning_state: None,
             provider_content: None,
             completed: false,
+            completed_at: None,
             ok: None,
             generation: None,
         }
@@ -1047,6 +1054,8 @@ pub struct QueuedPrompt {
     text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     images: Vec<ImageRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    audio: Vec<crate::generator::audio::AudioRef>,
     turn: TurnId,
     seq: Seq,
 }
@@ -1066,6 +1075,10 @@ impl QueuedPrompt {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn audio(&self) -> &[crate::generator::audio::AudioRef] {
+        &self.audio
     }
 
     pub fn images(&self) -> &[ImageRef] {
@@ -1641,6 +1654,7 @@ impl SessionState {
         id: QueuedPromptId,
         text: &str,
         images: &[ImageRef],
+        audio: &[crate::generator::audio::AudioRef],
     ) {
         if self
             .queued_prompt_ledger
@@ -1653,6 +1667,7 @@ impl SessionState {
             id,
             text: text.to_string(),
             images: images.to_vec(),
+            audio: audio.to_vec(),
             turn: ev.env.turn,
             seq: ev.env.seq,
         });
@@ -1759,9 +1774,11 @@ impl SessionState {
         let mut references = Vec::new();
         for prompt in &self.queued_prompt_ledger {
             references.extend(prompt.images.iter().map(|image| image.reference().clone()));
+            references.extend(prompt.audio.iter().map(|audio| audio.reference().clone()));
         }
         for item in self.items.values() {
             references.extend(item.images.iter().map(|image| image.reference().clone()));
+            references.extend(item.audio.iter().map(|audio| audio.reference().clone()));
             if let Some(result) = &item.tool_result {
                 references.extend(
                     result
@@ -2002,9 +2019,12 @@ impl SessionState {
             EventKind::ContextCooldown { turns } => {
                 self.context_cooldown = *turns;
             }
-            EventKind::PromptQueued { id, text, images } => {
-                self.accept_prompt(ev, *id, text, images)
-            }
+            EventKind::PromptQueued {
+                audio,
+                id,
+                text,
+                images,
+            } => self.accept_prompt(ev, *id, text, images, audio),
             EventKind::PromptDeliveryExpedited { through } => self.expedite_prompt(*through),
             EventKind::PromptRetracted { id } => {
                 if self
@@ -2017,6 +2037,7 @@ impl SessionState {
                 }
             }
             EventKind::UserPrompt {
+                audio,
                 text,
                 images,
                 queued_prompt,
@@ -2027,6 +2048,7 @@ impl SessionState {
                 if let Some(item) = self.item_mut(ev, ItemKind::UserPrompt) {
                     item.text = text.clone();
                     item.images = images.clone();
+                    item.audio = audio.clone();
                 }
             }
             EventKind::AssistantDelta { text } => {
@@ -2094,6 +2116,7 @@ impl SessionState {
                     item.text.clear();
                     item.tool_result = Some(result.clone());
                     item.completed = true;
+                    item.completed_at = Some(ev.env.ts);
                     item.ok = Some(*ok);
                 }
             }

@@ -46,7 +46,7 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 use futures::stream::BoxStream;
 
 use super::SessionEvidenceStore;
-use super::jsonl_store::{EvidenceIndex, JsonlStore, Repair};
+use super::jsonl_store::{AppendState, EvidenceIndex, JsonlStore, Repair};
 use super::lease::{Lease, LeaseError};
 use super::snapshot::SnapshotRejection;
 
@@ -139,15 +139,37 @@ pub struct OpenSession<'a> {
 pub struct SessionWriter<'a> {
     store: &'a JsonlStore,
     id: SessionId,
+    pid: u32,
+    /// Drop append descriptors before releasing the writer lease.
+    _appender: Arc<Mutex<AppendState>>,
     /// Released on drop, which is the whole point. Never read.
     _lease: Arc<Lease>,
     /// References derived from the repaired log and accepted snapshot state.
     reachable_blobs: Vec<BlobRef>,
     /// Rebuilt once from log truth and discarded with this lease.
     evidence_index: Mutex<EvidenceIndex>,
+    snapshot_revision: Option<super::FileRevision>,
+    snapshot: Option<SnapshotRejection>,
+}
+
+impl Drop for SessionWriter<'_> {
+    fn drop(&mut self) {
+        self.store.cache_writer(
+            self.id,
+            &self._appender,
+            self.snapshot_revision.take(),
+            self.snapshot.take(),
+            std::mem::take(&mut self.reachable_blobs),
+        );
+    }
 }
 
 impl SessionWriter<'_> {
+    /// Publish this writer as the process's active session after candidate acceptance.
+    pub fn publish_pid_index(&self) -> std::io::Result<()> {
+        self.store.index_lease(&self._lease, &self.id, self.pid)
+    }
+
     /// The session this writer holds the lease for.
     pub fn id(&self) -> SessionId {
         self.id
@@ -162,15 +184,25 @@ impl SessionWriter<'_> {
             Arc::clone(&self._lease),
         )?;
         let mut reachable = self.reachable_blobs.clone();
-        match self.store.read_events(&self.id) {
-            Ok(events) => {
-                reachable.extend(events.iter().flat_map(|event| event.kind.blob_references()))
-            }
-            Err(StoreError::NotFound) => {}
-            Err(error) => {
-                return Err(BlobEvidenceError::Io {
-                    message: error.to_string(),
-                });
+        let indexed = self
+            .store
+            .indexed_reachable_blobs(&self.id)
+            .map_err(|error| BlobEvidenceError::Io {
+                message: error.to_string(),
+            })?;
+        if let Some(references) = indexed {
+            reachable.extend(references);
+        } else {
+            match self.store.read_events(&self.id) {
+                Ok(events) => {
+                    reachable.extend(events.iter().flat_map(|event| event.kind.blob_references()))
+                }
+                Err(StoreError::NotFound) => {}
+                Err(error) => {
+                    return Err(BlobEvidenceError::Io {
+                        message: error.to_string(),
+                    });
+                }
             }
         }
         store.collect_garbage(&reachable)?;
@@ -319,6 +351,21 @@ impl JsonlStore {
         id: &SessionId,
         lease: LeaseInputs<'_>,
     ) -> Result<OpenSession<'_>, OpenError> {
+        let opened = self.open_candidate(id, lease)?;
+        opened
+            .writer
+            .publish_pid_index()
+            .map_err(|error| OpenError::Lease(LeaseError::Io(error)))?;
+        Ok(opened)
+    }
+
+    /// Lease and rebuild a candidate without replacing the active process index.
+    /// The accepting caller publishes through [`SessionWriter::publish_pid_index`].
+    pub fn open_candidate(
+        &self,
+        id: &SessionId,
+        lease: LeaseInputs<'_>,
+    ) -> Result<OpenSession<'_>, OpenError> {
         let held = Lease::acquire(
             &self.lease_path(id),
             lease.pid,
@@ -327,6 +374,30 @@ impl JsonlStore {
             lease.is_alive,
         )
         .map_err(OpenError::Lease)?;
+
+        let snapshot_revision = self
+            .io
+            .file_revision(&self.snapshot_path(id))
+            .ok()
+            .flatten();
+        if let Some(indexed) = self.open_indexed_writer(id).map_err(OpenError::Recover)? {
+            return Ok(OpenSession {
+                state: indexed.state,
+                repair: indexed.repair,
+                snapshot: indexed.snapshot.clone(),
+                writer: SessionWriter {
+                    store: self,
+                    id: *id,
+                    pid: lease.pid,
+                    _lease: Arc::new(held),
+                    _appender: indexed.appender,
+                    reachable_blobs: indexed.reachable_blobs,
+                    evidence_index: Mutex::new(indexed.evidence_index),
+                    snapshot_revision,
+                    snapshot: indexed.snapshot,
+                },
+            });
+        }
 
         let repair = self.recover(id).map_err(OpenError::Recover)?;
 
@@ -349,16 +420,24 @@ impl JsonlStore {
             .evidence_index(id)
             .map_err(|source| OpenError::Resume { source, repair })?;
 
+        let appender = self
+            .retain_appender(id, &state)
+            .map_err(|source| OpenError::Resume { source, repair })?;
+
         Ok(OpenSession {
             state,
             repair,
-            snapshot,
+            snapshot: snapshot.clone(),
             writer: SessionWriter {
                 store: self,
                 id: *id,
+                pid: lease.pid,
                 _lease: Arc::new(held),
+                _appender: appender,
                 reachable_blobs,
                 evidence_index: Mutex::new(evidence_index),
+                snapshot_revision,
+                snapshot,
             },
         })
     }

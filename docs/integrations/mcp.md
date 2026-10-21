@@ -19,8 +19,8 @@ server. A server that admission refuses (for example an HTTP server outside
 `--sandbox off`) or that fails to start is reported once with its cause and the
 session continues; the same refusal for an explicit `--mcp` is a usage error. A file entry is one complete server, not a
 second configuration hierarchy. See [configuration](../reference/configuration.md)
-for every field/default. HTTP OAuth uses `ego mcp login NAME` with the product's
-CIMD binding; credentials are stored privately under the existing authority.
+for every field/default. HTTP OAuth requires an explicit registration strategy;
+see [remote OAuth login](#remote-oauth-login).
 
 HTTP defaults to the current stateless contract. For a legacy SSE-only server,
 select the profile explicitly:
@@ -45,10 +45,12 @@ catalogue. Reload changes a future boundary, not an active call's authority.
 
 The collapsed model surface starts with vendor-neutral bootstrap operations for
 catalogue inspection and call selection. A `search_tools` response can include a
-complete MCP definition (`name`, `description`, `inputSchema`) in `results[0]`.
+complete MCP definition in the sibling `top_schema` field, with its `name`
+matching `results[0].name`.
 Ego admits that top hit before the next generation, so the model can call
 `call_tool` without a separate `get_tool_schema` round. The complete inline hit
-must fit within 16 KiB of serialized JSON. Other hits and summary-only responses
+must fit within 16 KiB of serialized JSON. Optional tool metadata is preserved.
+Other hits and summary-only responses
 still need an exact schema lookup. Servers own ranking and inline publication;
 ego does not issue hidden lookup calls or pin server-specific tools.
 
@@ -64,6 +66,49 @@ Protocol suspensions, elicitation, resources, and continuation handles remain
 owned by the MCP adapter and durable core. A reconnection does not prove the
 previous operation was never sent. Refused persisted sessions are quarantined;
 inspect their recorded failure rather than repeatedly rebuilding untrusted state.
+
+## Remote OAuth login
+
+OAuth login, persistence, runtime attachment, and refresh are implemented.
+Choose exactly one explicit public-client registration strategy for an existing
+HTTP server configured with `auth = "oauth"`:
+
+```sh
+ego mcp login NAME --client-id REGISTERED_PUBLIC_CLIENT_ID
+ego mcp login NAME --cimd https://example.test/ego-client.json
+ego mcp login NAME --dcr
+```
+
+These are alternatives, not three commands to run in order. A bare
+`ego mcp login NAME` refuses and names the required selection. `--client-id`
+uses an operator-issued public client ID; `--cimd` supplies a published HTTPS
+client metadata document; `--dcr` explicitly requests issuer-advertised dynamic
+registration. Confidential-client requirements are not silently bypassed.
+
+The command prints a copyable authorization URL and waits at most 120 seconds
+for the loopback callback. `--callback-port PORT` selects a registered port
+(the default `0` selects a free port). For a remote shell, forward that callback
+port to the machine running ego. The flow validates state, PKCE, issuer, and
+exact protected-resource identity before storing the credential privately.
+
+Runtime admission uses the stored credential and exact-resource locator.
+Expiry and a 401 can refresh credentials; a selected operation is not replayed
+because it returned 401. Missing or revoked credentials report a login hint.
+Explicit non-interactive refresh uses the same registration selection, plus
+`--refresh --issuer URL` and optional `--account ACCOUNT`.
+
+**Verification boundary:** regression case is code-landed, not live-login complete.
+Recorded public Linear and Asana discovery documents and local authorization
+server tests are source evidence. maintainer's real OAuth login, restart, and native
+credential-store attachment check remains pending. Do not read the native token
+store or claim this check passed from the local fixtures.
+
+Sources: [CLI login and refresh](../../crates/ego-cli/src/mcp.rs),
+[OAuth protocol and runtime](../../crates/ego-mcp/src/oauth.rs),
+[loopback and persistence adapters](../../crates/ego-tools/src/mcp_oauth.rs),
+[recorded public contracts](../../crates/ego-mcp/tests/fixtures/oauth/), and
+[local authorization-server coverage](../../crates/ego-mcp/tests/oauth_local_server.rs).
+Use `ego mcp login --help` for the installed binary's exact options.
 
 ## Serve εgo runs
 

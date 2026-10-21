@@ -89,6 +89,7 @@ fn metered() -> Metering {
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -1182,4 +1183,151 @@ async fn standard_tier_catches_fast_project_default_surviving_fast_off() {
         body["service_tier"], "default",
         "Standard must override OpenAI project Fast defaults, not inherit them"
     );
+}
+
+// Catches: a fork with the same cache root/history inherits its parent's response ID,
+// or compaction/unidentified/resumed requests reuse connection-local continuation.
+#[tokio::test]
+async fn codex_fork_and_compaction_never_send_another_lineages_response_id() {
+    use ego_ai::http::HttpWebSocket;
+    use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
+    use ego_core::event::id::SessionId;
+    use ego_core::generator::types::PromptCache;
+    use serde_json::{Value, json};
+
+    #[derive(Default)]
+    struct RecordingHttp {
+        sent: Arc<Mutex<Vec<Value>>>,
+        opened: std::sync::atomic::AtomicUsize,
+    }
+    struct Socket {
+        sent: Arc<Mutex<Vec<Value>>>,
+        response: Option<Vec<u8>>,
+    }
+    impl Http for RecordingHttp {
+        fn begin_call(&self) -> Box<dyn HttpCall> {
+            panic!("lineage guard must exercise WebSocket, not HTTP fallback")
+        }
+        fn open_websocket(
+            &self,
+            _: PreparedHttpCall,
+        ) -> BoxFuture<'static, Result<Box<dyn HttpWebSocket>, TransportError>> {
+            self.opened
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let socket = Socket {
+                sent: self.sent.clone(),
+                response: None,
+            };
+            Box::pin(async move { Ok(Box::new(socket) as Box<dyn HttpWebSocket>) })
+        }
+    }
+    impl HttpWebSocket for Socket {
+        fn send(&mut self, call: PreparedHttpCall) -> BoxFuture<'_, Result<(), TransportError>> {
+            let (_, _, _, request) = call.into_parts();
+            let mut sent = self.sent.lock().unwrap();
+            sent.push(serde_json::from_slice(request.body()).unwrap());
+            // Scripted component response, not evidence of a live backend contract.
+            self.response = Some(serde_json::to_vec(&json!({
+                "type":"response.completed",
+                "response":{"id":format!("resp_{}", sent.len()), "status":"completed", "output":[]}
+            })).unwrap());
+            Box::pin(async { Ok(()) })
+        }
+        fn receive(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
+            let response = self.response.take();
+            Box::pin(async move { Ok(response) })
+        }
+    }
+
+    for boundary in ["fork", "compaction", "unidentified", "resume"] {
+        let http = Arc::new(RecordingHttp::default());
+        let make_generator = || {
+            WireGenerator::new(
+                ProviderRow::openai_codex_default(),
+                &OpenAiCodexResponses,
+                http.clone(),
+                support::credential(),
+            )
+        };
+        let mut generator = make_generator();
+        let parent = SessionId::new();
+        let mut req = request();
+        req.cache = Some(PromptCache {
+            session_id: parent,
+            lineage_root: parent,
+            retention: CacheRetention::Short,
+            stable_messages: 0,
+        });
+        let mut gate = BudgetGate::new(usd("10"));
+        let attempt = attempt_for(&mut gate, &req);
+        let first: Vec<_> = generator.generate(req.clone(), attempt).collect().await;
+        assert!(matches!(
+            first.last(),
+            Some(AiEvent::Stop(StopReason::Stop))
+        ));
+
+        // The completed response has empty output, so all prior input is the
+        // continuation baseline. Prove continuation actually works before invalidation.
+        let mut messages = req.messages.messages().to_vec();
+        messages.push(Message::text(Role::User, "continue"));
+        req.messages = Conversation::new(messages).unwrap();
+        let attempt = attempt_for(&mut gate, &req);
+        let second: Vec<_> = generator.generate(req.clone(), attempt).collect().await;
+        assert!(matches!(
+            second.last(),
+            Some(AiEvent::Stop(StopReason::Stop))
+        ));
+        {
+            let sent = http.sent.lock().unwrap();
+            assert!(sent[0].get("previous_response_id").is_none());
+            assert_eq!(sent[1]["previous_response_id"], "resp_1");
+            assert_eq!(
+                sent[1]["input"],
+                json!([{"role":"user","content":"continue"}])
+            );
+        }
+
+        match boundary {
+            // Keep input AND routing key identical: only active session changes.
+            "fork" => req.cache.as_mut().unwrap().session_id = SessionId::new(),
+            "compaction" => {
+                req.messages =
+                    Conversation::new(vec![Message::text(Role::User, "compacted checkpoint")])
+                        .unwrap()
+            }
+            "unidentified" => req.cache = None,
+            "resume" => generator = make_generator(),
+            _ => unreachable!(),
+        }
+        let full: Value = serde_json::from_slice(
+            &ego_ai::wire::openai_codex_responses::request_body(&req).unwrap(),
+        )
+        .unwrap();
+        let attempt = attempt_for(&mut gate, &req);
+        let third: Vec<_> = generator.generate(req, attempt).collect().await;
+        assert!(matches!(
+            third.last(),
+            Some(AiEvent::Stop(StopReason::Stop))
+        ));
+        let sent = http.sent.lock().unwrap();
+        assert_eq!(sent.len(), 3, "{boundary}");
+        assert_eq!(sent[2]["type"], "response.create", "{boundary}");
+        assert!(
+            sent[2].get("previous_response_id").is_none(),
+            "{boundary}: leaked response ID"
+        );
+        assert_eq!(
+            sent[2]["input"], full["input"],
+            "{boundary}: lost full history"
+        );
+        if boundary == "fork" {
+            assert_eq!(sent[2]["prompt_cache_key"], sent[1]["prompt_cache_key"]);
+            assert_eq!(sent[2]["input"], full["input"]);
+        }
+        assert_eq!(
+            http.opened.load(std::sync::atomic::Ordering::SeqCst),
+            if boundary == "compaction" { 1 } else { 2 },
+            "{boundary}: wrong connection ownership",
+        );
+    }
 }

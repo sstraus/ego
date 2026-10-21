@@ -103,10 +103,10 @@ fn context_colour_uses_exact_thresholds_and_obeys_no_colour() {
     let mut caps = Capabilities::plain();
     caps.depth = Depth::TrueColor;
     for (used, colour) in [
-        (163_199, "80;200;80"),
-        (163_200, "229;192;80"),
-        (231_199, "229;192;80"),
-        (231_200, "255;107;128"),
+        (163_199, "151;207;167"),
+        (163_200, "217;190;129"),
+        (231_199, "217;190;129"),
+        (231_200, "221;151;158"),
     ] {
         let line = StatusLine::render(&surface(Some(used)), &[S::Context], 60);
         assert!(line.terminal_text(&caps).contains(colour));

@@ -1,6 +1,7 @@
 # ego extensions to ACP
 
-This is the client integration contract audited on 2026-10-10. It describes the
+This is the client integration contract audited on 2026-10-10 and reconciled
+against local source on 2026-10-20. It describes the
 code in this checkout, not a promise that every ACP client implements it.
 `C → E` means client to ego. `E → C` means ego to client.
 
@@ -30,12 +31,14 @@ advertisement before calling a custom method.
 
 ### Inventory and counting rule
 
-There are **24 named extension entries**: 18 distinct keys directly inside
-`_meta.ego`, four custom request methods, and two custom error codes. Nested
-members and uses of the same key in different message types do not add entries.
-The 18 keys are `steer`, `compact`, `hold`, `atMessage`, `trust`, `profile`,
-`ceilingProfile`, `effective`, `warnings`, `atMessageId`, `summary`, `lineage`,
-`inherited`, `providerRetry`, `salience`, `action`, `goalId`, and `goalState`.
+The inventory below groups capability keys, session input/output metadata,
+custom requests, and custom errors. Nested members and repeated uses of one key
+are not separate operations. The implemented custom requests are `_ego/steer`,
+`_ego/compact`, `_ego/pause`, `_ego/resume`, and `_ego/retry`. Session inputs also
+include `systemPrompt`, `bare`, and deletion `force`; these are not independent
+capability advertisements. Read each section's negotiation and fallback rules
+instead of using a historical entry count as a feature test.
+
 Transport policy, permission choices, and standard-field interpretations are
 listed separately below. There are no ego-named notification methods in the
 router: extensions are carried by standard `session/update` notifications.
@@ -57,7 +60,7 @@ The production durable composition advertises:
 {
   "loadSession": true,
   "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
-  "mcpCapabilities": {"http": true, "sse": false, "acp": true},
+  "mcpCapabilities": {"http": true, "sse": true, "acp": true},
   "sessionCapabilities": {
     "list": {}, "delete": {"_meta": {"ego": {"force": true}}}, "resume": {}, "close": {},
     "fork": {"_meta": {"ego": {"atMessage": true}}}
@@ -91,7 +94,7 @@ surfaces, not additional ego-named methods.
 
 ## Custom requests and errors
 
-All four custom requests are C → E, with an E → C JSON-RPC result. They require
+The custom requests are C → E, with an E → C JSON-RPC result. They require
 `v: 1`. Their request structs reject unknown fields. A response `v` is the
 extension version, not the negotiated ACP version.
 
@@ -574,28 +577,31 @@ Evidence: `crates/ego-acp/src/serve.rs:775` and the handler chain beginning at
 `crates/ego-acp/src/permission.rs:198`. Newer stable upstream schema entries
 must not be mistaken for methods implemented by ego's older pinned SDK.
 
-## Planned, not implemented: regression case
+## Session initialization prompt
 
-Pending story **regression_case**, requested on 2026-10-10, specifies:
+`session/new` accepts `_meta.ego.systemPrompt` and `_meta.ego.bare`:
 
-- C → E `session/new` `_meta.ego.systemPrompt`, with append or replace mode.
-- C → E `session/new` `_meta.ego.bare`, with CLI-equivalent validation,
-  including the bare/instructions conflict.
-- Launch-wide ACP `--system` and `--bare` parity, and a stable system prefix
-  across turns.
+```json
+{"cwd":"/workspace/repo","mcpServers":[],"_meta":{"ego":{"systemPrompt":{"mode":"append","text":"Use concise answers"},"bare":true}}}
+```
 
-These keys are **not current extensions** and are not included in the count.
-The story does not yet establish a complete JSON wire shape, error mapping,
-capability advertisement, or implemented test. Do not send guessed fields and
-assume they changed the prompt: the current session metadata parser reads
-profile names and trust, not these planned keys. Current launch-wide
-`--append-system` is separate from a per-session override. Until the story is
-implemented, use the existing launch configuration and separate processes when
-sessions require different launch-time instructions.
+`systemPrompt` requires `mode` (`append` or `replace`) and string `text`.
+Append extends the launch prompt; replace replaces it and its launch append.
+`@file` resolves from the session workspace. Empty text is valid. Malformed
+fields and unknown fields inside `systemPrompt` refuse creation. `bare` must
+be boolean; a session cannot undo launch-wide bare mode. Bare and explicit
+instructions conflict. Omitted values retain launch defaults.
 
-Source evidence: regression case read with `wiz-run stories-cli.js show regression_case`
-from the main checkout; current parser at `crates/ego-acp/src/serve.rs:2146` and
-trust reader at `:3070`. Planned implementation and tests: **untested / absent**.
+These fields are implemented, not planned. They have no separate capability
+advertisement. The stable prefix retains the selection across turns; creation
+selections survive restart before the first prompt. Launch-wide `ego acp
+--system TEXT --bare` is also implemented. See the
+[session initialization guide](acp.md#session-initialization-prompt) for details.
+
+Sources: `session_prompt` in `crates/ego-acp/src/serve.rs` and
+`crates/ego-cli/tests/acp_system_prompt.rs`, including
+`per_session_prompt_is_isolated_and_stable_across_turns` and
+`creation_prompt_selections_survive_restart_before_first_prompt`.
 
 ### Session deletion
 

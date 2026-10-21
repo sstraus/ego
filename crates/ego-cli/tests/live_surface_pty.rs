@@ -38,8 +38,12 @@ mod notice_wrap;
 mod permission_receipts;
 #[path = "live_surface_pty/picker_roles.rs"]
 mod picker_roles;
+#[path = "live_surface_pty/pinned_plan.rs"]
+mod pinned_plan;
 #[path = "live_surface_pty/plan_denial.rs"]
 mod plan_denial;
+#[path = "live_surface_pty/prompt_context.rs"]
+mod prompt_context;
 #[path = "live_surface_pty/prompt_echo.rs"]
 mod prompt_echo;
 #[path = "live_surface_pty/prompt_readiness.rs"]
@@ -50,6 +54,8 @@ mod raw_columns;
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/shell_rows.rs"]
+mod shell_rows;
 #[path = "live_surface_pty/slash_completion.rs"]
 mod slash_completion;
 #[path = "live_surface_pty/slash_inspections.rs"]
@@ -71,6 +77,8 @@ mod support;
 mod task_rows;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
+#[path = "live_surface_pty/working_repaint.rs"]
+mod working_repaint;
 #[path = "live_surface_pty/workspace_trust.rs"]
 mod workspace_trust;
 
@@ -670,6 +678,7 @@ fn across_root_picker_contract(case: &str) {
             (
                 Some(ItemId::new()),
                 EventKind::UserPrompt {
+                    audio: Vec::new(),
                     text: format!("REGRESSION-MARKER {label}"),
                     images: Vec::new(),
                     queued_prompt: None,
@@ -883,6 +892,7 @@ fn resume_replay_contract(turns: usize, unrenderable: bool) {
         append(
             Some(user),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: format!("REPLAY-USER-{n:02}"),
                 images: Vec::new(),
                 queued_prompt: None,
@@ -2766,6 +2776,44 @@ fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, s
     until_prompt_from_with_context(receiver, output, start, PROGRESS_DEADLINE, "PTY prompt");
 }
 
+fn until_prompt_after_reply(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    reply: &[u8],
+) {
+    until(receiver, output, reply);
+    // The same read can contain both the reply and its successor composer.
+    let reply_end = output
+        .windows(reply.len())
+        .rposition(|window| window == reply)
+        .expect("reply received")
+        + reply.len();
+    until_prompt_from(receiver, output, reply_end);
+}
+
+// Catches: an accepted-line redraw authorizing quit before the post-reply idle
+// composer, or discarding that composer when it shares the reply's PTY read.
+#[cfg(not(windows))]
+#[test]
+fn post_reply_prompt_wait_ignores_accepted_line_redraws() {
+    // Accepted-line frames and the answer marker captured from the failing rb PTY.
+    let prior = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> original queued text\x1b7\x1b8\x1b[?25h\x1b[J\r\n\x1b[6n\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> edited queued text\x1b7\x1b8\x1b[?25h\x1b[J\r\nSTEER-RECEIVED";
+    let idle = b"\x1b[6n\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> \x1b7\x1b8\x1b[?25h";
+    assert!(rendered_prompt_count(prior) > 0);
+    for coalesced in [false, true] {
+        let (sender, receiver) = mpsc::channel();
+        let mut output = prior.to_vec();
+        if coalesced {
+            output.extend_from_slice(idle);
+        } else {
+            sender.send(idle.to_vec()).expect("successor idle frame");
+        }
+        drop(sender);
+        until_prompt_after_reply(&receiver, &mut output, b"STEER-RECEIVED");
+        assert_eq!(&output[prior.len()..], idle);
+    }
+}
+
 fn until_prompt_from_with_context(
     receiver: &mpsc::Receiver<Vec<u8>>,
     output: &mut Vec<u8>,
@@ -4094,8 +4142,7 @@ fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
         "Messages to be submitted after next tool call",
     );
     initial_gate.release();
-    until(&reader, &mut output, b"STEER-RECEIVED");
-    until_prompt_from(&reader, &mut output, steer_start);
+    until_prompt_after_reply(&reader, &mut output, b"STEER-RECEIVED");
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
     let status = session.quit(input);
@@ -4188,8 +4235,7 @@ fn live_surface_recalled_pasted_slash_text_is_not_reinterpreted_as_a_command() {
         "Messages to be submitted after next tool call",
     );
     initial_gate.release();
-    until(&reader, &mut output, b"STEER-RECEIVED");
-    until_prompt_from(&reader, &mut output, steer_start);
+    until_prompt_after_reply(&reader, &mut output, b"STEER-RECEIVED");
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
     let status = session.quit(input);
@@ -6154,7 +6200,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("model", "Select model"),
         ("sessions", "Select session"),
         ("thinking", "Select reasoning for"),
-        ("mode", "Choose execution mode"),
+        ("mode", "Choose permission mode"),
         ("permissions", "Choose permission operation"),
         ("statusline", "Choose status-line setup"),
         ("setup", "Select setup proposal items"),
@@ -6196,7 +6242,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("skills", None),
         ("hooks", Some("no hooks are admitted")),
         ("retry", Some("no provider retry wait is active")),
-        ("version", Some("ego 0.1.0")),
+        ("version", Some(concat!("ego ", env!("CARGO_PKG_VERSION")))),
     ] {
         if command == "compact" {
             let start = output.len();
@@ -9377,6 +9423,89 @@ fn context_pressure_compacts_and_continues_without_operator_input() {
     assert!(
         !resumed.contains("PRESSURE"),
         "old conversation leaked: {resumed}"
+    );
+}
+
+// Catches: the recorded HTTP body failure leaves automatic compaction latched
+// off while every subsequent managed prompt is refused at context pressure.
+#[test]
+fn failed_compaction_preparation_does_not_loop_refusals() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("REGRESSION-MARKER", 245352, 4)),
+            Reply::TruncatedSse,
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# failed checkpoint fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (mut session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "compaction preparation failed");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        if session.child.try_wait().expect("child status").is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(20)) {
+            output.extend(bytes);
+        }
+    };
+    // Reap the pre-fix refusal loop too, without leaving a fixture process.
+    if !exited {
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+    }
+    let status = session.quit(input);
+    let shown = normalized(&output);
+    assert!(
+        exited,
+        "failed required compaction must terminate, not await another doomed prompt: {shown}"
+    );
+    assert!(
+        !status.success(),
+        "the parent must observe a failed process"
+    );
+    assert!(
+        shown.contains("automatic compaction failed; session stopped"),
+        "{shown}"
+    );
+    assert!(shown.contains("compaction stopped with Error"), "{shown}");
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "no retry storm or ordinary generation"
+    );
+    let journal = std::fs::read_to_string(
+        places
+            .home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        journal.contains("HTTP response body failed"),
+        "the fixture must replay the recorded transport failure"
     );
 }
 

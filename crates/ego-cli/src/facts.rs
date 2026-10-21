@@ -464,7 +464,7 @@ mod tests {
             format!(
                 r#"
 [model."openai/gpt-5.1".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = 400000
 max_output_tokens = 128000
 max_tools = 128
@@ -496,7 +496,7 @@ transport = "{transport}"
             toml::from_str::<Facts>(&format!(
                 r#"
 [model."openai/gpt-5.6".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = {context}
 max_output_tokens = 128000
 max_tools = 128
@@ -525,7 +525,7 @@ transport = "sse"
             toml::from_str::<Facts>(&format!(
                 r#"
 [model."openai/gpt-5.6-sol".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = {context}
 max_output_tokens = 128000
 supports_parallel_tool_calls = true
@@ -567,7 +567,7 @@ transport = "sse"
             toml::from_str::<Facts>(&format!(
                 r#"
 [model."openai/gpt-5.6".capabilities]
-schema_version = 5
+schema_version = 6
 max_context_tokens = {context}
 max_output_tokens = 128000
 supports_parallel_tool_calls = true

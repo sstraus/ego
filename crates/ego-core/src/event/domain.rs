@@ -362,6 +362,8 @@ pub enum EventKind {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audio: Vec<crate::generator::audio::AudioRef>,
     },
     /// A durable request to expedite the FIFO prefix ending at `through`.
     PromptDeliveryExpedited { through: QueuedPromptId },
@@ -373,6 +375,8 @@ pub enum EventKind {
         /// Ordered immutable image metadata; bytes live in the session CAS.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        audio: Vec<crate::generator::audio::AudioRef>,
         /// The queue acceptance this conversation item consumes. Absent on
         /// ordinary direct prompts and on records written before queues.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -749,8 +753,9 @@ impl EventKind {
             | Self::ExecutionMeasured { probe_evidence, .. } => {
                 references.extend(probe_evidence.iter().map(|evidence| evidence.blob_ref()));
             }
-            Self::PromptQueued { images, .. } | Self::UserPrompt { images, .. } => {
+            Self::PromptQueued { images, audio, .. } | Self::UserPrompt { images, audio, .. } => {
                 references.extend(images.iter().map(|image| image.reference().clone()));
+                references.extend(audio.iter().map(|audio| audio.reference().clone()));
             }
             Self::ToolCallCompleted { result, .. } => {
                 references.extend(

@@ -37,6 +37,7 @@ fn completed_message_fork_does_not_require_the_source_queue_to_have_been_empty()
             turn,
             Some(ItemId::new()),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "first question".into(),
                 images: vec![],
                 queued_prompt: None,
@@ -46,6 +47,7 @@ fn completed_message_fork_does_not_require_the_source_queue_to_have_been_empty()
             turn,
             None,
             EventKind::PromptQueued {
+                audio: Vec::new(),
                 id: queued,
                 text: "second question".into(),
                 images: vec![],
@@ -70,6 +72,7 @@ fn completed_message_fork_does_not_require_the_source_queue_to_have_been_empty()
             next_turn,
             Some(ItemId::new()),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "second question".into(),
                 images: vec![],
                 queued_prompt: Some(queued),

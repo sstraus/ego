@@ -6,11 +6,14 @@ use serde_json::Value;
 use support::{Ego, Plan, Reply, Stub, text, tool_call};
 
 const SERVER: &str = r#"
+import hashlib
 import json
 import sys
 from datetime import datetime
 
 mode = sys.argv[1]
+with open(sys.argv[3]) as fixture:
+    search_response = json.load(fixture)
 definition = {
     "name": "repo",
     "description": "List repositories",
@@ -92,8 +95,17 @@ for line in sys.stdin:
             assert request["params"]["arguments"]["tool_name"] == definition["name"]
         result = {"resultType": "complete", "isError": False}
         if operation == "search_tools":
-            hit = {"name": definition["name"], "summary": definition["description"]} if mode in ("schedule-baseline", "malformed", "multiple", "empty", "nontext") else definition
-            result["content"] = [{"type": "text", "text": json.dumps({"results": [hit], "count": 1})}]
+            # Source-derived TUIC response: summaries and a sibling complete top_schema.
+            response = dict(search_response)
+            response["results"] = [{"name": definition["name"], "summary": definition["description"]}]
+            response["catalogue_generation"] = hashlib.sha256(json.dumps(
+                [definition], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode()).hexdigest()
+            if mode in ("schedule-baseline", "malformed", "multiple", "empty", "nontext"):
+                response.pop("top_schema")
+            else:
+                response["top_schema"] = definition
+            result["content"] = [{"type": "text", "text": json.dumps(response)}]
         elif operation == "call_tool":
             arguments = request["params"]["arguments"]["arguments"]
             if mode.startswith("schedule"):
@@ -136,21 +148,33 @@ for line in sys.stdin:
 "#;
 
 fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
-    let mut completions = vec![Reply::Sse(tool_call(
-        "schema-call",
-        if mode.starts_with("search") {
-            "search_tools"
-        } else {
-            "get_tool_schema"
-        },
-        if mode.starts_with("search") {
-            r#"{"query":"list repositories"}"#
-        } else if mode == "captured" {
-            r#"{"tool_name":"progress"}"#
-        } else {
-            r#"{"tool_name":"repo"}"#
-        },
-    ))];
+    let dispatch_arguments = if mode == "captured" {
+        r#"{"tool_name":"progress","arguments":{"type":"done","text":"capture replay"}}"#
+    } else {
+        r#"{"tool_name":"repo","arguments":{"action":"list"}}"#
+    };
+    let mut completions = vec![
+        Reply::Sse(tool_call(
+            "unadmitted-call",
+            "call_tool",
+            dispatch_arguments,
+        )),
+        Reply::Sse(tool_call(
+            "schema-call",
+            if mode.starts_with("search") {
+                "search_tools"
+            } else {
+                "get_tool_schema"
+            },
+            if mode.starts_with("search") {
+                r#"{"query":"list repositories"}"#
+            } else if mode == "captured" {
+                r#"{"tool_name":"progress"}"#
+            } else {
+                r#"{"tool_name":"repo"}"#
+            },
+        )),
+    ];
     if matches!(
         mode,
         "text" | "both" | "search" | "search-invalid" | "captured"
@@ -178,6 +202,11 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
             "get_tool_schema",
             r#"{"tool_name":"repo"}"#,
         )));
+        completions.push(Reply::Sse(tool_call(
+            "still-unadmitted-call",
+            "call_tool",
+            dispatch_arguments,
+        )));
         completions.push(Reply::Sse(text("LOOKUP-REFUSED-COMPLETE")));
     }
     let stub = Stub::start(Plan {
@@ -201,13 +230,18 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         "captured-schema.json",
         include_str!("fixtures/tuic-1.8.0-progress-schema-response.json"),
     );
+    // TUIC 49f31508b1 search producer and needle regression; see fixture provenance.
+    let search_response = ego.file(
+        "search-response.json",
+        include_str!("../../ego-mcp/tests/fixtures/tuic-search-top-schema.json"),
+    );
     let selector = ego.file(
         "mcp.json",
         &serde_json::json!({
             "name": "fixture",
             "transport": "stdio",
             "command": "/usr/bin/python3",
-            "args": [server, mode, captured],
+            "args": [server, mode, captured, search_response],
             "inherit_env": []
         })
         .to_string(),
@@ -217,7 +251,16 @@ fn run_lookup(mode: &str) -> (support::Finished, Vec<Value>) {
         .arg(&format!("@{}", selector.display()))
         .arg("Get the repo tool schema")
         .run();
-    (finished, stub.generations())
+    let generations = stub.generations();
+    assert!(offers_tool(&generations[0], "call_tool"));
+    for generation in &generations {
+        assert_eq!(
+            generation["tools"], generations[0]["tools"],
+            "schema admission must not change the generator catalogue"
+        );
+    }
+    assert_dispatch_refused(&generations, "unadmitted-call");
+    (finished, generations)
 }
 
 fn offers_tool(generation: &Value, name: &str) -> bool {
@@ -226,6 +269,22 @@ fn offers_tool(generation: &Value, name: &str) -> bool {
         .is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == name))
 }
 
+fn assert_dispatch_refused(generations: &[Value], call_id: &str) {
+    let messages = generations.last().expect("final generation")["messages"]
+        .as_array()
+        .expect("messages");
+    let response = messages
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+        .expect("dispatch result");
+    assert!(
+        response["content"].as_str().is_some_and(|content| content
+            .contains("collapsed inner tool is absent from the captured admission")),
+        "unadmitted dispatch was not refused: {response:?}"
+    );
+}
+
+/// Catches: visible bootstrap dispatch grants authority before text schema publication.
 #[test]
 fn text_only_schema_lookup_publishes_the_inner_tool() {
     let (finished, generations) = run_lookup("text");
@@ -233,19 +292,6 @@ fn text_only_schema_lookup_publishes_the_inner_tool() {
     assert!(
         finished.stdout.contains("REPO-LIST-COMPLETE"),
         "{finished:?}"
-    );
-    assert!(
-        generations
-            .first()
-            .is_some_and(|first| !offers_tool(first, "call_tool")),
-        "call_tool appeared before lookup: {generations:?}"
-    );
-    assert!(
-        generations
-            .iter()
-            .skip(1)
-            .any(|next| offers_tool(next, "call_tool")),
-        "call_tool was not published after text lookup: {generations:?}; {finished:?}"
     );
     assert!(
         generations.iter().any(
@@ -262,29 +308,24 @@ fn text_only_schema_lookup_publishes_the_inner_tool() {
     );
 }
 
+/// Catches: invalid text overrides an admitted structured schema.
 #[test]
 fn structured_schema_wins_over_invalid_text() {
     let (finished, generations) = run_lookup("both");
     assert_eq!(finished.code, Some(0), "{finished:?}");
     assert!(
-        generations
-            .iter()
-            .skip(1)
-            .any(|next| offers_tool(next, "call_tool")),
-        "structured schema did not publish call_tool: {generations:?}; {finished:?}"
+        format!("{generations:?}").contains("fixture-repository"),
+        "structured schema did not admit repo dispatch: {generations:?}; {finished:?}"
     );
 }
 
+/// Catches: rejected schema envelopes grant inner dispatch authority.
 #[test]
 fn malformed_or_multiple_text_blocks_refuse_schema_publication() {
     for mode in ["malformed", "multiple", "empty", "nontext"] {
         let (finished, generations) = run_lookup(mode);
-        assert!(
-            generations
-                .iter()
-                .all(|next| !offers_tool(next, "call_tool")),
-            "{mode} published call_tool: {generations:?}; {finished:?}"
-        );
+        assert_eq!(finished.code, Some(0), "{mode}: {finished:?}");
+        assert_dispatch_refused(&generations, "still-unadmitted-call");
         let report = format!("{generations:?}");
         assert!(
             report.contains("collapsed schema lookup")
@@ -304,8 +345,8 @@ fn collapsed_search_inline_schema_removes_the_lookup_hop() {
     let (finished, generations) = run_lookup("search");
     assert_eq!(finished.code, Some(0), "{finished:?}");
     assert!(
-        offers_tool(&generations[1], "call_tool"),
-        "inline search did not admit dispatcher: {generations:?}; {finished:?}"
+        offers_tool(&generations[2], "call_tool"),
+        "inline search changed dispatcher visibility: {generations:?}; {finished:?}"
     );
     assert!(
         format!("{generations:?}").contains("fixture-repository"),
@@ -313,8 +354,8 @@ fn collapsed_search_inline_schema_removes_the_lookup_hop() {
     );
     assert_eq!(
         generations.len(),
-        3,
-        "search, call, answer: {generations:?}"
+        4,
+        "refused bootstrap dispatch, search, admitted call, answer: {generations:?}"
     );
 }
 
@@ -383,7 +424,11 @@ fn collapsed_schedule_one_hour_needs_one_discovery_hop() {
             "automations-tool.json",
             include_str!("fixtures/tuic-automations-tool.json"),
         );
-        let selector = ego.file("mcp.json", &serde_json::json!({"name":"fixture","transport":"stdio","command":"/usr/bin/python3","args":[server,mode,schema],"inherit_env":[]}).to_string());
+        let search_response = ego.file(
+            "search-response.json",
+            include_str!("../../ego-mcp/tests/fixtures/tuic-search-top-schema.json"),
+        );
+        let selector = ego.file("mcp.json", &serde_json::json!({"name":"fixture","transport":"stdio","command":"/usr/bin/python3","args":[server,mode,schema,search_response],"inherit_env":[]}).to_string());
         let finished = ego
             .arg("--mcp")
             .arg(&format!("@{}", selector.display()))
@@ -425,13 +470,6 @@ fn collapsed_schedule_one_hour_needs_one_discovery_hop() {
 fn captured_tuic_metadata_and_text_envelope_admit_valid_dispatch() {
     let (finished, generations) = run_lookup("captured");
     assert_eq!(finished.code, Some(0), "{finished:?}");
-    assert!(!offers_tool(&generations[0], "call_tool"));
-    assert!(
-        generations
-            .iter()
-            .skip(1)
-            .any(|next| offers_tool(next, "call_tool"))
-    );
     assert!(
         generations.iter().any(
             |request| request["messages"]
@@ -452,12 +490,8 @@ fn captured_tuic_metadata_and_text_envelope_admit_valid_dispatch() {
 fn unsupported_collapsed_envelope_has_terminal_compatibility_diagnostic() {
     for mode in ["malformed", "multiple", "empty", "nontext"] {
         let (finished, generations) = run_lookup(mode);
-        assert!(
-            generations
-                .iter()
-                .all(|request| !offers_tool(request, "call_tool")),
-            "{mode}: {finished:?}"
-        );
+        assert_eq!(finished.code, Some(0), "{mode}: {finished:?}");
+        assert_dispatch_refused(&generations, "still-unadmitted-call");
         let report = format!("{generations:?}");
         assert!(
             report.contains("non-retryable compatibility error"),

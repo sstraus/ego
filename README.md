@@ -39,13 +39,15 @@ Ollama installation:
 ollama pull qwen3
 ego models --provider ollama --refresh
 ego config set 'roots=[]'
-ego -m ollama/qwen3 --thinking off
+ego -m ollama/qwen3 --thinking off --sandbox workspace
 ```
 
 Type a first prompt such as “Explain the main entry points in this repository.”
 The model name above is an example: use one listed by your daemon.
-`ego config set 'roots=[]'` selects workspace-only access instead of the default `~/Gits`
-extra root, keeping unrelated repositories outside the perimeter. For a hosted
+`ego config set 'roots=[]'` clears configured extra roots, including the implicit
+`~/Gits` extra root under strict confinement. The example also explicitly selects
+`workspace` confinement; macOS's default adaptive sandbox can derive additional
+roots. Inspect `/config perimeter` for the actual admitted boundary. For a hosted
 model, supply its API key or complete subscription login first; see
 [providers and login](docs/guides/providers.md). No key belongs in project files.
 
@@ -58,7 +60,7 @@ model, supply its API key or complete subscription login first; see
 The command set is `ego run`, `ego resume`, `ego continue`, `ego fork`, `ego compact`,
 `ego export`, `ego checkpoint`, `ego ls`, `ego rm`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`, `ego setup`,
 `ego acp`, `ego a2a`, `ego auth`, `ego mcp`, `ego config`, `ego roots`,
-`ego rules`, `ego orchestrator`, and `ego mcp-server`.
+`ego rules`, `ego orchestrator`, `ego worktree`, and `ego mcp-server`.
 
 `ego checkpoint SESSION_ID preview` lists session-owned file checkpoints.
 Use `ego checkpoint SESSION_ID restore CHECKPOINT_COMMIT` to restore one
@@ -89,32 +91,57 @@ instructions do not silently become script authority. See
 - Load named skills and lifecycle hooks under the same authority boundaries.
 - Inspect configuration, effective perimeter, usage, and redacted health facts.
 
+The public permission modes are `plan`, `default`, `auto`, `accept-edits`, and
+`yolo`. Select them with `--mode NAME` or live `/mode NAME`; Shift+Tab cycles
+the same modes without submitting the draft. Mode selection comes from
+[the shared mode definition](crates/ego-core/src/config/layer.rs); terminal
+routing is in [REPL actions](crates/ego-cli/src/repl/actions.rs).
+
+Codex subscription generation uses WebSocket continuation with guarded SSE
+fallback; see [Codex transport](docs/guides/providers.md#codex-transport).
+Remote MCP OAuth login and runtime attachment are code-landed, but the real
+operator login/restart check remains pending; see [MCP login](docs/integrations/mcp.md#remote-oauth-login).
+
 Permission mode and operating-system confinement are separate choices. A relaxed
 permission mode does not remove a sandbox or an administrator's ceilings.
 
 ## Status and platforms
 
-This is an unreleased project; there is no stable release yet. `ego-cli` currently
-has version `0.1.0` and workspace packages are not published. The command references
+This is an unreleased project; there is no stable release yet. The version is
+defined once in
+`[workspace.package]` in `Cargo.toml`; all workspace packages inherit it and are
+not published. Every landing to `master` increments the patch version by one
+(`0.0.1`). Run `ego --version` to identify an installed build. The command references
 describe this checkout, not a promise about a future release.
+
+Recorded SSE comments, raw PTY captures, and dated validation reports retain
+the version of the observed build. They are historical evidence, not version
+declarations. SSE decoders ignore provenance comments; launch golden comparisons
+normalize the banner version. Do not rewrite these records for a version bump.
 
 macOS uses Seatbelt and Linux uses its confinement backends when the host can prove
 the requested guarantee. Windows transport and private-state support exist, but
-Windows confinement and the final cross-platform product proof remain open work.
+Windows `workspace`, `ro`, and `--offline` confinement remain unsupported.
+The final product proof remains open.
 An unavailable confinement guarantee is refused rather than silently weakened.
 See [platforms and troubleshooting](docs/guides/troubleshooting.md) and
 [the roadmap](ARCHITECTURE.mdregression case-resolves-48).
 
 ## Documentation
 
-Start with the [documentation index](docs/README.md):
+Start with the [user guide](docs/README.md). It is organized as an mdBook with
+getting-started, task guides, integrations, and reference sections. With mdBook
+0.5.4 and Python 3 available, build it with `mdbook build docs` or preview it
+with `mdbook serve docs`; see [documentation maintenance](docs/maintaining.md).
+These commands build or serve locally; they do not publish a website.
 
 - [Getting started](docs/getting-started/README.md) and [interactive use](docs/guides/interactive.md)
+- [Git worktrees](docs/guides/worktrees.md) and [instructions and memory](docs/guides/memory.md)
 - [Sessions, runs, turns, permits, and evidence](docs/concepts/README.md)
 - [CLI reference](docs/reference/README.md) and [configuration reference](docs/reference/configuration.md)
 - [Providers](docs/guides/providers.md), [tools](docs/guides/tools.md), and [permissions](docs/guides/permissions.md)
 - [ACP, MCP, skills, hooks, and orchestration](docs/integrations/README.md)
-- [Architecture](docs/architecture.md), [changelog](CHANGELOG.md), and [historical research](ARCHITECTURE.md)
+- [Architecture](docs/architecture.md) and [open-source licenses](docs/THIRD_PARTY_LICENSES.md)
 
 ## Name
 

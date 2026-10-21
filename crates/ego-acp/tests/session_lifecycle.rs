@@ -390,9 +390,9 @@ async fn initialize_advertises_exactly_the_composed_v1_lifecycle_surface() {
     );
     assert_eq!(capabilities["promptCapabilities"]["embeddedContext"], true);
 
-    assert_ne!(
+    assert_eq!(
         capabilities["promptCapabilities"]["audio"], true,
-        "unsupported prompt capability audio was advertised"
+        "durable audio surface was not advertised"
     );
 
     connection.finish().await;

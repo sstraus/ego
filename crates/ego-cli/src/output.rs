@@ -33,12 +33,22 @@ use crate::repl::SurfaceOutput;
 pub trait Diagnostics: Send + Sync {
     fn note(&self, message: &str);
 
+    /// One already-laid-out diagnostic block, with no spacing between its rows.
+    fn notice_block(&self, message: &str) {
+        self.note(message);
+    }
+
     /// A finished tool call: its rows, and the full detail the expand key
     /// shows later. A headless run has no expand key, so the rows are a
     /// diagnostic and the detail is dropped; a terminal surface commits the
     /// rows to the transcript and keeps the detail.
     fn tool_row(&self, rows: &str, _detail: String) {
         self.note(rows);
+    }
+
+    /// A replaceable successful shell row; append-only adapters keep the row.
+    fn shell_row(&self, rows: &str, detail: String, _live: crate::render::Line) {
+        self.tool_row(rows, detail);
     }
 
     /// Print the detail of the most recent tool call, if this surface kept
@@ -63,7 +73,13 @@ pub trait TextOutput: Diagnostics {
     fn retry_status(&self, _message: Option<(&str, u64)>) {}
     /// Refresh the active goal counter without writing a transcript row.
     fn goal_status(&self, _goal: Option<(String, u32, Option<u32>)>) {}
+    /// Replace the interactive plan; false retains append-only output.
+    fn plan_status(&self, _plan: &ego_core::plan::Plan) -> bool {
+        false
+    }
+    fn finish_plan(&self, _caps: Capabilities) {}
     fn begin_block(&self) {}
+    fn settle_shell(&self) {}
     fn finish(&self) {}
 }
 
@@ -73,6 +89,10 @@ pub struct Stderr;
 impl Diagnostics for Stderr {
     fn note(&self, message: &str) {
         note(message);
+    }
+
+    fn notice_block(&self, message: &str) {
+        let _ = writeln!(std::io::stderr(), "{DISPLAY_NAME}: {message}");
     }
 }
 
@@ -175,6 +195,10 @@ impl Diagnostics for Stdout {
     fn note(&self, message: &str) {
         note(message);
     }
+
+    fn notice_block(&self, message: &str) {
+        Stderr.notice_block(message);
+    }
 }
 
 impl TextOutput for Stdout {
@@ -235,11 +259,24 @@ impl Diagnostics for InteractiveOutput {
         self.line(&wrap_notice(&text, width));
     }
 
+    fn notice_block(&self, message: &str) {
+        self.line(&format!("{DISPLAY_NAME}: {message}"));
+    }
+
     fn tool_row(&self, rows: &str, detail: String) {
         {
             let mut output = self.inner.lock().expect("surface output lock");
             let _ = output.write_tool(rows);
         }
+        self.details.remember(detail);
+    }
+
+    fn shell_row(&self, rows: &str, detail: String, live: crate::render::Line) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .write_shell(rows, live);
         self.details.remember(detail);
     }
 
@@ -295,12 +332,34 @@ impl TextOutput for InteractiveOutput {
             .goal_status(goal);
     }
 
+    fn plan_status(&self, plan: &ego_core::plan::Plan) -> bool {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .plan_status(plan)
+    }
+
+    fn finish_plan(&self, caps: Capabilities) {
+        let plan = self.inner.lock().expect("surface output lock").take_plan();
+        if let Some(plan) = plan {
+            self.notice_block(&plan_block(&plan, caps));
+        }
+    }
+
     fn begin_block(&self) {
         let _ = self
             .inner
             .lock()
             .expect("surface output lock")
             .begin_block();
+    }
+
+    fn settle_shell(&self) {
+        let _ = self
+            .inner
+            .lock()
+            .expect("surface output lock")
+            .settle_shell();
     }
 
     fn finish(&self) {
@@ -338,6 +397,43 @@ pub(crate) fn wrap_notice(text: &str, width: Option<usize>) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Layout before painting: ANSI bytes must never participate in notice wrapping.
+pub(crate) fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> String {
+    use crate::render::Line;
+    use crate::render::style::{Palette, Style};
+    use ego_core::plan::StepStatus;
+
+    if plan.steps.is_empty() {
+        return "Plan cleared".into();
+    }
+    let completed = plan
+        .steps
+        .iter()
+        .filter(|step| step.status == StepStatus::Completed)
+        .count();
+    let mut rows = vec![format!("Plan {completed}/{}", plan.steps.len())];
+    for step in &plan.steps {
+        let (symbol, colour) = match step.status {
+            StepStatus::Completed => ("✓", Palette::ADDED_FG),
+            StepStatus::InProgress => ("▶", Palette::CODE),
+            StepStatus::Pending => ("○", Palette::GUTTER_FG),
+            StepStatus::Blocked => ("!", Palette::ERROR),
+        };
+        // A step is one logical row even when its text contains line breaks.
+        let text = ego_core::permit::terminal_safe(
+            &step.text.split_whitespace().collect::<Vec<_>>().join(" "),
+        );
+        let mut row = Line::styled(symbol, Style::fg(colour));
+        row.push(crate::render::Span::plain(format!(" {text}")));
+        rows.extend(
+            row.wrap_hanging(caps.width, 2)
+                .into_iter()
+                .map(|row| row.render(caps.depth)),
+        );
+    }
+    rows.join("\n")
 }
 
 fn write_note(mut err: impl Write, message: &str, width: Option<usize>) {
@@ -425,16 +521,6 @@ pub struct TextSink<'a> {
 struct StartedCall {
     name: String,
     args: String,
-}
-
-fn compact_tokens(count: u64) -> String {
-    if count < 1_000 {
-        count.to_string()
-    } else if count < 100_000 {
-        format!("{:.1}K", count as f64 / 1_000.0)
-    } else {
-        format!("{}K", count / 1_000)
-    }
 }
 
 /// The state of the answer currently being written.
@@ -613,6 +699,7 @@ impl<'a> TextSink<'a> {
             .expect("a poisoned lock means a writer panicked mid-line");
         self.finish_text(&mut text);
         text.tools.separate();
+        self.out.settle_shell();
     }
 
     fn finish_text(&self, text: &mut Streaming) {
@@ -685,6 +772,20 @@ impl EventSink for TextSink<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         self.goal_receipts(event, state);
+        if matches!(event, PublicEvent::TurnCompleted { .. }) && !self.quiet {
+            self.finish();
+            self.out.finish_plan(self.capabilities.with_current_width());
+        }
+        // Only adjacent completed top-level exec calls share the live row.
+        // Prose settles through write_answer/begin_block when it becomes visible;
+        // do not acquire the surface lock a second time for every streamed delta.
+        if matches!(
+            event,
+            PublicEvent::TurnStarted { .. } | PublicEvent::TurnCompleted { .. }
+        ) || matches!(event, PublicEvent::ItemStarted { kind: ItemKind::Tool, name: Some(name), .. } if name != "exec")
+        {
+            self.out.settle_shell();
+        }
         if self.capabilities.on_screen()
             && self.out.live_retry()
             && matches!(
@@ -697,7 +798,22 @@ impl EventSink for TextSink<'_> {
             self.out.retry_status(None);
             if let Some(cause) = self.retry_cause.lock().expect("retry cause lock").take() {
                 self.finish();
-                self.out.note(&format!("{cause} — retry finished"));
+                let colour = if matches!(event, PublicEvent::TurnCompleted { ok: false, .. }) {
+                    crate::render::style::Palette::ERROR
+                } else {
+                    crate::render::style::Palette::ADDED_FG
+                };
+                let capabilities = self.capabilities.with_current_width();
+                let receipt = crate::render::Line::styled(
+                    format!("{DISPLAY_NAME}: {cause} — retry finished"),
+                    crate::render::style::Style::fg(colour),
+                )
+                .wrap(capabilities.width)
+                .into_iter()
+                .map(|line| line.render(capabilities.depth))
+                .collect::<Vec<_>>()
+                .join("\n");
+                self.out.line(&receipt);
             }
         }
         match event {
@@ -706,17 +822,6 @@ impl EventSink for TextSink<'_> {
                     .lock()
                     .expect("turn clock lock")
                     .insert(*turn, Instant::now());
-            }
-            PublicEvent::UsageUpdated { usage_delta, .. }
-                if self.capabilities.on_screen()
-                    && !self.quiet
-                    && usage_delta.cache_read_tokens > 0 =>
-            {
-                self.finish();
-                self.out.note(&format!(
-                    "cache hit: {} tokens",
-                    compact_tokens(usage_delta.cache_read_tokens)
-                ));
             }
             PublicEvent::TurnCompleted { turn, ok, .. }
                 if self.capabilities.on_screen() && !self.quiet =>
@@ -736,7 +841,7 @@ impl EventSink for TextSink<'_> {
                     let elapsed = tool_row::duration(started.elapsed());
                     let clock = chrono::Local::now().format("%-I:%M %p");
                     let outcome = if *ok { "done" } else { "stopped" };
-                    let mut receipt = format!("✻ Turn elapsed {elapsed} · {outcome} {clock}");
+                    let mut receipt = format!("Turn elapsed {elapsed} · {outcome} {clock}");
                     if let Some(lines) = lines {
                         let (green, red, reset) = if self.capabilities.coloured() {
                             ("\x1b[32m", "\x1b[31m", "\x1b[0m")
@@ -753,12 +858,11 @@ impl EventSink for TextSink<'_> {
             }
             PublicEvent::PlanUpdated { .. } if !self.quiet => {
                 self.finish();
-                for step in &state.plan.steps {
-                    self.out
-                        .note(&format!("[{:?}] {}: {}", step.status, step.id, step.text));
-                }
-                if state.plan.steps.is_empty() {
-                    self.out.note("Plan cleared");
+                if !self.out.plan_status(&state.plan) {
+                    self.out.notice_block(&plan_block(
+                        &state.plan,
+                        self.capabilities.with_current_width(),
+                    ));
                 }
             }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
@@ -841,7 +945,13 @@ impl EventSink for TextSink<'_> {
                         },
                         self.capabilities.with_current_width(),
                     );
-                    self.out.tool_row(&record.rows, record.detail);
+                    if self.capabilities.on_screen()
+                        && let Some(live) = record.shell_progress
+                    {
+                        self.out.shell_row(&record.rows, record.detail, live);
+                    } else {
+                        self.out.tool_row(&record.rows, record.detail);
+                    }
                 }
             }
             // Deliberately **not** gated on `quiet`. `-q` is presentation —
@@ -1222,10 +1332,9 @@ mod tests {
         }
     }
 
-    /// Catches: reporting a cache hit as a raw token count or dropping it from
-    /// the interactive transcript after a provider reports reused input.
+    /// Catches: successful cache hits adding a notice for every generation.
     #[test]
-    fn interactive_usage_reports_compact_cache_hits_only_when_read_tokens_exist() {
+    fn interactive_usage_keeps_successful_cache_hits_silent() {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
@@ -1248,7 +1357,7 @@ mod tests {
                 &state,
             );
         }
-        assert_eq!(*out.notes.lock().unwrap(), ["cache hit: 18.4K tokens"]);
+        assert!(out.notes.lock().unwrap().is_empty());
     }
 
     /// Catches: treating a first miss or a different cache prefix as a reset,
@@ -1359,7 +1468,7 @@ mod tests {
         headless.publish(&end, &state);
         let notes = out.notes.lock().unwrap();
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].starts_with("✻ Turn elapsed "), "{notes:?}");
+        assert!(notes[0].starts_with("Turn elapsed "), "{notes:?}");
         assert!(notes[0].contains(" · done "), "{notes:?}");
     }
 
@@ -1499,6 +1608,148 @@ mod tests {
         }
     }
 
+    fn plan_fixture() -> SessionState {
+        use ego_core::plan::{PlanStep, StepStatus};
+        let mut state = SessionState::default();
+        state.plan.steps = [
+            (StepStatus::Completed, "Read the current output path"),
+            (
+                StepStatus::InProgress,
+                "Render the plan as one compact block with readable status symbols",
+            ),
+            (StepStatus::Pending, "Verify narrow output"),
+            (StepStatus::Blocked, "Wait for review"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (status, text))| PlanStep {
+            id: index.to_string(),
+            text: text.into(),
+            status,
+        })
+        .collect();
+        state
+    }
+
+    #[test]
+    #[ignore = "writes the plan goldens; run deliberately after reading the diff"]
+    fn regenerate_plan_goldens() {
+        for width in [40, 80, 120] {
+            for (depth, extension) in [
+                (crate::render::Depth::None, "txt"),
+                (crate::render::Depth::TrueColor, "ansi"),
+            ] {
+                let mut caps = Capabilities::plain();
+                caps.width = width;
+                caps.depth = depth;
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("tests/goldens/plan/{width}.{extension}"));
+                std::fs::write(
+                    path,
+                    format!(
+                        "{DISPLAY_NAME}: {}\n",
+                        plan_block(&plan_fixture().plan, caps)
+                    ),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    // Catches: separate notes insert blank lines and expose Debug status names.
+    #[test]
+    fn plan_block_compact() {
+        use ego_core::plan::PlanUpdate;
+        let state = plan_fixture();
+        let event = PublicEvent::PlanUpdated {
+            turn: TurnId::new(),
+            update: PlanUpdate::Replace { steps: vec![] },
+        };
+        for (width, plain, coloured) in [
+            (
+                40,
+                include_str!("../tests/goldens/plan/40.txt"),
+                include_str!("../tests/goldens/plan/40.ansi"),
+            ),
+            (
+                80,
+                include_str!("../tests/goldens/plan/80.txt"),
+                include_str!("../tests/goldens/plan/80.ansi"),
+            ),
+            (
+                120,
+                include_str!("../tests/goldens/plan/120.txt"),
+                include_str!("../tests/goldens/plan/120.ansi"),
+            ),
+        ] {
+            for (depth, expected) in [
+                (crate::render::Depth::None, plain),
+                (crate::render::Depth::TrueColor, coloured),
+            ] {
+                let out = Recorded::default();
+                let mut caps = Capabilities::plain();
+                caps.width = width;
+                caps.depth = depth;
+                TextSink::new(&out, false, caps).publish(&event, &state);
+                let notes = out.notes.lock().unwrap();
+                assert_eq!(notes.len(), 1, "one update must be one block");
+                assert_eq!(
+                    format!("{DISPLAY_NAME}: {}\n", notes[0]),
+                    expected,
+                    "width {width}, {depth:?}"
+                );
+            }
+        }
+    }
+
+    // Catches: embedded newlines split a step into blank blocks, or narrow
+    // output truncates unbreakable Unicode text instead of retaining every cell.
+    #[test]
+    fn plan_block_preserves_multiline_and_long_unicode_text() {
+        use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
+        let mut state = SessionState::default();
+        state
+            .plan
+            .apply(&PlanUpdate::Replace {
+                steps: vec![PlanStep {
+                    id: "unicode".into(),
+                    text: "Read\n\n界界界界界界界界界界界界界界界界界界界界界界\tthen verify"
+                        .into(),
+                    status: StepStatus::Pending,
+                }],
+            })
+            .unwrap();
+        let event = PublicEvent::PlanUpdated {
+            turn: TurnId::new(),
+            update: PlanUpdate::Step {
+                id: "unicode".into(),
+                status: StepStatus::Pending,
+            },
+        };
+        let out = Recorded::default();
+        let mut caps = Capabilities::plain();
+        caps.width = 40;
+        TextSink::new(&out, false, caps).publish(&event, &state);
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].contains("\n\n"));
+        let rows: Vec<_> = notes[0].lines().collect();
+        assert!(rows[2..].iter().all(|row| row.starts_with("  ")));
+        assert!(
+            rows.iter()
+                .all(|row| crate::render::Line::plain(*row).width() <= 40)
+        );
+        assert_eq!(
+            rows[1..]
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(' ', ""),
+            "○Read界界界界界界界界界界界界界界界界界界界界界界thenverify"
+        );
+    }
+
     #[test]
     fn terminal_plan_rows_use_reduced_state_and_respect_quiet_progress() {
         // Catches: terminal renders stale operation payloads instead of the authoritative plan.
@@ -1519,10 +1770,7 @@ mod tests {
         let out = Recorded::default();
         let sink = TextSink::new(&out, false, Capabilities::plain());
         sink.publish(&event, &state);
-        assert_eq!(
-            *out.notes.lock().unwrap(),
-            ["[Blocked] stable: Verify output"]
-        );
+        assert_eq!(*out.notes.lock().unwrap(), ["Plan 0/1\n! Verify output"]);
         state.plan.steps.clear();
         sink.publish(&event, &state);
         assert_eq!(out.notes.lock().unwrap().last().unwrap(), "Plan cleared");

@@ -6,9 +6,9 @@ use ego_core::permit::Change;
 fn permission_diff_deletion_shows_removed_content_without_additions() {
     let output = permission_diff::render(
         &Change::Replace {
+            replace_all: false,
             old_string: "delete this\n".into(),
             new_string: String::new(),
-            replace_all: false,
         },
         Capabilities::plain(),
     );
@@ -26,9 +26,9 @@ fn permission_diff_deletion_shows_removed_content_without_additions() {
 fn permission_diff_final_newline_removal_is_visible() {
     let output = permission_diff::render(
         &Change::Replace {
+            replace_all: false,
             old_string: "keep this\n".into(),
             new_string: "keep this".into(),
-            replace_all: false,
         },
         Capabilities::plain(),
     );
@@ -36,18 +36,27 @@ fn permission_diff_final_newline_removal_is_visible() {
     assert!(output.contains("\\ No newline at end of file"), "{output}");
 }
 
-// Catches: approval renders an all-occurrence edit as a single replacement.
+// Catches: the permission diff displays a bulk edit as one reviewed substitution.
 #[test]
-fn permission_diff_replace_all_states_scope_without_reading_the_file() {
-    let output = permission_diff::render(
-        &Change::Replace {
-            old_string: "old\n".into(),
-            new_string: "new\n".into(),
-            replace_all: true,
-        },
-        Capabilities::plain(),
-    );
-    assert!(output.contains("all occurrences"), "{output}");
-    assert!(output.contains("final content depends"), "{output}");
-    assert!(output.contains("-old\n+new"), "{output}");
+fn replace_all_permission_diff_names_the_mode_without_claiming_final_content() {
+    for replace_all in [false, true] {
+        let output = permission_diff::render(
+            &Change::Replace {
+                replace_all,
+                old_string: "old\n".into(),
+                new_string: "new\n".into(),
+            },
+            Capabilities::plain(),
+        );
+        assert!(
+            output.contains(if replace_all {
+                "all original non-overlapping occurrences"
+            } else {
+                "exactly one occurrence"
+            }),
+            "{output}"
+        );
+        assert!(output.contains("final content depends on the file at execution time"));
+        assert!(output.contains("-old\n+new"));
+    }
 }

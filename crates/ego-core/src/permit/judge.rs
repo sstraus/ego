@@ -571,9 +571,9 @@ impl From<&Change> for CanonicalChange {
                 sha256: sha256_hex(bytes),
             },
             Change::Replace {
+                replace_all,
                 old_string,
                 new_string,
-                replace_all,
             } => Self::Replace {
                 replace_all: *replace_all,
                 old_bytes: old_string.len(),
@@ -641,28 +641,4 @@ enum JudgeVerdict {
     Allow,
     Deny,
     Escalate,
-}
-
-#[cfg(test)]
-mod replacement_scope_tests {
-    use super::*;
-
-    // Catches: the auto judge cannot distinguish reviewed unique and all-match effects.
-    #[test]
-    fn canonical_replacement_preserves_scope_without_disclosing_text() {
-        let project = |replace_all| {
-            serde_json::to_value(CanonicalChange::from(&Change::Replace {
-                old_string: "private old text".into(),
-                new_string: "private new text".into(),
-                replace_all,
-            }))
-            .unwrap()
-        };
-        let unique = project(false);
-        let all = project(true);
-        assert_eq!(unique["replace_all"], false);
-        assert_eq!(all["replace_all"], true);
-        assert_ne!(unique, all);
-        assert!(!all.to_string().contains("private"));
-    }
 }

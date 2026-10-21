@@ -89,6 +89,7 @@ pub const PATH: &str = "responses";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
+    AudioNotSupported,
     ReasoningStateNotCarriable,
     ProviderContentNotCarriable,
     ImageMediaTypeNotSupported(ImageMediaType),
@@ -98,6 +99,9 @@ pub enum Inexpressible {
 impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AudioNotSupported => {
+                f.write_str("this wire contract does not support audio input")
+            }
             Self::ProviderContentNotCarriable => write!(
                 f,
                 "openai-responses cannot replay provider content from another dialect or invalid JSON"
@@ -265,6 +269,7 @@ fn input_items(req: &GenRequest) -> Result<Vec<WireInput<'_>>, Inexpressible> {
                 ContentBlock::Reasoning { .. } => {}
                 // Handled above when the message had one, and refused above
                 // when the role was wrong.
+                ContentBlock::Audio { .. } => return Err(Inexpressible::AudioNotSupported),
                 ContentBlock::Image { .. } => {}
                 ContentBlock::Text { text } if !has_image => match message.role {
                     Role::System => items.push(WireInput::Value(serde_json::json!({
@@ -310,6 +315,9 @@ fn input_items(req: &GenRequest) -> Result<Vec<WireInput<'_>>, Inexpressible> {
 /// Separate from [`build_request`] so a golden can pin the body without a URL
 /// or a credential in it, exactly as the Chat mapping this replaces did.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_audio(req) {
+        return Err(Inexpressible::AudioNotSupported);
+    }
     if carries_reasoning(req) {
         return Err(Inexpressible::ReasoningStateNotCarriable);
     }

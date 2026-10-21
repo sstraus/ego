@@ -126,6 +126,7 @@ async fn inventory(
                 },
                 capabilities: ModelCapabilities {
                     schema_version: ModelCapabilities::SCHEMA_VERSION,
+                    audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
                     max_context_tokens: model.context_length,
                     max_output_tokens: model
                         .top_provider
@@ -201,7 +202,7 @@ pub async fn resolve(
         .collect();
     // An operator row in `models.toml` overrides discovery, including reasoning
     // facts, and can also describe an unlisted model.
-    let capabilities = match catalogue.supplied_capabilities(&format!("{}/{model}", row.id())) {
+    let mut capabilities = match catalogue.supplied_capabilities(&format!("{}/{model}", row.id())) {
         Some(supplied) => supplied.clone(),
         None => {
             models
@@ -214,6 +215,7 @@ pub async fn resolve(
                 .capabilities
         }
     };
+    capabilities.audio_input = ego_core::generator::capabilities::AudioInputSupport::Unsupported;
     Ok(ResolvedModel {
         model: model.to_owned(),
         row: row.clone(),

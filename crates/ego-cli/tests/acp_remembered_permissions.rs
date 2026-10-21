@@ -65,13 +65,33 @@ fn send_prompt(host: &mut AcpHost, session: &str) -> u64 {
 }
 
 fn settle_without_question(host: &mut AcpHost, prompt_id: u64) -> serde_json::Value {
+    settle_with_tool_status(host, prompt_id, None)
+}
+
+fn settle_with_tool_status(
+    host: &mut AcpHost,
+    prompt_id: u64,
+    expected: Option<(&str, &str)>,
+) -> serde_json::Value {
+    let mut terminal_status = None;
     loop {
         let frame = host.read_frame();
         assert_ne!(
             frame["method"], "session/request_permission",
             "a remembered rule did not settle the next session: {frame}"
         );
+        let update = &frame["params"]["update"];
+        if let Some((item, _)) = expected
+            && update["sessionUpdate"] == "tool_call_update"
+            && update["toolCallId"] == item
+            && matches!(update["status"].as_str(), Some("completed" | "failed"))
+        {
+            terminal_status = update["status"].as_str().map(str::to_owned);
+        }
         if frame["id"].as_u64() == Some(prompt_id) {
+            if let Some((_, expected)) = expected {
+                assert_eq!(terminal_status.as_deref(), Some(expected), "{frame}");
+            }
             return frame;
         }
     }
@@ -384,7 +404,11 @@ fn allow_always_writes_one_profile_rule_and_revoke_restores_the_question() {
         "persistent permission widening was not shown: {question}"
     );
     select(&mut first, &question, "allow-always");
-    let first_result = settle_without_question(&mut first, prompt_id);
+    // Catches: persisting an allow rule but denying the current call.
+    let item = question["params"]["toolCall"]["toolCallId"]
+        .as_str()
+        .unwrap();
+    let first_result = settle_with_tool_status(&mut first, prompt_id, Some((item, "completed")));
     assert!(first_result["result"].is_object(), "{first_result}");
     first.finish();
 
@@ -435,7 +459,11 @@ fn reject_always_stores_profile_deny_that_beats_a_later_base_allow() {
     let (_, prompt_id) = prompt(&mut first, &places);
     let question = permission(&mut first);
     select(&mut first, &question, "reject-always");
-    let denied = settle_without_question(&mut first, prompt_id);
+    // Catches: persisting a deny rule but allowing the current call.
+    let item = question["params"]["toolCall"]["toolCallId"]
+        .as_str()
+        .unwrap();
+    let denied = settle_with_tool_status(&mut first, prompt_id, Some((item, "failed")));
     assert!(
         denied["result"].is_object() || denied["error"].is_object(),
         "{denied}"

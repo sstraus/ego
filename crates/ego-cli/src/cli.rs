@@ -967,10 +967,10 @@ fn parse_mode(value: &str) -> Result<Mode, String> {
         "plan" => Ok(Mode::Plan),
         "default" => Ok(Mode::Default),
         "auto" => Ok(Mode::Auto),
-        "edits" => Ok(Mode::Edits),
+        "edits" | "accept-edits" => Ok(Mode::Edits),
         "yolo" => Ok(Mode::Yolo),
         other => Err(format!(
-            "`{other}` is not a permission mode: plan|default|auto|edits|yolo"
+            "`{other}` is not a permission mode: plan|default|auto|accept-edits|yolo (alias: edits)"
         )),
     }
 }

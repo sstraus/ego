@@ -245,6 +245,7 @@ impl Fixture {
         append(
             Some(user),
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: text.into(),
                 images: Vec::new(),
                 queued_prompt: None,

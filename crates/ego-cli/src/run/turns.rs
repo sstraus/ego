@@ -219,6 +219,7 @@ enum TurnStart {
     Prompt {
         text: String,
         images: Vec<ImageRef>,
+        audio: Vec<ego_core::generator::audio::AudioRef>,
     },
     Resumed(ego_core::event::id::TurnId),
     Presented(ItemId),
@@ -244,11 +245,25 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
+        self.drive_with_media(loop_, first, images, Vec::new(), cancel, diagnostics)
+            .await
+    }
+
+    pub(super) async fn drive_with_media<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        first: &str,
+        images: Vec<ImageRef>,
+        audio: Vec<ego_core::generator::audio::AudioRef>,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
         self.drive_from(
             loop_,
             TurnStart::Prompt {
                 text: first.to_owned(),
                 images,
+                audio,
             },
             cancel,
             diagnostics,
@@ -348,7 +363,11 @@ impl Turns<'_> {
                     self.one_running(Box::pin(loop_.continue_checkpoint()), cancel)
                         .await
                 }
-                TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
+                TurnStart::Prompt {
+                    text,
+                    images,
+                    audio,
+                } => self.one(loop_, &text, images, audio, cancel).await,
                 TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
                 TurnStart::Presented(question) => {
                     self.one_running(Box::pin(loop_.present_foreign_question(question)), cancel)
@@ -445,6 +464,7 @@ impl Turns<'_> {
                     next = TurnStart::Prompt {
                         text: schema::repair_prompt(&invalid),
                         images: Vec::new(),
+                        audio: Vec::new(),
                     };
                 }
             }
@@ -465,10 +485,14 @@ impl Turns<'_> {
         loop_: &mut TurnLoop<'session, 'turn>,
         prompt: &str,
         images: Vec<ImageRef>,
+        audio: Vec<ego_core::generator::audio::AudioRef>,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        self.one_running(Box::pin(loop_.run_with_images(prompt, images)), cancel)
-            .await
+        self.one_running(
+            Box::pin(loop_.run_with_media(prompt, images, audio)),
+            cancel,
+        )
+        .await
     }
 
     async fn one_resumed<'session: 'turn, 'turn>(

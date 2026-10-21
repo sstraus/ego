@@ -31,8 +31,7 @@ landing, or the outstanding multi-day observation proof.
 
 Sources: [domain contract](../../crates/ego-core/src/orchestrator.rs),
 [OS adapter](../../crates/ego-tools/src/orchestrator.rs),
-[active operations](../../crates/ego-tools/src/orchestrator_active.rs), and
-[retained operational note](../internals/orchestration/active-operations.md).
+[active operations](../../crates/ego-tools/src/orchestrator_active.rs).
 
 `ego orchestrator brief [--root PATH]` provides the same deterministic child and
 unread-path inspection without a model turn. ACP cards append `notice_delivered`

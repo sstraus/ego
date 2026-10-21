@@ -66,6 +66,7 @@ use ego_mcp::McpRegistryController;
 use ego_tools::fs::OsFs;
 
 const CHANNEL_CAPACITY: usize = 1;
+pub(super) const MODE_CYCLE_COMMAND: &str = "ego:mode-cycle";
 pub(super) const ACTION_COMMAND: &str = "ego:action:";
 const ACTION_MENU: &str = "ego_action_menu";
 pub(super) const MODEL_PICKER_COMMAND: &str = "ego:model-picker:";
@@ -455,18 +456,21 @@ struct SurfaceStatus {
     modal_waited: std::time::Duration,
     reply_started: Arc<AtomicBool>,
     retry: Option<(String, Instant, u64)>,
+    shell: Option<crate::render::Line>,
     notice: Option<String>,
     image_chips: Vec<String>,
     images: super::ImageDraft,
     origin: InputOrigin,
     native_status: bool,
     width: usize,
+    plan: Option<ego_core::plan::Plan>,
     template: super::status::StatusTemplate,
     template_diagnostic: Option<String>,
     provider_values: Vec<(StatusSegmentName, super::status::SegmentValue)>,
     config_store: Option<Arc<dyn UserConfigStore>>,
     snapshot: Option<SurfaceSnapshot>,
     status_base: Option<StatusBase>,
+    selected_mode: Option<Mode>,
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
@@ -557,18 +561,21 @@ impl Default for SurfaceStatus {
             modal_waited: std::time::Duration::ZERO,
             reply_started: Arc::new(AtomicBool::new(false)),
             retry: None,
+            shell: None,
             notice: None,
             image_chips: Vec::new(),
             images: super::ImageDraft::default(),
             origin: InputOrigin::Typed,
             native_status: false,
             width: 0,
+            plan: None,
             template: super::status::StatusTemplate::new(super::status::DEFAULT_TEMPLATE.into()),
             template_diagnostic: None,
             provider_values: Vec::new(),
             config_store: None,
             snapshot: None,
             status_base: None,
+            selected_mode: None,
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             model_picker: None,
@@ -808,6 +815,7 @@ pub struct SurfaceOutput {
     sender: SurfaceSender,
     pending: String,
     pending_answer: bool,
+    shell: Option<String>,
     status: Option<SharedStatus>,
     answer_block: bool,
     wrote: bool,
@@ -824,6 +832,7 @@ impl SurfaceOutput {
             sender: SurfaceSender::Direct(sender),
             pending: String::new(),
             pending_answer: false,
+            shell: None,
             status: None,
             answer_block: false,
             wrote: false,
@@ -890,6 +899,7 @@ impl SurfaceOutput {
                 sender: SurfaceSender::Pumped(sender),
                 pending: String::new(),
                 pending_answer: false,
+                shell: None,
                 status: None,
                 answer_block: false,
                 wrote: false,
@@ -900,6 +910,22 @@ impl SurfaceOutput {
             },
             owner,
         )
+    }
+
+    pub(crate) fn plan_status(&self, plan: &ego_core::plan::Plan) -> bool {
+        let Some(status) = &self.status else {
+            return false;
+        };
+        status.lock().expect("surface status lock").plan = Some(plan.clone());
+        repaint_status(status);
+        true
+    }
+
+    pub(crate) fn take_plan(&self) -> Option<ego_core::plan::Plan> {
+        let status = self.status.as_ref()?;
+        let plan = status.lock().expect("surface status lock").plan.take();
+        repaint_status(status);
+        plan
     }
 
     pub(crate) fn goal_status(&self, goal: Option<(String, u32, Option<u32>)>) {
@@ -916,7 +942,10 @@ impl SurfaceOutput {
         }
     }
 
-    pub(crate) fn retry_status(&self, message: Option<(&str, u64)>) {
+    pub(crate) fn retry_status(&mut self, message: Option<(&str, u64)>) {
+        if message.is_some() {
+            let _ = self.settle_shell();
+        }
         if let Some(status) = &self.status {
             status.lock().expect("surface status lock").retry =
                 message.map(|(text, delay)| (text.to_string(), Instant::now(), delay));
@@ -932,10 +961,37 @@ impl SurfaceOutput {
     }
 
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         self.write_with_kind(text, false)
     }
 
+    pub(crate) fn write_shell(
+        &mut self,
+        rows: &str,
+        live: crate::render::Line,
+    ) -> Result<(), SendError<String>> {
+        let Some(status) = &self.status else {
+            return self.write_tool(rows);
+        };
+        self.shell = Some(rows.to_owned());
+        status.lock().expect("surface status lock").shell = Some(live);
+        repaint_status(status);
+        Ok(())
+    }
+
+    pub(crate) fn settle_shell(&mut self) -> Result<(), SendError<String>> {
+        if let Some(rows) = self.shell.take() {
+            if let Some(status) = &self.status {
+                status.lock().expect("surface status lock").shell = None;
+                repaint_status(status);
+            }
+            self.write_tool(&rows)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn begin_block(&mut self) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         if !self.pending.is_empty() {
             self.write_with_kind("\n", false)?;
         }
@@ -959,6 +1015,7 @@ impl SurfaceOutput {
         if text.is_empty() {
             return Ok(());
         }
+        self.settle_shell()?;
         let text = if !self.answer_block {
             self.begin_block()?;
             if !self.wrote {
@@ -996,6 +1053,7 @@ impl SurfaceOutput {
     }
 
     pub fn finish(&mut self) -> Result<(), SendError<String>> {
+        self.settle_shell()?;
         self.answer_block = false;
         if !self.pending.is_empty() {
             let row = std::mem::take(&mut self.pending);
@@ -1440,6 +1498,9 @@ impl Seat {
                     }
                     Dispatch::Init(arguments) => Line::HostCommand(HostCommand::Init(arguments)),
                     Dispatch::Fast(enabled) => Line::HostCommand(HostCommand::Fast(enabled)),
+                    Dispatch::Mode(mode) => {
+                        Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode)))
+                    }
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
                     }
@@ -1701,6 +1762,16 @@ impl Seat {
         }
     }
 
+    /// The last accepted selection, including one staged for the next boundary.
+    pub(crate) fn set_selected_mode(&self, mode: Mode) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status
+                .lock()
+                .expect("surface status lock")
+                .selected_mode = Some(mode);
+        }
+    }
+
     /// Replace only the active generation mode used by the next status rebuild.
     pub(crate) fn set_status_mode(&self, mode: Mode) {
         let SeatKind::Live(live) = &self.kind else {
@@ -1786,6 +1857,13 @@ impl Seat {
         } = setup;
         {
             let mut status = live.status.lock().expect("surface status lock");
+            if status
+                .status_base
+                .as_ref()
+                .is_none_or(|base| base.session != session)
+            {
+                status.selected_mode = None;
+            }
             status.native_status = native;
             status.width = width;
             status.template = super::status::StatusTemplate::new(template);
@@ -2170,6 +2248,10 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn activate_session(&self, target: SessionId) -> bool {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            status.selected_mode = None;
+        }
         self.request(|reply| Control::ActivateSession { target, reply }, false)
     }
 
@@ -2284,6 +2366,15 @@ fn own_terminal(
     let mut idle_interrupt = None;
     let mut drafts = DraftStash::new(SessionId::new());
     loop {
+        // Reedline's default indicator colour otherwise leaks into unstyled
+        // retry rows even when the renderer's capability gate forbids colour.
+        editor = editor.with_ansi_colors(
+            status
+                .lock()
+                .expect("surface status lock")
+                .permission_capabilities
+                .coloured(),
+        );
         if matches!(pending_control.as_ref(), Some(Control::Activate { .. })) {
             let Some(Control::Activate { session }) = pending_control.take() else {
                 unreachable!("the pending activation was just matched");

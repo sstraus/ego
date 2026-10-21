@@ -59,9 +59,9 @@ jobs:
         if: github.ref_type == 'tag'
         shell: bash
         run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/ego-cli/Cargo.toml | head -n 1)
+          VERSION=$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
           if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
-            echo "tag $GITHUB_REF_NAME does not match crates/ego-cli version $VERSION"
+            echo "tag $GITHUB_REF_NAME does not match workspace.package.version $VERSION in Cargo.toml"
             exit 1
           fi
 

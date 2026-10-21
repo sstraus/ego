@@ -56,6 +56,15 @@ pub(crate) fn report_discarded(
     effective: &Effective,
     diagnostics: &dyn Diagnostics,
 ) {
+    report_discarded_in(workspace, effective, diagnostics, ego_home().as_deref());
+}
+
+fn report_discarded_in(
+    workspace: &Path,
+    effective: &Effective,
+    diagnostics: &dyn Diagnostics,
+    home: Option<&Path>,
+) {
     for discarded in &effective.discarded {
         diagnostics.note(&discarded.to_string());
     }
@@ -63,6 +72,9 @@ pub(crate) fn report_discarded(
         return;
     }
     for (source, path) in project_layer_paths(workspace) {
+        if home.is_some_and(|home| same_config_file(&path, &home.join("config.toml"))) {
+            continue;
+        }
         if effective
             .discarded
             .iter()
@@ -1293,6 +1305,13 @@ fn project_layer_paths(workspace: &Path) -> [(Source, PathBuf); 2] {
     ]
 }
 
+fn same_config_file(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn base_layers(workspace: &Path, trust: Trust) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
     base_layers_in(workspace, trust, ego_home().as_deref())
 }
@@ -1313,7 +1332,12 @@ pub(crate) fn base_layers_in(
     // Open configuration only in a trusted workspace. Diagnostics may inspect
     // metadata for excluded paths, but never read or parse their contents.
     if trust == Trust::Trusted {
-        files.extend(project_layer_paths(workspace));
+        for (source, path) in project_layer_paths(workspace) {
+            if home.is_some_and(|home| same_config_file(&path, &home.join("config.toml"))) {
+                continue;
+            }
+            files.push((source, path));
+        }
     }
 
     let mut found = Vec::new();
@@ -1550,6 +1574,146 @@ mod tests {
             panic!("the profile fixture invocation must be a headless run");
         };
         *args
+    }
+
+    // Catches the user file being parsed a second time as a project file when
+    // the workspace is HOME, rejecting otherwise valid read-write roots.
+    #[test]
+    fn home_workspace_loads_user_roots_once_without_project_rejection() {
+        let home = tempfile::tempdir().unwrap();
+        let user_dir = home.path().join(".ego");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::write(
+            user_dir.join("config.toml"),
+            format!(
+                "roots=[{{path={},access=\"read-write\"}}]",
+                toml::Value::String(home.path().to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+
+        let found = base_layers_in(home.path(), Trust::Trusted, Some(&user_dir)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, Source::User);
+        let effective = resolve(&found, Trust::Trusted, None).unwrap();
+        assert_eq!(effective.roots.len(), 1);
+        assert_eq!(effective.roots_source, Some(Source::User));
+        assert_eq!(
+            effective.roots[0].access,
+            ego_core::permit::RootAccess::ReadWrite
+        );
+    }
+
+    // Catches bare diagnostics mislabeling the selected user file as an ignored
+    // project file, or suppressing the warning for a genuinely distinct file.
+    #[test]
+    fn bare_diagnostics_preserve_user_identity_and_warn_for_distinct_project() {
+        #[derive(Default)]
+        struct Recorded(std::sync::Mutex<Vec<String>>);
+        impl Diagnostics for Recorded {
+            fn note(&self, message: &str) {
+                self.0.lock().unwrap().push(message.to_owned());
+            }
+        }
+
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join(".ego");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::write(user_dir.join("config.toml"), "bare=true").unwrap();
+        let layers = base_layers_in(owner.path(), Trust::Trusted, Some(&user_dir)).unwrap();
+        let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+        let diagnostics = Recorded::default();
+        report_discarded_in(owner.path(), &effective, &diagnostics, Some(&user_dir));
+        assert!(diagnostics.0.lock().unwrap().is_empty());
+
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        std::fs::write(workspace.join(".ego/config.toml"), "model='project/model'").unwrap();
+        report_discarded_in(&workspace, &effective, &diagnostics, Some(&user_dir));
+        let notes = diagnostics.0.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("project configuration"), "{}", notes[0]);
+        assert!(
+            notes[0].contains("not applied in the bare posture"),
+            "{}",
+            notes[0]
+        );
+    }
+
+    // Catches an overbroad fix that skips every project config if EGO_HOME is
+    // set or if a workspace sits under the operator's home directory.
+    #[test]
+    fn distinct_project_config_keeps_its_project_authority() {
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join("user-config");
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        std::fs::write(user_dir.join("config.toml"), "model='user/model'").unwrap();
+        std::fs::write(workspace.join(".ego/config.toml"), "model='project/model'").unwrap();
+
+        let found = base_layers_in(&workspace, Trust::Trusted, Some(&user_dir)).unwrap();
+        assert_eq!(
+            resolve(&found, Trust::Trusted, None).unwrap().model,
+            Some(ModelRef("project/model".into()))
+        );
+        let untrusted = base_layers_in(&workspace, Trust::Untrusted, Some(&user_dir)).unwrap();
+        assert_eq!(
+            resolve(&untrusted, Trust::Untrusted, None).unwrap().model,
+            Some(ModelRef("user/model".into()))
+        );
+    }
+
+    // Catches a distinct project file being incorrectly promoted to user
+    // authority, which would admit write access from a project document.
+    #[test]
+    fn distinct_project_write_roots_remain_rejected() {
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join("user-config");
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        std::fs::write(
+            workspace.join(".ego/config.toml"),
+            format!(
+                "roots=[{{path={},access=\"read-write\"}}]",
+                toml::Value::String(workspace.to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+
+        let error = base_layers_in(&workspace, Trust::Trusted, Some(&user_dir))
+            .err()
+            .unwrap();
+        assert!(error.0.contains("project layer"), "{error}");
+        assert!(error.0.contains("read access"), "{error}");
+        assert!(base_layers_in(&workspace, Trust::Untrusted, Some(&user_dir)).is_ok());
+    }
+
+    // Catches a lexical-only path comparison admitting one user file twice
+    // when a trusted project's config is a symlink to the user file.
+    #[cfg(unix)]
+    #[test]
+    fn project_symlink_to_user_config_does_not_duplicate_authority() {
+        let owner = tempfile::tempdir().unwrap();
+        let user_dir = owner.path().join("user-config");
+        let workspace = owner.path().join("workspace");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::create_dir_all(workspace.join(".ego")).unwrap();
+        let user_file = user_dir.join("config.toml");
+        std::fs::write(
+            &user_file,
+            format!(
+                "roots=[{{path={},access=\"read-write\"}}]",
+                toml::Value::String(owner.path().to_string_lossy().into_owned())
+            ),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&user_file, workspace.join(".ego/config.toml")).unwrap();
+
+        let found = base_layers_in(&workspace, Trust::Trusted, Some(&user_dir)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, Source::User);
     }
 
     #[test]

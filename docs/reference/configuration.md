@@ -118,6 +118,7 @@ higher or lower layer supplies a value.
 | `auth.PROVIDER` | Credential-command/identity-header table | No override |
 | `ui.statusline.template` | MiniJinja template string | Compact default; `{{ prompt }}` disables optional status |
 | `mcp.servers.NAME` | Complete tagged server entry (optional `enabled = false` detaches it from session start) or tombstone | No configured external server |
+| `mdkb_prompt_command` | Absolute path to the mdkb executable; user layer only. Enables bounded mdkb warmup, prompt recall, tool hints, and bounded inline model Stop episodes; returned context is user-role data and cannot grant authority. Command execution remains subject to run policy. | Disabled |
 | `hooks` | Ordered array of hook entries | Empty contribution; hooks combine across admitted sources |
 
 `permissions` is a whole-block override, not a merge of individual lists.
@@ -137,8 +138,12 @@ The first `ego roots add` writes an explicit list and replaces implicit
 express them. Use `ego config set 'exec_paths=["/absolute/path"]'` to edit `exec_paths`. Restart or resume the
 session to apply changed perimeter settings.
 
-Extra roots use canonical paths; conflicting nested read-only/read-write roots
-are refused. See [permissions](../guides/permissions.md).
+Extra roots use canonical paths. A nested read-only root restricts built-in
+writes below a writable root or workspace. macOS Seatbelt also denies native
+writes and execution there. Linux Landlock cannot subtract ancestor grants;
+ego reports that the writable ancestor wins for exec children without exiting.
+The read-only boundary still applies to built-in tools. See
+[permissions](../guides/permissions.md).
 
 `exec.env="core"` retains only present PATH, HOME, USER, LOGNAME, SHELL, TMPDIR,
 TMP, TEMP, LANG, LC_ALL, LC_CTYPE, SYSTEMROOT, WINDIR, COMSPEC, and PATHEXT.
@@ -264,11 +269,17 @@ Source: [facts.rs](../../crates/ego-cli/src/facts.rs),
 | `...default_reasoning_effort` | Optional supported effort; absent unknown |
 | `...cancel` | `unsupported`, `cooperative`, `immediate` |
 | `...cache` | `none`, `short`, `long` |
-| `...transport` | `sse` (the only implemented transport) |
+| `...transport` | `sse` or `web_socket`; Codex uses WebSocket, with guarded SSE fallback. `auto`, `web_transport`, and `websocket` are not accepted spellings |
 | `...image_input` | `"unknown"` default, `"unsupported"`, or supported table below |
 | `model."PROVIDER/MODEL".pricing` | Optional quote table; absence is unpriced, not free |
 | `retired."PROVIDER/MODEL".replacement` | Required replacement slug |
 | `retired."PROVIDER/MODEL".retired` | Required date string; runtime tombstone consultation uses the builtin table |
+
+Transport spellings come from
+[`Transport`](../../crates/ego-core/src/generator/capabilities.rs); the
+[Codex mapping](../../crates/ego-ai/src/wire/openai_codex_responses.rs) selects
+its transport. A capability declaration is not a switch that changes another
+provider's wire contract.
 
 A supported image table has `kind="supported"`, `accepted_media_types` from
 `png`, `jpeg`, `webp`, `gif`, and optional `max_images`, `max_bytes_per_image`,

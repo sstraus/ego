@@ -40,11 +40,35 @@ pub enum Mode {
     Plan,
     Default,
     Auto,
+    #[serde(rename = "accept-edits", alias = "edits")]
     Edits,
     Yolo,
 }
 
 impl Mode {
+    /// Public selection and cycle order. Default is the ordinary deterministic permission policy.
+    pub const SELECTABLE: [Self; 5] = [
+        Self::Plan,
+        Self::Default,
+        Self::Auto,
+        Self::Edits,
+        Self::Yolo,
+    ];
+
+    pub fn parse_selection(value: &str) -> Option<Self> {
+        Self::SELECTABLE
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::SELECTABLE
+            .iter()
+            .position(|mode| *mode == self)
+            .expect("every permission mode is selectable");
+        Self::SELECTABLE[(index + 1) % Self::SELECTABLE.len()]
+    }
+
     /// Whether this mode stays under the approved system maximum.
     pub const fn within(self, maximum: Self) -> bool {
         self.ceiling_rank() <= maximum.ceiling_rank()
@@ -65,7 +89,7 @@ impl Mode {
             Mode::Plan => "plan",
             Mode::Default => "default",
             Mode::Auto => "auto",
-            Mode::Edits => "edits",
+            Mode::Edits => "accept-edits",
             Mode::Yolo => "yolo",
         }
     }
@@ -983,6 +1007,8 @@ pub struct ConfigLayer {
     /// Name-keyed MCP entries in this layer.
     #[serde(default)]
     pub mcp: McpLayer,
+    /// User-authorized executable for optional mdkb prompt recall.
+    pub mdkb_prompt_command: Option<std::path::PathBuf>,
     /// Hooks retain declaration order within this authority layer.
     #[serde(default)]
     pub hooks: Vec<HookConfigEntry>,
@@ -995,6 +1021,19 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
+        if value.mdkb_prompt_command.is_some()
+            && (source != Source::User
+                || value
+                    .mdkb_prompt_command
+                    .as_ref()
+                    .is_some_and(|path| !path.is_absolute()))
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "mdkb_prompt_command requires an absolute path in user configuration"
+                    .into(),
+            });
+        }
         if source != Source::System && value.max_mode.is_some() {
             return Err(ConfigError::Invalid {
                 source,
@@ -1058,14 +1097,6 @@ impl ConfigLayer {
                         source,
                         message: "roots paths must be absolute or start with ~/".into(),
                     });
-                }
-                if root.access == crate::permit::RootAccess::Read
-                    && roots.iter().any(|other| {
-                        other.access == crate::permit::RootAccess::ReadWrite
-                            && root.path.starts_with(&other.path)
-                    })
-                {
-                    return Err(ConfigError::Invalid { source, message: "nested-read-only-root: a read root beneath a read-write root cannot be enforced by Landlock".into() });
                 }
             }
         }

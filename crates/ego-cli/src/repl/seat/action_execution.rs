@@ -151,7 +151,10 @@ pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> Strin
         .into_iter()
         .filter(|key| !key.hint.is_empty())
         .map(|key| format!("{} {}", key.label, key.hint))
-        .chain([format!("/{}", registry.help(ActionId::Help).name())]);
+        .chain([
+            "Shift+Tab mode".to_owned(),
+            format!("/{}", registry.help(ActionId::Help).name()),
+        ]);
     let mut rows: Vec<String> = Vec::new();
     for item in items {
         match rows.last_mut() {
@@ -224,6 +227,14 @@ fn submit_busy_line(
         return None;
     }
     match dispatch {
+        Dispatch::Mode(mode) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((
+                Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode))),
+                false,
+            ));
+        }
         Dispatch::Action(action) => {
             let (handled, interrupted) =
                 execute_action_and_modal(editor, phase, status, ingress, action, true);
@@ -332,12 +343,8 @@ pub(super) fn surface_line(
         if phase.get() == EditPhase::Busy {
             let notice = status.lock().expect("surface status lock").notice.take();
             if let Some(notice) = notice {
-                // A host command suspends the live prompt in place. Retire it
-                // before the notice is queued, including at the bottom row
-                // where resuming the old footprint would scroll it into history.
-                if editor.erase_last_prompt().is_err() {
-                    return (Line::Ended, true);
-                }
+                // Notices and other transcript output use the same Reedline
+                // owner, which retires its live region before printing.
                 commit_to_transcript(status, &format!("{}: {notice}", crate::DISPLAY_NAME));
             }
         } else if phase.get() == EditPhase::Idle {
@@ -350,6 +357,15 @@ pub(super) fn surface_line(
             });
         }
         let signal = editor.read_line(prompt);
+        if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == MODE_CYCLE_COMMAND)
+        {
+            // Preserve intent until the owner consumes this queued command. During
+            // a turn, the editor's visible/staged mode can lag earlier commands.
+            return (
+                Line::HostCommand(HostCommand::Policy(PolicyControlRequest::CycleMode)),
+                false,
+            );
+        }
         // Reject blank input before Reedline commits it to history or clears
         // the composer, for both idle submission and busy queue admission.
         let signal = if matches!(
@@ -503,6 +519,12 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Config(arguments) => {
                     return (Line::HostCommand(HostCommand::Config(arguments)), failed);
+                }
+                Dispatch::Mode(mode) => {
+                    return (
+                        Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode))),
+                        failed,
+                    );
                 }
                 Dispatch::Fast(enabled) => {
                     return (Line::HostCommand(HostCommand::Fast(enabled)), failed);

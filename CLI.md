@@ -213,7 +213,7 @@ omitted when empty: two states, identical bytes.
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it a human terminal shows the session picker across roots; headless execution takes the most recently updated session of this workspace. With terminal stdin and stdout, a positional prompt is submitted once to the interactive driver, which accepts further messages. Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file, or profile `ci` selects headless execution. Redirected stdin or stdout also selects headless execution |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | **yes** | creates a durable lineage branch at the idle tip or after the completed turn containing `--at ITEM_ID`, without copying source spend or run state |
-| `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
+| `ego compact` | **yes** | publishes one idempotent clean target from the idle compaction operation and supports later continuation; `--request-id` optionally reuses an existing ID, otherwise the parser generates one |
 | `ego export` | **yes** | local transcript export plus the producer-only version-1 structural bundle under `--sanitize`; Markdown, JSON, JSONL, stdout, and atomic file publication follow §2.1 |
 | `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME --client-id ID`, `login NAME --cimd URL`, or `login NAME --dcr` selects an explicit public-client registration strategy, prints a copyable authorization URL, and waits up to 120 seconds on an exact loopback callback; `--callback-port PORT` selects a registered callback port |
 | `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status`/`compact` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
@@ -419,7 +419,7 @@ the final grammar.
 **Permissions and confinement** (one axis pair, Codex-style)
 
 ```
-    --mode M            plan|default|auto|edits|yolo   shortcuts: --plan, --yolo
+    --mode M            plan|default|auto|accept-edits|yolo   shortcuts: --plan, --yolo
                         trusted interactive sessions default to auto when no
                         mode is configured; deterministic low/bounded calls
                         need no judge, while unknown calls may use the
@@ -960,6 +960,27 @@ changed nothing, so the refusal is returned to the model as a failed tool
 result and the turn continues (regression case). Writes and spawns outside the
 workspace still end the run.
 
+### Host PID-to-session index
+
+While ego holds a session writer lease, it atomically publishes
+`$EGO_HOME/pids/<pid>.json` (default `~/.ego/pids/<pid>.json`):
+
+```json
+{"pid":12345,"session_id":"01900000-0000-7000-8000-000000000001","cwd":"/absolute/workspace"}
+```
+
+`pid` is the process ID, `session_id` is the leased session UUID, and `cwd` is
+its absolute workspace path. Publication writes a temporary file beside the
+index, then renames it into place. Opening the initial session successfully
+publishes its binding. A replacement session replaces the binding only after
+it becomes active; opening or rejecting a candidate does not change it. Releasing the last owner of that lease removes its
+binding; releasing an older session does not remove a newer binding. Normal
+exit releases these owners. A crash or forced termination can leave an index.
+The index is only a lookup hint, not a liveness or ownership guarantee: hosts
+must verify that the selected session's `lease` records the same PID and that
+the process is live. The session lease remains the source of truth. A custom
+`--session-dir` does not move this index out of `$EGO_HOME/pids`.
+
 ### 4.5 Parse and lifecycle contract (normative before release)
 
 The grammar ships with: a command × flag **applicability matrix** (no flag
@@ -1122,6 +1143,11 @@ when its last row does — so the output is live without a half-built table ever
 reaching the screen. Colour depth is whatever the gate found: 24-bit, 256, 16,
 or none.
 
+Top-level prose paragraphs stay on one logical line. The terminal or narrower
+viewer owns their soft wrapping; ego adds no continuation indentation. Explicit
+Markdown hard breaks and paragraph boundaries remain. Lists, block quotes,
+fenced code, and tables keep their structured layout.
+
 **One gate decides, once** (`crates/ego-cli/src/render/caps.rs`). In precedence
 order: `--no-color`, then `NO_COLOR` (presence, not value), then whether stdout
 is a terminal, then `TERM`, then `COLORTERM`, then `TERM_PROGRAM`. No other
@@ -1211,7 +1237,7 @@ family as skills; `--var` fills `{{placeholders}}`; shebang makes it a program:
 ---
 version: 1
 model: anthropic/claude-sonnet-5
-mode: edits
+mode: accept-edits
 sandbox: workspace
 allow: ["exec(cargo *)"]
 schema: "@review-schema.json"
@@ -1377,15 +1403,35 @@ wraps the shared health snapshot at the live terminal width. Both preserve
 every field at 120, 80, 60, and 40 columns instead of relying on terminal
 reflow or attaching multiline output to the composer.
 
-`/mode`, `/plan`, `/yolo`, and `/permissions` are argument-free local modal
-actions. A direct-argument form such as `/mode edits` or `/permissions allow
-...` is rejected as action usage and never submitted as a prompt. `/mode`
-selects one of `plan`, `default`, `auto`, `edits`, or `yolo` for this session;
-`/plan` stages plan idempotently. `/yolo`, the Yolo palette action, and Yolo
-selected through `/mode` stage yolo directly and produce one receipt; they do
-not open a second confirmation ritual. Selecting auto validates a configured
-judge and its current model/request without a provider effect; deterministic
-local calls remain available when no judge is configured.
+`/mode` opens the permission picker. `/mode <name>` selects exactly one of
+`plan`, `default`, `auto`, `accept-edits`, and `yolo` (bypass permissions).
+Unknown names and extra arguments are local usage errors, never model input.
+`/plan`, `/yolo`, and `/permissions` still take no arguments.
+Shift+Tab cycles in this order: plan → default → auto → accept-edits → yolo → plan.
+It preserves the composer draft and attachments and does not submit them, in both
+Emacs and Vim editing. While a picker, permission prompt, or other modal is open,
+Shift+Tab does nothing. During an active turn it queues a local selection until
+the turn ends; it does not change that turn's captured policy. Repeated selections
+start from the last accepted staged mode. A receipt shows the selected mode and
+its next-generation boundary. Fixed sandbox, system max_mode and profile ceilings
+still apply. A refused selection leaves the prior selection intact and reports why.
+Auto selection validates its configured judge without a provider effect.
+`/plan` stages plan idempotently. `/yolo` and picker selection stage yolo directly;
+they do not ask for a second confirmation.
+
+Default keeps its existing policy: reads are admitted without a human prompt,
+uncovered writes ask, explicit allow rules are honored, and coordinator bounded
+calls retain their deterministic admission. Explicit denies and hard boundaries
+still win. This selection feature does not add a new approval mechanism or change
+existing ACP/session permission answers.
+
+Configuration, CLI flags, ACP controls and saved selections use the same public
+names. `edits` remains an input alias for `accept-edits`; saved config emits
+`accept-edits`. The private content-addressed snapshot v1 wire retains `edits` to
+preserve saved authority digests. Missing mode still falls back to default except
+for the existing trusted-interactive auto default. Session resume keeps its
+recorded policy and confinement; selection never widens them implicitly.
+
 `/permissions`
 exposes the same list, allow, deny, revoke, remember, and explain services and
 DTOs as the root `rules` command. List/explain use the session's
@@ -1631,6 +1677,16 @@ prompt, so control input remains responsive without reordering the transcript.
 In interactive mode reedline is therefore the terminal writer. In headless
 modes the existing renderer remains the writer. There is never one of each
 writing the same terminal.
+
+The default interactive presentation uses one live row for consecutive successful
+shell commands (`exec`) that produce no output in the same turn. Each such
+completion replaces the live row. Before a failed command, command output,
+another tool, agent prose, or the end of the turn, the last live command becomes
+a transcript row. Failed commands and output previews remain visible. Nested
+child-tool rows keep their existing grouping. `--plain`, `TERM=dumb`, and
+headless output remain append-only; `--no-color` only removes colour. This
+presentation does not change durable events, transcript replay/export, or the
+bounded tool-detail history used by the expand key.
 
 `Ctrl-S` with a non-empty composer pushes the exact multiline buffer onto a
 session-local LIFO draft stash and clears the composer. `Ctrl-S` with an empty
@@ -1929,14 +1985,18 @@ branches its owning ancestor at that ancestor's completion sequence. Title and
 active goal come from the selected boundary. An explicit completed boundary can
 be read while the source writer runs; a tip fork requires an inactive source.
 
-Standard ACP `session/fork` currently serves the tip. The message selector
-`_meta.ego.atMessageId`, lineage metadata, and inherited-message replay are
-planned extensions. The accepted cache design snapshots only the system prompt
+Standard ACP `session/fork` serves the tip when no selector is supplied.
+Negotiated `_meta.ego.atMessageId` selects a completed-message boundary;
+lineage metadata and inherited-message replay are also implemented. See
+[ACP history metadata](docs/integrations/acp-extensions.md#session-and-history-metadata)
+and the source owners `crates/ego-acp/src/serve.rs` and
+`crates/ego-acp/src/project.rs`. The accepted cache design snapshots only the system prompt
 per epoch; resume/fork inherit it, and compaction or explicit refresh replaces
 it. Tool admission remains current. The snapshot is captured on the first admitted generation. `/refresh` reloads
 instructions and opens a new epoch on the next admitted generation; it refuses
 while source work is pending. Live runtime and host facts are transient data
-before current user intent. Provider cache fields remain regression case, with decisions in
+before current user intent. Provider cache usage and Codex continuation are separate observations; see
+[Codex transport](docs/guides/providers.md#codex-transport), with decisions in
 `ARCHITECTURE.md`.
 
 ## 7. Configuration
@@ -2008,8 +2068,8 @@ Orphan candidates from a crashed parent are never silently removed.
 The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
 candidate retention for every editor result.
 
-System policy can also set `max_mode="edits"`, using the order
-plan < default < edits < auto < yolo. A selected mode above the maximum is
+System policy can also set `max_mode="accept-edits"`, using the order
+plan < default < accept-edits < auto < yolo. A selected mode above the maximum is
 refused before run effects, including live ACP and REPL selections. A refused
 selection preserves the current and pending mode. `max_mode` is system-only and does not change
 the default mode; a plan maximum must be paired with `mode="plan"`.
@@ -2040,8 +2100,8 @@ explicit `--offline` invocation.
 `--read-only-dir DIR` grants reads of one session upload directory at launch.
 It is available to interactive runs, `run`, `resume`, and served protocols.
 DIR must be an existing canonical absolute directory: relative paths, `..`,
-symlink aliases, home/administrator ancestors, and directories beneath a
-writable workspace or root are refused. This launch grant does not make
+symlink aliases and home/administrator ancestors are refused. Nested directories
+beneath a writable workspace or root follow the platform rules below. This launch grant does not make
 configuration `roots` writable from flags. System and host profile ceilings
 still bind; credential denials remain in force. The grant adds neither writes
 nor executable uploads. It does not change the selected sandbox level. On Linux, confined read roots
@@ -2058,9 +2118,16 @@ when loading a session that has not yet started a run. Paths inside the grant
 are still canonicalized by each built-in tool, so symlinks cannot open siblings.
 
 Effective perimeter inspection warns when canonical roots overlap the workspace.
-A read root beneath a read-write root is refused with `nested-read-only-root`,
-including symlink aliases: Landlock cannot subtract access from a broader grant. A missing or unresolvable configured path is reported as a warning and
-remains an admission error; it is never shown as an admitted root.
+A read root beneath a writable root or the workspace is admitted. Built-in tools
+keep that subtree read-only, even if a deeper write root exists. On macOS,
+Seatbelt denies writes and execution in the subtree; later grants cannot reopen
+it, and its ancestors cannot be renamed to bypass the restriction. On Linux,
+Landlock grants are additive: the writable ancestor wins for exec children,
+including execution in the read subtree. Ego reports that limitation without
+exiting; built-in tools still enforce read-only access. With `sandbox=ro`, the
+global native write denial remains in force. With `sandbox=off`, native writes
+are not confined. A missing or unresolvable configured path is reported as a
+warning and remains an admission error; it is never shown as an admitted root.
 
 `/config` lists Model, Mode, Sandbox, Perimeter, and Budget from the session's
 captured startup configuration. Each declaration names its origin layer and
@@ -2273,7 +2340,7 @@ A full entry, with every field the schema accepts:
 ```toml
 # `provider/model`. The model half is what goes on the wire.
 [model."openai/gpt-5.6-sol".capabilities]
-schema_version = 5                 # required; rejects an older document
+schema_version = 6                 # required; rejects an older document
 max_context_tokens = 1050000       # omit if the vendor does not state it
 max_output_tokens = 128000
 # max_tools = 128                  # most tools accepted in one request
@@ -2324,6 +2391,11 @@ a cached row is never handed to a request
 Only supplied rows come from this file, and they are rebuilt on every
 invocation rather than cached at all; the cache holds only *discovered* rows,
 from providers that enumerate themselves.
+
+An obsolete discovery-cache schema is ignored at startup. Supplied facts and
+bounded local discovery remain available, and an ordinary catalogue read can
+rebuild the cache without `--refresh`. Startup does not replace the old bytes.
+A corrupt or newer-schema cache still reports an error and is not overwritten.
 
 ### Interactive session picker
 
@@ -2457,8 +2529,12 @@ instructions, tool definitions, accounting, and auditable lineage use the same
 transition as `/compact`.
 
 Pending prompts, questions, or live attempts prevent the transition. A failed
-automatic compaction is shown and is not automatically retried in that source
-epoch. Unknown occupancy is not estimated. A known full context still refuses
+automatic compaction at measured context pressure stops the session with an
+explicit diagnostic and a nonzero process exit, so managed parents can observe
+the failure instead of sending prompts that cannot run. The durable source is
+retained for resume; no automatic retry loop runs in that source epoch. Explicit
+operator cancellation and failed manual compaction remain interactive. Unknown
+occupancy is not estimated. A known full context still refuses
 before any request, including a compaction request: automatic recovery must
 start before exhaustion, and the threshold is not an exact fit guarantee for
 unsent growth. A 272000-token window triggers at 244800 measured tokens.
@@ -2765,3 +2841,51 @@ oversized output is omitted. Terminal controls are sanitized and known secrets
 are masked. Values are cached in the live seat, not persisted or admitted as
 instructions. Providers inherit the normal admitted exec environment; there is
 no shell expansion unless the operator explicitly selects a shell executable.
+
+
+### ACP audio input
+
+The durable ACP surface advertises audio input. This is a surface capability,
+not a promise that every selected model accepts audio. Submitting audio grants
+consent for durable session storage and provider transmission; the ACP host must
+obtain user-facing consent. Ego checks the resolved model on each generation,
+including resumed history and fallback. Unsupported or unknown models refuse
+before audio is sent; ego does not drop or transcribe audio.
+
+The supported contract is public OpenAI Chat Completions, exact model
+`openai/gpt-audio-1.5`, with text output. Supply its row in `models.toml` because
+the pinned builtin catalogue does not contain it:
+
+```toml
+[model."openai/gpt-audio-1.5".capabilities]
+schema_version = 6
+max_context_tokens = 128000
+max_output_tokens = 16384
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["off"] }
+default_reasoning_effort = "off"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+image_input = "unsupported"
+audio_input = "supported_wav"
+```
+
+Audio requires explicit ACP `mimeType: "audio/wav"` and base64 data. Ego admits
+PCM16 WAV only, mono or stereo, at most 48 kHz and sixty seconds per clip. A prompt
+can contain at most four clips and 10 MiB of decoded audio in total. These are ego
+limits, not documented provider maxima. Mixed image/audio prompts are refused.
+No remote URLs, inferred MIME, transcoding or raw PCM input is accepted.
+
+Exact validated bytes are committed into the session blob store before the
+journal references them. Replay checks the reference and encoding again. Missing
+or corrupt blobs cause an explicit refusal; they are never fetched again or
+silently omitted. The operator must preserve the session blob store with its log.
+
+Audio-specific pricing is not represented by text-token quotes. Monetary ceilings
+fail closed for this model; no-ceiling runs can report unknown cost. No paid audio
+acceptance probe is part of this feature's validation. Provider contract sources:
+<https://developers.openai.com/api/docs/models/gpt-audio-1.5.md> and
+<https://developers.openai.com/api/docs/guides/audio-chat-completions.md>, read
+2026-10-20.

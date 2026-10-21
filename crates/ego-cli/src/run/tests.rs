@@ -790,9 +790,9 @@ fn durable_compact_is_enabled_when_idle_before_confirmation_resolution_generatio
 }
 
 #[derive(Debug)]
-struct CompactionDecisionSeat {
-    confirm: bool,
-    activate: bool,
+pub(super) struct CompactionDecisionSeat {
+    pub(super) confirm: bool,
+    pub(super) activate: bool,
 }
 
 impl Reads for CompactionDecisionSeat {
@@ -3378,6 +3378,7 @@ async fn background_task_completion_during_another_parent_turn_waits_for_boundar
             Some(ItemId::new()),
             None,
             EventKind::UserPrompt {
+                audio: Vec::new(),
                 text: "another parent turn".to_owned(),
                 images: vec![],
                 queued_prompt: None,

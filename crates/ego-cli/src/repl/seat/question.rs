@@ -1634,7 +1634,7 @@ fn status_right(status: &SharedStatus) -> String {
 
 fn status_row(status: &SurfaceStatus) -> String {
     let ephemeral = activity_or_status_row(status);
-    if status.activity || status.retry.is_some() {
+    if status.activity || status.retry.is_some() || status.shell.is_some() {
         // The compact default keeps 524's single Working row. Critical state
         // still survives there; custom layouts retain all their configured rows.
         let template = if status.template.is_compact() {
@@ -1657,6 +1657,43 @@ fn status_row(status: &SurfaceStatus) -> String {
     ephemeral
 }
 
+/// Leave half the terminal for the composer, notices and status. Layout uses
+/// live geometry on every repaint, including resize, rather than startup width.
+fn live_plan_rows(status: &SurfaceStatus, status_rows: &str) -> String {
+    let Some(plan) = &status.plan else {
+        return String::new();
+    };
+    let geometry = crossterm::terminal::size().ok();
+    let width = geometry
+        .map(|(w, _)| usize::from(w))
+        .unwrap_or(status.width)
+        .max(1);
+    let height = geometry.map(|(_, h)| usize::from(h)).unwrap_or(24);
+    let reserved = status_rows.lines().count() + status_prefix(status).lines().count() + 2;
+    let budget = (height / 2).min(height.saturating_sub(reserved));
+    if budget == 0 {
+        return String::new();
+    }
+    let mut caps = status.permission_capabilities;
+    caps.width = width.saturating_sub(1).max(1);
+    let block = crate::output::plan_block(plan, caps);
+    let mut rows: Vec<_> = block.lines().map(str::to_owned).collect();
+    rows[0] = crate::render::Line::plain(&rows[0])
+        .truncate_to(caps.width)
+        .text()
+        .to_owned();
+    if rows.len() > budget {
+        rows.truncate(budget);
+        if budget > 1 {
+            rows[budget - 1] = crate::render::Line::plain("… more steps")
+                .truncate_to(caps.width)
+                .text()
+                .to_owned();
+        }
+    }
+    format!("{}\n", rows.join("\n"))
+}
+
 fn activity_or_status_row(status: &SurfaceStatus) -> String {
     if let Some((message, started, delay_ms)) = &status.retry {
         let remaining = delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
@@ -1676,11 +1713,21 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
         };
         let message = message.replace(['\r', '\n', '\t'], " ");
         let mut line = crate::render::line::Line::empty();
-        line.push(crate::render::line::Span::plain(message));
+        line.push(crate::render::line::Span::new(
+            message,
+            crate::render::style::Style::fg(crate::render::style::Palette::ERROR),
+        ));
         return format!(
             "{}\n",
             line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
-                .text()
+                .render(status.permission_capabilities.depth)
+        );
+    }
+    if let Some(line) = &status.shell {
+        return format!(
+            "{}\n",
+            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
+                .render(status.permission_capabilities.depth)
         );
     }
     if status.activity {
@@ -1770,13 +1817,14 @@ impl Prompt for Waiting {
     fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
         let status = self.status.lock().expect("surface status lock");
         let row = status_row(&status);
+        let plan = live_plan_rows(&status, &row);
         let mode = match mode {
             PromptEditMode::Vi(reedline::PromptViMode::Normal) => "[NORMAL] ",
             PromptEditMode::Vi(reedline::PromptViMode::Visual) => "[VISUAL] ",
             PromptEditMode::Vi(reedline::PromptViMode::Insert) => "[INSERT] ",
             _ => "",
         };
-        Cow::Owned(format!("{row}{}{mode}> ", status_prefix(&status)))
+        Cow::Owned(format!("{plan}{row}{}{mode}> ", status_prefix(&status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,

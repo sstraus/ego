@@ -25,18 +25,18 @@ pub fn render(change: &Change, capabilities: Capabilities) -> String {
             );
         }
         Change::Replace {
+            replace_all,
             old_string,
             new_string,
-            replace_all,
         } => (
             old_string.as_str(),
             new_string.as_str(),
             "old fragment",
             "new fragment",
             if *replace_all {
-                "Replace all occurrences of this fragment; count and final content depend on the file at execution time."
+                "Replacement fragment: replace all original non-overlapping occurrences; final content depends on the file at execution time."
             } else {
-                "Replacement fragment; final content depends on the file at execution time."
+                "Replacement fragment: replace exactly one occurrence; final content depends on the file at execution time."
             },
         ),
         Change::Whole(bytes) => match std::str::from_utf8(bytes) {

@@ -269,6 +269,7 @@ fn project(row: &ProviderRow, url: &url::Url, model: Model) -> Result<CurrentMod
         model: model.id,
         capabilities: ModelCapabilities {
             schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
             max_context_tokens: Some(model.context_length),
             max_output_tokens: None,
             max_tools: (!model.supports_tool_use).then_some(0),
