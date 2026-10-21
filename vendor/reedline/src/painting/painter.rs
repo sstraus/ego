@@ -343,6 +343,7 @@ struct PaintedFrame {
     colors: [nu_ansi_term::Color; 3],
     ansi: bool,
     cursors: Option<CursorConfig>,
+    indicator_updates: bool,
 }
 
 /// Implementation of the output to the terminal
@@ -704,6 +705,7 @@ impl Painter {
             ],
             ansi: use_ansi_coloring,
             cursors: cursor_config.clone(),
+            indicator_updates: prompt.supports_indicator_row_updates(),
         });
         if only_if_changed
             && frame.is_some()

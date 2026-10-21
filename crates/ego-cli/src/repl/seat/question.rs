@@ -1776,11 +1776,8 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
 
 impl Prompt for Waiting {
     fn supports_indicator_row_updates(&self) -> bool {
-        !self
-            .status
-            .lock()
-            .expect("surface status lock")
-            .permission_modal
+        let status = self.status.lock().expect("surface status lock");
+        status.activity && !status.permission_modal
     }
 
     fn render_prompt_footer(&self) -> Cow<'_, str> {
