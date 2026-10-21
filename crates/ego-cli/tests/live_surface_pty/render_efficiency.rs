@@ -1,6 +1,6 @@
 use super::*;
 
-// Catches: a metadata-only idle callback invalidates the anchor on every tool tick.
+// Catches: quiet ticks invalidate the anchor and redraw the unchanged composer.
 #[test]
 fn quiet_working_ticks_do_not_query_the_cursor() {
     let (reply, gate) = gated_paced_line("EFFICIENCY-HELD\n");
@@ -43,6 +43,14 @@ fn quiet_working_ticks_do_not_query_the_cursor() {
     assert!(
         !ticks.windows(4).any(|bytes| bytes == b"\x1b[6n"),
         "quiet ticks queried cursor: {ticks:?}"
+    );
+    assert!(
+        !ticks.windows(3).any(|bytes| bytes == b"\x1b[J"),
+        "quiet ticks erased the full live region: {ticks:?}"
+    );
+    assert!(
+        !ticks.windows(2).any(|bytes| bytes == b"> "),
+        "quiet ticks repainted the composer: {ticks:?}"
     );
 }
 
