@@ -32,23 +32,23 @@ fn typing_during_long_output_echoes_within_500ms() {
     let typed = Instant::now();
     input.write_all(b"DRAFT574RESPONSIVE").unwrap();
     input.flush().unwrap();
-    // The marker is plain ASCII in the composer. Re-normalizing the growing
-    // 2000-row backlog after each chunk measures the observer, not draft echo.
-    until_ascii_echo(&reader, &mut output, draft_start, b"DRAFT574RESPONSIVE");
+    // PTY reads can coalesce a complete draft frame with a later output erase.
+    // Observe the completed frame, not the screen at an arbitrary read boundary.
+    let echoed = until_composer_frame(&reader, &mut output, draft_start, |rows| {
+        rows.iter().any(|row| row.contains("> DRAFT574RESPONSIVE"))
+    });
     let elapsed = typed.elapsed();
-    assert!(
-        screen_rows(&output, 40, 120)
-            .join("\n")
-            .contains("DRAFT574RESPONSIVE"),
-        "the observed bytes must be visible in the composer"
-    );
+    assert!(echoed.join("\n").contains("DRAFT574RESPONSIVE"));
     gate.release();
     until_normalized(&reader, &mut output, answer_start, "REGRESSION-MARKER-ROW-1999");
     until_mcp_composer_is_idle(&reader, &mut output);
     let cleared = output.len();
     input.write_all(b"\x03").unwrap();
     input.flush().unwrap();
-    until_prompt_from(&reader, &mut output, cleared);
+    until_composer_frame(&reader, &mut output, cleared, |rows| {
+        rows.last().is_some_and(|row| row.trim() == ">")
+            && !rows.iter().any(|row| row.contains("Esc to interrupt"))
+    });
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -93,42 +93,71 @@ fn help_finishes_within_500ms_without_per_row_poll_delays() {
     );
 }
 
-/// Scan each new chunk once, retaining only the overlap needed for a split echo.
-fn until_ascii_echo(
+/// Observe completed painter frames, independent of PTY chunk boundaries.
+/// Feed each byte to the emulator once; never reparse the growing output backlog.
+fn until_composer_frame(
     reader: &mpsc::Receiver<Vec<u8>>,
     output: &mut Vec<u8>,
     start: usize,
-    needle: &[u8],
-) {
+    ready: impl Fn(&[String]) -> bool,
+) -> Vec<String> {
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
     let deadline = Instant::now() + PROGRESS_DEADLINE;
+    let mut parser = vt100::Parser::new(40, 120, 0);
+    parser.process(&output[..start]);
     let mut scan_from = start;
     loop {
-        if output[scan_from..]
-            .windows(needle.len())
-            .any(|bytes| bytes == needle)
-        {
-            return;
+        let end = output.len();
+        let mut parsed = scan_from;
+        for index in scan_from..end {
+            if output[..=index].ends_with(SHOW_CURSOR) {
+                parser.process(&output[parsed..=index]);
+                parsed = index + 1;
+                let rows: Vec<_> = parser
+                    .screen()
+                    .contents()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect();
+                if ready(&rows) {
+                    return rows;
+                }
+            }
         }
-        scan_from = output.len().saturating_sub(needle.len() - 1).max(start);
+        parser.process(&output[parsed..end]);
+        scan_from = end;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let chunk = reader.recv_timeout(remaining).unwrap_or_else(|error| {
             panic!(
-                "ASCII echo wait failed: {error}; output: {:?}",
-                normalized(&output[start..])
+                "composer frame wait failed: {error}; screen: {:?}; output: {:?}",
+                parser.screen().contents(),
+                String::from_utf8_lossy(&output[start..])
             )
         });
         output.extend(chunk);
     }
 }
 
-// Catches: the linear observer accepts an old echo or misses one split across reads.
+// Catches: an old echo satisfies the observer, a split frame is missed, or one
+// PTY read coalesces a visible draft frame with its subsequent erase.
 #[test]
-fn ascii_echo_wait_ignores_old_output_and_accepts_a_split_marker() {
-    let (sender, receiver) = mpsc::channel();
-    let mut output = b"DRAFT574RESPONSIVE old echo\n".to_vec();
-    let start = output.len();
-    sender.send(b"DRAFT574RESP".to_vec()).unwrap();
-    sender.send(b"ONSIVE".to_vec()).unwrap();
-    until_ascii_echo(&receiver, &mut output, start, b"DRAFT574RESPONSIVE");
-    assert_eq!(&output[start..], b"DRAFT574RESPONSIVE");
+fn draft_echo_observer_accepts_completed_frame_before_coalesced_erase() {
+    // Recorded from rb repetition 36 in help-red-100.log; no synthetic terminal bytes.
+    let captured = include_bytes!("../fixtures/help-latency-erased-draft.txt");
+    for split in 0..=captured.len() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(captured[..split].to_vec()).unwrap();
+        sender.send(captured[split..].to_vec()).unwrap();
+        drop(sender);
+        let mut output = captured.to_vec();
+        let start = output.len();
+        let rows = until_composer_frame(&receiver, &mut output, start, |rows| {
+            rows.iter().any(|row| row.contains("> DRAFT574RESPONSIVE"))
+        });
+        assert!(
+            rows.join("\n").contains("> DRAFT574RESPONSIVE"),
+            "split {split}"
+        );
+        assert!(output.len() > start, "an old echo satisfied split {split}");
+    }
 }
