@@ -13,7 +13,7 @@ use crate::event::time::{Clock, Timestamp};
 use crate::generation_model_source::GenerationModelError;
 use crate::generator::capabilities::CapabilityGap;
 use crate::generator::port::RequestExpressibilityError;
-use crate::generator::types::{GenRequest, HistoryError, StopReason};
+use crate::generator::types::{ErrorKind, GenRequest, HistoryError, StopReason};
 use crate::goal::GoalRecord;
 use crate::run::RequestId;
 use crate::session::{TargetPublication, TargetSeed};
@@ -230,7 +230,10 @@ pub enum CompactionError {
     Budget(BudgetDenied),
     Cancelled(CancelCause),
     UnexpectedStop(StopReason),
-    Generation(String),
+    Generation {
+        message: String,
+        kind: ErrorKind,
+    },
     EmptyCheckpoint,
     InvalidCheckpoint(CheckpointError),
     Store(StoreError),
@@ -254,7 +257,7 @@ impl fmt::Display for CompactionError {
             Self::Budget(error) => write!(formatter, "{error}"),
             Self::Cancelled(cause) => write!(formatter, "compaction was cancelled by {cause:?}"),
             Self::UnexpectedStop(stop) => write!(formatter, "compaction stopped with {stop:?}"),
-            Self::Generation(message) => {
+            Self::Generation { message, .. } => {
                 write!(formatter, "compaction generation failed: {message}")
             }
             Self::EmptyCheckpoint => formatter.write_str("compaction returned an empty checkpoint"),

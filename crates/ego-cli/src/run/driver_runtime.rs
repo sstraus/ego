@@ -3221,8 +3221,10 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     }
     // Required pressure recovery cannot return to a prompt that cannot run.
     let required_compaction = automatic_compaction && ego_core::turn::compaction_due(state.context);
-    // One automatic attempt per source epoch; operator cancellation stays idle.
-    *automatic_compaction_failed = automatic_compaction;
+    // Failed pressure recovery must wait for an explicit retry, including when
+    // that retry fails. Operator cancellation also stays idle.
+    *automatic_compaction_failed =
+        automatic_compaction || ego_core::turn::compaction_due(state.context);
     seat.busy();
     seat.set_compaction_availability(repl::actions::Availability::BusyWithReason {
         reason: "ego is busy; compaction already running",
@@ -3320,6 +3322,20 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
                 && let Ok(selected) = selection.snapshot()
             {
                 status.seat.refresh_status(state, selected);
+            }
+            if matches!(
+                &error,
+                CompactionTransitionError::Preparation(CompactionError::Generation {
+                    kind: ego_core::generator::types::ErrorKind::Transient,
+                    ..
+                })
+            ) {
+                // Keep automatic_compaction_failed latched until an explicit retry:
+                // pressure is unchanged, so immediate re-entry would spin.
+                diagnostics.note(&format!(
+                    "Compaction paused; the session is still open: {error}. Use /compact to retry before continuing."
+                ));
+                return Ok(CommandOutcome::Continue);
             }
             let cancelled = matches!(
                 &error,

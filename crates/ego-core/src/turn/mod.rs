@@ -1926,7 +1926,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Err(
                 CompactionError::History(_)
                 | CompactionError::UnexpectedStop(_)
-                | CompactionError::Generation(_)
+                | CompactionError::Generation { .. }
                 | CompactionError::EmptyCheckpoint
                 | CompactionError::InvalidCheckpoint(_),
             ) => (false, ExitReason::Provider),
@@ -2313,7 +2313,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             ));
         }
         if let Some(message) = drained.error_message {
-            return Err(CompactionError::Generation(message));
+            return Err(CompactionError::Generation {
+                message,
+                kind: drained.error_kind.unwrap_or(ErrorKind::Unclassified),
+            });
         }
         if drained.private_tool_use
             || drained.error_kind.is_some()

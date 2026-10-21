@@ -9478,14 +9478,139 @@ fn context_pressure_compacts_and_continues_without_operator_input() {
     );
 }
 
-// Catches: the recorded HTTP body failure leaves automatic compaction latched
+// Catches: a transient checkpoint failure exits the session instead of keeping
+// the source usable for an explicit retry, or silently starts a retry storm.
+#[cfg(not(windows))]
+#[test]
+fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("REGRESSION-MARKER", 245352, 4)),
+            Reply::TruncatedSse,
+            Reply::TruncatedSse,
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# transient checkpoint fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (mut session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    let turn_start = output.len();
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    let mut retry_start = turn_start;
+    for failed_checkpoints in 1..=2 {
+        until_normalized(
+            &reader,
+            &mut output,
+            retry_start,
+            "compaction preparation failed",
+        );
+        let failed_at =
+            retry_start + find(&output[retry_start..], b"compaction preparation failed");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while support::ready_prompt_count_with_status(&output[failed_at..]) == 0 {
+            if let Some(status) = session.child.try_wait().expect("child status") {
+                let _ = session.quit(input);
+                panic!(
+                    "transient compaction must leave the source session open, exited {status:?}: {}",
+                    normalized(&output)
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "source did not return to idle: {}",
+                normalized(&output)
+            );
+            if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(20)) {
+                output.extend(bytes);
+            }
+        }
+        assert!(
+            session
+                .child
+                .try_wait()
+                .expect("source process status")
+                .is_none(),
+            "source must remain alive for the explicit retry"
+        );
+        // An empty composer can repaint between rows of the failure notice.
+        // Wait for its complete actionable text before inspecting it.
+        until_notice_prose(&reader, &mut output, failed_at, "Use /compact to retry");
+        let shown = support::notice_prose(&normalized(&output));
+        assert!(shown.contains("HTTP response body failed"), "{shown}");
+        assert!(shown.contains("Use /compact to retry"), "{shown}");
+        assert!(!shown.contains("session stopped"), "{shown}");
+        assert_eq!(
+            stub.generations().len(),
+            failed_checkpoints + 1,
+            "no automatic retry storm"
+        );
+        assert_eq!(
+            std::fs::read_dir(places.home_path().join("sessions"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .parse::<uuid::Uuid>()
+                    .is_ok())
+                .count(),
+            1,
+            "source remains selected before retry"
+        );
+        retry_start = output.len();
+        input.write_all(b"/compact\r").unwrap();
+        input.flush().unwrap();
+    }
+    until_successor_receipt_ready(&reader, &mut output, retry_start, "compact", &stub);
+    input.write_all(b"continue the task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, retry_start, "REGRESSION-MARKER");
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let requests = stub.generations();
+    assert_eq!(
+        requests.len(),
+        5,
+        "two failed checkpoints and one successful explicit retry"
+    );
+    assert!(
+        requests[3].to_string().contains("REGRESSION-MARKER"),
+        "retry preserves source history"
+    );
+    assert!(
+        requests[4].to_string().contains("Continue the task."),
+        "successor contains checkpoint"
+    );
+}
+
+// Catches: a non-transient checkpoint failure leaves required compaction latched
 // off while every subsequent managed prompt is refused at context pressure.
 #[test]
 fn failed_compaction_preparation_does_not_loop_refusals() {
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(support::costing("REGRESSION-MARKER", 245352, 4)),
-            Reply::TruncatedSse,
+            Reply::Status(400),
         ],
         context_length: Some(272000),
         ..Plan::default()
@@ -9543,9 +9668,9 @@ fn failed_compaction_preparation_does_not_loop_refusals() {
     );
     assert!(
         support::notice_prose(&shown).contains(
-            "automatic compaction failed; session stopped: compaction failed: compaction preparation failed: compaction generation failed: the response stream failed: HTTP response body failed"
+            "automatic compaction failed; session stopped: compaction failed: compaction preparation failed: compaction generation failed: the provider returned HTTP 400"
         ),
-        "the final failure must name the transport cause: {shown}"
+        "the final failure must name the permanent provider cause: {shown}"
     );
     assert!(shown.contains("Compacting the session now"), "{shown}");
     assert!(
@@ -9566,8 +9691,8 @@ fn failed_compaction_preparation_does_not_loop_refusals() {
     )
     .unwrap();
     assert!(
-        journal.contains("HTTP response body failed"),
-        "the fixture must replay the recorded transport failure"
+        journal.contains("the provider returned HTTP 400"),
+        "the fixture must retain the non-transient provider failure"
     );
 }
 
