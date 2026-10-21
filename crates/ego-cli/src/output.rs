@@ -92,7 +92,9 @@ impl Diagnostics for Stderr {
     }
 
     fn notice_block(&self, message: &str) {
-        let _ = writeln!(std::io::stderr(), "{DISPLAY_NAME}: {message}");
+        let mut err = std::io::stderr();
+        let raw = stderr_is_raw(&err);
+        write_note(&mut err, message, None, raw);
     }
 }
 
@@ -376,7 +378,8 @@ pub fn note(message: &str) {
         .then(terminal_size::terminal_size)
         .flatten()
         .map(|(width, _)| usize::from(width.0));
-    write_note(&mut err, message, width);
+    let raw = stderr_is_raw(&err);
+    write_note(&mut err, message, width, raw);
 }
 
 /// Plain human notices share the answer renderer's word and cell layout.
@@ -436,11 +439,21 @@ pub(crate) fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> Str
     rows.join("\n")
 }
 
-fn write_note(mut err: impl Write, message: &str, width: Option<usize>) {
+fn stderr_is_raw(err: &std::io::Stderr) -> bool {
+    err.is_terminal() && crossterm::terminal::is_raw_mode_enabled().unwrap_or(false)
+}
+
+fn write_note(mut err: impl Write, message: &str, width: Option<usize>, raw: bool) {
     // Nothing to be done if the diagnostic channel itself is gone, and a
     // panic here would replace a report with a crash.
     let text = wrap_notice(&format!("{DISPLAY_NAME}: {message}"), width);
-    let _ = writeln!(err, "{text}");
+    if raw {
+        // Raw mode disables the tty's LF-to-CRLF translation, including wrapped rows.
+        let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        let _ = write!(err, "{text}\r\n");
+    } else {
+        let _ = writeln!(err, "{text}");
+    }
 }
 
 /// The one sentence every empty listing says: what is missing, and the command
@@ -1208,10 +1221,66 @@ mod tests {
         serde_json::to_value(report).expect("§4.1's object serialises")
     }
 
+    // Catches: resume's stderr adapter emits LF without CR while the seat owns raw mode.
+    #[test]
+    fn raw_mode_stderr_diagnostics_restore_column_zero() {
+        const CHILD: &str = "EGO_TEST_RAW_STDERR_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            crossterm::terminal::enable_raw_mode().expect("raw PTY");
+            Stderr.note("raw-one\nraw-two");
+            Stderr.notice_block("raw-block-one\nraw-block-two");
+            crossterm::terminal::disable_raw_mode().expect("restore PTY");
+            return;
+        }
+
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("PTY");
+        let mut command = CommandBuilder::new(std::env::current_exe().expect("test executable"));
+        command.args([
+            "--exact",
+            "output::tests::raw_mode_stderr_diagnostics_restore_column_zero",
+            "--nocapture",
+        ]);
+        command.env(CHILD, "1");
+        let mut child = pair.slave.spawn_command(command).expect("child");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = reader.read_to_end(&mut bytes);
+            let _ = sender.send(bytes);
+        });
+        let bytes = match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("raw diagnostic child did not finish: {error}");
+            }
+        };
+        assert!(child.wait().expect("child status").success());
+        reading.join().expect("reader thread");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("εgo: raw-one\r\nraw-two\r\n")
+                && text.contains("εgo: raw-block-one\r\nraw-block-two\r\n"),
+            "raw diagnostics must use CRLF for every row: {text:?}"
+        );
+    }
+
     #[test]
     fn a_diagnostic_uses_the_human_facing_product_name_byte_for_byte() {
         let mut err = Vec::new();
-        write_note(&mut err, "something failed", None);
+        write_note(&mut err, "something failed", None, false);
 
         assert_eq!(err, "εgo: something failed\n".as_bytes());
     }
@@ -1222,7 +1291,7 @@ mod tests {
         let message =
             "a long diagnostic with instructions that must stay on one logical line\n  next line";
         let mut err = Vec::new();
-        write_note(&mut err, message, None);
+        write_note(&mut err, message, None, false);
         assert_eq!(String::from_utf8(err).unwrap(), format!("εgo: {message}\n"));
     }
 
@@ -1256,7 +1325,7 @@ mod tests {
     #[test]
     fn diagnostic_tokens_wider_than_the_terminal_still_fit() {
         let mut err = Vec::new();
-        write_note(&mut err, "abcdefghijklmnopqrstuvwxyz", Some(20));
+        write_note(&mut err, "abcdefghijklmnopqrstuvwxyz", Some(20), false);
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "εgo:\nabcdefghijklmnopqrst\nuvwxyz\n"
