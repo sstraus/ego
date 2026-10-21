@@ -1057,6 +1057,104 @@ mod write {
 mod edit {
     use super::*;
 
+    // Catches: all-match edits accept a file above their advertised input limit.
+    #[test]
+    fn edit_replace_all_refuses_oversized_input_without_writing() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let before = "x".repeat(16 * 1024 * 1024 + 1);
+        let path = ws.file("src/main.rs", &before);
+        assert!(
+            ws.call(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": "x", "new_string": "y", "replace_all": true
+                })
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
+    }
+
+    // Catches: a short repeated input expands into an unbounded allocation before refusal.
+    #[test]
+    fn edit_replace_all_refuses_oversized_output_before_writing() {
+        let ws = Workspace::in_mode(Mode::Edits);
+        let before = "a".repeat(4097);
+        let path = ws.file("src/main.rs", &before);
+        let error = ws
+            .call(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": "a", "new_string": "b".repeat(4097),
+                    "replace_all": true
+                }),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("16 MiB"));
+        assert_eq!(fs::read_to_string(path).unwrap(), before);
+    }
+
+    // Catches: the byte limit is exclusive, counts characters, or misses retained bytes.
+    #[test]
+    fn edit_replace_all_byte_limit_includes_exact_boundary_and_retained_bytes() {
+        for (before, old, new, expected) in [
+            (
+                "é".repeat(8 * 1024 * 1024),
+                "é",
+                String::new(),
+                Some(String::new()),
+            ),
+            (
+                "a".repeat(4096),
+                "a",
+                "b".repeat(4096),
+                Some("b".repeat(16 * 1024 * 1024)),
+            ),
+            (
+                format!("{}z", "a".repeat(4096)),
+                "a",
+                "b".repeat(4096),
+                None,
+            ),
+        ] {
+            let ws = Workspace::in_mode(Mode::Edits);
+            let path = ws.file("src/main.rs", &before);
+            let result = ws.call(
+                "edit",
+                json!({
+                    "path": "src/main.rs", "old_string": old, "new_string": new, "replace_all": true
+                }),
+            );
+            match expected {
+                Some(after) => {
+                    result.unwrap();
+                    assert_eq!(fs::read_to_string(path).unwrap(), after);
+                }
+                None => {
+                    assert!(result.unwrap_err().to_string().contains("16 MiB"));
+                    assert_eq!(fs::read_to_string(path).unwrap(), before);
+                }
+            }
+        }
+    }
+
+    // Catches: a misspelled mode is silently ignored and the advertised boolean is required.
+    #[test]
+    fn edit_replace_all_schema_and_dispatch_agree_on_optional_mode() {
+        let ws = editable();
+        let schema = ws.tool("edit").descriptor().schema.to_value();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let base = json!({"path":"src/main.rs","old_string":"todo!()","new_string":"ok()"});
+        assert!(validator.is_valid(&base));
+        let mut all = base.clone();
+        all["replace_all"] = json!(true);
+        assert!(validator.is_valid(&all));
+        let mut typo = base;
+        typo["replaceAll"] = json!(true);
+        assert!(!validator.is_valid(&typo));
+        assert!(ws.prepare("edit", typo).is_err());
+    }
+
     fn editable() -> Workspace {
         let ws = Workspace::in_mode(Mode::Edits);
         ws.file("src/main.rs", "fn main() {\n    todo!()\n}\n");
