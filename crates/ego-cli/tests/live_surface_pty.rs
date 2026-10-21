@@ -50,6 +50,8 @@ mod prompt_echo;
 mod prompt_readiness;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
+#[path = "live_surface_pty/render_efficiency.rs"]
+mod render_efficiency;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
 #[path = "live_surface_pty/setup.rs"]
@@ -72,8 +74,6 @@ mod status_history;
 mod status_providers;
 #[path = "live_surface_pty/status_template.rs"]
 mod status_template;
-#[path = "live_surface_pty/render_efficiency.rs"]
-mod render_efficiency;
 mod support;
 #[path = "live_surface_pty/task_rows.rs"]
 mod task_rows;
