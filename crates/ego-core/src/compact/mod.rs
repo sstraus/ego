@@ -230,6 +230,7 @@ pub enum CompactionError {
     Budget(BudgetDenied),
     Cancelled(CancelCause),
     UnexpectedStop(StopReason),
+    Generation(String),
     EmptyCheckpoint,
     InvalidCheckpoint(CheckpointError),
     Store(StoreError),
@@ -253,6 +254,9 @@ impl fmt::Display for CompactionError {
             Self::Budget(error) => write!(formatter, "{error}"),
             Self::Cancelled(cause) => write!(formatter, "compaction was cancelled by {cause:?}"),
             Self::UnexpectedStop(stop) => write!(formatter, "compaction stopped with {stop:?}"),
+            Self::Generation(message) => {
+                write!(formatter, "compaction generation failed: {message}")
+            }
             Self::EmptyCheckpoint => formatter.write_str("compaction returned an empty checkpoint"),
             Self::InvalidCheckpoint(error) => write!(formatter, "{error}"),
             Self::Store(error) => write!(formatter, "{error}"),

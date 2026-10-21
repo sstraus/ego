@@ -1926,6 +1926,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Err(
                 CompactionError::History(_)
                 | CompactionError::UnexpectedStop(_)
+                | CompactionError::Generation(_)
                 | CompactionError::EmptyCheckpoint
                 | CompactionError::InvalidCheckpoint(_),
             ) => (false, ExitReason::Provider),
@@ -2310,6 +2311,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             return Err(CompactionError::Cancelled(
                 self.cancel.cause().unwrap_or(CancelCause::User),
             ));
+        }
+        if let Some(message) = drained.error_message {
+            return Err(CompactionError::Generation(message));
         }
         if drained.private_tool_use
             || drained.error_kind.is_some()
@@ -5140,9 +5144,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
 
         if self.automatic_compaction && compaction_due(self.state().context) {
-            return self.refuse(turn,
-                "Measured context pressure requires a clean-session compaction before continuing.".to_owned(),
-                ExitReason::ContextOverflow).map(std::ops::ControlFlow::Break);
+            return self
+                .refuse(
+                    turn,
+                    "The session is nearly full; pausing to make room for the task.".to_owned(),
+                    ExitReason::ContextOverflow,
+                )
+                .map(std::ops::ControlFlow::Break);
         }
 
         // Per candidate: a fallback runs on a different model, and the
@@ -5886,6 +5894,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             .filter_map(|item| item.call_id.clone())
             .collect();
         let mut error_kind = None;
+        let mut error_message = None;
         // Under a provider-reported settlement the tokens and the money
         // arrive as two frames, and `EventKind::UsageUpdated` carries them
         // together because they are one observation. So both are held and
@@ -6199,6 +6208,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 }
                 AiEvent::Error { message, kind } => {
                     error_kind = Some(kind);
+                    error_message = Some(message.clone());
                     self.journal
                         .append(turn, None, None, EventKind::Error { message, kind })
                         .map(|_| ())
@@ -6288,6 +6298,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             cancelled,
             corrupt,
             error_kind,
+            error_message,
             private_text: assembled,
             private_tool_use,
             accounting_booked,
@@ -8090,6 +8101,8 @@ struct Drained {
     /// the exit of a stream that went on to end some other way, and is never
     /// consulted, because this is only read when the stop reason is `Error`.
     error_kind: Option<ErrorKind>,
+    /// The last generation error, retained for the compaction failure receipt.
+    error_message: Option<String>,
     /// Text retained for a private generation and never projected as an item.
     private_text: String,
     /// Whether a private, tool-less generation nevertheless emitted a call.

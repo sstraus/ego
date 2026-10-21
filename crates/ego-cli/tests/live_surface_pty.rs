@@ -8828,6 +8828,12 @@ fn critic_fork_model_is_present_before_first_successor_prompt() {
 fn compact_prints_a_receipt_naming_the_successor_and_reports_context_availability() {
     let (receipt, target) = critic_successor_model_before_generation("compact");
     assert_eq!(receipt.matches("compacted session").count(), 1, "{receipt}");
+    assert!(receipt.contains("Compacting the session now"), "{receipt}");
+    assert!(!receipt.contains("continue automatically"), "{receipt}");
+    assert!(
+        !receipt.contains("Resuming the task automatically"),
+        "{receipt}"
+    );
     assert!(
         receipt.contains(&format!(
             "compacted session {} into {target}",
@@ -9382,14 +9388,20 @@ fn human_input_real_turn_does_not_render_duration_unavailable() {
     assert!(!shown.contains("duration unavailable"), "{shown}");
 }
 
-// Catches: a managed terminal idles at context pressure until /compact is typed.
+// Catches: automatic compaction silently works or only shows a refusal, without
+// explaining progress and automatic continuation in the successor session.
 #[test]
 fn context_pressure_compacts_and_continues_without_operator_input() {
     let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let gate = ReleaseGate::new();
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(support::costing("PRESSURE", 244796, 4)),
-            Reply::Sse(text(checkpoint)),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: text(checkpoint),
+                gate: gate.clone(),
+            },
             Reply::Sse(text("RECOVERED")),
         ],
         context_length: Some(272000),
@@ -9414,10 +9426,48 @@ fn context_pressure_compacts_and_continues_without_operator_input() {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"finish this task\r").unwrap();
     input.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 2 {
+        assert!(Instant::now() < deadline, "checkpoint did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    until_notice_prose(
+        &reader,
+        &mut output,
+        start,
+        "The task will continue automatically.",
+    );
+    let preparing = support::notice_prose(&normalized(&output[start..]));
+    gate.release();
     until_normalized(&reader, &mut output, start, "RECOVERED");
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
+    let shown = support::notice_prose(&normalized(&output[start..]));
+    assert!(
+        preparing.contains("Compacting the session now"),
+        "missing running notice: {preparing}"
+    );
+    assert!(preparing.contains("saving a summary"), "{preparing}");
+    assert!(preparing.contains("continue automatically"), "{preparing}");
+    assert!(
+        preparing.contains("Working"),
+        "missing progress: {preparing}"
+    );
+    assert!(!shown.contains("measured context pressure"), "{shown}");
+    assert!(!shown.contains("Measured context pressure"), "{shown}");
+    assert!(!shown.contains("clean-session"), "{shown}");
+    let target = std::fs::read_dir(places.home_path().join("sessions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name != support::FIXTURE_SESSION_ID && name.parse::<uuid::Uuid>().is_ok())
+        .expect("successor session");
+    let resumed_notice = format!("Resuming the task automatically in session {target}");
+    let resumed_at = shown
+        .find(&resumed_notice)
+        .expect("successor continuation notice");
+    assert!(resumed_at < shown.find("RECOVERED").unwrap(), "{shown}");
     let requests = stub.generations();
     assert_eq!(requests.len(), 3);
     let resumed = requests[2].to_string();
@@ -9491,7 +9541,17 @@ fn failed_compaction_preparation_does_not_loop_refusals() {
         shown.contains("automatic compaction failed; session stopped"),
         "{shown}"
     );
-    assert!(shown.contains("compaction stopped with Error"), "{shown}");
+    assert!(
+        support::notice_prose(&shown).contains(
+            "automatic compaction failed; session stopped: compaction failed: compaction preparation failed: compaction generation failed: the response stream failed: HTTP response body failed"
+        ),
+        "the final failure must name the transport cause: {shown}"
+    );
+    assert!(shown.contains("Compacting the session now"), "{shown}");
+    assert!(
+        !shown.contains("Resuming the task automatically"),
+        "{shown}"
+    );
     assert_eq!(
         stub.generations().len(),
         2,

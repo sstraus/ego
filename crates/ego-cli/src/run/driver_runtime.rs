@@ -622,6 +622,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 None
                             } else if checkpoint_pending {
                                 checkpoint_pending = false;
+                                diagnostics.note(&format!(
+                                    "Resuming the task automatically in session {}.",
+                                    active.id()
+                                ));
                                 Some(InteractiveTurnInput::Checkpoint)
                             } else {
                                 let queue = control.status();
@@ -3222,6 +3226,11 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     seat.busy();
     seat.set_compaction_availability(repl::actions::Availability::BusyWithReason {
         reason: "ego is busy; compaction already running",
+    });
+    diagnostics.note(if automatic_compaction {
+        "Compacting the session now: saving a summary. The task will continue automatically."
+    } else {
+        "Compacting the session now: saving a summary to make room."
     });
 
     let target_runtime = Arc::new(Mutex::new(None));
