@@ -74,7 +74,19 @@ pub(super) fn open(
             let config = async_tungstenite::tungstenite::protocol::WebSocketConfig::default()
                 .max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
             async_tungstenite::tokio::client_async_tls_with_config(handshake, tcp, Some(config))
-                .await.map_err(|_| definitely_unsent(TransportFailure::Connect("WebSocket handshake failed".into())))
+                .await.map_err(|error| {
+                    use async_tungstenite::tungstenite::Error;
+                    let (failure_class, status) = match &error {
+                        Error::Http(response) => ("http", Some(response.status().as_u16())),
+                        Error::Tls(_) => ("tls", None),
+                        Error::Io(_) => ("io", None),
+                        Error::Protocol(_) => ("protocol", None),
+                        _ => ("other", None),
+                    };
+                    // Never emit the error itself: it can carry response headers and bodies.
+                    tracing::debug!(failure_class, status, "WebSocket handshake refused");
+                    definitely_unsent(TransportFailure::Connect("WebSocket handshake failed".into()))
+                })
         };
         let (mut socket, _) = tokio::select! {
             result = opening => result?,

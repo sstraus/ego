@@ -87,11 +87,11 @@ fn fingerprint(request: &HttpRequest, body: &Value, transport: &str) {
     if !tracing::enabled!(target: "ego_ai::codex_session", tracing::Level::DEBUG) {
         return;
     }
-    let mut settings = body.clone();
+    let mut settings = without_input(body.clone());
     settings
         .as_object_mut()
         .expect("Codex body object")
-        .remove("input");
+        .remove("type");
     let mut prefix = Vec::new();
     let prefix_digests: Vec<_> = body["input"]
         .as_array()
@@ -108,7 +108,13 @@ fn fingerprint(request: &HttpRequest, body: &Value, transport: &str) {
         .filter(|header| {
             matches!(
                 header.name(),
-                "session-id" | "x-client-request-id" | "openai-beta"
+                "session-id"
+                    | "session_id"
+                    | "thread-id"
+                    | "x-client-request-id"
+                    | "openai-beta"
+                    | "x-codex-routing-hint"
+                    | "x-codex-turn-state"
             )
         })
         .map(|header| (header.name(), ego_core::digest::sha256_hex(header.value())))
