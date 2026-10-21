@@ -82,6 +82,49 @@ fn normalize_output(output: &[Value]) -> Option<Vec<Value>> {
     Some(items)
 }
 
+// Allowlist routing metadata only: never hash or log authorization/account headers.
+fn fingerprint(request: &HttpRequest, body: &Value, transport: &str) {
+    if !tracing::enabled!(target: "ego_ai::codex_session", tracing::Level::DEBUG) {
+        return;
+    }
+    let mut settings = body.clone();
+    settings
+        .as_object_mut()
+        .expect("Codex body object")
+        .remove("input");
+    let mut prefix = Vec::new();
+    let prefix_digests: Vec<_> = body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            prefix.extend(serde_json::to_vec(item).expect("Codex JSON serializes"));
+            ego_core::digest::sha256_hex(&prefix)
+        })
+        .collect();
+    let routing: Vec<_> = request
+        .headers
+        .iter()
+        .filter(|header| {
+            matches!(
+                header.name(),
+                "session-id" | "x-client-request-id" | "openai-beta"
+            )
+        })
+        .map(|header| (header.name(), ego_core::digest::sha256_hex(header.value())))
+        .collect();
+    tracing::debug!(
+        target: "ego_ai::codex_session",
+        transport,
+        request_digest = %ego_core::digest::sha256_hex(&serde_json::to_vec(body).expect("Codex JSON serializes")),
+        settings_digest = %ego_core::digest::sha256_hex(&serde_json::to_vec(&settings).expect("Codex JSON serializes")),
+        prompt_cache_key_digest = ?body["prompt_cache_key"].as_str().map(|key| ego_core::digest::sha256_hex(key.as_bytes())),
+        routing_header_digests = ?routing,
+        input_prefix_digests = ?prefix_digests,
+        "Codex transport fingerprint"
+    );
+}
+
 fn invalid() -> HttpError {
     HttpError::transport(TransportError::definitely_unsent(
         TransportFailure::AuthorityMismatch,
@@ -99,6 +142,7 @@ pub(crate) async fn execute(
     owner.bind_session(session_id);
     let body: Value = serde_json::from_slice(request.body.as_deref().unwrap_or_default())
         .map_err(|_| invalid())?;
+    fingerprint(&request, &body, "websocket_attempt");
     let fallback = HttpRequest {
         url: request.url.clone(),
         method: request.method,
@@ -130,6 +174,7 @@ pub(crate) async fn execute(
                     if error.delivery() == DeliveryCertainty::DefinitelyUnsent
                         && matches!(error.failure(), TransportFailure::Connect(_)) =>
                 {
+                    fingerprint(&fallback, &body, "http");
                     drop(owner);
                     return profile.execute(http.as_ref(), fallback).await;
                 }
@@ -186,6 +231,7 @@ pub(crate) async fn execute(
             request.to_core().map_err(|_| invalid())?,
         )
         .map_err(|_| invalid())?;
+    fingerprint(&request, &outgoing, "websocket");
     socket.send(prepared).await.map_err(HttpError::transport)?;
     let chunks = stream::unfold(Some((owner, socket, body)), |state| async move {
         let (mut owner, mut socket, body) = state?;
