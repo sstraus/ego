@@ -8,7 +8,8 @@ publish.workspace = true
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-webpki-roots"] }
+# Match reqwest's OS trust policy, including system-managed inspection CAs.
+async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-platform-verifier"] }
 ego-core.workspace = true
 ego-mcp.workspace = true
 fd-lock = "4.0.4"
