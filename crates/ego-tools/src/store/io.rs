@@ -169,11 +169,19 @@ pub trait PrivateLogWriter: Send {
 /// A session append descriptor owned by a writer lease. Writes are immediately
 /// visible to readers; durability barriers use this same descriptor.
 pub trait SessionLogWriter: Send {
+    /// Inspect this descriptor after a known append, without resolving its path.
+    fn file_revision(&self) -> io::Result<Option<FileRevision>> {
+        Ok(None)
+    }
     fn append_line(&mut self, line: &[u8]) -> io::Result<()>;
     fn fsync(&self) -> io::Result<()>;
 }
 
 impl SessionLogWriter for fs::File {
+    fn file_revision(&self) -> io::Result<Option<FileRevision>> {
+        FileRevision::from_metadata(&self.metadata()?).map(Some)
+    }
+
     fn append_line(&mut self, line: &[u8]) -> io::Result<()> {
         use io::Write as _;
         self.write_all(line)?;
@@ -190,7 +198,7 @@ impl SessionLogWriter for fs::File {
 pub struct FileRevision {
     pub(crate) modified: std::time::SystemTime,
     created: Option<std::time::SystemTime>,
-    length: u64,
+    pub(crate) length: u64,
     #[cfg(unix)]
     identity: (u64, u64, i64, i64),
 }
@@ -223,6 +231,13 @@ pub trait StoreIo: Send + Sync {
             io::ErrorKind::Unsupported,
             "file revisions unavailable",
         ))
+    }
+
+    /// Read an appended suffix. Adapters without ranged reads retain the safe fallback.
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Option<Vec<u8>>> {
+        self.read(path).map(|bytes| {
+            bytes.map(|bytes| bytes.get(offset as usize..).unwrap_or_default().to_vec())
+        })
     }
 
     /// Retain an append descriptor when the adapter supports it. The parent
@@ -675,6 +690,19 @@ impl StoreIo for OsIo {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Option<Vec<u8>>> {
+        use io::{Read as _, Seek as _, SeekFrom};
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
     }
 
     fn open_session_log(&self, path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {

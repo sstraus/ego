@@ -401,6 +401,32 @@ mod store {
     }
 
     impl StoreIo for ReadCountingIo {
+        fn visit_file(
+            &self,
+            path: &std::path::Path,
+            visitor: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+        ) -> std::io::Result<bool> {
+            self.inner.visit_file(path, visitor)
+        }
+
+        fn list_files(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.list_files(path)
+        }
+
+        fn file_revision(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Option<ego_tools::store::FileRevision>> {
+            self.inner.file_revision(path)
+        }
+        fn read_from(
+            &self,
+            path: &std::path::Path,
+            offset: u64,
+        ) -> std::io::Result<Option<Vec<u8>>> {
+            self.inner.read_from(path, offset)
+        }
+
         fn open_session_log(
             &self,
             path: &std::path::Path,
@@ -479,6 +505,360 @@ mod store {
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             self.inner.list_dirs(path)
         }
+    }
+
+    // Catches: run CAS rereads the complete log and discards the domain projection.
+    #[test]
+    fn leased_run_cas_between_domain_appends_does_not_replay_log() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        store
+            .compare_and_append_run(
+                &session,
+                None,
+                admitted_run_transaction(&session, 1, None, true),
+            )
+            .unwrap();
+        let opened = store
+            .open_writer(
+                &session,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::EPOCH,
+                    stale_after: Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        let completed = |seq| {
+            ev(
+                seq,
+                turn,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            )
+        };
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        opened
+            .writer
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(1)),
+                admitted_run_transaction(&session, 2, Some(1), false),
+            )
+            .unwrap();
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        reads.lock().unwrap().clear();
+        let invocation = RunInvocationId::new();
+        EvidenceAdmissionService::new()
+            .admit_run_context(
+                &opened.writer,
+                RunContextEvidence::new(
+                    session,
+                    invocation,
+                    RunId::new(session, invocation.uuid()),
+                    ConfigProvenance::default(),
+                ),
+            )
+            .unwrap();
+        let transaction = admitted_run_transaction(&session, 3, Some(2), false);
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(&session, Some(RunRevision::new(2)), transaction.clone())
+                .unwrap(),
+            RunAppend::Committed {
+                revision: RunRevision::new(3)
+            }
+        );
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(&session, Some(RunRevision::new(2)), transaction)
+                .unwrap(),
+            RunAppend::Conflict {
+                actual: RunRevision::new(3)
+            }
+        );
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "steady-state run CAS and following domain append must not replay the log"
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 7);
+        assert!(entries.iter().all(Result::is_ok));
+        assert_eq!(store.list().unwrap()[0].summary_failures, 3);
+
+        // Catches: a cached revision accepts a stale CAS after another store writes.
+        let other = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        other
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(3)),
+                admitted_run_transaction(&session, 4, Some(3), false),
+            )
+            .unwrap();
+        assert_eq!(
+            opened
+                .writer
+                .compare_and_append_run(
+                    &session,
+                    Some(RunRevision::new(3)),
+                    admitted_run_transaction(&session, 4, Some(3), false)
+                )
+                .unwrap(),
+            RunAppend::Conflict {
+                actual: RunRevision::new(4)
+            }
+        );
+        opened
+            .writer
+            .append(&session, &completed(seq.next()))
+            .unwrap();
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 9);
+        assert!(entries.iter().all(Result::is_ok));
+        assert_eq!(store.list().unwrap()[0].summary_failures, 4);
+
+        // Catches: fstat on an old append descriptor misses atomic path replacement.
+        let log = log_path(dir.path(), &session);
+        let bytes = std::fs::read_to_string(&log).unwrap();
+        let replacement = bytes.replacen(
+            "\"workspace_root\":\"/workspace\"",
+            "\"workspace_root\":\"/elsewhere\"",
+            1,
+        );
+        assert_ne!(replacement, bytes);
+        assert_eq!(replacement.len(), bytes.len());
+        let staging = log.with_extension("replacement");
+        std::fs::write(&staging, &replacement).unwrap();
+        std::fs::rename(staging, &log).unwrap();
+        assert!(
+            opened
+                .writer
+                .compare_and_append_run(
+                    &session,
+                    Some(RunRevision::new(4)),
+                    admitted_run_transaction(&session, 5, Some(4), false)
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(log).unwrap(), replacement);
+    }
+
+    // Catches: reopening an unchanged, locally indexed writer replays recovery,
+    // resume, evidence indexing and blob reachability instead of using validated facts.
+    #[test]
+    fn indexed_writer_reopen_and_evidence_store_do_not_replay_log() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let store = JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(ReadCountingIo {
+                inner: OsIo,
+                reads: Arc::clone(&reads),
+            }),
+        );
+        let session = SessionId::new();
+        store
+            .compare_and_append_run(
+                &session,
+                None,
+                admitted_run_transaction(&session, 1, None, true),
+            )
+            .unwrap();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        opened
+            .writer
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(1)),
+                admitted_run_transaction(&session, 2, Some(1), false),
+            )
+            .unwrap();
+        let mut seq = Seq::ZERO;
+        let turn = TurnId::new();
+        use ego_core::store::blob::BlobStore as _;
+        let blobs = ego_tools::store::SessionBlobStore::open(dir.path(), session, 1024).unwrap();
+        let mut blob = blobs.begin().unwrap();
+        blob.append(b"reachable image").unwrap();
+        let reference = blob.commit().unwrap();
+        let mut orphan = blobs.begin().unwrap();
+        orphan.append(b"orphan image").unwrap();
+        let orphan = orphan.commit().unwrap();
+        let image = ego_core::generator::types::ImageRef::new(
+            reference.clone(),
+            ego_core::generator::types::ImageMediaType::Png,
+            1,
+            1,
+        )
+        .unwrap();
+        let mut prompt = ev(
+            seq.next(),
+            turn,
+            EventKind::UserPrompt {
+                text: "Describe this".to_owned(),
+                images: vec![image],
+                audio: Vec::new(),
+                queued_prompt: None,
+            },
+        );
+        prompt.env.item = Some(ego_core::event::id::ItemId::new());
+        opened.writer.append(&session, &prompt).unwrap();
+        opened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::SessionTitleChanged {
+                        title: Some("Indexed session".to_owned()),
+                    },
+                ),
+            )
+            .unwrap();
+        let invocation = RunInvocationId::new();
+        let context = RunContextEvidence::new(
+            session,
+            invocation,
+            RunId::new(session, invocation.uuid()),
+            ConfigProvenance::default(),
+        );
+        EvidenceAdmissionService::new()
+            .admit_run_context(&opened.writer, context.clone())
+            .unwrap();
+        drop(opened);
+        reads.lock().unwrap().clear();
+        // ACP admission and settlement CAS can run between writer leases.
+        store
+            .compare_and_append_run(
+                &session,
+                Some(RunRevision::new(2)),
+                admitted_run_transaction(&session, 3, Some(2), false),
+            )
+            .unwrap();
+        let reopened = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(reopened.repair.truncated_bytes, 0);
+        assert_eq!(reopened.repair.dropped_lines, 0);
+        assert_eq!(reopened.state.title.as_deref(), Some("Indexed session"));
+        reopened.writer.evidence_store(1024 * 1024).unwrap();
+        assert_eq!(blobs.read(&reference).unwrap(), b"reachable image");
+        assert!(
+            blobs.read(&orphan).is_err(),
+            "indexed GC must still collect unreferenced blobs"
+        );
+        EvidenceAdmissionService::new()
+            .admit_run_context(&reopened.writer, context)
+            .unwrap();
+        reopened
+            .writer
+            .append(
+                &session,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ExitReason::Completed,
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "indexed reopen and evidence-store opening must not replay the whole log"
+        );
+        assert_eq!(
+            store.list().unwrap()[0].title.as_deref(),
+            Some("Indexed session")
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        assert_eq!(entries.len(), 7);
+        assert!(entries.iter().all(Result::is_ok));
+        drop(reopened);
+
+        // Catches: the fast path mistakes a valid log index for a valid manifest.
+        let manifest = log_path(dir.path(), &session).with_file_name("manifest.json");
+        std::fs::write(&manifest, b"{").unwrap();
+        std::fs::write(ego_tools::store::tmp_path_for(&manifest), b"orphan").unwrap();
+        reads.lock().unwrap().clear();
+        let repaired = store.open_writer(&session, evidence_lease()).unwrap();
+        assert!(repaired.repair.manifest_rebuilt);
+        assert!(repaired.repair.removed_tmp);
+        assert_eq!(repaired.state.title.as_deref(), Some("Indexed session"));
+        assert_eq!(
+            reads
+                .lock()
+                .unwrap()
+                .get(&log_path(dir.path(), &session))
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        let snapshot_state = repaired.state.clone();
+        drop(repaired);
+
+        // Catches: a cached open ignores a snapshot installed between leases.
+        store
+            .write_snapshot(&session, snapshot_state.last_seq, &snapshot_state)
+            .unwrap();
+        let snapshotted = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(snapshotted.snapshot, None);
+        assert_eq!(snapshotted.state.title.as_deref(), Some("Indexed session"));
+        drop(snapshotted);
+
+        // Catches: a stale in-memory index bypasses repair after an external tear.
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log_path(dir.path(), &session))
+            .unwrap()
+            .write_all(b"torn")
+            .unwrap();
+        let recovered = store.open_writer(&session, evidence_lease()).unwrap();
+        assert_eq!(recovered.repair.truncated_bytes, 4);
+        assert_eq!(recovered.state.title.as_deref(), Some("Indexed session"));
+        assert_eq!(
+            block_on(store.read(&session).unwrap().collect::<Vec<_>>()).len(),
+            7
+        );
     }
 
     // Catches: a lease-held append reopens the header and tail for every event.
