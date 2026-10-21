@@ -308,10 +308,50 @@ impl PromptStartRow {
     }
 }
 
+/// Only SGR escapes are safe in a row patch. Cursor controls, tabs and OSC
+/// sequences require the full painter, even if their stripped widths fit.
+fn safe_indicator_row(row: &str, width: u16) -> bool {
+    let row = row.trim_end_matches('\r');
+    let mut rest = row;
+    while let Some(index) = rest.find('\x1b') {
+        if rest[..index].chars().any(char::is_control) {
+            return false;
+        }
+        let Some(parameters) = rest[index..].strip_prefix("\x1b[") else {
+            return false;
+        };
+        let Some(end) = parameters.find('m') else {
+            return false;
+        };
+        if !parameters[..end]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b';' || byte == b':')
+        {
+            return false;
+        }
+        rest = &parameters[end + 1..];
+    }
+    !rest.chars().any(char::is_control) && line_width(row) < usize::from(width)
+}
+
+/// Complete non-menu projection. Only asynchronous requests may reuse it;
+/// editor events and menus always use the full painter.
+#[derive(Clone, PartialEq, Eq)]
+struct PaintedFrame {
+    lines: PromptLines<'static>,
+    mode: PromptEditMode,
+    colors: [nu_ansi_term::Color; 3],
+    ansi: bool,
+    cursors: Option<CursorConfig>,
+    indicator_updates: bool,
+}
+
 /// Implementation of the output to the terminal
 pub struct Painter {
     // Stdout
     stdout: W,
+    last_frame: Option<PaintedFrame>,
+    last_cursor_margin_row: Option<u16>,
     prompt_start_row: PromptStartRow,
     // The number of lines that the prompt takes up
     prompt_height: u16,
@@ -330,6 +370,8 @@ impl Painter {
     pub(crate) fn new(stdout: W) -> Self {
         Painter {
             stdout,
+            last_frame: None,
+            last_cursor_margin_row: None,
             prompt_start_row: PromptStartRow::Unverified,
             prompt_height: 0,
             terminal_size: (0, 0),
@@ -354,6 +396,7 @@ impl Painter {
 
     /// Sets the semantic prompt markers for terminal integration (OSC 133/633)
     pub fn set_semantic_markers(&mut self, markers: Option<Box<dyn SemanticPromptMarkers>>) {
+        self.last_frame = None;
         self.semantic_markers = markers;
     }
 
@@ -529,6 +572,7 @@ impl Painter {
     /// Erase a finished prompt when the screen and the cursor are still where
     /// its return left them, leaving the cursor on its first row.
     pub(crate) fn erase_footprint(&mut self, footprint: &PromptFootprint) -> Result<bool> {
+        self.last_frame = None;
         let Some(row) = footprint.erasable_from(cursor::position()?, terminal::size()?) else {
             return Ok(false);
         };
@@ -547,6 +591,7 @@ impl Painter {
         &mut self,
         suspended_state: Option<&PainterSuspendedState>,
     ) -> Result<()> {
+        self.last_frame = None;
         // Update the terminal size
         self.terminal_size = {
             let size = terminal::size()?;
@@ -586,6 +631,7 @@ impl Painter {
     /// that lets something other than reedline's rendering move the
     /// cursor (e.g. `$EDITOR`).
     pub(crate) fn invalidate_prompt_start_row(&mut self) {
+        self.last_frame = None;
         self.prompt_start_row.invalidate();
     }
 
@@ -607,6 +653,83 @@ impl Painter {
         use_ansi_coloring: bool,
         cursor_config: &Option<CursorConfig>,
     ) -> Result<()> {
+        self.paint_buffer(
+            prompt,
+            lines,
+            prompt_mode,
+            menu,
+            use_ansi_coloring,
+            cursor_config,
+            false,
+        )
+    }
+
+    pub(crate) fn repaint_buffer_if_changed(
+        &mut self,
+        prompt: &dyn Prompt,
+        lines: &PromptLines,
+        prompt_mode: PromptEditMode,
+        menu: Option<&ReedlineMenu>,
+        use_ansi_coloring: bool,
+        cursor_config: &Option<CursorConfig>,
+    ) -> Result<()> {
+        self.paint_buffer(
+            prompt,
+            lines,
+            prompt_mode,
+            menu,
+            use_ansi_coloring,
+            cursor_config,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_buffer(
+        &mut self,
+        prompt: &dyn Prompt,
+        lines: &PromptLines,
+        prompt_mode: PromptEditMode,
+        menu: Option<&ReedlineMenu>,
+        use_ansi_coloring: bool,
+        cursor_config: &Option<CursorConfig>,
+        only_if_changed: bool,
+    ) -> Result<()> {
+        let frame = menu.is_none().then(|| PaintedFrame {
+            lines: lines.clone().into_owned(),
+            mode: prompt_mode.clone(),
+            colors: [
+                prompt.get_prompt_color(),
+                prompt.get_indicator_color(),
+                prompt.get_prompt_right_color(),
+            ],
+            ansi: use_ansi_coloring,
+            cursors: cursor_config.clone(),
+            indicator_updates: prompt.supports_indicator_row_updates(),
+        });
+        if only_if_changed
+            && frame.is_some()
+            && frame == self.last_frame
+            && matches!(self.prompt_start_row, PromptStartRow::Verified(_))
+            && !self.just_resized
+        {
+            return Ok(());
+        }
+        if only_if_changed
+            && prompt.supports_indicator_row_updates()
+            && matches!(self.prompt_start_row, PromptStartRow::Verified(_))
+            && !self.just_resized
+            && !self.large_buffer
+        {
+            if let Some(ref frame) = frame {
+                if self.repaint_indicator_rows(frame)? {
+                    self.last_frame = Some(frame.clone());
+                    return Ok(());
+                }
+            }
+        }
+        // A failed or partial write must never leave a reusable frame.
+        self.last_frame = None;
         // Reset any ANSI styling that may have been left by external commands
         // This ensures the prompt is not affected by previous output styling
         // Note: Attribute::Reset (SGR 0) resets all attributes including colors
@@ -746,7 +869,73 @@ impl Painter {
         }
         self.stdout.queue(cursor::Show)?;
 
-        self.stdout.flush()
+        self.stdout.flush()?;
+        self.last_cursor_margin_row = margin_cursor_row;
+        self.last_frame = frame;
+        Ok(())
+    }
+
+    /// Patch only complete, unwrapped indicator rows above an unchanged editor.
+    /// A wrap, menu, modal transition or geometry change takes the full path.
+    fn repaint_indicator_rows(&mut self, frame: &PaintedFrame) -> Result<bool> {
+        let Some(previous) = &self.last_frame else {
+            return Ok(false);
+        };
+        if !frame.lines.prompt_str_left.is_empty() || !frame.lines.prompt_str_right.is_empty() {
+            return Ok(false);
+        }
+        let mut comparison = frame.clone();
+        comparison.lines.prompt_indicator = previous.lines.prompt_indicator.clone();
+        if comparison != *previous {
+            return Ok(false);
+        }
+        let Some((old, old_tail)) = previous.lines.prompt_indicator.rsplit_once('\n') else {
+            return Ok(false);
+        };
+        let Some((new, new_tail)) = frame.lines.prompt_indicator.rsplit_once('\n') else {
+            return Ok(false);
+        };
+        if old_tail != new_tail {
+            return Ok(false);
+        }
+        let old_rows = old.split('\n').collect::<Vec<_>>();
+        let new_rows = new.split('\n').collect::<Vec<_>>();
+        if old_rows.len() != new_rows.len() || new_rows.len() >= usize::from(self.remaining_lines())
+        {
+            return Ok(false);
+        }
+        if old_rows
+            .iter()
+            .chain(&new_rows)
+            .any(|row| !safe_indicator_row(row, self.screen_width()))
+        {
+            return Ok(false);
+        }
+        let changed = old_rows
+            .iter()
+            .zip(new_rows)
+            .enumerate()
+            .filter(|(_, (old, new))| **old != *new)
+            .map(|(index, (_, row))| (index as u16, row.trim_end_matches('\r').to_owned()))
+            .collect::<Vec<_>>();
+        self.last_frame = None;
+        self.stdout
+            .queue(SetAttribute(Attribute::Reset))?
+            .queue(cursor::Hide)?;
+        for (offset, row) in changed {
+            self.stdout
+                .queue(MoveTo(0, self.prompt_start_row.last_known_row() + offset))?
+                .queue(Clear(ClearType::CurrentLine))?;
+            if frame.ansi {
+                self.stdout.queue(Print(frame.colors[1].prefix()))?;
+            }
+            self.stdout
+                .queue(Print(row))?
+                .queue(SetAttribute(Attribute::Reset))?;
+        }
+        self.queue_cursor_placement(self.last_cursor_margin_row)?;
+        self.stdout.queue(cursor::Show)?.flush()?;
+        Ok(true)
     }
 
     /// Captures the current screen layout into a [`RenderSnapshot`] that records
@@ -1277,6 +1466,7 @@ impl Painter {
     ///
     /// Also works in raw mode
     pub(crate) fn print_crlf(&mut self) -> Result<()> {
+        self.last_frame = None;
         self.stdout.queue(Print("\r\n"))?;
 
         self.stdout.flush()
@@ -1309,6 +1499,7 @@ impl Painter {
     /// cursor survives, leaving a rejected command on screen as the record of
     /// what was aborted (#1143).
     pub(crate) fn move_cursor_to_end(&mut self) -> Result<()> {
+        self.last_frame = None;
         self.stdout.queue(Clear(ClearType::FromCursorDown))?;
         if let Some(after_cursor) = &self.after_cursor_lines {
             self.stdout.queue(Print(after_cursor))?;
@@ -1336,14 +1527,17 @@ impl Painter {
         // prompt suffixes behind when a wrapped message is shorter on a later
         // row; repaint may scroll that contaminated row above its new anchor.
         self.clear_from_anchor(starting_row)?;
-        let erase_line = format!("\r{}\r", " ".repeat(self.screen_width().into()));
         let max_row = self.screen_height().saturating_sub(1);
         // Invalidate up front: a `?` early-return below can leave
         // bytes in the buffer with the cache still claiming `Verified`.
         self.invalidate_prompt_start_row();
         let mut row = starting_row;
         for line in messages {
-            self.stdout.queue(Print(&erase_line))?;
+            // Erase-to-end also clears column zero, which clear_from_anchor
+            // deliberately skips on row zero to avoid tmux scroll-on-clear.
+            self.stdout
+                .queue(Print("\r"))?
+                .queue(Clear(ClearType::UntilNewLine))?;
             // Note: we don't use `print_line` here because we don't want to
             // flush right now. The subsequent repaint of the prompt will cause
             // immediate flush anyways. And if we flush here, every external
@@ -1453,6 +1647,10 @@ mod tests {
     struct TestPrompt;
 
     impl Prompt for TestPrompt {
+        fn supports_indicator_row_updates(&self) -> bool {
+            true
+        }
+
         fn render_prompt_left(&self) -> Cow<'_, str> {
             "> ".into()
         }
@@ -2621,6 +2819,186 @@ mod tests {
                 "emitted {sgr:?} with coloring disabled: {out:?}"
             );
         }
+    }
+
+    // Catches: an identical asynchronous projection still emits a full redraw.
+    #[test]
+    fn unchanged_requested_frame_emits_no_bytes() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(4);
+        let lines = make_lines("Working", "> ", "", "draft", "");
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        let length = painter.stdout.captured().len();
+        painter
+            .repaint_buffer_if_changed(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        assert_eq!(painter.stdout.captured().len(), length);
+        // Editor events must retain the full path even with identical text.
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        assert!(painter.stdout.captured().len() > length);
+    }
+
+    // Catches: a timer-only status change erases and redraws the unchanged draft.
+    #[test]
+    fn indicator_tick_preserves_composer_and_unchanged_plan_rows() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(4);
+        let lines = make_lines("", "plan stays\nWorking 1s\n> ", "", "draft", "");
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        let mark = painter.stdout.captured().len();
+        let lines = make_lines("", "plan stays\nWorking 2s\n> ", "", "draft", "");
+        painter
+            .repaint_buffer_if_changed(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        let patch = String::from_utf8_lossy(&painter.stdout.captured()[mark..]);
+        assert!(patch.contains("Working 2s"));
+        for unchanged in ["plan stays", "draft", "> ", "\x1b[J"] {
+            assert!(!patch.contains(unchanged), "{patch:?}");
+        }
+    }
+
+    // Catches: a newly wrapped indicator or cursor-control row is patched into
+    // the editor instead of falling back to the full geometry owner.
+    #[test]
+    fn indicator_patch_refuses_wrapping_and_cursor_controls() {
+        for indicator in ["Working 2s with wrapping\n> ", "Working \x1b[2J2s\n> "] {
+            let mut painter = Painter::new(W::capture());
+            painter.terminal_size = (20, 10);
+            painter.prompt_start_row.mark_verified(2);
+            let lines = make_lines("", "Working 1s\n> ", "", "draft", "");
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+            let mark = painter.stdout.captured().len();
+            let lines = make_lines("", indicator, "", "draft", "");
+            painter
+                .repaint_buffer_if_changed(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+            let patch = String::from_utf8_lossy(&painter.stdout.captured()[mark..]);
+            assert!(
+                patch.contains("draft") && patch.contains("\x1b[J"),
+                "{patch:?}"
+            );
+        }
+    }
+
+    // Catches: comparing only the status hides a changed footer or draft cursor.
+    #[test]
+    fn changed_requested_frame_repaints_footer_and_cursor() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(4);
+        let mut lines = make_lines("Working", "> ", "", "draft", "");
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        for change in 0..3 {
+            match change {
+                0 => lines.footer = Cow::Borrowed("new footer"),
+                1 => {
+                    lines.before_cursor = Cow::Borrowed("draf");
+                    lines.after_cursor = Cow::Borrowed("t");
+                }
+                _ => lines.prompt_str_left = Cow::Borrowed("notice"),
+            }
+            let length = painter.stdout.captured().len();
+            painter
+                .repaint_buffer_if_changed(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+            assert!(painter.stdout.captured().len() > length);
+        }
+    }
+
+    // Catches: replacing padding leaves the skipped home cell dirty or triggers
+    // tmux scroll-on-clear by erasing below at home.
+    #[cfg(feature = "external_printer")]
+    #[test]
+    fn external_empty_row_at_zero_erases_home_without_clear_down_at_home() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 8);
+        painter.prompt_start_row.mark_verified(0);
+        painter
+            .print_external_message(vec![String::new()], &LineBuffer::new(), &TestPrompt)
+            .unwrap();
+        let bytes = painter.stdout.captured();
+        assert!(bytes
+            .windows(b"\r\x1b[K\r\n".len())
+            .any(|window| window == b"\r\x1b[K\r\n"));
+        assert!(!bytes
+            .windows(b"\x1b[1;1H\x1b[J".len())
+            .any(|window| window == b"\x1b[1;1H\x1b[J"));
+        assert!(!bytes.windows(120).any(|window| window == [b' '; 120]));
     }
 
     #[cfg(feature = "external_printer")]

@@ -237,7 +237,7 @@ pub struct Reedline {
     // Callback function that is called periodically while waiting for input.
     // Useful for processing external events (e.g., GUI updates) during idle time.
     #[cfg(feature = "idle_callback")]
-    idle_callback: Option<Box<dyn FnMut() + Send>>,
+    idle_callback: Option<Box<dyn FnMut() -> bool + Send>>,
 }
 
 /// A submitted host receipt has no composer indicator or live status prefix.
@@ -1094,11 +1094,9 @@ impl Reedline {
             // Call idle callback if set (for processing external events like GUI updates)
             #[cfg(feature = "idle_callback")]
             if let Some(ref mut callback) = self.idle_callback {
-                callback();
-                // The callback owns stdout while it runs and may have
-                // written or moved the cursor. Re-verify the anchor on
-                // the next paint.
-                self.painter.invalidate_prompt_start_row();
+                if callback() {
+                    self.painter.invalidate_prompt_start_row();
+                }
             }
 
             if let Some(ref signal) = self.break_signal {
@@ -1114,7 +1112,11 @@ impl Reedline {
             }
 
             if self.take_repaint_request() {
-                self.repaint(prompt)?;
+                if self.input_mode == InputMode::HistorySearch {
+                    self.history_search_paint(prompt)?;
+                } else {
+                    self.buffer_paint(prompt, true)?;
+                }
             }
 
             #[cfg(feature = "external_printer")]
@@ -2253,7 +2255,7 @@ impl Reedline {
         if self.input_mode == InputMode::HistorySearch {
             self.history_search_paint(prompt)
         } else {
-            self.buffer_paint(prompt)
+            self.buffer_paint(prompt, false)
         }
     }
 
@@ -2588,7 +2590,7 @@ impl Reedline {
     /// Triggers a full repaint including the prompt parts
     ///
     /// Includes the highlighting and hinting calls.
-    fn buffer_paint(&mut self, prompt: &dyn Prompt) -> Result<()> {
+    fn buffer_paint(&mut self, prompt: &dyn Prompt, only_if_changed: bool) -> Result<()> {
         let cursor_position_in_buffer = self.editor.insertion_point();
         let buffer_to_paint = self.editor.get_buffer();
 
@@ -2686,10 +2688,16 @@ impl Reedline {
 
         let menu = self.menus.iter().find(|menu| menu.is_visible());
 
-        self.painter.repaint_buffer(
+        let paint = if only_if_changed {
+            Painter::repaint_buffer_if_changed
+        } else {
+            Painter::repaint_buffer
+        };
+        paint(
+            &mut self.painter,
             prompt,
             &lines,
-            self.prompt_edit_mode(),
+            self.edit_mode.edit_mode(),
             menu,
             self.use_ansi_coloring,
             &self.cursor_shapes,
@@ -2769,7 +2777,21 @@ impl Reedline {
     ///     }));
     /// ```
     #[cfg(feature = "idle_callback")]
-    pub fn with_idle_callback(mut self, callback: Box<dyn FnMut() + Send>) -> Self {
+    pub fn with_idle_callback(mut self, mut callback: Box<dyn FnMut() + Send>) -> Self {
+        self.idle_callback = Some(Box::new(move || {
+            callback();
+            true
+        }));
+        self
+    }
+
+    /// Set an idle callback that reports whether it changed terminal geometry.
+    /// Return false for nonprinting work or cursor-preserving metadata only.
+    #[cfg(feature = "idle_callback")]
+    pub fn with_geometry_idle_callback(
+        mut self,
+        callback: Box<dyn FnMut() -> bool + Send>,
+    ) -> Self {
         self.idle_callback = Some(callback);
         self
     }

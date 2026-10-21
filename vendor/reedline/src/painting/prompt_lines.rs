@@ -9,7 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 /// Aggregate of prompt and input string used by `Painter`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PromptLines<'prompt> {
     pub(crate) prompt_str_left: Cow<'prompt, str>,
     pub(crate) prompt_str_right: Cow<'prompt, str>,
@@ -57,6 +57,19 @@ impl<'prompt> PromptLines<'prompt> {
                 .into_owned()
                 .into(),
             right_prompt_on_last_line,
+        }
+    }
+
+    pub(crate) fn into_owned(self) -> PromptLines<'static> {
+        PromptLines {
+            prompt_str_left: self.prompt_str_left.into_owned().into(),
+            prompt_str_right: self.prompt_str_right.into_owned().into(),
+            prompt_indicator: self.prompt_indicator.into_owned().into(),
+            before_cursor: self.before_cursor.into_owned().into(),
+            after_cursor: self.after_cursor.into_owned().into(),
+            footer: self.footer.into_owned().into(),
+            hint: self.hint.into_owned().into(),
+            right_prompt_on_last_line: self.right_prompt_on_last_line,
         }
     }
 
