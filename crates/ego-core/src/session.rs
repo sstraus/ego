@@ -34,9 +34,19 @@ pub enum SessionLineage {
 /// Failures produced by the durable replay adapter, before core policy is applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplaySourceError {
-    CorruptSession { session: SessionId, reason: String },
-    UnknownEntry { session: SessionId, position: Seq },
-    Unavailable { session: SessionId, reason: String },
+    CorruptSession {
+        session: SessionId,
+        reason: String,
+    },
+    UnknownEntry {
+        session: SessionId,
+        position: Seq,
+        reason: String,
+    },
+    Unavailable {
+        session: SessionId,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ReplaySourceError {
@@ -45,10 +55,14 @@ impl fmt::Display for ReplaySourceError {
             Self::CorruptSession { session, reason } => {
                 write!(formatter, "session {session} is corrupt: {reason}")
             }
-            Self::UnknownEntry { session, position } => {
+            Self::UnknownEntry {
+                session,
+                position,
+                reason,
+            } => {
                 write!(
                     formatter,
-                    "session {session} has an unknown entry at {position:?}"
+                    "session {session} has an unknown entry at {position:?}: {reason}"
                 )
             }
             Self::Unavailable { session, reason } => {
@@ -85,6 +99,7 @@ pub enum ReplayError {
     UnknownEntry {
         session: SessionId,
         position: Seq,
+        reason: String,
     },
     MissingBlob {
         session: SessionId,
@@ -110,10 +125,14 @@ impl fmt::Display for ReplayError {
             Self::CorruptSession { session, reason } => {
                 write!(formatter, "session {session} is corrupt: {reason}")
             }
-            Self::UnknownEntry { session, position } => {
+            Self::UnknownEntry {
+                session,
+                position,
+                reason,
+            } => {
                 write!(
                     formatter,
-                    "session {session} has an unknown entry at {position:?}"
+                    "session {session} has an unknown entry at {position:?}: {reason}"
                 )
             }
             Self::MissingBlob { session, reference } => {
@@ -145,9 +164,15 @@ pub(crate) fn map_source(error: ReplaySourceError) -> ReplayError {
         | ReplaySourceError::Unavailable { session, reason } => {
             ReplayError::CorruptSession { session, reason }
         }
-        ReplaySourceError::UnknownEntry { session, position } => {
-            ReplayError::UnknownEntry { session, position }
-        }
+        ReplaySourceError::UnknownEntry {
+            session,
+            position,
+            reason,
+        } => ReplayError::UnknownEntry {
+            session,
+            position,
+            reason,
+        },
     }
 }
 

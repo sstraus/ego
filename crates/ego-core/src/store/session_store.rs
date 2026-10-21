@@ -88,6 +88,23 @@ impl<'de> Deserialize<'de> for SessionEntry {
             }
             SessionEntryWire::Evidence { evidence } => {
                 if let Some(error) = evidence.current_schema_error() {
+                    if let EvidenceRecord::GenerationAdmission(admission) = &evidence {
+                        let found = admission.capabilities().schema_version;
+                        let required =
+                            crate::generator::capabilities::ModelCapabilities::SCHEMA_VERSION;
+                        if admission.version() == crate::evidence::EVIDENCE_SCHEMA_VERSION
+                            && found != required
+                        {
+                            let age = if found < required {
+                                "an old"
+                            } else {
+                                "a newer"
+                            };
+                            return Err(serde::de::Error::custom(format!(
+                                "session was written with {age}, unsupported capabilities schema {found}; this build requires schema {required}"
+                            )));
+                        }
+                    }
                     return Err(serde::de::Error::custom(error));
                 }
                 Self::Evidence(evidence)

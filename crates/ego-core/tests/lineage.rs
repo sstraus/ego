@@ -380,6 +380,7 @@ fn missing_session_corruption_unknown_entry_and_blob_failures_are_typed_refusals
         Err(ReplaySourceError::UnknownEntry {
             session: source_id,
             position: seq(2),
+            reason: "unknown fixture entry".to_owned(),
         }),
     );
     source.lineages.insert(

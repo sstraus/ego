@@ -440,6 +440,7 @@ fn unknown_durable_entry_fails_closed_and_preserves_source_bytes() {
         Err(ReplaySourceError::UnknownEntry {
             session: source,
             position: Seq::ZERO,
+            reason: "unknown fixture entry".to_owned(),
         }),
     );
     let before = source_bytes(&fixture);
