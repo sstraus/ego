@@ -74,12 +74,26 @@ pub(super) fn open(
             let config = async_tungstenite::tungstenite::protocol::WebSocketConfig::default()
                 .max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
             async_tungstenite::tokio::client_async_tls_with_config(handshake, tcp, Some(config))
-                .await.map_err(|_| definitely_unsent(TransportFailure::Connect("WebSocket handshake failed".into())))
+                .await.map_err(|error| {
+                    use async_tungstenite::tungstenite::Error;
+                    let (failure_class, status) = match &error {
+                        Error::Http(response) => ("http", Some(response.status().as_u16())),
+                        Error::Tls(_) => ("tls", None),
+                        Error::Io(_) => ("io", None),
+                        Error::Protocol(_) => ("protocol", None),
+                        _ => ("other", None),
+                    };
+                    // Never emit the error itself: it can carry response headers and bodies.
+                    let detail = handshake_io_detail(&error);
+                    tracing::debug!(failure_class, status, io_kind = ?detail.io_kind, raw_os_error = ?detail.raw_os_error, rustls_variant = detail.rustls_variant, certificate_variant = detail.certificate_variant, "WebSocket handshake refused");
+                    definitely_unsent(TransportFailure::Connect("WebSocket handshake failed".into()))
+                })
         };
         let (mut socket, _) = tokio::select! {
             result = opening => result?,
             failure = scope_end(cancel.clone(), run_deadline, deadline) => return Err(definitely_unsent(failure)),
         };
+        tracing::debug!("WebSocket handshake accepted on fresh TCP/TLS connection");
         let (sender, mut receiver) = mpsc::channel(1);
         let lifetime_cancel = cancel.clone();
         let owner = AbortOnDrop(runtime_handle().spawn(async move {
@@ -233,5 +247,158 @@ impl WebSocketSession for Session {
                 })
             })?
         })
+    }
+}
+
+/// Only allowlisted, payload-free values may cross the diagnostic boundary.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HandshakeIoDetail {
+    io_kind: Option<std::io::ErrorKind>,
+    raw_os_error: Option<i32>,
+    rustls_variant: Option<&'static str>,
+    certificate_variant: Option<&'static str>,
+}
+
+fn handshake_io_detail(error: &async_tungstenite::tungstenite::Error) -> HandshakeIoDetail {
+    use async_tungstenite::tungstenite::{Error, error::TlsError};
+    let mut detail = HandshakeIoDetail::default();
+    let tls = match error {
+        Error::Io(io) => {
+            detail.io_kind = Some(io.kind());
+            detail.raw_os_error = io.raw_os_error();
+            io.get_ref()
+                .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        }
+        Error::Tls(TlsError::Rustls(tls)) => Some(tls.as_ref()),
+        _ => None,
+    };
+    if let Some(tls) = tls {
+        detail.rustls_variant = Some(rustls_variant(tls));
+        if let rustls::Error::InvalidCertificate(certificate) = tls {
+            detail.certificate_variant = Some(certificate_variant(certificate));
+        }
+    }
+    detail
+}
+
+fn rustls_variant(error: &rustls::Error) -> &'static str {
+    use rustls::Error::*;
+    match error {
+        InappropriateMessage { .. } => "InappropriateMessage",
+        InappropriateHandshakeMessage { .. } => "InappropriateHandshakeMessage",
+        InvalidEncryptedClientHello(..) => "InvalidEncryptedClientHello",
+        InvalidMessage(..) => "InvalidMessage",
+        NoCertificatesPresented => "NoCertificatesPresented",
+        UnsupportedNameType => "UnsupportedNameType",
+        DecryptError => "DecryptError",
+        EncryptError => "EncryptError",
+        PeerIncompatible(..) => "PeerIncompatible",
+        PeerMisbehaved(..) => "PeerMisbehaved",
+        AlertReceived(..) => "AlertReceived",
+        InvalidCertificate(..) => "InvalidCertificate",
+        InvalidCertRevocationList(..) => "InvalidCertRevocationList",
+        General(..) => "General",
+        FailedToGetCurrentTime => "FailedToGetCurrentTime",
+        FailedToGetRandomBytes => "FailedToGetRandomBytes",
+        HandshakeNotComplete => "HandshakeNotComplete",
+        PeerSentOversizedRecord => "PeerSentOversizedRecord",
+        NoApplicationProtocol => "NoApplicationProtocol",
+        BadMaxFragmentSize => "BadMaxFragmentSize",
+        InconsistentKeys(..) => "InconsistentKeys",
+        Other(..) => "Other",
+        _ => "Unknown",
+    }
+}
+
+fn certificate_variant(error: &rustls::CertificateError) -> &'static str {
+    use rustls::CertificateError::*;
+    match error {
+        BadEncoding => "BadEncoding",
+        Expired => "Expired",
+        ExpiredContext { .. } => "ExpiredContext",
+        NotValidYet => "NotValidYet",
+        NotValidYetContext { .. } => "NotValidYetContext",
+        Revoked => "Revoked",
+        UnhandledCriticalExtension => "UnhandledCriticalExtension",
+        UnknownIssuer => "UnknownIssuer",
+        UnknownRevocationStatus => "UnknownRevocationStatus",
+        ExpiredRevocationList => "ExpiredRevocationList",
+        ExpiredRevocationListContext { .. } => "ExpiredRevocationListContext",
+        BadSignature => "BadSignature",
+        #[allow(deprecated)]
+        UnsupportedSignatureAlgorithm => "UnsupportedSignatureAlgorithm",
+        UnsupportedSignatureAlgorithmContext { .. } => "UnsupportedSignatureAlgorithmContext",
+        UnsupportedSignatureAlgorithmForPublicKeyContext { .. } => {
+            "UnsupportedSignatureAlgorithmForPublicKeyContext"
+        }
+        NotValidForName => "NotValidForName",
+        NotValidForNameContext { .. } => "NotValidForNameContext",
+        InvalidPurpose => "InvalidPurpose",
+        InvalidPurposeContext { .. } => "InvalidPurposeContext",
+        InvalidOcspResponse => "InvalidOcspResponse",
+        ApplicationVerificationFailure => "ApplicationVerificationFailure",
+        Other(..) => "Other",
+        _ => "Unknown",
+    }
+}
+
+#[cfg(test)]
+mod handshake_diagnostic_tests {
+    use super::*;
+    use async_tungstenite::tungstenite::Error;
+    use std::io;
+
+    #[test]
+    fn wrapped_tls_certificate_catches_misclassified_io_and_secret_disclosure() {
+        let cases = [
+            (rustls::CertificateError::UnknownIssuer, "UnknownIssuer"),
+            (
+                rustls::CertificateError::NotValidForNameContext {
+                    expected: "private.invalid".try_into().expect("fixture name"),
+                    presented: vec!["secret.internal.invalid".into()],
+                },
+                "NotValidForNameContext",
+            ),
+        ];
+        for (certificate, expected) in cases {
+            let error = Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                rustls::Error::InvalidCertificate(certificate),
+            ));
+            let detail = handshake_io_detail(&error);
+            assert_eq!(detail.io_kind, Some(io::ErrorKind::InvalidData));
+            assert_eq!(detail.rustls_variant, Some("InvalidCertificate"));
+            assert_eq!(detail.certificate_variant, Some(expected));
+            let rendered = format!("{detail:?}");
+            assert!(!rendered.contains("private.invalid"));
+            assert!(!rendered.contains("secret.internal.invalid"));
+        }
+    }
+
+    #[test]
+    fn os_error_and_unknown_payload_catch_lost_errno_and_raw_message_logging() {
+        let os = io::Error::from_raw_os_error(61);
+        let expected_kind = os.kind();
+        let detail = handshake_io_detail(&Error::Io(os));
+        assert_eq!(detail.raw_os_error, Some(61));
+        assert_eq!(detail.io_kind, Some(expected_kind));
+        assert_eq!(detail.rustls_variant, None);
+        let secret = Error::Io(io::Error::other("credential=must-not-log"));
+        assert_eq!(
+            format!("{:?}", handshake_io_detail(&secret)),
+            "HandshakeIoDetail { io_kind: Some(Other), raw_os_error: None, rustls_variant: None, certificate_variant: None }"
+        );
+    }
+
+    #[test]
+    fn direct_tls_general_catches_raw_rustls_payload_and_false_certificate_label() {
+        use async_tungstenite::tungstenite::error::TlsError;
+        let error = Error::Tls(TlsError::Rustls(Box::new(rustls::Error::General(
+            "secret certificate bytes".into(),
+        ))));
+        assert_eq!(
+            format!("{:?}", handshake_io_detail(&error)),
+            "HandshakeIoDetail { io_kind: None, raw_os_error: None, rustls_variant: Some(\"General\"), certificate_variant: None }"
+        );
     }
 }
