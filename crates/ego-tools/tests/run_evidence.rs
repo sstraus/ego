@@ -668,6 +668,95 @@ fn final_codec_evidence_is_tagged_and_does_not_infer_from_lifecycle_events() {
 }
 
 #[test]
+fn old_capabilities_resume_names_unsupported_schema_instead_of_unknown_entry() {
+    // Catches discarded strict-decoder diagnostics on both resume reader paths.
+    use ego_core::session::ReplaySource;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    let root = tempdir().unwrap();
+    let session = SessionId::new();
+    let invocation = RunInvocationId::new();
+    let attempt = AttemptRef::first(GenerationId::new());
+    let mut wire = serde_json::to_value(SessionEntry::Evidence(
+        EvidenceRecord::GenerationAdmission(generation(session, invocation, attempt)),
+    ))
+    .unwrap();
+    wire["evidence"]["capabilities"]["schema_version"] = json!(5);
+    wire["evidence"]["capabilities"]
+        .as_object_mut()
+        .unwrap()
+        .remove("audio_input");
+    let log = write_evidence_log(root.path(), session, &[wire]);
+    let original = std::fs::read(&log).unwrap();
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let reasons = [
+        (
+            ReplaySource::entries(&store, &session)
+                .unwrap_err()
+                .to_string(),
+            "Seq(1)",
+        ),
+        (
+            store.lifecycle_meta(session).unwrap_err().to_string(),
+            "record 1",
+        ),
+    ];
+    for (reason, position) in reasons {
+        assert!(
+            reason.contains("old, unsupported capabilities schema 5"),
+            "{reason}"
+        );
+        assert!(reason.contains("requires schema 6"), "{reason}");
+        assert!(reason.contains(&session.to_string()), "{reason}");
+        assert!(
+            reason.contains(position),
+            "missing physical record: {reason}"
+        );
+    }
+    assert_eq!(std::fs::read(&log).unwrap(), original);
+}
+
+#[test]
+fn capabilities_diagnostics_do_not_misclassify_future_or_malformed_records() {
+    // Catches old-schema wording for future data and false schema classification.
+    use ego_core::session::ReplaySource;
+    let root = tempdir().unwrap();
+    for (schema, malformed) in [(6, false), (7, false), (5, true)] {
+        let session = SessionId::new();
+        let mut wire = serde_json::to_value(SessionEntry::Evidence(
+            EvidenceRecord::GenerationAdmission(generation(
+                session,
+                RunInvocationId::new(),
+                AttemptRef::first(GenerationId::new()),
+            )),
+        ))
+        .unwrap();
+        wire["evidence"]["capabilities"]["schema_version"] = json!(schema);
+        if malformed {
+            wire["evidence"]["target"] = json!(null);
+        }
+        write_evidence_log(root.path(), session, &[wire]);
+        let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+        let result = ReplaySource::entries(&store, &session);
+        if schema == 6 {
+            assert_eq!(result.unwrap().unwrap().len(), 1);
+        } else {
+            let reason = result.unwrap_err().to_string();
+            assert!(
+                !reason.contains("old, unsupported capabilities"),
+                "{reason}"
+            );
+            if !malformed {
+                assert!(
+                    reason.contains("newer, unsupported capabilities schema 7"),
+                    "{reason}"
+                );
+                assert!(reason.contains("requires schema 6"), "{reason}");
+            }
+        }
+    }
+}
+
+#[test]
 fn generation_evidence_rejects_old_outer_and_inner_versions_at_every_authority() {
     assert_eq!(EVIDENCE_SCHEMA_VERSION, 3);
     assert_eq!(ModelCapabilities::SCHEMA_VERSION, 6);

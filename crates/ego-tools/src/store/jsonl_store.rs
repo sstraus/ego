@@ -514,9 +514,9 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                 ));
             }
         };
-        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
+        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|error| {
             invalid_log(format!(
-                "session {} has an unknown payload in the valid session prefix at record {} (unsupported schema or invalid payload)",
+                "session {} has an unknown payload in the valid session prefix at record {}: {error}",
                 header.session, record.seq
             ))
         })?;
@@ -3291,6 +3291,7 @@ fn decode_session_entries(
                 return Err(ReplaySourceError::UnknownEntry {
                     session: *session,
                     position,
+                    reason: "unrecognized record shape".to_owned(),
                 });
             }
             Ok(StoreLine::Header(_)) => {
@@ -3306,12 +3307,14 @@ fn decode_session_entries(
                 });
             }
         };
-        let entry = serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
-            ReplaySourceError::UnknownEntry {
-                session: *session,
-                position: record.seq,
-            }
-        })?;
+        let entry =
+            serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|error| {
+                ReplaySourceError::UnknownEntry {
+                    session: *session,
+                    position: record.seq,
+                    reason: error.to_string(),
+                }
+            })?;
         entries.push(entry);
     }
     Ok(entries)
