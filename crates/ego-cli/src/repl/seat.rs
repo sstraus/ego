@@ -1344,12 +1344,18 @@ impl Seat {
         output.details = Arc::clone(&status.lock().expect("surface status lock").details);
         output.status = Some(Arc::clone(&status));
         let active_signals = signals.clone();
-        editor = editor.with_idle_callback(Box::new(move || {
+        editor = editor.with_geometry_idle_callback(Box::new(move || {
             let mut out = std::io::stdout().lock();
+            let mut wrote = false;
             for sequence in active_signals.try_iter() {
-                let _ = out.write_all(sequence.as_bytes());
+                wrote = true;
+                if out.write_all(sequence.as_bytes()).is_err() {
+                    return true;
+                }
             }
-            let _ = out.flush();
+            // These OSC metadata signals do not move the editing cursor.
+            // A failed write may leave an incomplete control sequence.
+            wrote && out.flush().is_err()
         }));
         if let SurfaceSender::Pumped(sender) = &output.sender {
             status.lock().expect("surface status lock").transcript = Some(sender.clone());

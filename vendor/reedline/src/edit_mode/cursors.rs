@@ -7,7 +7,7 @@ use crossterm::cursor::SetCursorStyle;
 /// The `hx_*` fields only exist with the `helix` feature, so build one with
 /// `..CursorConfig::default()` rather than an exhaustive literal; otherwise the
 /// set of fields a literal must name changes with the feature set.
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct CursorConfig {
     /// The cursor to be used when in vi insert mode
     pub vi_insert: Option<SetCursorStyle>,

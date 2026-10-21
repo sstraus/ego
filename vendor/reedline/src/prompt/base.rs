@@ -263,6 +263,12 @@ impl IntoDiscriminant for PromptEditMode {
 /// Implementors have to provide [`str`]-based content which will be
 /// displayed before the `LineBuffer` is drawn.
 pub trait Prompt: Send {
+    /// Allow asynchronous updates of complete indicator rows above the editor.
+    /// Menus, wrapped rows and changed editor geometry still force a full paint.
+    fn supports_indicator_row_updates(&self) -> bool {
+        false
+    }
+
     /// Replace the submitted prompt and buffer with a host receipt. The original
     /// buffer is still returned and saved in history. `None` keeps the ordinary
     /// prompt echo. The receipt must fit the supplied terminal width.

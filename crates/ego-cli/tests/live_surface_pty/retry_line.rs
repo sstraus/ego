@@ -175,7 +175,8 @@ fn retry_colour_contract(recovers: bool, no_color: bool) {
     assert_eq!(
         settled,
         vec![expected_receipt],
-        "one outcome-coloured receipt"
+        "one outcome-coloured receipt; screen={:?}",
+        screen_rows(&after, 40, 180)
     );
     if !recovers {
         assert!(
@@ -197,8 +198,24 @@ fn cause_colours(output: &[u8]) -> Vec<vt100::Color> {
                 .collect();
             if text == "503" {
                 colours.push(screen.cell(row, col).unwrap().fgcolor());
+                // A detailed cause can repeat the status code on one receipt.
+                // Count rendered rows, not occurrences within the same row.
+                break;
             }
         }
     }
     colours
+}
+
+// Catches: one receipt containing HTTP 503 and the provider's own 503 detail
+// is mistaken for two separately rendered receipts.
+#[test]
+fn cause_colours_counts_receipt_rows_not_repeated_status_codes() {
+    let red = vt100::Color::Rgb(221, 151, 158);
+    let one = b"\x1b[38;2;221;151;158mHTTP 503: provider detail also says 503\x1b[0m";
+    assert_eq!(cause_colours(one), vec![red]);
+    let mut two = one.to_vec();
+    two.extend_from_slice(b"\r\n");
+    two.extend_from_slice(one);
+    assert_eq!(cause_colours(&two), vec![red, red]);
 }
