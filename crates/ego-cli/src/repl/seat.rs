@@ -1319,6 +1319,9 @@ impl Seat {
                 registry: Arc::clone(&registry),
             }))
             .with_quick_completions(true)
+            // Erasing inside a /-prefixed draft re-filters the menu; ActionMenu closes it
+            // once the completer has no choice left (for example after the / is erased).
+            .with_persistent_menus(true)
             .with_menu(ReedlineMenu::EngineCompleter(Box::new(ActionMenu::new(
                 ColumnarMenu::default().with_name(ACTION_MENU),
             ))))
