@@ -302,7 +302,19 @@ fn materialize_admissions(
                 server, provenance, ..
             } => {
                 let material = match server {
-                    McpServerConfig::Stdio(_) => McpTransportMaterial::stdio(Vec::new()),
+                    McpServerConfig::Stdio(config) => McpTransportMaterial::stdio(
+                        config
+                            .inherit_env
+                            .iter()
+                            .map(|name| {
+                                ego_mcp::McpEnvironmentBinding::from_native(
+                                    name.clone(),
+                                    std::ffi::OsString::from(format!("fixture-{}", name.as_str())),
+                                )
+                                .expect("fixture environment material")
+                            })
+                            .collect(),
+                    ),
                     McpServerConfig::Http(_) => McpTransportMaterial::http(Vec::new()),
                     McpServerConfig::Acp { .. } => McpTransportMaterial::acp(),
                 };
@@ -778,6 +790,99 @@ async fn admission_requests_are_complete_and_refresh_admission_is_async() {
             source: Source::User
         }
     ));
+}
+
+/// Catches: duplicate stdio tool names losing their private cause and reporting only
+/// a generic publication failure, including on refresh and optional-log failure.
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_stdio_tool_names_report_conflict_and_retain_private_cause() {
+    const MESSAGE: &str =
+        "MCP tool names conflict across servers; attach only one server for each tool name";
+    const PRIVATE_TOOL: &str = "private-tool-name";
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.design-test]\ntransport = 'stdio'\ncommand = '/usr/bin/python3'\nargs = ['tap.py', 'ego']\ninherit_env = ['TUIC_SOCKET', 'TUIC_SESSION']\n\n[mcp.servers.tuic]\ntransport = 'stdio'\ncommand = 'tuic-bridge'\n",
+    )
+    .expect("same stdio candidate shape with enabled configured bridge");
+    let config = resolve(&[layer], Trust::Trusted, None).unwrap().mcp;
+    for (retain_predecessor, fail_private) in [(false, false), (true, false), (true, true)] {
+        let admission = fixture_admission(Vec::new());
+        let (registry, journal) = controller(Arc::clone(&admission));
+        if retain_predecessor {
+            // Distinct names remain valid before a conflicting refresh.
+            for (server, tool) in [("design-test", "unique_one"), ("tuic", "unique_two")] {
+                admission.push(Outcome::Candidate(candidate(
+                    server,
+                    vec![CountingTool::new(tool, Arc::new(AtomicUsize::new(0)))],
+                )));
+            }
+            registry
+                .reconcile(refresh_with(config.clone(), RegistryTrigger::Add))
+                .await
+                .unwrap();
+            assert_eq!(
+                registry.publication().admitted_tools(),
+                ["unique_one", "unique_two"]
+            );
+        }
+        let predecessor = registry.publication();
+        journal.state.lock().unwrap().fail_private = fail_private;
+        for server in ["design-test", "tuic"] {
+            admission.push(Outcome::Candidate(candidate(
+                server,
+                vec![CountingTool::new(
+                    PRIVATE_TOOL,
+                    Arc::new(AtomicUsize::new(0)),
+                )],
+            )));
+        }
+        let error = registry
+            .reconcile(refresh_with(config.clone(), RegistryTrigger::Reload))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            format!("invalid MCP candidate: {MESSAGE}")
+        );
+        assert_eq!(
+            registry.publication().generation(),
+            predecessor.generation()
+        );
+        assert_eq!(
+            registry.publication().admitted_tools(),
+            predecessor.admitted_tools()
+        );
+        for server in registry.status().servers() {
+            assert_eq!(server.diagnostic().unwrap().message(), MESSAGE);
+            assert_eq!(
+                server.state(),
+                if retain_predecessor {
+                    ego_mcp::McpServerState::Degraded
+                } else {
+                    ego_mcp::McpServerState::Absent
+                }
+            );
+        }
+        let events = journal.events();
+        assert!(
+            matches!(events.last(), Some(McpRegistryEvent::RefreshFailed { cause, .. }) if cause == MESSAGE)
+        );
+        assert!(!format!("{events:?}").contains(PRIVATE_TOOL));
+        assert!(!format!("{:?}", registry.status().mcp_errors()).contains(PRIVATE_TOOL));
+        let state = journal.state.lock().unwrap();
+        if fail_private {
+            assert!(state.private_diagnostics.is_empty());
+        } else {
+            assert_eq!(state.private_diagnostics.len(), 2);
+            assert!(
+                state
+                    .private_diagnostics
+                    .iter()
+                    .all(|(_, cause)| cause.contains(PRIVATE_TOOL))
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
