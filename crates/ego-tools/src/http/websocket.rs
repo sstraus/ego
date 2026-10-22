@@ -348,6 +348,52 @@ mod handshake_diagnostic_tests {
     use async_tungstenite::tungstenite::Error;
     use std::io;
 
+    /// Real TLS boundary, without credentials or model work. Run explicitly on a
+    /// host where chatgpt.com has a system-trusted, non-WebPKI inspection chain.
+    #[tokio::test]
+    #[ignore = "requires the system-trusted corporate TLS inspection endpoint"]
+    async fn websocket_embedded_roots_reject_a_chain_accepted_by_http() {
+        let deadline = std::time::Duration::from_secs(20);
+        tokio::time::timeout(deadline, async {
+            let selected = tokio::net::lookup_host(("chatgpt.com", 443))
+                .await
+                .expect("resolve TLS test endpoint")
+                .find(SocketAddr::is_ipv4)
+                .expect("IPv4 TLS test endpoint");
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .resolve_to_addrs("chatgpt.com", &[selected])
+                .build()
+                .expect("HTTP platform verifier");
+            // Any HTTP response proves TLS completed. Never print its body/headers.
+            client
+                .get("https://chatgpt.com/backend-api/codex/responses")
+                .send()
+                .await
+                .expect("HTTP must accept the system-trusted chain");
+            let tcp = tokio::net::TcpStream::connect(selected)
+                .await
+                .expect("pinned TCP");
+            let result = async_tungstenite::tokio::client_async_tls_with_config(
+                "wss://chatgpt.com/backend-api/codex/responses",
+                tcp,
+                None,
+            )
+            .await;
+            match result {
+                Ok(_) | Err(Error::Http(_)) => {} // Upgrade refusal is past TLS.
+                Err(error) => panic!(
+                    "WebSocket rejected HTTP-accepted TLS: {:?}",
+                    handshake_io_detail(&error)
+                ),
+            }
+        })
+        .await
+        .expect("bounded TLS parity probe");
+    }
+
     #[test]
     fn wrapped_tls_certificate_catches_misclassified_io_and_secret_disclosure() {
         let cases = [
