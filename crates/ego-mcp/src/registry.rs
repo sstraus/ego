@@ -1367,9 +1367,33 @@ fn failed_server_status(
     }
 }
 
+enum PublicationFailure {
+    Invalid(String),
+    Catalogue(ToolCatalogueError),
+}
+
+impl PublicationFailure {
+    fn public_message(&self) -> &'static str {
+        match self {
+            Self::Catalogue(ToolCatalogueError::DuplicateName { .. }) => {
+                "MCP tool names conflict across servers; attach only one server for each tool name"
+            }
+            _ => "registry publication failed",
+        }
+    }
+
+    fn private_cause(&self) -> String {
+        match self {
+            Self::Invalid(cause) => cause.clone(),
+            Self::Catalogue(error) => error.to_string(),
+        }
+    }
+}
+
 fn failed_publication_status(
     predecessor: &AdmittedRegistrySnapshot,
     attempted_servers: Vec<McpServerName>,
+    message: &'static str,
     now: Instant,
 ) -> McpRegistryStatus {
     let mut servers = BTreeMap::new();
@@ -1391,7 +1415,7 @@ fn failed_publication_status(
                 authorization: None,
                 diagnostic: Some(McpServerDiagnostic {
                     failure: McpFailure::Protocol,
-                    message: Arc::from("registry publication failed"),
+                    message: Arc::from(message),
                 }),
             },
         );
@@ -1408,7 +1432,7 @@ fn failed_publication_status(
             authorization: None,
             diagnostic: Some(McpServerDiagnostic {
                 failure: McpFailure::Protocol,
-                message: Arc::from("registry publication failed"),
+                message: Arc::from(message),
             }),
         });
     }
@@ -2018,7 +2042,7 @@ impl McpRegistryController {
             None => {
                 return self.fail_publication(
                     request_id,
-                    "registry generation space exhausted".to_owned(),
+                    PublicationFailure::Invalid("registry generation space exhausted".to_owned()),
                     &predecessor,
                     servers.keys(),
                 );
@@ -2030,7 +2054,7 @@ impl McpRegistryController {
             Err(error) => {
                 return self.fail_publication(
                     request_id,
-                    error.to_string(),
+                    PublicationFailure::Invalid(error.to_string()),
                     &predecessor,
                     servers.keys(),
                 );
@@ -2050,7 +2074,7 @@ impl McpRegistryController {
                     Err(error) => {
                         return self.fail_publication(
                             request_id,
-                            error.to_string(),
+                            PublicationFailure::Invalid(error.to_string()),
                             &predecessor,
                             servers.keys(),
                         );
@@ -2073,7 +2097,7 @@ impl McpRegistryController {
         if let Err(error) = CapturedToolCatalogue::new(generation.to_string(), tools.clone()) {
             return self.fail_publication(
                 request_id,
-                error.to_string(),
+                PublicationFailure::Catalogue(error),
                 &predecessor,
                 servers.keys(),
             );
@@ -2083,7 +2107,7 @@ impl McpRegistryController {
             Err(error) => {
                 return self.fail_publication(
                     request_id,
-                    error.to_string(),
+                    PublicationFailure::Invalid(error.to_string()),
                     &predecessor,
                     servers.keys(),
                 );
@@ -2147,27 +2171,33 @@ impl McpRegistryController {
     fn fail_publication<'a>(
         &self,
         request_id: &str,
-        _cause: String,
+        failure: PublicationFailure,
         predecessor: &Arc<AdmittedRegistrySnapshot>,
         attempted_servers: impl Iterator<Item = &'a McpServerName>,
     ) -> Result<McpRegistryPublication, McpRegistryError> {
+        let message = failure.public_message();
+        let cause = failure.private_cause();
+        let attempted_servers = attempted_servers.cloned().collect::<Vec<_>>();
+        for server in &attempted_servers {
+            let _ = self
+                .journal
+                .record_private_diagnostic(server.as_str(), &cause);
+        }
         let retained_generation =
             (predecessor.number > 0).then(|| predecessor.generation.to_string());
         self.journal.append(McpRegistryEvent::RefreshFailed {
             request_id: request_id.to_owned(),
-            cause: "registry publication failed".to_owned(),
+            cause: message.to_owned(),
             retained_generation,
         })?;
 
-        let attempted_servers = attempted_servers.cloned().collect::<Vec<_>>();
         let mut state = self
             .state
             .write()
             .map_err(|_| McpRegistryError::PublicationUnavailable)?;
-        state.status = failed_publication_status(predecessor, attempted_servers, Instant::now());
-        Err(McpRegistryError::InvalidCandidate(
-            "registry publication failed".to_owned(),
-        ))
+        state.status =
+            failed_publication_status(predecessor, attempted_servers, message, Instant::now());
+        Err(McpRegistryError::InvalidCandidate(message.to_owned()))
     }
 }
 
