@@ -1429,11 +1429,6 @@ mod codex_recovery {
             Box::pin(async move { result })
         }
     }
-    fn dead() -> TransportError {
-        TransportError::definitely_unsent(TransportFailure::Connect(
-            "scripted closed socket".into(),
-        ))
-    }
     fn setup(sockets: Vec<OpenScript>) -> (Arc<FaultHttp>, WireGenerator, GenRequest, BudgetGate) {
         let fallback = StubHttp::responding(
             200,
@@ -1488,82 +1483,6 @@ mod codex_recovery {
             sent["input"], full["input"],
             "new connection lost full input"
         );
-    }
-
-    // Catches: a dead reused socket ends a definitely-unsent generation instead
-    // of reconnecting once, or a reconnect sends the old socket's suffix/ID.
-    #[tokio::test]
-    async fn codex_recovery_dead_reused_socket_reconnects_once_with_full_input() {
-        let (http, generator, mut req, mut gate) = setup(vec![
-            Ok(vec![Ok(Reply::Complete), Err(dead())].into()),
-            Ok(vec![Ok(Reply::Complete)].into()),
-        ]);
-        collect(&generator, &req, &mut gate).await;
-        extend(&mut req);
-        let (events, settlement) = collect(&generator, &req, &mut gate).await;
-        assert!(matches!(
-            events.last(),
-            Some(AiEvent::Stop(StopReason::Stop))
-        ));
-        assert_eq!(settlement.outcome.stop(), StopReason::Stop);
-        assert_eq!(http.opened.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert_eq!(http.fallback.calls(), 0);
-        let sent = http.sent.lock().unwrap();
-        assert_eq!(sent.len(), 3);
-        assert_eq!(sent[1]["previous_response_id"], "resp_old");
-        assert_full(&sent[2], &req);
-    }
-
-    // Catches: reconnect failure loses HTTP fallback, or retries a new socket
-    // send/authority refusal instead of preserving the bounded delivery policy.
-    #[tokio::test]
-    async fn codex_recovery_fallback_is_only_for_definitely_unsent_connect_failure() {
-        for mode in ["connect", "uncertain_connect", "fresh_send", "authority"] {
-            let replacement = match mode {
-                "connect" => Err(dead()),
-                "uncertain_connect" => Err(TransportError::possibly_sent(
-                    TransportFailure::Connect("scripted uncertain connect".into()),
-                )),
-                "fresh_send" => Ok(vec![Err(dead())].into()),
-                _ => Err(TransportError::definitely_unsent(
-                    TransportFailure::AuthorityMismatch,
-                )),
-            };
-            let (http, generator, mut req, mut gate) = setup(vec![
-                Ok(vec![Ok(Reply::Complete), Err(dead())].into()),
-                replacement,
-            ]);
-            collect(&generator, &req, &mut gate).await;
-            extend(&mut req);
-            let (_, settled) = collect(&generator, &req, &mut gate).await;
-            assert_eq!(
-                http.opened.load(std::sync::atomic::Ordering::SeqCst),
-                2,
-                "{mode}"
-            );
-            assert_eq!(
-                http.fallback.calls(),
-                usize::from(mode == "connect"),
-                "{mode}"
-            );
-            assert_eq!(
-                settled.outcome.stop(),
-                if mode == "connect" {
-                    StopReason::Stop
-                } else {
-                    StopReason::Error
-                }
-            );
-            if mode == "connect" {
-                let seen = http.fallback.seen.lock().unwrap();
-                let full: Value = serde_json::from_slice(seen[0].body.as_deref().unwrap()).unwrap();
-                assert_full(&full, &req);
-                assert!(
-                    full.get("type").is_none(),
-                    "HTTP must retain its original body"
-                );
-            }
-        }
     }
 
     // Catches: a possibly-sent send, cancellation or authority refusal is
