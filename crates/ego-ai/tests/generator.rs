@@ -1331,3 +1331,296 @@ async fn codex_fork_and_compaction_never_send_another_lineages_response_id() {
         );
     }
 }
+
+// Scripted component faults exercise the public generator/transport boundary;
+// they make no claim about provider responses or live cache behavior.
+mod codex_recovery {
+    use super::*;
+    use ego_ai::http::HttpWebSocket;
+    use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
+    use ego_core::event::id::SessionId;
+    use ego_core::generator::types::PromptCache;
+    use serde_json::{Value, json};
+    use std::collections::VecDeque;
+
+    enum Reply {
+        Complete,
+        Eof,
+        Drop,
+        TextThenDrop,
+    }
+    type SendScript = VecDeque<Result<Reply, TransportError>>;
+    type OpenScript = Result<SendScript, TransportError>;
+
+    struct Socket {
+        sent: Arc<Mutex<Vec<Value>>>,
+        sends: SendScript,
+        replies: VecDeque<Result<Option<Vec<u8>>, TransportError>>,
+    }
+    impl HttpWebSocket for Socket {
+        fn send(&mut self, call: PreparedHttpCall) -> BoxFuture<'_, Result<(), TransportError>> {
+            let (_, _, _, request) = call.into_parts();
+            self.sent
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(request.body()).unwrap());
+            let result =
+                self.sends
+                    .pop_front()
+                    .expect("unexpected send")
+                    .map(|reply| {
+                        let drop = || {
+                            Err(TransportError::possibly_sent(
+                                TransportFailure::ResponseBody("scripted drop".into()),
+                            ))
+                        };
+                        self.replies =
+                            match reply {
+                                Reply::Complete => vec![Ok(Some(serde_json::to_vec(&json!({
+                        "type":"response.completed",
+                        "response":{"id":"resp_old","status":"completed","output":[]}
+                    })).unwrap()))],
+                                Reply::Eof => vec![Ok(None)],
+                                Reply::Drop => vec![drop()],
+                                Reply::TextThenDrop => {
+                                    vec![Ok(Some(serde_json::to_vec(&json!({
+                        "type":"response.output_text.delta", "delta":"visible"
+                    })).unwrap())), drop()]
+                                }
+                            }
+                            .into();
+                    });
+            Box::pin(async move { result })
+        }
+        fn receive(&mut self) -> BoxFuture<'_, Result<Option<Vec<u8>>, TransportError>> {
+            let result = self.replies.pop_front().unwrap_or(Ok(None));
+            Box::pin(async move { result })
+        }
+    }
+    struct FaultHttp {
+        sockets: Mutex<VecDeque<OpenScript>>,
+        opened: std::sync::atomic::AtomicUsize,
+        sent: Arc<Mutex<Vec<Value>>>,
+        fallback: Arc<StubHttp>,
+    }
+    impl Http for FaultHttp {
+        fn begin_call(&self) -> Box<dyn HttpCall> {
+            self.fallback.begin_call()
+        }
+        fn open_websocket(
+            &self,
+            _: PreparedHttpCall,
+        ) -> BoxFuture<'static, Result<Box<dyn HttpWebSocket>, TransportError>> {
+            self.opened
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let result = self
+                .sockets
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected reconnect")
+                .map(|sends| {
+                    Box::new(Socket {
+                        sent: self.sent.clone(),
+                        sends,
+                        replies: VecDeque::new(),
+                    }) as Box<dyn HttpWebSocket>
+                });
+            Box::pin(async move { result })
+        }
+    }
+    fn dead() -> TransportError {
+        TransportError::definitely_unsent(TransportFailure::Connect(
+            "scripted closed socket".into(),
+        ))
+    }
+    fn setup(sockets: Vec<OpenScript>) -> (Arc<FaultHttp>, WireGenerator, GenRequest, BudgetGate) {
+        let fallback = StubHttp::responding(
+            200,
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        );
+        let http = Arc::new(FaultHttp {
+            sockets: Mutex::new(sockets.into()),
+            opened: Default::default(),
+            sent: Default::default(),
+            fallback,
+        });
+        let generator = WireGenerator::new(
+            ProviderRow::openai_codex_default(),
+            &OpenAiCodexResponses,
+            http.clone(),
+            support::credential(),
+        );
+        let mut req = request();
+        let session = SessionId::new();
+        req.cache = Some(PromptCache {
+            session_id: session,
+            lineage_root: session,
+            retention: CacheRetention::Short,
+            stable_messages: 0,
+        });
+        (http, generator, req, BudgetGate::new(usd("10")))
+    }
+    async fn collect(
+        generator: &WireGenerator,
+        req: &GenRequest,
+        gate: &mut BudgetGate,
+    ) -> (Vec<AiEvent>, ego_core::generator::attempt::Settlement) {
+        let mut stream = generator.generate(req.clone(), attempt_for(gate, req));
+        let events = stream.by_ref().collect().await;
+        (events, stream.settle(gate).unwrap())
+    }
+    fn extend(req: &mut GenRequest) {
+        let mut messages = req.messages.messages().to_vec();
+        messages.push(Message::text(Role::User, "continue"));
+        req.messages = Conversation::new(messages).unwrap();
+    }
+    fn assert_full(sent: &Value, req: &GenRequest) {
+        let full: Value = serde_json::from_slice(
+            &ego_ai::wire::openai_codex_responses::request_body(req).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            sent.get("previous_response_id").is_none(),
+            "old socket response ID leaked"
+        );
+        assert_eq!(
+            sent["input"], full["input"],
+            "new connection lost full input"
+        );
+    }
+
+    // Catches: a dead reused socket ends a definitely-unsent generation instead
+    // of reconnecting once, or a reconnect sends the old socket's suffix/ID.
+    #[tokio::test]
+    async fn codex_recovery_dead_reused_socket_reconnects_once_with_full_input() {
+        let (http, generator, mut req, mut gate) = setup(vec![
+            Ok(vec![Ok(Reply::Complete), Err(dead())].into()),
+            Ok(vec![Ok(Reply::Complete)].into()),
+        ]);
+        collect(&generator, &req, &mut gate).await;
+        extend(&mut req);
+        let (events, settlement) = collect(&generator, &req, &mut gate).await;
+        assert!(matches!(
+            events.last(),
+            Some(AiEvent::Stop(StopReason::Stop))
+        ));
+        assert_eq!(settlement.outcome.stop(), StopReason::Stop);
+        assert_eq!(http.opened.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(http.fallback.calls(), 0);
+        let sent = http.sent.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[1]["previous_response_id"], "resp_old");
+        assert_full(&sent[2], &req);
+    }
+
+    // Catches: reconnect failure loses HTTP fallback, or retries a new socket
+    // send/authority refusal instead of preserving the bounded delivery policy.
+    #[tokio::test]
+    async fn codex_recovery_fallback_is_only_for_definitely_unsent_connect_failure() {
+        for mode in ["connect", "uncertain_connect", "fresh_send", "authority"] {
+            let replacement = match mode {
+                "connect" => Err(dead()),
+                "uncertain_connect" => Err(TransportError::possibly_sent(
+                    TransportFailure::Connect("scripted uncertain connect".into()),
+                )),
+                "fresh_send" => Ok(vec![Err(dead())].into()),
+                _ => Err(TransportError::definitely_unsent(
+                    TransportFailure::AuthorityMismatch,
+                )),
+            };
+            let (http, generator, mut req, mut gate) = setup(vec![
+                Ok(vec![Ok(Reply::Complete), Err(dead())].into()),
+                replacement,
+            ]);
+            collect(&generator, &req, &mut gate).await;
+            extend(&mut req);
+            let (_, settled) = collect(&generator, &req, &mut gate).await;
+            assert_eq!(
+                http.opened.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{mode}"
+            );
+            assert_eq!(
+                http.fallback.calls(),
+                usize::from(mode == "connect"),
+                "{mode}"
+            );
+            assert_eq!(
+                settled.outcome.stop(),
+                if mode == "connect" {
+                    StopReason::Stop
+                } else {
+                    StopReason::Error
+                }
+            );
+            if mode == "connect" {
+                let seen = http.fallback.seen.lock().unwrap();
+                let full: Value = serde_json::from_slice(seen[0].body.as_deref().unwrap()).unwrap();
+                assert_full(&full, &req);
+                assert!(
+                    full.get("type").is_none(),
+                    "HTTP must retain its original body"
+                );
+            }
+        }
+    }
+
+    // Catches: a possibly-sent send, cancellation or authority refusal is
+    // silently replayed by the session rather than returned to the retry owner.
+    #[tokio::test]
+    async fn codex_recovery_never_replays_uncertain_or_refused_send() {
+        for error in [
+            TransportError::possibly_sent(TransportFailure::Exchange("scripted send".into())),
+            TransportError::definitely_unsent(TransportFailure::Cancelled),
+            TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),
+        ] {
+            let delivery = error.delivery();
+            let (http, generator, req, mut gate) =
+                setup(vec![Ok(vec![Ok(Reply::Complete), Err(error)].into())]);
+            collect(&generator, &req, &mut gate).await;
+            let (_, settled) = collect(&generator, &req, &mut gate).await;
+            assert_eq!(settled.outcome.stop(), StopReason::Error);
+            assert_eq!(settled.outcome.delivery(), delivery);
+            assert_eq!(http.opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(http.fallback.calls(), 0);
+        }
+    }
+
+    // Catches: EOF/drop succeeds or loses retryable classification, silently
+    // resends within the attempt, or leaves a stale continuation for the next.
+    #[tokio::test]
+    async fn codex_recovery_midstream_drop_is_transient_and_next_attempt_is_full() {
+        for reply in [Reply::Eof, Reply::Drop, Reply::TextThenDrop] {
+            let (http, generator, mut req, mut gate) = setup(vec![
+                Ok(vec![Ok(Reply::Complete), Ok(reply)].into()),
+                Ok(vec![Ok(Reply::Complete)].into()),
+            ]);
+            collect(&generator, &req, &mut gate).await;
+            extend(&mut req);
+            let (events, settled) = collect(&generator, &req, &mut gate).await;
+            assert_eq!(settled.outcome.stop(), StopReason::Error);
+            assert_eq!(settled.outcome.delivery(), DeliveryCertainty::PossiblySent);
+            assert!(events.iter().any(|e| matches!(
+                e,
+                AiEvent::Error {
+                    kind: ErrorKind::Transient,
+                    ..
+                }
+            )));
+            assert_eq!(
+                http.opened.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "must not replay midstream"
+            );
+            assert_eq!(http.fallback.calls(), 0);
+            // Explicit next generation stands in for the caller's policy decision.
+            let (_, next) = collect(&generator, &req, &mut gate).await;
+            assert_eq!(next.outcome.stop(), StopReason::Stop);
+            let sent = http.sent.lock().unwrap();
+            assert_eq!(sent.len(), 3);
+            assert_eq!(sent[1]["previous_response_id"], "resp_old");
+            assert_full(&sent[2], &req);
+        }
+    }
+}

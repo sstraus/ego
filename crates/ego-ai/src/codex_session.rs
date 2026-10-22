@@ -162,83 +162,100 @@ pub(crate) async fn execute(
         "openai-beta",
         b"responses_websockets=2026-02-06".to_vec(),
     ));
-    // Taking the connection makes cancellation/drop fail closed: no partial response can be reused.
-    let socket_reused = owner.socket.is_some();
-    let mut socket = match owner.socket.take() {
-        Some(socket) => socket,
-        None => {
-            owner.continuation = None;
-            let prepared = profile
-                .prepare(
-                    request.url.clone(),
-                    request.to_core().map_err(|_| invalid())?,
-                )
-                .map_err(|_| invalid())?;
-            match http.open_websocket(prepared).await {
-                Ok(socket) => socket,
-                Err(error)
-                    if error.delivery() == DeliveryCertainty::DefinitelyUnsent
-                        && matches!(error.failure(), TransportFailure::Connect(_)) =>
-                {
-                    fingerprint(&fallback, &body, "http");
-                    drop(owner);
-                    return profile.execute(http.as_ref(), fallback).await;
+    let socket = loop {
+        // Opening a replacement must not carry the failed socket's suffix body.
+        request.body = fallback.body.clone();
+        // Taking the connection makes cancellation/drop fail closed: no partial response can be reused.
+        let socket_reused = owner.socket.is_some();
+        let mut socket = match owner.socket.take() {
+            Some(socket) => socket,
+            None => {
+                owner.continuation = None;
+                let prepared = profile
+                    .prepare(
+                        request.url.clone(),
+                        request.to_core().map_err(|_| invalid())?,
+                    )
+                    .map_err(|_| invalid())?;
+                match http.open_websocket(prepared).await {
+                    Ok(socket) => socket,
+                    Err(error)
+                        if error.delivery() == DeliveryCertainty::DefinitelyUnsent
+                            && matches!(error.failure(), TransportFailure::Connect(_)) =>
+                    {
+                        fingerprint(&fallback, &body, "http");
+                        drop(owner);
+                        return profile.execute(http.as_ref(), fallback).await;
+                    }
+                    Err(error) => return Err(HttpError::transport(error)),
                 }
-                Err(error) => return Err(HttpError::transport(error)),
             }
+        };
+        let mut outgoing = owner
+            .continuation
+            .take()
+            .map_or_else(|| body.clone(), |prior| prior.request(&body));
+        // Diagnostic evidence contains hashes only, never prompt text or transport headers.
+        if tracing::enabled!(target: "ego_ai::codex_session", tracing::Level::DEBUG) {
+            let mut prefix = Vec::new();
+            let prefix_digests: Vec<_> = body["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|item| {
+                    prefix.extend(serde_json::to_vec(item).expect("Codex JSON serializes"));
+                    ego_core::digest::sha256_hex(&prefix)
+                })
+                .collect();
+            let mut settings = body.clone();
+            settings
+                .as_object_mut()
+                .expect("Codex request object")
+                .remove("input");
+            tracing::debug!(
+                target: "ego_ai::codex_session",
+                socket_reused,
+                settings_digest = %ego_core::digest::sha256_hex(
+                    &serde_json::to_vec(&settings).expect("Codex JSON serializes")
+                ),
+                input_prefix_digests = ?prefix_digests,
+                outgoing_digest = %ego_core::digest::sha256_hex(
+                    &serde_json::to_vec(&outgoing).expect("Codex JSON serializes")
+                ),
+                "Codex request fingerprint evidence"
+            );
         }
-    };
-    let mut outgoing = owner
-        .continuation
-        .take()
-        .map_or_else(|| body.clone(), |prior| prior.request(&body));
-    // Diagnostic evidence contains hashes only, never prompt text or transport headers.
-    if tracing::enabled!(target: "ego_ai::codex_session", tracing::Level::DEBUG) {
-        let mut prefix = Vec::new();
-        let prefix_digests: Vec<_> = body["input"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|item| {
-                prefix.extend(serde_json::to_vec(item).expect("Codex JSON serializes"));
-                ego_core::digest::sha256_hex(&prefix)
-            })
-            .collect();
-        let mut settings = body.clone();
-        settings
-            .as_object_mut()
-            .expect("Codex request object")
-            .remove("input");
         tracing::debug!(
             target: "ego_ai::codex_session",
-            socket_reused,
-            settings_digest = %ego_core::digest::sha256_hex(
-                &serde_json::to_vec(&settings).expect("Codex JSON serializes")
-            ),
-            input_prefix_digests = ?prefix_digests,
-            outgoing_digest = %ego_core::digest::sha256_hex(
-                &serde_json::to_vec(&outgoing).expect("Codex JSON serializes")
-            ),
-            "Codex request fingerprint evidence"
+            incremental = outgoing.get("previous_response_id").is_some(),
+            full_input_items = body["input"].as_array().map_or(0, Vec::len),
+            sent_input_items = outgoing["input"].as_array().map_or(0, Vec::len),
+            "sending Codex WebSocket generation"
         );
-    }
-    tracing::debug!(
-        target: "ego_ai::codex_session",
-        incremental = outgoing.get("previous_response_id").is_some(),
-        full_input_items = body["input"].as_array().map_or(0, Vec::len),
-        sent_input_items = outgoing["input"].as_array().map_or(0, Vec::len),
-        "sending Codex WebSocket generation"
-    );
-    outgoing["type"] = json!("response.create");
-    request.body = Some(serde_json::to_vec(&outgoing).expect("Codex JSON serializes"));
-    let prepared = profile
-        .prepare(
-            request.url.clone(),
-            request.to_core().map_err(|_| invalid())?,
-        )
-        .map_err(|_| invalid())?;
-    fingerprint(&request, &outgoing, "websocket");
-    socket.send(prepared).await.map_err(HttpError::transport)?;
+        outgoing["type"] = json!("response.create");
+        request.body = Some(serde_json::to_vec(&outgoing).expect("Codex JSON serializes"));
+        let prepared = profile
+            .prepare(
+                request.url.clone(),
+                request.to_core().map_err(|_| invalid())?,
+            )
+            .map_err(|_| invalid())?;
+        fingerprint(&request, &outgoing, "websocket");
+        match socket.send(prepared).await {
+            Ok(()) => break socket,
+            Err(error)
+                if socket_reused
+                    && error.delivery() == DeliveryCertainty::DefinitelyUnsent
+                    && matches!(error.failure(), TransportFailure::Connect(_)) =>
+            {
+                // The old socket rejected the command before send. Its continuation
+                // was taken above; the same fresh-connect path now sends full input.
+                // A fresh socket is never retained here, so this reconnect is bounded.
+                continue;
+            }
+            Err(error) => return Err(HttpError::transport(error)),
+        }
+    };
     let chunks = stream::unfold(Some((owner, socket, body)), |state| async move {
         let (mut owner, mut socket, body) = state?;
         match socket.receive().await {
