@@ -789,11 +789,6 @@ mod codex_real_recovery {
         let state = turn.into_state().unwrap();
         assert!(state.live_attempts.is_empty(), "every attempt must settle");
         assert_eq!(state.settled_attempts.len(), 3);
-        // Explicit evidence output, captured by the targeted nextest run.
-        println!(
-            "real Codex recovery idle_close={idle_close}: retries={retries}, opens=2, HTTP=0, trace={:?}",
-            trace
-        );
     }
 
     // Catches: a real peer-closed idle socket or no-output midstream drop ends
