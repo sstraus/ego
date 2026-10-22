@@ -482,10 +482,7 @@ impl SurfaceSnapshot {
             StatusSegmentName::Interrupt,
         ]
         .into_iter()
-        .filter_map(|name| {
-            self.value(&name)
-                .map(|value| format!("{}={}", name.label(), value.0))
-        })
+        .filter_map(|name| self.value(&name).map(|value| name.render_value(value)))
         .collect()
     }
 
@@ -551,7 +548,7 @@ impl SurfaceSnapshot {
             // Idle counters carry no news, so they do not take a row cell.
             StatusSegmentName::Queue => self.active(name).then(|| {
                 SegmentValue::text(format!(
-                    "{}/{}",
+                    "steer {} · next {}",
                     self.queue.pending_steers, self.queue.queued
                 ))
             }),
@@ -723,7 +720,16 @@ impl StatusSegmentName {
                 | Self::Cwd
                 | Self::Git
                 | Self::Goal
+                | Self::Queue
         )
+    }
+
+    fn render_value(&self, value: SegmentValue) -> String {
+        if self.self_describing() {
+            value.0
+        } else {
+            format!("{}={}", self.label(), value.0)
+        }
     }
 
     fn critical(&self) -> bool {
@@ -863,11 +869,7 @@ impl StatusLine {
             match value {
                 Some(value) => segments.push(RenderedSegment {
                     name: name.clone(),
-                    text: if name.self_describing() {
-                        value.0
-                    } else {
-                        format!("{}={}", name.label(), value.0)
-                    },
+                    text: name.render_value(value),
                     active: snapshot.active(name) || matches!(name, StatusSegmentName::Custom(_)),
                 }),
                 None => omitted.push(name.clone()),

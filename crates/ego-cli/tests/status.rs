@@ -59,7 +59,7 @@ fn builtins_and_arbitrary_configured_segments_render_in_user_order() {
     let line = StatusLine::render(&surface, &names, 240);
     assert_eq!(line.diagnostics(), &[]);
     assert!(line.text().find("gpt-5.6").unwrap() < line.text().find("high").unwrap());
-    assert!(line.text().find("queue=").unwrap() < line.text().find("drafts=").unwrap());
+    assert!(line.text().find("steer ").unwrap() < line.text().find("drafts=").unwrap());
     assert!(line.text().find("/w/ego").unwrap() < line.text().find("⎇").unwrap());
 
     let custom = StatusSegmentName::custom("latency");
@@ -74,6 +74,33 @@ fn builtins_and_arbitrary_configured_segments_render_in_user_order() {
         120,
     );
     assert!(custom_line.text().starts_with("latency=17ms · "));
+}
+
+// Catches ambiguous queue ratios, swapped counts, or newly visible idle counters.
+#[test]
+fn rendered_queue_labels_distinguish_steers_from_next_turn() {
+    let mut surface = snapshot();
+    for (pending_steers, queued, expected) in [
+        (1, 2, "steer 1 · next 2"),
+        (1, 0, "steer 1 · next 0"),
+        (0, 2, "steer 0 · next 2"),
+        (0, 0, ""),
+    ] {
+        surface.set_queue(QueueStatus {
+            pending_steers,
+            queued,
+            interrupt_pending: false,
+        });
+        let rendered = StatusLine::render(&surface, &[StatusSegmentName::Queue], 80);
+        assert_eq!(rendered.text(), expected);
+        assert_eq!(rendered.width(), UnicodeWidthStr::width(expected));
+        if !expected.is_empty() {
+            let narrow =
+                StatusLine::render(&surface, &[StatusSegmentName::Queue], rendered.width() - 1);
+            assert_eq!(narrow.text(), "");
+            assert!(narrow.omitted(StatusSegmentName::Queue));
+        }
+    }
 }
 
 #[test]
@@ -110,7 +137,7 @@ fn inactive_and_optional_segments_collapse_as_whole_segments() {
     assert!(rendered.text().contains("gpt-5.6"));
     assert!(!rendered.text().contains("cost"));
     assert!(!rendered.text().contains("gi"));
-    assert!(!rendered.text().contains("queue=2"));
+    assert!(!rendered.text().contains("steer 2"));
     assert!(!rendered.text().contains("drafts=3"));
     assert!(rendered.text().contains("interrupt="));
     assert!(
@@ -166,7 +193,7 @@ fn impossible_critical_width_retains_interrupt_then_queue_then_drafts() {
     ];
     let rendered = StatusLine::render(&surface, &configured, 8);
     assert!(!rendered.text().contains("drafts="));
-    assert!(!rendered.text().contains("queue="));
+    assert!(!rendered.text().contains("steer "));
     assert!(
         rendered.text().contains("interrupt=") || rendered.omitted(StatusSegmentName::Interrupt)
     );

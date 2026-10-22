@@ -1818,6 +1818,9 @@ editable buffer; text after it goes below. Filter blocks use `priority(integer)`
 lower priorities disappear first when a row is too wide. Blocks cannot nest or
 contain the prompt. Unblocked rows are indivisible. Values are never truncated.
 Active queue, draft and interrupt state is added even when the template omits it.
+The queue field reads `steer N · next N`: `steer` counts messages that steer the
+running turn; `next` counts messages queued for the next turn. Both counts are
+shown when either is nonzero. When both are zero, the field is omitted.
 At a width too small for one critical value, that value remains whole.
 
 Variables: `model`, `effort`, `fast`, `mode`, `ctx.used`, `ctx.window`,

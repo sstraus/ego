@@ -146,13 +146,13 @@ fn statusline_presets_store_templates_with_one_prompt_slot() {
             "{id}: {visible}"
         );
         assert!(!visible.contains("statusline:"), "{id}: {visible}");
-        for critical in ["queue=1/2", "drafts=3", "interrupt=yes"] {
+        for critical in ["steer 1 · next 2", "drafts=3", "interrupt=yes"] {
             assert!(visible.contains(critical), "{id}: {visible}");
         }
         match id {
             "off" => assert_eq!(
                 visible,
-                "queue=1/2\ndrafts=3\ninterrupt=yes\n> preset-probe"
+                "steer 1 · next 2\ndrafts=3\ninterrupt=yes\n> preset-probe"
             ),
             "minimal" => assert!(
                 visible.starts_with("provider/model · medium · yolo\n"),

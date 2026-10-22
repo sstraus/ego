@@ -99,7 +99,7 @@ fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
     std::fs::write(&path, support::PNG_1X1).unwrap();
     input.write_all(b"\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, refusal_start, "queue=1/0");
+    until_normalized(&reader, &mut output, refusal_start, "steer 1 · next 0");
     gate.release();
     until_normalized(&reader, &mut output, paste_start, "QUEUED-IMAGE-ANSWER");
     let quit_start = output.len();
@@ -359,7 +359,7 @@ fn saved_image_draft_survives_clearing_a_different_draft() {
     std::fs::remove_file(&scratch).unwrap();
     input.write_all(b"\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "queue=1/0");
+    until_normalized(&reader, &mut output, start, "steer 1 · next 0");
     gate.release();
     until_normalized(&reader, &mut output, start, "SAVED-IMAGE-ANSWER");
     let start = output.len();

@@ -100,7 +100,10 @@ session confinement; they do not grant new process or network authority.
 ## Status and state
 
 The width-aware status row shows selected model/effort/mode, context occupancy,
-queue/drafts/interrupt, workspace/Git, and trust as configured. It uses whole
+steering/next-turn counts, drafts/interrupt, workspace/Git, and trust as configured.
+The counts read `steer N · next N`: messages that steer the running turn, then
+messages queued for the next turn. Both counts appear when either is nonzero;
+the field is omitted when both are zero. It uses whole
 segments under width pressure. A missing monetary rate is not a zero-cost run.
 Configure `ui.statusline.template` with MiniJinja to place status above or below
 the editor. The template must render `{{ prompt }}` once on its own line.

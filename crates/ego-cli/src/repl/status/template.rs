@@ -455,11 +455,11 @@ mod tests {
         snapshot.set_drafts(3);
         for template in [
             "{{ prompt }}",
-            "{% filter priority(0) %}queue=1/2 drafts=3 interrupt=yes too long{% endfilter %}\n{{ prompt }}",
+            "{% filter priority(0) %}steer 1 · next 2 drafts=3 interrupt=yes too long{% endfilter %}\n{{ prompt }}",
         ] {
             let (line, error) = StatusTemplate::new(template.into()).render(&snapshot, &[], 20);
             assert_eq!(error, None);
-            for value in ["queue=1/2", "drafts=3", "interrupt=yes"] {
+            for value in ["steer 1 · next 2", "drafts=3", "interrupt=yes"] {
                 assert!(line.text().contains(value), "{}", line.text());
             }
         }
