@@ -313,7 +313,7 @@ fn prepare_resume_phase<'store>(
         let opened = early_opened
             .as_ref()
             .expect("a resume answer opens its session before planning");
-        Some(plan_resume_answer(&opened.state(), &args.answers).map_err(&finalize)?)
+        Some(plan_resume_answer(&opened.state(), &args.answers).map_err(finalize)?)
     };
     let recovered_capture = match resume_plan.as_ref() {
         Some(ResumePlan::Foreign {
@@ -586,7 +586,7 @@ async fn admit_run_phase<'store>(
                 continuation,
                 request_event,
             )
-            .map_err(&finalize)?;
+            .map_err(finalize)?;
             (Some(RuntimeResume::Model(continuation.turn)), None)
         }
         Some(plan @ ResumePlan::Foreign { .. }) => (None, Some(plan)),
