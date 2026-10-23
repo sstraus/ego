@@ -12,6 +12,7 @@
 
 mod catalogue;
 mod commands;
+mod compaction_fit;
 mod context_capacity;
 pub use context_capacity::compaction_due;
 mod control;
@@ -2018,12 +2019,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     role: GenerationRole::Compaction,
                     error,
                 })?;
-        if let Some(message) = context_capacity::exhausted(
-            self.state().context,
-            profile.capabilities.max_context_tokens,
-        ) {
-            return Err(CompactionError::Internal(message));
-        }
         let live_request = self.last_request.as_ref().and_then(|previous| {
             // History coalesces adjacent messages, so compare content blocks,
             // not message counts. Include the source's final response/results.
@@ -2183,6 +2178,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         if let Some(cause) = self.cancel.cause() {
             return Err(CompactionError::Cancelled(cause));
         }
+        let fitted = compaction_fit::fit(request, profile.capabilities.max_context_tokens)?;
+        let request = &fitted;
         let gaps = profile.capabilities.request_gaps(request);
         if !gaps.is_empty() {
             return Err(CompactionError::Capability {

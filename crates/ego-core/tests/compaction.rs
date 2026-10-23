@@ -1825,3 +1825,65 @@ fn model_clear_preserves_the_spent_goal_continuation_allowance() {
         "spent goal turns must survive the transition"
     );
 }
+
+// Catches: measured exhaustion prevents both explicit and automatic hosts from
+// preparing the very checkpoint needed to recover; a huge first prompt must fit.
+#[test]
+fn over_window_compaction_fits_summarizer_instead_of_refusing() {
+    let (compact, generator) = compaction_profile(
+        "compaction-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (main, _) = compaction_profile(
+        "main-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact)),
+        (GenerationRole::Main, Ok(main)),
+    ]);
+    let mut state = SessionState::default();
+    state.apply(&seeded_event(EventKind::UserPrompt {
+        text: format!(
+            "original objective\n{}\nlatest instructions",
+            "界".repeat(400_000)
+        ),
+        images: Vec::new(),
+        audio: Vec::new(),
+        queued_prompt: None,
+    }));
+    state.apply(&event(EventKind::ContextWindowUpdated {
+        used_tokens: 437_009,
+        provenance: ego_core::event::domain::OccupancyProvenance::GenerationBoundary,
+        window: Some(32_000),
+    }));
+    let (mut turn, _, _) = compaction_turn_with_state(source, state);
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
+        .expect("over-window history must still compact");
+    assert_eq!(prepared.checkpoint().text(), checkpoint());
+    let calls = generator.calls();
+    assert_eq!(calls.len(), 1);
+    let request = &calls[0];
+    let bytes = serde_json::to_vec(request).unwrap().len() as u64;
+    assert!(
+        bytes + request.max_output_tokens.unwrap() + 4_096 <= 32_000,
+        "summarizer request must reserve output and framing: {bytes}"
+    );
+    let rendered = serde_json::to_string(&request.messages).unwrap();
+    assert!(rendered.contains("latest instructions"));
+    assert_eq!(
+        request.messages.messages().last(),
+        Some(&Message::text(Role::User, COMPACTION_PROMPT))
+    );
+}
