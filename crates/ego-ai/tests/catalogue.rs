@@ -1096,6 +1096,38 @@ fn rebuilt_catalogues_share_inventory_only_inside_the_bound_scope() {
     assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
 }
 
+/// Catches reusing account-scoped model facts after the credential changes.
+#[test]
+fn changed_credential_refetches_inventory_instead_of_reusing_previous_account_facts() {
+    use ego_ai::provider::CredentialStrategy;
+    use support::FakeCredentials;
+
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+    let (http, stub) = server([
+        (
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        ),
+        (503, "the new account inventory is unavailable"),
+    ]);
+    let slug = ModelSlug::parse("openrouter/openai/gpt-6-luna").unwrap();
+    assert!(block_on(catalogue.resolve(&slug, &http, &credential())).is_ok());
+    let next_credential = CredentialStrategy::BearerFromEnv {
+        var: "EGO_TEST_KEY".into(),
+    }
+    .resolve(&FakeCredentials::holding("different-account-key"))
+    .unwrap();
+
+    assert!(
+        matches!(
+            block_on(catalogue.resolve(&slug, &http, &next_credential)),
+            Err(ResolveError::EndpointUnreachable { .. })
+        ),
+        "changed credentials must not resolve using the previous account's inventory"
+    );
+    assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
+}
+
 /// Catches poisoning the scope with a failed first fetch or inventing absent models.
 #[test]
 fn failed_inventory_is_not_retained_and_missing_models_still_refuse() {
