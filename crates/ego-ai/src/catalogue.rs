@@ -1141,8 +1141,23 @@ pub fn provider_reported(cost: &dyn ProviderCost) -> Metering {
 /// one developer's disk presented as a fact about every installation.
 #[derive(Debug, Clone)]
 pub struct Catalogue {
+    inventory: ResolutionInventory,
     rows: BTreeMap<String, ProviderRow>,
     hosted: BTreeMap<String, HostedModel>,
+}
+
+/// Successful OpenRouter discovery retained for one bound effect scope.
+/// Sharing this value does not share credentials, request policy or pricing.
+#[derive(Debug, Clone, Default)]
+pub struct ResolutionInventory {
+    pub(crate) openrouter: Arc<futures::lock::Mutex<Option<RetainedOpenRouterInventory>>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedOpenRouterInventory {
+    pub base: Url,
+    pub request: ego_core::permit::HttpRequestDigest,
+    pub models: Vec<ModelDiscoveryEntry>,
 }
 
 /// The refusal a row owes when it has not cleared the live-promotion gate.
@@ -1174,12 +1189,24 @@ impl Catalogue {
     /// refuses until one is supplied.
     pub fn new(rows: impl IntoIterator<Item = ProviderRow>) -> Self {
         Catalogue {
+            inventory: ResolutionInventory::default(),
             rows: rows
                 .into_iter()
                 .map(|row| (row.id().to_owned(), row))
                 .collect(),
             hosted: BTreeMap::new(),
         }
+    }
+
+    /// Reuse discovery inside one bound scope while rebuilding operator facts.
+    /// A new scope must use a new inventory, so discovery can refresh there.
+    pub fn with_resolution_inventory(mut self, inventory: ResolutionInventory) -> Self {
+        self.inventory = inventory;
+        self
+    }
+
+    pub(crate) fn resolution_inventory(&self) -> &ResolutionInventory {
+        &self.inventory
     }
 
     /// Supply what this build cannot know about one hosted model, keyed by

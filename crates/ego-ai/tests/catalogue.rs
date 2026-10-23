@@ -1040,3 +1040,142 @@ fn an_unknown_provider_is_refused_before_a_resolver_is_chosen() {
     );
     assert!(stub.paths().is_empty());
 }
+
+/// Catches a second inventory GET aborting resolution after a successful tool step.
+#[test]
+fn inventory_outage_after_first_resolution_does_not_abort_next_step() {
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+    let (http, stub) = server([
+        (
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        ),
+        (503, "inventory temporarily unavailable"),
+    ]);
+    for model in [
+        "openai/gpt-6-luna",
+        "anthropic/claude-sonnet-5.5",
+        "openai/gpt-6-luna",
+    ] {
+        let resolved = block_on(catalogue.resolve(
+            &ModelSlug::parse(&format!("openrouter/{model}")).unwrap(),
+            &http,
+            &credential(),
+        ))
+        .expect("the bound inventory survives an outage, including a model change");
+        assert_eq!(resolved.model, model);
+        assert!(resolved.capabilities.max_context_tokens.is_some());
+    }
+    assert_eq!(stub.paths(), vec!["/api/v1/models"]);
+}
+
+/// Catches losing the bound inventory when the CLI rebuilds operator facts.
+#[test]
+fn rebuilt_catalogues_share_inventory_only_inside_the_bound_scope() {
+    use ego_ai::catalogue::ResolutionInventory;
+    let inventory = ResolutionInventory::default();
+    let (http, stub) = server([
+        (
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        ),
+        (503, "inventory temporarily unavailable"),
+    ]);
+    let slug = ModelSlug::parse("openrouter/openai/gpt-6-luna").unwrap();
+    for _ in 0..2 {
+        let catalogue = Catalogue::new([ProviderRow::openrouter_default()])
+            .with_resolution_inventory(inventory.clone());
+        assert!(block_on(catalogue.resolve(&slug, &http, &credential())).is_ok());
+    }
+    // A new scope must discover again rather than carrying stale capabilities forever.
+    let next = Catalogue::new([ProviderRow::openrouter_default()]);
+    assert!(matches!(
+        block_on(next.resolve(&slug, &http, &credential())),
+        Err(ResolveError::EndpointUnreachable { .. })
+    ));
+    assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
+}
+
+/// Catches reusing account-scoped model facts after the credential changes.
+#[test]
+fn changed_credential_refetches_inventory_instead_of_reusing_previous_account_facts() {
+    use ego_ai::provider::CredentialStrategy;
+    use support::FakeCredentials;
+
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+    let (http, stub) = server([
+        (
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        ),
+        (503, "the new account inventory is unavailable"),
+    ]);
+    let slug = ModelSlug::parse("openrouter/openai/gpt-6-luna").unwrap();
+    assert!(block_on(catalogue.resolve(&slug, &http, &credential())).is_ok());
+    let next_credential = CredentialStrategy::BearerFromEnv {
+        var: "EGO_TEST_KEY".into(),
+    }
+    .resolve(&FakeCredentials::holding("different-account-key"))
+    .unwrap();
+
+    assert!(
+        matches!(
+            block_on(catalogue.resolve(&slug, &http, &next_credential)),
+            Err(ResolveError::EndpointUnreachable { .. })
+        ),
+        "changed credentials must not resolve using the previous account's inventory"
+    );
+    assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
+}
+
+/// Catches poisoning the scope with a failed first fetch or inventing absent models.
+#[test]
+fn failed_inventory_is_not_retained_and_missing_models_still_refuse() {
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]);
+    let (http, stub) = server([
+        (503, "inventory temporarily unavailable"),
+        (
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        ),
+    ]);
+    let slug = ModelSlug::parse("openrouter/openai/gpt-6-luna").unwrap();
+    assert!(matches!(
+        block_on(catalogue.resolve(&slug, &http, &credential())),
+        Err(ResolveError::EndpointUnreachable { .. })
+    ));
+    assert!(block_on(catalogue.resolve(&slug, &http, &credential())).is_ok());
+    let absent = ModelSlug::parse("openrouter/fixture/not-in-inventory").unwrap();
+    assert!(matches!(
+        block_on(catalogue.resolve(&absent, &http, &credential())),
+        Err(ResolveError::NotInstalled { .. })
+    ));
+    assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
+}
+
+/// Catches reusing inventory when an effective account or routing header changes.
+#[test]
+fn changed_inventory_headers_refetch_even_with_the_same_endpoint_and_credential() {
+    use ego_ai::catalogue::ResolutionInventory;
+    let inventory = ResolutionInventory::default();
+    let (http, stub) = server([
+        (
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        ),
+        (503, "the new header scope inventory is unavailable"),
+    ]);
+    let slug = ModelSlug::parse("openrouter/openai/gpt-6-luna").unwrap();
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()])
+        .with_resolution_inventory(inventory.clone());
+    assert!(block_on(catalogue.resolve(&slug, &http, &credential())).is_ok());
+    let mut row = ProviderRow::openrouter_default();
+    row.extra_headers
+        .push(("x-account".into(), "other-account".into()));
+    let changed = Catalogue::new([row]).with_resolution_inventory(inventory);
+    assert!(matches!(
+        block_on(changed.resolve(&slug, &http, &credential())),
+        Err(ResolveError::EndpointUnreachable { .. })
+    ));
+    assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
+}

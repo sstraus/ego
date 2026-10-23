@@ -9107,7 +9107,7 @@ mod turn {
             fn revalidate(&self, _spec: &SpawnSpec) -> Result<(), ProcessError> {
                 if self
                     .movement
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                     .is_ok()
                 {
                     Err(ProcessError::Invariant("observed movement".into()))
