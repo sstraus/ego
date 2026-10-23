@@ -214,8 +214,26 @@ impl HttpRequestDigest {
         &self.0
     }
     pub fn of(request: &HttpRequest) -> Self {
+        Self::hash(request, false)
+    }
+
+    /// Private in-memory reuse identity, including the authenticated headers.
+    /// Unlike the public request digest, this distinguishes credential changes.
+    /// Do not persist this identity or use it as a public request commitment.
+    pub fn for_authenticated_reuse(request: &HttpRequest) -> Self {
+        Self::hash(request, true)
+    }
+
+    fn hash(request: &HttpRequest, authenticated: bool) -> Self {
         let mut hasher = Sha256::new();
-        hash_http_frame(&mut hasher, b"ego.http-request");
+        hash_http_frame(
+            &mut hasher,
+            if authenticated {
+                b"ego.http-authenticated-reuse"
+            } else {
+                b"ego.http-request"
+            },
+        );
         hash_http_frame(&mut hasher, b"1");
         hash_http_frame(&mut hasher, request.method.as_bytes());
         hash_http_frame(&mut hasher, request.path.as_bytes());
@@ -226,9 +244,16 @@ impl HttpRequestDigest {
                 HttpHeaderValue::Public(value) => {
                     hash_http_frame(&mut hasher, value);
                 }
-                HttpHeaderValue::Secret(_) => {
+                HttpHeaderValue::Secret(value) => {
                     hash_http_frame(&mut hasher, b"ego.http-header.secret");
-                    hash_http_frame(&mut hasher, b"");
+                    hash_http_frame(
+                        &mut hasher,
+                        if authenticated {
+                            value.expose_secret_bytes()
+                        } else {
+                            b""
+                        },
+                    );
                 }
             }
         }

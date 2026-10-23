@@ -540,15 +540,23 @@ async fn connect_failure_keeps_reqwest_source_chain_without_url_secrets() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let error = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap()
-        .get(format!("http://{address}/private?key=sk-live-secret"))
-        .send()
+    let target = NetworkTarget::new("localhost", address.port()).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::get("/private?key=sk-live-secret").unwrap();
+    let connect = PreparedConnect::new(target, &request);
+    let transport = offline_transport(
+        Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+        CancelToken::new(),
+    );
+    let mapped = GuardedHttp::new(transport.clone(), transport)
+        .execute_admitted(
+            route,
+            connect,
+            request,
+            Instant::now() + Duration::from_secs(5),
+        )
         .await
         .expect_err("the local fixture port is closed");
-    let mapped = super::exchange_error(error);
     let TransportFailure::Connect(detail) = mapped.failure() else {
         panic!("expected a connection failure, got {mapped:?}");
     };

@@ -1156,6 +1156,7 @@ pub struct ResolutionInventory {
 #[derive(Debug)]
 pub(crate) struct RetainedOpenRouterInventory {
     pub base: Url,
+    pub request: ego_core::permit::HttpRequestDigest,
     pub models: Vec<ModelDiscoveryEntry>,
 }
 

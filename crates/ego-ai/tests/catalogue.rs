@@ -1152,3 +1152,30 @@ fn failed_inventory_is_not_retained_and_missing_models_still_refuse() {
     ));
     assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
 }
+
+/// Catches reusing inventory when an effective account or routing header changes.
+#[test]
+fn changed_inventory_headers_refetch_even_with_the_same_endpoint_and_credential() {
+    use ego_ai::catalogue::ResolutionInventory;
+    let inventory = ResolutionInventory::default();
+    let (http, stub) = server([
+        (
+            200,
+            include_str!("goldens/openrouter/models-2026-10-15.json"),
+        ),
+        (503, "the new header scope inventory is unavailable"),
+    ]);
+    let slug = ModelSlug::parse("openrouter/openai/gpt-6-luna").unwrap();
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()])
+        .with_resolution_inventory(inventory.clone());
+    assert!(block_on(catalogue.resolve(&slug, &http, &credential())).is_ok());
+    let mut row = ProviderRow::openrouter_default();
+    row.extra_headers
+        .push(("x-account".into(), "other-account".into()));
+    let changed = Catalogue::new([row]).with_resolution_inventory(inventory);
+    assert!(matches!(
+        block_on(changed.resolve(&slug, &http, &credential())),
+        Err(ResolveError::EndpointUnreachable { .. })
+    ));
+    assert_eq!(stub.paths(), vec!["/api/v1/models", "/api/v1/models"]);
+}

@@ -56,11 +56,10 @@ struct TopProvider {
     max_completion_tokens: Option<u64>,
 }
 
-async fn inventory(
+fn inventory_request(
     row: &ProviderRow,
-    http: &Arc<dyn Http>,
     credential: &ResolvedCredential,
-) -> Result<Vec<ModelDiscoveryEntry>, String> {
+) -> Result<HttpRequest, String> {
     let url = row
         .base()
         .join("models")
@@ -71,17 +70,20 @@ async fn inventory(
         headers.push(public_header(name, value.as_bytes().to_vec()));
     }
     headers.push(public_header("accept", b"application/json".to_vec()));
-    let answer = exchange(
-        http,
-        &row.http_profile,
-        HttpRequest {
-            url,
-            method: Method::Get,
-            headers,
-            body: None,
-        },
-    )
-    .await?;
+    Ok(HttpRequest {
+        url,
+        method: Method::Get,
+        headers,
+        body: None,
+    })
+}
+
+async fn inventory(
+    row: &ProviderRow,
+    http: &Arc<dyn Http>,
+    request: HttpRequest,
+) -> Result<Vec<ModelDiscoveryEntry>, String> {
+    let answer = exchange(http, &row.http_profile, request).await?;
     if !(200..300).contains(&answer.status) {
         return Err(crate::http::refusal(&answer));
     }
@@ -156,7 +158,9 @@ pub async fn enumerate(
     http: &Arc<dyn Http>,
     credential: &ResolvedCredential,
 ) -> Result<ModelDiscoveryReport, String> {
-    match inventory(row, http, credential).await {
+    let discovered =
+        async { inventory(row, http, inventory_request(row, credential)?).await }.await;
+    match discovered {
         Ok(models) => ModelDiscoveryReport::try_new(
             ModelDiscoverySource::Discovered {
                 provider: row.id().to_owned(),
@@ -195,21 +199,26 @@ pub async fn resolve(
     let mut capabilities = match catalogue.supplied_capabilities(&format!("{}/{model}", row.id())) {
         Some(supplied) => supplied.clone(),
         None => {
+            let unreachable = |message| ResolveError::EndpointUnreachable {
+                endpoint: format!("{} models", row.id()),
+                message,
+            };
+            let request = inventory_request(row, credential).map_err(unreachable)?;
+            let core = request
+                .to_core()
+                .map_err(|error| unreachable(error.to_string()))?;
+            let identity = ego_core::permit::HttpRequestDigest::for_authenticated_reuse(&core);
             let mut retained = catalogue.resolution_inventory().openrouter.lock().await;
             // The complete inventory covers model changes between tool steps.
-            // Refetch only for a new scope or endpoint, never for each generation.
-            if retained
-                .as_ref()
-                .is_none_or(|inventory| &inventory.base != row.base())
-            {
-                let models = inventory(row, http, credential).await.map_err(|message| {
-                    ResolveError::EndpointUnreachable {
-                        endpoint: format!("{} models", row.id()),
-                        message,
-                    }
-                })?;
+            // A new scope, endpoint or authenticated request must discover again:
+            // configurable endpoints may expose account-specific model facts.
+            if retained.as_ref().is_none_or(|inventory| {
+                &inventory.base != row.base() || inventory.request != identity
+            }) {
+                let models = inventory(row, http, request).await.map_err(unreachable)?;
                 *retained = Some(RetainedOpenRouterInventory {
                     base: row.base().clone(),
+                    request: identity,
                     models,
                 });
             }

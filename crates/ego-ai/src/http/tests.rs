@@ -602,3 +602,27 @@ async fn connect_and_timeout_diagnostics_retain_host_without_request_secrets() {
         assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
     }
 }
+
+/// Catches an authenticated cache key silently using the secret-blind public digest.
+#[test]
+fn authenticated_reuse_digest_distinguishes_secrets_without_changing_public_commitments() {
+    let request = |secret: &[u8]| request_with("GET", "/models", vec![bearer_header(secret)], b"");
+    let first = request(b"first-account-secret");
+    let second = request(b"second-account-secret");
+    assert_eq!(
+        HttpRequestDigest::of(&first),
+        HttpRequestDigest::of(&second)
+    );
+    let identity = HttpRequestDigest::for_authenticated_reuse(&first);
+    assert_eq!(
+        identity,
+        HttpRequestDigest::for_authenticated_reuse(&request(b"first-account-secret"))
+    );
+    assert_ne!(
+        identity,
+        HttpRequestDigest::for_authenticated_reuse(&second)
+    );
+    let diagnostic = format!("{identity:?}");
+    assert!(!diagnostic.contains("first-account-secret"));
+    assert!(!diagnostic.contains("Bearer"));
+}
