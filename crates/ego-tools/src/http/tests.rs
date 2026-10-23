@@ -533,3 +533,30 @@ async fn websocket_run_expiry_closes_idle_socket_and_refuses_late_request() {
         &TransportFailure::TimedOut
     );
 }
+
+/// Catches reqwest's outer Display hiding the actual TCP/TLS cause.
+#[tokio::test]
+async fn connect_failure_keeps_reqwest_source_chain_without_url_secrets() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("http://{address}/private?key=sk-live-secret"))
+        .send()
+        .await
+        .expect_err("the local fixture port is closed");
+    let mapped = super::exchange_error(error);
+    let TransportFailure::Connect(detail) = mapped.failure() else {
+        panic!("expected a connection failure, got {mapped:?}");
+    };
+    assert!(
+        detail.to_lowercase().contains("refused"),
+        "missing TCP cause: {detail}"
+    );
+    assert!(!detail.contains("private"));
+    assert!(!detail.contains("sk-live-secret"));
+    assert_eq!(mapped.delivery(), DeliveryCertainty::DefinitelyUnsent);
+}

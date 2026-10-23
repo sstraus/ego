@@ -570,3 +570,35 @@ async fn response_body_error_preserves_typed_delivery() {
         .expect_err("typed body error");
     assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
 }
+
+/// Catches the protocol adapter erasing transport causes or the admitted host.
+#[tokio::test]
+async fn connect_and_timeout_diagnostics_retain_host_without_request_secrets() {
+    for failure in [
+        TransportFailure::Connect("client error: TLS handshake: certificate verify failed".into()),
+        TransportFailure::TimedOut,
+    ] {
+        let http = RecordingHttp::new(vec![Err(TransportError::definitely_unsent(failure))]);
+        let error = match execute_profile(
+            &profile_for("api.example.test"),
+            &http,
+            provider_request("https://api.example.test/private?key=sk-live-secret"),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("transport failure must remain a failure"),
+        };
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("api.example.test"));
+        assert!(!diagnostic.contains("private"));
+        assert!(!diagnostic.contains("sk-live-secret"));
+        if diagnostic.contains("connection failed") {
+            assert!(diagnostic.contains("TLS handshake: certificate verify failed"));
+        } else {
+            assert!(diagnostic.contains("timed out"));
+        }
+        assert_eq!(error.kind(), ErrorKind::Transient);
+        assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+    }
+}

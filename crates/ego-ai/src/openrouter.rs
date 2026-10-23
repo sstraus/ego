@@ -13,7 +13,7 @@ use serde::Deserialize;
 use crate::catalogue::{
     Catalogue, ModelDiscoveryEntry, ModelDiscoveryFailure, ModelDiscoveryReport,
     ModelDiscoverySource, ModelFactProvenance, ModelSlug, ResolveError, ResolvedModel,
-    provider_reported,
+    RetainedOpenRouterInventory, provider_reported,
 };
 use crate::http::{Http, HttpRequest, Method, exchange, public_header};
 use crate::provider::{ProviderRow, ResolvedCredential};
@@ -190,29 +190,45 @@ pub async fn resolve(
     http: &Arc<dyn Http>,
     credential: &ResolvedCredential,
 ) -> Result<ResolvedModel, ResolveError> {
-    let models = inventory(row, http, credential).await.map_err(|message| {
-        ResolveError::EndpointUnreachable {
-            endpoint: format!("{} models", row.id()),
-            message,
-        }
-    })?;
-    let installed = models
-        .iter()
-        .map(|entry| entry.slug.model.clone())
-        .collect();
-    // An operator row in `models.toml` overrides discovery, including reasoning
-    // facts, and can also describe an unlisted model.
+    // Operator facts are sufficient even for an unlisted model. Discovery must
+    // not turn these facts into an avoidable network dependency.
     let mut capabilities = match catalogue.supplied_capabilities(&format!("{}/{model}", row.id())) {
         Some(supplied) => supplied.clone(),
         None => {
+            let mut retained = catalogue.resolution_inventory().openrouter.lock().await;
+            // The complete inventory covers model changes between tool steps.
+            // Refetch only for a new scope or endpoint, never for each generation.
+            if retained
+                .as_ref()
+                .is_none_or(|inventory| &inventory.base != row.base())
+            {
+                let models = inventory(row, http, credential).await.map_err(|message| {
+                    ResolveError::EndpointUnreachable {
+                        endpoint: format!("{} models", row.id()),
+                        message,
+                    }
+                })?;
+                *retained = Some(RetainedOpenRouterInventory {
+                    base: row.base().clone(),
+                    models,
+                });
+            }
+            let models = &retained
+                .as_ref()
+                .expect("successful inventory retained")
+                .models;
             models
-                .into_iter()
+                .iter()
                 .find(|entry| entry.slug.model == model)
                 .ok_or_else(|| ResolveError::NotInstalled {
                     model: model.to_owned(),
-                    installed,
+                    installed: models
+                        .iter()
+                        .map(|entry| entry.slug.model.clone())
+                        .collect(),
                 })?
                 .capabilities
+                .clone()
         }
     };
     capabilities.audio_input = ego_core::generator::capabilities::AudioInputSupport::Unsupported;

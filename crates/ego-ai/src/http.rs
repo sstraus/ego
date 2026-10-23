@@ -233,18 +233,25 @@ impl AdmittedHttpProfile {
                 ));
             }
 
+            let host = request.url.host_str().unwrap_or_default().to_owned();
             match call.execute(prepared).await {
-                Err(error) => return Err(HttpError::transport(error).promote(prior_effect)),
+                Err(error) => {
+                    return Err(HttpError::transport(error)
+                        .at_host(host)
+                        .promote(prior_effect));
+                }
                 Ok(OneHopResponse::Response {
                     status,
                     headers,
                     body,
                     ..
                 }) => {
-                    let body = body.map(|chunk| {
-                        chunk
-                            .map(bytes::Bytes::from)
-                            .map_err(|error| HttpError::transport(error).promote(true))
+                    let body = body.map(move |chunk| {
+                        chunk.map(bytes::Bytes::from).map_err(|error| {
+                            HttpError::transport(error)
+                                .at_host(host.clone())
+                                .promote(true)
+                        })
                     });
                     return Ok(HttpResponse {
                         status,
@@ -452,6 +459,8 @@ enum HttpFailure {
 pub struct HttpError {
     failure: HttpFailure,
     delivery: DeliveryCertainty,
+    host: Option<String>,
+    connect_source: Option<String>,
 }
 
 impl HttpError {
@@ -459,6 +468,8 @@ impl HttpError {
         Self {
             failure: HttpFailure::Profile(failure),
             delivery,
+            host: None,
+            connect_source: None,
         }
     }
 
@@ -479,7 +490,17 @@ impl HttpError {
         Self {
             failure,
             delivery: error.delivery(),
+            host: None,
+            connect_source: match error.failure() {
+                TransportFailure::Connect(source) => Some(source.clone()),
+                _ => None,
+            },
         }
+    }
+
+    fn at_host(mut self, host: String) -> Self {
+        self.host = Some(host);
+        self
     }
 
     fn promote(mut self, prior_effect: bool) -> Self {
@@ -528,7 +549,14 @@ impl fmt::Display for HttpError {
             HttpFailure::Cancelled => "HTTP call was cancelled",
             HttpFailure::TimedOut => "HTTP call timed out",
         };
-        f.write_str(message)
+        f.write_str(message)?;
+        if let Some(host) = &self.host {
+            write!(f, " ({host})")?;
+        }
+        if let Some(source) = &self.connect_source {
+            write!(f, ": {source}")?;
+        }
+        Ok(())
     }
 }
 

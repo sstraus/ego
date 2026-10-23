@@ -878,10 +878,8 @@ fn openrouter_resolution_preserves_operator_quote() {
             rates: Some(rates.clone()),
         },
     );
-    let (http, stub) = server([(
-        200,
-        include_str!("goldens/openrouter/models-2026-10-15.json"),
-    )]);
+    // Supplied facts and prices must work even when discovery is unavailable.
+    let (http, stub) = server([(503, "inventory unavailable")]);
     let resolved = block_on(catalogue.resolve(
         &ModelSlug::parse("openrouter/anthropic/claude-sonnet-5.5").unwrap(),
         &http,
@@ -895,7 +893,7 @@ fn openrouter_resolution_preserves_operator_quote() {
             settlement: SettlementSource::ProviderReported { .. }
         }
     ));
-    assert_eq!(stub.paths(), ["/api/v1/models"]);
+    assert!(stub.paths().is_empty());
 }
 
 // Catches: an absent quote is fabricated or copied from a different routed slug.

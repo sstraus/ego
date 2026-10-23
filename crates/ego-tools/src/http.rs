@@ -409,12 +409,24 @@ fn response_headers(
 }
 
 fn exchange_error(error: reqwest::Error) -> TransportError {
-    let failure = if error.is_connect() {
-        TransportFailure::Connect(error.to_string())
+    let unsent = error.is_builder() || error.is_connect();
+    let connect = error.is_connect();
+    // Request URLs can contain query secrets. Only the admitted host is added
+    // by the protocol layer; retain the URL-free TCP/TLS source chain here.
+    let error = error.without_url();
+    let mut detail = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        use std::fmt::Write as _;
+        let _ = write!(detail, ": {cause}");
+        source = cause.source();
+    }
+    let failure = if connect {
+        TransportFailure::Connect(detail)
     } else {
-        TransportFailure::Exchange(error.to_string())
+        TransportFailure::Exchange(detail)
     };
-    if error.is_builder() || error.is_connect() {
+    if unsent {
         definitely_unsent(failure)
     } else {
         possibly_sent(failure)

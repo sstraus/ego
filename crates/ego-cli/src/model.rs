@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
+use ego_ai::catalogue::{Catalogue, ModelSlug, ResolutionInventory, ResolveError, ResolvedModel};
 use ego_ai::generator::StaticRequestProfile;
 use ego_ai::http::Http;
 use ego_ai::provider::{
@@ -258,8 +258,27 @@ pub async fn resolve(
     creds: &dyn Credentials,
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<(ResolvedModel, ResolvedCredential), ResolveError> {
+    resolve_with_inventory(
+        slug,
+        hosted,
+        http,
+        creds,
+        auth,
+        ResolutionInventory::default(),
+    )
+    .await
+}
+
+async fn resolve_with_inventory(
+    slug: &str,
+    hosted: Vec<(String, facts::Hosted)>,
+    http: &Arc<dyn Http>,
+    creds: &dyn Credentials,
+    auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
+    inventory: ResolutionInventory,
+) -> Result<(ResolvedModel, ResolvedCredential), ResolveError> {
     let slug = ModelSlug::parse(slug)?;
-    let catalogue = catalogue(hosted, auth)?;
+    let catalogue = catalogue(hosted, auth)?.with_resolution_inventory(inventory);
     let row = catalogue.row(&slug.provider)?;
     // Before the credential, deliberately: a row nobody may select should not
     // make a keychain prompt or a `credential_command` run, and "no key" is
@@ -525,6 +544,7 @@ impl CliGenerationModelSource {
             cancel,
             run_deadline,
             generator: Mutex::new(None),
+            inventory: ResolutionInventory::default(),
         })
     }
 
@@ -535,6 +555,7 @@ impl CliGenerationModelSource {
         cancel: &CancelToken,
         run_deadline: Option<std::time::Instant>,
         retained: &Mutex<Option<RetainedGenerator>>,
+        inventory: &ResolutionInventory,
     ) -> Result<GenerationProfile, GenerationModelError> {
         let role = request.role();
         let has_model_overlay = request.model().is_some();
@@ -650,10 +671,16 @@ impl CliGenerationModelSource {
         )
         .await
         .map_err(auth_generation_error)?;
-        let (mut resolved, credential) =
-            resolve(&identity.0, hosted, http, credentials.as_ref(), &self.auth)
-                .await
-                .map_err(generation_error)?;
+        let (mut resolved, credential) = resolve_with_inventory(
+            &identity.0,
+            hosted,
+            http,
+            credentials.as_ref(),
+            &self.auth,
+            inventory.clone(),
+        )
+        .await
+        .map_err(generation_error)?;
         let ledger = self.ceilings.money.map(|limit| {
             crate::budget::gate(&self.ceilings, None, limit.currency)
                 .ledger()
@@ -787,6 +814,7 @@ struct BoundGenerationModelSource {
     cancel: CancelToken,
     run_deadline: Option<std::time::Instant>,
     generator: Mutex<Option<RetainedGenerator>>,
+    inventory: ResolutionInventory,
 }
 
 impl GenerationModelSource for BoundGenerationModelSource {
@@ -800,6 +828,7 @@ impl GenerationModelSource for BoundGenerationModelSource {
             &self.cancel,
             self.run_deadline,
             &self.generator,
+            &self.inventory,
         ))
     }
 }
@@ -1021,6 +1050,97 @@ mod tests {
             .snapshot()
             .expect_err("a source without an initial effort is unresolved");
         assert!(error.to_string().contains("thinking"));
+    }
+
+    // Catches: generation boundaries recreate discovery despite one bound source.
+    #[tokio::test]
+    async fn openrouter_bound_source_retains_inventory_across_model_changes() {
+        const CHILD: &str = "EGO_TEST_OPENROUTER_INVENTORY_BOUNDARY";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "model::tests::openrouter_bound_source_retains_inventory_across_model_changes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("EGO_HOME", home.path())
+                .env("OPENROUTER_API_KEY", "fixture-not-a-real-key")
+                .env_remove(OPENROUTER_BASE_URL)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        struct InventoryHttp(Arc<std::sync::atomic::AtomicUsize>);
+        struct InventoryCall(Arc<std::sync::atomic::AtomicUsize>);
+        impl Http for InventoryHttp {
+            fn begin_call(&self) -> Box<dyn HttpCall> {
+                Box::new(InventoryCall(self.0.clone()))
+            }
+        }
+        impl HttpCall for InventoryCall {
+            fn execute(
+                &mut self,
+                call: PreparedHttpCall,
+            ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+                let (_, _, _, request) = call.into_parts();
+                assert_eq!(request.method(), "GET");
+                assert_eq!(request.path(), "/api/v1/models");
+                let first = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                Box::pin(async move {
+                    if first {
+                        Ok(OneHopResponse::streaming_response(
+                            200,
+                            Vec::new(),
+                            Box::pin(futures::stream::iter([Ok(include_bytes!(
+                                "../../ego-ai/tests/goldens/openrouter/models-2026-10-15.json"
+                            )
+                            .to_vec())])),
+                        ))
+                    } else {
+                        Err(TransportError::definitely_unsent(
+                            TransportFailure::Connect("fixture inventory offline".into()),
+                        ))
+                    }
+                })
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source = Arc::new(CliGenerationModelSource::new(
+            ModelRef("openrouter/openai/gpt-6-luna".into()),
+            Some(ThinkingLevel::Low),
+            None,
+            Ceilings::default(),
+            Default::default(),
+        ));
+        let bound = source.bind(
+            Arc::new(InventoryHttp(calls.clone())),
+            CancelToken::new(),
+            None,
+        );
+        for model in [
+            "openai/gpt-6-luna",
+            "anthropic/claude-sonnet-5.5",
+            "openai/gpt-6-luna",
+        ] {
+            source
+                .selection()
+                .install(ModelRef(format!("openrouter/{model}")), ThinkingLevel::Low)
+                .unwrap();
+            let profile = bound
+                .resolve(GenerationModelRequest::new(GenerationRole::Main))
+                .await
+                .unwrap();
+            assert_eq!(profile.request_model, model);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // Catches: fresh model resolution discards the previous tool response and socket.
