@@ -203,25 +203,67 @@ fn steer_queued(composer: Option<&str>) {
         2,
         "one interrupted request and one delivery"
     );
-    let messages = &generations[1]["messages"];
     let mut expected = vec!["queued first", "queued second"];
     expected.extend(composer);
-    let mut last = 0;
-    let serialized = messages.to_string();
-    for prompt in expected {
-        assert_eq!(
-            count_exact_strings(messages, prompt),
-            1,
-            "{prompt}: exactly once"
-        );
-        let position = serialized.find(prompt).expect("delivered prompt");
-        assert!(
-            position > last,
-            "FIFO order including composer: {serialized}"
-        );
-        last = position;
-    }
+    // Consecutive user prompts may share one wire message. The observable
+    // contract is each fixture line once in FIFO order, not JSON boundaries.
+    let delivered = generations[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .flat_map(|message| {
+            message["content"]
+                .as_str()
+                .expect("text-only user content")
+                .lines()
+        })
+        .filter(|line| expected.contains(line))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        delivered, expected,
+        "FIFO delivery including composer, exactly once"
+    );
     let final_journal = journal(&ego);
+    let events = final_journal
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|record| !record["payload"]["event"].is_null())
+        .map(|record| {
+            serde_json::from_value::<ego_core::event::domain::DomainEvent>(
+                record["payload"]["event"].clone(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    use ego_core::event::domain::EventKind;
+    let queued = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::PromptQueued { id, text, .. } => Some((*id, text.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        queued.iter().map(|(_, text)| *text).collect::<Vec<_>>(),
+        expected,
+        "durable admissions must match the queued inputs and optional composer"
+    );
+    let consumed = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::UserPrompt {
+                queued_prompt: Some(id),
+                text,
+                ..
+            } => Some((*id, text.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        consumed, queued,
+        "each queued ID must be acknowledged once, in admission order"
+    );
     let state = replay(&final_journal);
     assert_eq!(
         state.queue_status(),
@@ -326,9 +368,9 @@ fn repeated_up_withdraws_images_and_text_without_replaying_them_on_resume() {
     );
     // Do not requeue either withdrawn prompt. Finish the original turn, then
     // discard only the unsent drafts at the normal explicit exit confirmation.
-    gate.release();
     let offset = output.len();
-    until_prompt_from(&reader, &mut output, offset);
+    gate.release();
+    until_idle_image_composer(&reader, &mut output, offset);
     let offset = output.len();
     input.write_all(b"\x03").unwrap();
     input.flush().unwrap();
@@ -450,4 +492,46 @@ fn up_without_queued_prompts_keeps_history_navigation() {
         2,
         "history Up must resubmit the prior input once, preserving its earlier history entry"
     );
+}
+
+// The recalled image and text stay in place until an idle frame is complete.
+// Generic empty/text prompt helpers do not recognize this image-prefixed row.
+fn until_idle_image_composer(reader: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        let ready = output[start..]
+            .windows(HIDE_CURSOR.len())
+            .enumerate()
+            .filter(|(_, bytes)| *bytes == HIDE_CURSOR)
+            .any(|(offset, _)| {
+                let frame = &output[start + offset..];
+                let Some(end) = frame
+                    .windows(SHOW_CURSOR.len())
+                    .position(|bytes| bytes == SHOW_CURSOR)
+                else {
+                    return false;
+                };
+                let mut screen = vt100::Parser::new(24, 100, 0);
+                screen.process(&frame[..end + SHOW_CURSOR.len()]);
+                let visible = screen.screen().contents();
+                !visible.contains("Esc to interrupt")
+                    && visible.trim_end().lines().last()
+                        == Some("[image: recalled 1] | > image queued first")
+            });
+        if ready {
+            return;
+        }
+        output.extend(
+            reader
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "idle image composer wait: {error}; {:?}",
+                        normalized(&output[start..])
+                    )
+                }),
+        );
+    }
 }
