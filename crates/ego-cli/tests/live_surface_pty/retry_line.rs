@@ -179,6 +179,12 @@ fn retry_colour_contract(recovers: bool, no_color: bool) {
         screen_rows(&after, 40, 180)
     );
     if !recovers {
+        let receipt = screen_rows(&after, 40, 180).join(" ");
+        assert!(receipt.contains("stopped"), "{receipt}");
+        assert!(
+            receipt.contains("review the output, then send a new prompt to continue"),
+            "{receipt}"
+        );
         assert!(
             !String::from_utf8_lossy(&after).contains("\x1b[38;2;151;207;167m"),
             "failed turn emitted success colour"

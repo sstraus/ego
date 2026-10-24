@@ -496,6 +496,44 @@ impl EventSink for JsonlSink<'_> {
     }
 }
 
+/// The two terminal consumers share one failure/continuation contract. Keep the
+/// diagnostic scoped to its turn: session-wide error history can name a prior
+/// failure after a later stream ends without an error event.
+#[derive(Default)]
+pub(crate) struct ProviderTurnNotices(Mutex<HashMap<TurnId, String>>);
+
+impl ProviderTurnNotices {
+    pub(crate) fn observe(&self, event: &PublicEvent) -> Option<String> {
+        match event {
+            PublicEvent::Error { turn, message, .. } => {
+                self.0
+                    .lock()
+                    .expect("turn diagnostic lock")
+                    .insert(*turn, ego_core::permit::terminal_safe(message));
+                None
+            }
+            PublicEvent::ProviderRetrying { turn, .. } => {
+                self.0.lock().expect("turn diagnostic lock").remove(turn);
+                None
+            }
+            PublicEvent::TurnCompleted {
+                turn,
+                ok,
+                exit_reason,
+            } => {
+                let cause = self.0.lock().expect("turn diagnostic lock").remove(turn);
+                (!*ok && *exit_reason == ego_core::event::domain::ExitReason::Provider).then(|| {
+                    format!(
+                        "{}; review the output, then send a new prompt to continue",
+                        cause.as_deref().unwrap_or("the provider response failed")
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// The default text mode: line-oriented, closer to a Unix tool than a TUI
 /// (`SPEC.md` §2.3, `ARCHITECTURE.md` §6).
 ///
@@ -525,6 +563,7 @@ pub struct TextSink<'a> {
     calls: Mutex<HashMap<ItemId, StartedCall>>,
     capabilities: Capabilities,
     retry_cause: Mutex<Option<String>>,
+    provider_notices: ProviderTurnNotices,
     goal: Mutex<Option<ego_core::goal::GoalRecord>>,
     turn_started: Mutex<HashMap<TurnId, Instant>>,
     edited_lines: Mutex<HashMap<TurnId, ego_core::permit::LineChange>>,
@@ -557,6 +596,7 @@ impl<'a> TextSink<'a> {
             calls: Mutex::new(HashMap::new()),
             capabilities,
             retry_cause: Mutex::new(None),
+            provider_notices: ProviderTurnNotices::default(),
             goal: Mutex::new(None),
             turn_started: Mutex::new(HashMap::new()),
             edited_lines: Mutex::new(HashMap::new()),
@@ -784,6 +824,7 @@ impl EventSink for TextSink<'_> {
     }
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        let provider_notice = self.provider_notices.observe(event);
         self.goal_receipts(event, state);
         if matches!(event, PublicEvent::TurnCompleted { .. }) && !self.quiet {
             self.finish();
@@ -809,7 +850,9 @@ impl EventSink for TextSink<'_> {
             )
         {
             self.out.retry_status(None);
-            if let Some(cause) = self.retry_cause.lock().expect("retry cause lock").take() {
+            if let Some(cause) = self.retry_cause.lock().expect("retry cause lock").take()
+                && provider_notice.is_none()
+            {
                 self.finish();
                 let colour = if matches!(event, PublicEvent::TurnCompleted { ok: false, .. }) {
                     crate::render::style::Palette::ERROR
@@ -830,15 +873,13 @@ impl EventSink for TextSink<'_> {
             }
         }
         match event {
-            PublicEvent::TurnStarted { turn } if self.capabilities.on_screen() && !self.quiet => {
+            PublicEvent::TurnStarted { turn } if self.capabilities.on_screen() => {
                 self.turn_started
                     .lock()
                     .expect("turn clock lock")
                     .insert(*turn, Instant::now());
             }
-            PublicEvent::TurnCompleted { turn, ok, .. }
-                if self.capabilities.on_screen() && !self.quiet =>
-            {
+            PublicEvent::TurnCompleted { turn, ok, .. } if self.capabilities.on_screen() => {
                 let started = self
                     .turn_started
                     .lock()
@@ -849,7 +890,9 @@ impl EventSink for TextSink<'_> {
                     .lock()
                     .expect("edit count lock")
                     .remove(turn);
-                if let Some(started) = started {
+                if let Some(started) = started
+                    && (!self.quiet || provider_notice.is_some())
+                {
                     self.finish();
                     let elapsed = tool_row::duration(started.elapsed());
                     let clock = chrono::Local::now().format("%-I:%M %p");
@@ -866,7 +909,24 @@ impl EventSink for TextSink<'_> {
                             lines.added, lines.removed
                         ));
                     }
-                    self.out.note(&receipt);
+                    if let Some(notice) = provider_notice {
+                        let capabilities = self.capabilities.with_current_width();
+                        let mut row =
+                            crate::render::Line::plain(format!("{DISPLAY_NAME}: {receipt} · "));
+                        row.push(crate::render::Span::new(
+                            notice,
+                            crate::render::style::Style::fg(crate::render::style::Palette::ERROR),
+                        ));
+                        let rendered = row
+                            .wrap(capabilities.width)
+                            .into_iter()
+                            .map(|line| line.render(capabilities.depth))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.out.line(&rendered);
+                    } else {
+                        self.out.note(&receipt);
+                    }
                 }
             }
             PublicEvent::PlanUpdated { .. } if !self.quiet => {

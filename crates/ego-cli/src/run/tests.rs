@@ -2158,6 +2158,7 @@ fn a_turn_starts_with_the_title_the_intent_and_busy() {
         ),
         "\x1b]0;ɛ । explain the diff\x07\
          \x1b]7770;intent=explain the diff (εgo)\x07\
+         \x1b]9;4;0;0\x07\
          \x1b]7770;state=busy\x07"
     );
 
@@ -2538,7 +2539,11 @@ fn recovery_waiting_and_settlement_emit_exact_osc() {
                 },
                 &state
             ),
-            "\x1b]7770;ego-recovery=clear\x07\x1b]7770;state=idle\x07"
+            if exit_reason == ego_core::event::domain::ExitReason::Provider {
+                "\x1b]7770;ego-recovery=clear\x07\x1b]9;4;2;0\x07\x1b]777;notify;εgo;the provider response failed; review the output, then send a new prompt to continue\x07\x1b]7770;state=awaiting\x07"
+            } else {
+                "\x1b]7770;ego-recovery=clear\x07\x1b]7770;state=idle\x07"
+            }
         );
     }
 }
@@ -3622,4 +3627,241 @@ async fn background_task_uncertain_execution_is_failure_data_not_parent_error() 
     let state = fixture.owner.hooks.hook_state().state();
     assert!(state.delivered_subagents.contains_key(&id));
     fixture.owner.refresh_tasks(state).await.unwrap();
+}
+
+#[derive(Default)]
+struct FailureReceiptOutput(std::sync::Mutex<Vec<String>>);
+
+impl Diagnostics for FailureReceiptOutput {
+    fn note(&self, text: &str) {
+        self.0.lock().unwrap().push(text.to_owned());
+    }
+    fn tool_row(&self, _: &str, _: String) {}
+}
+
+impl crate::output::TextOutput for FailureReceiptOutput {
+    fn write(&self, _: &str) {}
+    fn line(&self, text: &str) {
+        self.0.lock().unwrap().push(text.to_owned());
+    }
+    fn live_retry(&self) -> bool {
+        true
+    }
+}
+
+impl FailureReceiptOutput {
+    fn receipts(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|text| text.contains("Turn elapsed "))
+            .map(|text| {
+                let mut terminal = vt100::Parser::new(40, 80, 0);
+                terminal.process(text.replace('\n', "\r\n").as_bytes());
+                terminal
+                    .screen()
+                    .contents()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+}
+
+// Catches: a parsed-but-unrun tool hides the cause and reports normal idle.
+#[test]
+fn regression_case_unrun_tools_keep_failure_receipt_and_host_signal() {
+    for fixture in [
+        include_str!("../../tests/fixtures/615-unrun-exec.jsonl"),
+        include_str!("../../tests/fixtures/615-unrun-write.jsonl"),
+        include_str!("../../tests/fixtures/615-unrun-exec-without-reasoning.jsonl"),
+    ] {
+        let events: Vec<DomainEvent> = fixture
+            .lines()
+            .map(|line| {
+                let record: Value = serde_json::from_str(line).unwrap();
+                serde_json::from_value(record["payload"]["event"].clone()).unwrap()
+            })
+            .collect();
+        for (quiet, screen, colour) in [
+            (false, true, true),
+            (true, true, true),
+            (false, true, false),
+            (true, true, false),
+            (false, false, false),
+            (true, false, false),
+        ] {
+            let out = FailureReceiptOutput::default();
+            let mut caps = if screen {
+                capabilities(OscProfile::Tuic)
+            } else {
+                Capabilities::plain()
+            };
+            if !colour {
+                caps.depth = Depth::None;
+            }
+            let sink = TextSink::new(&out, quiet, caps);
+            let announce = Announce::new(&out, caps, quiet);
+            let mut state = SessionState::default();
+            let turn = events[0].env.turn;
+            sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+            let mut terminal_signal = String::new();
+            for event in &events {
+                state.apply(event);
+                if let Some(public) = ego_core::public::project_public(event) {
+                    sink.publish(&public, &state);
+                    let signal = announce.signal(&public, &state);
+                    if matches!(public, PublicEvent::TurnCompleted { .. }) {
+                        terminal_signal = signal;
+                    }
+                }
+            }
+            // Parse rendered bytes, including wrapped rows and SGR, as a terminal does.
+            let receipts = out.receipts();
+            let receipt = receipts.first();
+            let notes = out.0.lock().unwrap();
+            if screen {
+                let receipt = receipt.unwrap();
+                if !colour {
+                    assert!(!notes.iter().any(|row| row.contains("\x1b[")), "{notes:?}");
+                }
+                assert!(receipt.contains("HTTP response body failed"), "{receipt}");
+                assert!(
+                    receipt.contains("review the output, then send a new prompt to continue"),
+                    "{receipt}"
+                );
+                assert!(
+                    terminal_signal.contains("\x1b]9;4;2;0\x07"),
+                    "{terminal_signal:?}"
+                );
+                assert!(
+                    terminal_signal.contains("\x1b]7770;state=awaiting\x07"),
+                    "{terminal_signal:?}"
+                );
+                assert!(
+                    terminal_signal.contains("HTTP response body failed"),
+                    "{terminal_signal:?}"
+                );
+                assert!(
+                    terminal_signal.contains("send a new prompt to continue"),
+                    "{terminal_signal:?}"
+                );
+                assert!(
+                    !terminal_signal.contains("state=idle"),
+                    "{terminal_signal:?}"
+                );
+                assert!(
+                    !notes.iter().any(|line| line.contains("retry finished")),
+                    "{notes:?}"
+                );
+                let next = announce.signal(&prompt_submitted("continue"), &state);
+                assert!(next.contains("\x1b]9;4;0;0\x07"), "{next:?}");
+                assert!(next.contains("state=busy"), "{next:?}");
+            } else {
+                assert!(receipt.is_none(), "{notes:?}");
+                assert!(terminal_signal.is_empty(), "{terminal_signal:?}");
+                assert_eq!(
+                    *notes,
+                    ["the response stream failed: HTTP response body failed".to_owned()]
+                );
+            }
+        }
+    }
+}
+
+// Catches: recovered/cancelled errors, or a different turn's errors, taint a later failed receipt.
+#[test]
+fn provider_failure_notices_are_scoped_to_the_failed_turn() {
+    use ego_core::event::domain::{CancelCause, ExitReason};
+    for exit_reason in [
+        ExitReason::Completed,
+        ExitReason::Cancelled(CancelCause::User),
+        ExitReason::Usage,
+    ] {
+        let out = FailureReceiptOutput::default();
+        let caps = capabilities(OscProfile::Tuic);
+        let sink = TextSink::new(&out, false, caps);
+        let announce = Announce::new(&out, caps, false);
+        let state = SessionState::default();
+        let first = TurnId::new();
+        let second = TurnId::new();
+        for event in [
+            PublicEvent::TurnStarted { turn: first },
+            PublicEvent::Error {
+                turn: first,
+                item: None,
+                message: "earlier failure".into(),
+                kind: ego_core::generator::types::ErrorKind::Transient,
+            },
+            PublicEvent::TurnCompleted {
+                turn: first,
+                ok: exit_reason == ExitReason::Completed,
+                exit_reason,
+            },
+        ] {
+            sink.publish(&event, &state);
+            let signal = announce.signal(&event, &state);
+            if matches!(event, PublicEvent::TurnCompleted { .. }) {
+                assert_eq!(signal, "\x1b]7770;state=idle\x07");
+            }
+        }
+        let receipts = out.receipts();
+        let receipt = receipts.last().unwrap();
+        assert!(!receipt.contains("earlier failure"), "{receipt}");
+        assert!(!receipt.contains("send a new prompt"), "{receipt}");
+        for event in [
+            PublicEvent::TurnStarted { turn: second },
+            PublicEvent::Error {
+                turn: second,
+                item: None,
+                message: "retried failure".into(),
+                kind: ego_core::generator::types::ErrorKind::Transient,
+            },
+            PublicEvent::ProviderRetrying {
+                turn: second,
+                attempt: 1,
+            },
+            // A late event belonging to the old turn must not become the new turn's cause.
+            PublicEvent::Error {
+                turn: first,
+                item: None,
+                message: "unrelated failure".into(),
+                kind: ego_core::generator::types::ErrorKind::Transient,
+            },
+            PublicEvent::TurnCompleted {
+                turn: second,
+                ok: false,
+                exit_reason: ExitReason::Provider,
+            },
+        ] {
+            sink.publish(&event, &state);
+            let signal = announce.signal(&event, &state);
+            if matches!(event, PublicEvent::TurnCompleted { .. }) {
+                assert!(
+                    signal.contains("the provider response failed"),
+                    "{signal:?}"
+                );
+                assert!(
+                    !signal.contains("earlier failure")
+                        && !signal.contains("unrelated failure")
+                        && !signal.contains("retried failure"),
+                    "{signal:?}"
+                );
+            }
+        }
+        let receipts = out.receipts();
+        let receipt = receipts.last().unwrap();
+        assert!(
+            receipt.contains("the provider response failed"),
+            "{receipt}"
+        );
+        assert!(
+            !receipt.contains("earlier failure")
+                && !receipt.contains("unrelated failure")
+                && !receipt.contains("retried failure"),
+            "{receipt}"
+        );
+    }
 }
