@@ -733,6 +733,7 @@ pub(super) struct Announce<'a> {
     quiet: bool,
     started: std::time::Instant,
     recovering: std::sync::Mutex<bool>,
+    provider_notices: crate::output::ProviderTurnNotices,
 }
 
 /// How long a run has to take before finishing it is worth a desktop
@@ -752,6 +753,7 @@ impl<'a> Announce<'a> {
             quiet,
             started: std::time::Instant::now(),
             recovering: std::sync::Mutex::new(false),
+            provider_notices: crate::output::ProviderTurnNotices::default(),
         }
     }
 
@@ -800,6 +802,7 @@ impl<'a> Announce<'a> {
     /// reads it.
     pub(super) fn signal(&self, event: &PublicEvent, state: &SessionState) -> String {
         use ego_core::public::ItemKind as Kind;
+        let provider_notice = self.provider_notices.observe(event);
         match event {
             PublicEvent::ProviderRetry {
                 attempt, delay_ms, ..
@@ -829,7 +832,17 @@ impl<'a> Announce<'a> {
             // raised before a judge or a stored rule may settle it, and the
             // terminal owner announces the wait when it puts the question.
             PublicEvent::TurnCompleted { .. } => {
-                [self.clear_recovery(), self.osc.state(State::Idle)].concat()
+                if let Some(notice) = provider_notice {
+                    [
+                        self.clear_recovery(),
+                        self.osc.progress(Progress::Failed),
+                        self.osc.notify(crate::DISPLAY_NAME, &notice),
+                        self.osc.state(State::Awaiting),
+                    ]
+                    .concat()
+                } else {
+                    [self.clear_recovery(), self.osc.state(State::Idle)].concat()
+                }
             }
             _ => String::new(),
         }
@@ -860,7 +873,13 @@ impl<'a> Announce<'a> {
                 .intent(&format!("{text} ({})", crate::DISPLAY_NAME)),
             None => String::new(),
         };
-        [self.osc.title(&label), intent, self.osc.state(State::Busy)].concat()
+        [
+            self.osc.title(&label),
+            intent,
+            self.osc.progress(Progress::Cleared),
+            self.osc.state(State::Busy),
+        ]
+        .concat()
     }
 
     pub(super) fn postamble(&self, termination: &RunTermination, elapsed: Duration) -> String {
