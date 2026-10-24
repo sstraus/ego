@@ -1125,8 +1125,8 @@ pub enum ReedlineEvent {
     /// Use this to send custom instructions or serialized data from a keybinding
     /// logic back to the main application loop.
     ExecuteHostCommand(String),
-    /// Suspend for a host command only when the editor buffer is empty.
-    ExecuteHostCommandIfEmpty(String),
+    /// Suspend for a host command only when the cursor is on the first editor line.
+    ExecuteHostCommandIfFirstLine(String),
 
     /// Open text editor
     OpenEditor,

@@ -48,6 +48,8 @@ mod prompt_context;
 mod prompt_echo;
 #[path = "live_surface_pty/prompt_readiness.rs"]
 mod prompt_readiness;
+#[path = "live_surface_pty/queued_controls.rs"]
+mod queued_controls;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
 #[path = "live_surface_pty/render_efficiency.rs"]

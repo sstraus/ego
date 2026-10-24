@@ -615,12 +615,12 @@ impl ActionRegistry {
         .with_binding(KeyBinding::new(
             "Up",
             "recalls",
-            "With an empty busy composer, withdraw the last queued line for editing",
+            "On the first composer line while busy, withdraw the last queued prompt; preserve the draft",
         ))
         .with_binding(KeyBinding::new(
             "Ctrl+Enter",
             "steers",
-            "While a turn is running, send the line now: interrupt and deliver it first",
+            "While busy, steer all queued prompts in order, then the composer; interrupt and deliver now",
         ))
         .with_binding(KeyBinding::new(
             "Ctrl+S",

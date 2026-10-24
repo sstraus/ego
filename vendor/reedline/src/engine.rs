@@ -1442,8 +1442,8 @@ impl Reedline {
                 self.input_mode = InputMode::Regular;
                 Ok(EventStatus::Handled)
             }
-            ReedlineEvent::ExecuteHostCommandIfEmpty(host_command) => {
-                if self.editor.get_buffer().is_empty() {
+            ReedlineEvent::ExecuteHostCommandIfFirstLine(host_command) => {
+                if self.editor.is_cursor_at_first_line() {
                     self.last_render_snapshot = None;
                     self.suspended = true;
                     Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
@@ -1769,8 +1769,8 @@ impl Reedline {
                     }
                 }
             }
-            ReedlineEvent::ExecuteHostCommandIfEmpty(host_command) => {
-                if self.editor.get_buffer().is_empty() {
+            ReedlineEvent::ExecuteHostCommandIfFirstLine(host_command) => {
+                if self.editor.is_cursor_at_first_line() {
                     self.last_render_snapshot = None;
                     self.suspended = true;
                     Ok(EventStatus::Exits(Signal::HostCommand(host_command)))
@@ -4611,22 +4611,27 @@ mod tests {
         );
     }
 
-    // Catches: conditional host commands stealing Up from a nonempty composer.
+    // Catches: queue recall stealing Up while the cursor can move to an earlier line.
     #[test]
-    fn empty_only_host_command_does_not_steal_nonempty_buffer() {
+    fn first_line_host_command_preserves_multiline_cursor_navigation() {
         let mut editor = Reedline::create();
         let prompt = DefaultPrompt::default();
-        let event = ReedlineEvent::ExecuteHostCommandIfEmpty("recall".into());
+        let event = ReedlineEvent::ExecuteHostCommandIfFirstLine("recall".into());
         assert!(
             matches!(editor.handle_event(&prompt, event.clone()).unwrap(),
             EventStatus::Exits(Signal::HostCommand(command)) if command == "recall")
         );
-        editor.run_edit_commands(&[EditCommand::InsertString("draft".into())]);
+        editor.run_edit_commands(&[EditCommand::InsertString("first\nsecond".into())]);
         assert!(matches!(
             editor.handle_event(&prompt, event).unwrap(),
             EventStatus::Inapplicable
         ));
-        assert_eq!(editor.current_buffer_contents(), "draft");
+        assert_eq!(editor.current_buffer_contents(), "first\nsecond");
+        editor.run_edit_commands(&[EditCommand::MoveToStart { select: false }]);
+        assert!(matches!(
+            editor.handle_event(&prompt, ReedlineEvent::ExecuteHostCommandIfFirstLine("recall".into())).unwrap(),
+            EventStatus::Exits(Signal::HostCommand(command)) if command == "recall"
+        ));
     }
 
     fn send_edit(reedline: &mut Reedline, command: EditCommand) {

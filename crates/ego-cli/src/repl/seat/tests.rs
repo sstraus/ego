@@ -1496,7 +1496,7 @@ fn vim_composer_keeps_busy_host_controls_in_both_modes() {
         };
         assert_eq!(
             events[0],
-            ReedlineEvent::ExecuteHostCommandIfEmpty(BUSY_RECALL_COMMAND.into())
+            ReedlineEvent::ExecuteHostCommandIfFirstLine(BUSY_RECALL_COMMAND.into())
         );
         assert_eq!(
             mode.parse_event(keyboard_event(KeyCode::Char('j'), KeyModifiers::CONTROL)),

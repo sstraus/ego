@@ -46,10 +46,19 @@ Add a leading space to send literal prompt text that starts with `/`.
 ## Input while work is running
 
 The live composer preserves drafts and queues accepted prompts. Steering and
-ordinary queued prompts are distinct. Up on an empty busy composer withdraws
-the last queued prompt, including its images, for editing. Enter queues the
-complete edited prompt again. Withdrawal is durable, so resume does not deliver
-the old prompt. Local inspection and model-picker actions
+ordinary queued prompts are distinct. Up on the first line of a busy composer
+withdraws the last queued prompt, including its images, for editing. Any current
+text and images are saved as a draft (Ctrl+S restores the latest saved draft
+when the composer is empty). Repeated Up withdraws the previous queued prompt.
+On later composer lines, Up moves the cursor; without queued prompts it keeps
+normal history navigation. Enter queues the complete edited prompt again.
+Withdrawal is durable, so resume does not deliver the old prompt.
+
+Ctrl+Enter while busy steers all queued prompts in order, followed by any text
+and images in the composer. An empty composer does not add a blank prompt.
+This uses the same durable interrupt and delivery path as Escape: delivery
+occurs at the next safe boundary, not by interrupting an effect mid-flight.
+Idle Ctrl+Enter with no queued prompts still inserts a newline. Local inspection and model-picker actions
 can remain responsive during streaming; model changes take effect at a generation
 boundary, never by mutating an already-sent request. `/help` answers during a turn.
 Local commands that need the coordinator show a persistent pending receipt and

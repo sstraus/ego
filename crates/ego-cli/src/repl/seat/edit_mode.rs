@@ -311,7 +311,7 @@ impl EditMode for SurfaceEditMode {
                     Err(()) => ReedlineEvent::None,
                 };
                 return ReedlineEvent::UntilFound(vec![
-                    ReedlineEvent::ExecuteHostCommandIfEmpty(BUSY_RECALL_COMMAND.to_owned()),
+                    ReedlineEvent::ExecuteHostCommandIfFirstLine(BUSY_RECALL_COMMAND.to_owned()),
                     fallback,
                 ]);
             }

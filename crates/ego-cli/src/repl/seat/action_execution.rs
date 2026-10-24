@@ -382,6 +382,17 @@ pub(super) fn surface_line(
                     .images
                     .is_empty()
             {
+                let queued = {
+                    let current = status.lock().expect("surface status lock");
+                    current.queue.pending_steers + current.queue.queued > 0
+                };
+                if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == BUSY_STEER_COMMAND)
+                    && phase.get() == EditPhase::Busy
+                    && queued
+                    && request_interrupt(status, ingress)
+                {
+                    return (Line::HostCommand(HostCommand::Interrupt), false);
+                }
                 continue;
             }
             let is_prompt = {
@@ -652,16 +663,28 @@ pub(super) fn surface_line(
                 repaint_status(status);
             }
             HostCommand::BusyRecall => {
-                if !status
-                    .lock()
-                    .expect("surface status lock")
-                    .images
-                    .is_empty()
-                {
-                    continue;
-                }
                 match futures::executor::block_on(ingress.recall()) {
                     Ok(Some((recalled, queue))) => {
+                        // Do not discard an unsent draft, including an earlier
+                        // recalled prompt, when Up withdraws another queue entry.
+                        let buffer = editor.current_buffer_contents().to_owned();
+                        let cursor = editor.current_insertion_point();
+                        let mut current = status.lock().expect("surface status lock");
+                        if !buffer.is_empty() || !current.images.is_empty() {
+                            drafts.push_active(ComposerDraft {
+                                text: buffer,
+                                cursor,
+                                origin: current.origin,
+                                images: std::mem::take(&mut current.images),
+                            });
+                        }
+                        current.drafts = drafts.active_count();
+                        let draft_count = current.drafts;
+                        if let Some(snapshot) = current.snapshot.as_mut() {
+                            snapshot.set_drafts(draft_count);
+                        }
+                        drop(current);
+                        editor.run_edit_commands(&[EditCommand::Clear]);
                         editor.run_edit_commands(&[EditCommand::InsertString(
                             recalled.text().to_owned(),
                         )]);
