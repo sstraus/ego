@@ -145,13 +145,13 @@ fn pnpm_home_is_writable_for_workspace_and_adaptive_without_discovery() {
     }
 }
 
-// Catches: whole-home authority still leaves pnpm unable to recover a selector
-// lock whose owner has exited. Clone the cached engine so no operator lock is
-// created, removed or replaced by this deliberately failing-state fixture.
+// Catches: Adaptive changes pnpm's dead-owner lock behavior compared with an
+// unsandboxed run. Clone the cached engine so no operator lock is touched.
 #[test]
 #[ignore = "live installed pnpm@11.15.1 and APFS clone prerequisite; run explicitly"]
-fn pnpm_11_live_exec_recovers_a_dead_selector_lock_owner() {
-    const NAME: &str = "pnpm_11_layout::pnpm_11_live_exec_recovers_a_dead_selector_lock_owner";
+fn pnpm_11_live_dead_selector_lock_matches_unsandboxed_behavior() {
+    const NAME: &str =
+        "pnpm_11_layout::pnpm_11_live_dead_selector_lock_matches_unsandboxed_behavior";
     if let Some(root) = std::env::var_os("EGO_PNPM_STALE_ROOT") {
         let root = PathBuf::from(root);
         let workspace = root.join("workspace");
@@ -161,9 +161,15 @@ fn pnpm_11_live_exec_recovers_a_dead_selector_lock_owner() {
             CanonPath::new(workspace.canonicalize().unwrap()),
         )
         .unwrap();
-        let witness = || {
+        let witness = |level| {
+            let policy = if level == Confinement::Off {
+                ego_core::permit::RunConfinement::new(level, false, policy.workspace().clone())
+                    .unwrap()
+            } else {
+                policy.clone()
+            };
             execute(
-                policy.clone(),
+                policy,
                 &root,
                 vec![
                     "/opt/homebrew/bin/pnpm".into(),
@@ -174,7 +180,7 @@ fn pnpm_11_live_exec_recovers_a_dead_selector_lock_owner() {
         };
         // Establish that the real copied cached engine works before poisoning
         // only its task-owned lock; this is not an engine-install test.
-        witness().expect("isolated cached pnpm baseline within 10 seconds");
+        witness(Confinement::Adaptive).expect("isolated cached pnpm baseline within 10 seconds");
         let mut owner = Command::new("/usr/bin/true").spawn().unwrap();
         let pid = owner.id();
         assert!(owner.wait().unwrap().success());
@@ -194,18 +200,26 @@ fn pnpm_11_live_exec_recovers_a_dead_selector_lock_owner() {
             .as_nanos();
         let value = format!("{pid}-{timestamp}-0");
         std::fs::write(lock.join("owner"), &value).unwrap();
-        let started = std::time::Instant::now();
-        let output = witness();
-        assert!(
-            output.is_ok(),
-            "real pnpm must recover dead owner {value} within the unchanged 10s child limit: {output:?}; elapsed={:?}; remaining_owner={:?}",
-            started.elapsed(),
-            std::fs::read_to_string(lock.join("owner"))
-        );
-        assert!(
-            !lock.exists(),
-            "successful pnpm must release its selector lock"
-        );
+        // Recorded unsandboxed fixture: pnpm also retains a fresh abandoned
+        // owner beyond 10 seconds. Compare both policies on the same lock.
+        for level in [Confinement::Off, Confinement::Adaptive] {
+            let started = std::time::Instant::now();
+            let output = witness(level);
+            assert!(
+                matches!(
+                    output,
+                    Err(ego_core::permit::ProcessError::Timeout { timeout })
+                        if timeout == std::time::Duration::from_secs(10)
+                ),
+                "{level} must match the recorded pnpm 10s timeout: {output:?}; elapsed={:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                std::fs::read_to_string(lock.join("owner")).unwrap(),
+                value,
+                "{level} must leave the same dead owner untouched"
+            );
+        }
         return;
     }
     let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
