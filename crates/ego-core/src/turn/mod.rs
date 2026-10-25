@@ -4993,6 +4993,23 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 &settlement,
                 drained.accounting_booked,
             )?;
+            if let UsageReport::Reported(usage) = settlement.outcome.usage() {
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::ContextWindowUpdated {
+                        used_tokens: usage.total_tokens(),
+                        provenance: OccupancyProvenance::GenerationBoundary,
+                        // This profile and not the one the caller resolved
+                        // before the loop: the candidate walk above can end
+                        // on a fallback, and the occupancy below is that
+                        // model's, so the ceiling it is a fraction of has
+                        // to be that model's too.
+                        window: profile.capabilities.max_context_tokens,
+                    },
+                )?;
+            }
             if let Some(prefix) = cache_prefix.as_ref() {
                 let usage = match (settlement.outcome.stop(), settlement.outcome.usage()) {
                     (
@@ -5465,23 +5482,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 outcome: settlement.outcome,
             },
         )?;
-        if let UsageReport::Reported(usage) = settlement.outcome.usage() {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::ContextWindowUpdated {
-                    used_tokens: usage.total_tokens(),
-                    provenance: OccupancyProvenance::GenerationBoundary,
-                    // This profile and not the one the caller resolved
-                    // before the loop: the candidate walk above can end
-                    // on a fallback, and the occupancy below is that
-                    // model's, so the ceiling it is a fraction of has
-                    // to be that model's too.
-                    window: profile.capabilities.max_context_tokens,
-                },
-            )?;
-        }
         Ok(terminal)
     }
 
