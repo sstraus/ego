@@ -24,7 +24,7 @@ const TRUNCATION_MARKER: &str = "…[truncated]";
 
 pub(crate) fn prompt_revision() -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"ego:judge:action-evidence-v7\0");
+    digest.update(b"ego:judge:action-evidence-v8\0");
     digest.update(JUDGE_INSTRUCTIONS.as_bytes());
     digest.finalize().into()
 }
@@ -196,7 +196,20 @@ fn redact_mcp_value(value: &mut serde_json::Value, depth: usize) {
         serde_json::Value::String(text) => {
             if text.len() > 16 * 1024 {
                 *value = serde_json::json!({"incomplete": "string exceeds 16384 bytes"});
-            } else if let Ok(mut encoded) = serde_json::from_str::<serde_json::Value>(text) {
+                return;
+            }
+            // Decode a single percent-encoded value, never just the first form field.
+            let decoded = (text.contains('%') && !text.contains(['&', '='])).then(|| {
+                url::form_urlencoded::parse(text.as_bytes())
+                    .next()
+                    .map(|(key, _)| key)
+            });
+            let json = serde_json::from_str::<serde_json::Value>(text).or_else(|error| {
+                decoded
+                    .flatten()
+                    .map_or(Err(error), |decoded| serde_json::from_str(&decoded))
+            });
+            if let Ok(mut encoded) = json {
                 // Encoded request bodies carry the same secret-key semantics.
                 // Share the nesting limit rather than restarting it per string.
                 redact_mcp_value(&mut encoded, depth + 1);
