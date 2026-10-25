@@ -313,6 +313,14 @@ an explicit empty list clears configured roots. Project and project-local
 configuration cannot add exec roots. Paths must be absolute and must exist;
 the runner canonicalizes symlinks before creating the confinement policy.
 On macOS and Linux these roots add read and execute access, never write access.
+On macOS the inherited operator PATH remains unchanged. The sandbox permits
+metadata lookup in those PATH directories and for their captured symlink targets,
+so a tool outside the exec perimeter is found but its execution is denied. This
+metadata grant does not permit file contents, directory listing, writes, or execution.
+A declared MCP server does not add exec authority. If its executable is outside
+the perimeter, startup names its canonical path and asks you to add that exact path
+to `exec_paths`, then exit and resume. MCP diagnostics do not expose child stderr,
+arguments, or environment values.
 On macOS an installed `/opt/homebrew` is also a default runtime root, including
 its `bin` symlinks, Cellar targets and libraries. Other installation prefixes
 must be listed explicitly. Git can also read existing `~/.gitconfig` and

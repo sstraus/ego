@@ -475,9 +475,9 @@ impl HttpError {
 
     pub(crate) fn transport(error: TransportError) -> Self {
         let failure = match error.failure() {
-            TransportFailure::AuthoritySpent | TransportFailure::AuthorityMismatch => {
-                HttpFailure::Authority
-            }
+            TransportFailure::AuthoritySpent
+            | TransportFailure::AuthorityMismatch
+            | TransportFailure::ExecutableDenied(_) => HttpFailure::Authority,
             TransportFailure::Offline => HttpFailure::Offline,
             TransportFailure::Resolution(_) => HttpFailure::Resolution,
             TransportFailure::InvalidRequest(_) => HttpFailure::InvalidRequest,

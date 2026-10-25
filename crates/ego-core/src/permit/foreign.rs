@@ -1315,6 +1315,8 @@ pub struct TransportError {
 pub enum TransportFailure {
     AuthoritySpent,
     AuthorityMismatch,
+    /// A host-observed executable lies outside the active sandbox exec perimeter.
+    ExecutableDenied(CanonPath),
     Offline,
     Resolution(String),
     InvalidRequest(String),
@@ -1355,6 +1357,13 @@ fn authority_mismatch() -> TransportError {
 
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let TransportFailure::ExecutableDenied(path) = &self.failure {
+            return write!(
+                f,
+                "sandbox denies execution of {}; add this exact canonical path to exec_paths in ego config edit, then exit and resume",
+                crate::permit::terminal_text::shell_word(&path.as_path().to_string_lossy())
+            );
+        }
         write!(
             f,
             "foreign transport failed: {:?} ({:?})",

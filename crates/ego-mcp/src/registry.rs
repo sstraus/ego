@@ -234,6 +234,9 @@ pub trait McpCandidateAdmission: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpCandidateError {
     CredentialRequired,
+    ExecutableDenied {
+        path: ego_core::permit::CanonPath,
+    },
     Invalid {
         cause: String,
     },
@@ -249,6 +252,7 @@ impl McpCandidateError {
         match self {
             Self::CredentialRequired => McpFailure::Credential,
             Self::Invalid { .. } => McpFailure::InvalidValue,
+            Self::ExecutableDenied { .. } => McpFailure::Authority,
             Self::AuthorizationRequired { .. } => McpFailure::Authorization,
         }
     }
@@ -258,6 +262,7 @@ struct CandidateFailure {
     failure: McpFailure,
     authorization: Option<CandidateAuthorizationFailure>,
     detail: Option<String>,
+    denied_executable: Option<ego_core::permit::CanonPath>,
 }
 
 struct CandidateAuthorizationFailure {
@@ -272,12 +277,17 @@ impl CandidateFailure {
             failure,
             authorization: None,
             detail: None,
+            denied_executable: None,
         }
     }
 
     fn admission(error: McpCandidateError) -> Self {
         match error {
             McpCandidateError::CredentialRequired => Self::materialization(McpFailure::Credential),
+            McpCandidateError::ExecutableDenied { path } => Self {
+                denied_executable: Some(path),
+                ..Self::materialization(McpFailure::Authority)
+            },
             McpCandidateError::Invalid { cause } => Self {
                 detail: Some(cause),
                 ..Self::materialization(McpFailure::InvalidValue)
@@ -294,6 +304,7 @@ impl CandidateFailure {
                     scopes,
                 }),
                 detail: None,
+                denied_executable: None,
             },
         }
     }
@@ -302,8 +313,16 @@ impl CandidateFailure {
         failure_message(self.failure)
     }
 
-    /// Public diagnostics contain only the fixed failure classification.
+    /// Public diagnostics contain a fixed classification or a typed host path.
     fn diagnostic_message(&self) -> String {
+        if let Some(path) = &self.denied_executable {
+            // Only host-observed image identity is public. Never publish child
+            // stderr, command arguments, environment values or raw causes.
+            return ego_core::permit::TransportError::definitely_unsent(
+                ego_core::permit::TransportFailure::ExecutableDenied(path.clone()),
+            )
+            .to_string();
+        }
         self.sanitized_cause().to_owned()
     }
 }

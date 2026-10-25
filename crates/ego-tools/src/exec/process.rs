@@ -917,6 +917,31 @@ async fn spawn_duplex(
         ));
     }
 
+    // Management discovery has no model tool call to surface a child refusal.
+    // Refuse an unreachable host-observed image before the wrapper starts, so
+    // the MCP registry can retain a typed path instead of a protocol EOF.
+    let spec = if spec.identity().is_some() {
+        spec
+    } else {
+        super::identity::capture(&spec).map_err(process_before_spawn)?
+    };
+    if let Some(identity) = spec.identity()
+        && !identity.files.is_empty()
+        && context.confinement.level() != ego_core::permit::Confinement::Off
+    {
+        let read_only = context.confinement.roots().iter().any(|root| {
+            root.access() == ego_core::permit::RootAccess::Read
+                && identity.target.is_or_under(root.path())
+        });
+        if read_only
+            || !super::setup_exec_reachable(&context.confinement, &identity.target)
+                .map_err(process_before_spawn)?
+        {
+            return Err(TransportError::definitely_unsent(
+                TransportFailure::ExecutableDenied(identity.target.clone()),
+            ));
+        }
+    }
     let mut command =
         prefixed_command(context.backend.launch_prefix(), &spec).map_err(process_before_spawn)?;
     command
