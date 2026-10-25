@@ -542,3 +542,123 @@ fn pnpm_static_profile_contains_home_locks_and_named_system_info() {
         assert!(!backend.profile.contains("(allow system-info)"));
     }
 }
+
+// Catches: a broad read root becomes an unconditional adaptive control and
+// denies the more-specific derived Git metadata authority of a moved worktree.
+#[test]
+fn adaptive_linked_git_read_ancestor_preserves_operational_metadata() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    // The workspace cannot be inside TMPDIR: that would turn the derived
+    // temporary root into a forbidden writable ancestor of the workspace.
+    let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let main = base.join("main");
+    let original = base.join("admin-name");
+    let workspace = base.join("different-directory-name");
+    let git = |cwd: &Path, args: &[&str]| {
+        let output = Command::new("/usr/bin/git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    };
+    fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q"]);
+    git(
+        &main,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+    );
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "fixture",
+            original.to_str().unwrap(),
+        ],
+    );
+    git(
+        &main,
+        &[
+            "worktree",
+            "move",
+            original.to_str().unwrap(),
+            workspace.to_str().unwrap(),
+        ],
+    );
+    let scratch = base.join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let policy = super::super::adaptive::admit_confinement(
+        Confinement::Adaptive,
+        false,
+        CanonPath::new(&workspace),
+    )
+    .unwrap()
+    .with_roots(vec![ProfileRoot::new(
+        CanonPath::new(&main),
+        RootAccess::Read,
+    )]);
+    let admin = main.join(".git/worktrees/admin-name");
+    assert!(admin.is_dir());
+    assert!(
+        policy
+            .adaptive_perimeter()
+            .unwrap()
+            .writable
+            .contains(&CanonPath::new(&admin))
+    );
+    let backend = SeatbeltBackend::prepare(
+        &policy,
+        &CanonPath::new(&scratch),
+        &derived_runtime_roots().unwrap(),
+    )
+    .unwrap();
+    fs::write(workspace.join("change"), "fixture\n").unwrap();
+    let add = run(
+        &backend,
+        "/usr/bin/git",
+        &["add".as_ref(), "change".as_ref()],
+    );
+    assert!(add.status.success(), "git add: {add:?}");
+    let commit = run(
+        &backend,
+        "/usr/bin/git",
+        &[
+            "-c".as_ref(),
+            "user.name=Fixture".as_ref(),
+            "-c".as_ref(),
+            "commit.gpgsign=false".as_ref(),
+            "-c".as_ref(),
+            "user.email=fixture@example.invalid".as_ref(),
+            "commit".as_ref(),
+            "-qm".as_ref(),
+            "change".as_ref(),
+        ],
+    );
+    assert!(commit.status.success(), "git commit: {commit:?}");
+    for target in [
+        main.join(".git/config"),
+        admin.join("config.worktree"),
+        main.join("ordinary"),
+    ] {
+        let denied = run(&backend, "/usr/bin/touch", &[target.as_os_str()]);
+        assert!(
+            !denied.status.success(),
+            "read/control root reopened: {target:?}: {denied:?}"
+        );
+    }
+}

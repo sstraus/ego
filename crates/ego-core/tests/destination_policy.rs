@@ -104,3 +104,41 @@ fn destination_policy_without_rules_reports_mode_dependent_coverage() {
             .contains("mode and approval policy decide uncovered destinations")
     );
 }
+
+// Catches: diagnostics label a derived path writable despite an equal or
+// nested explicit read restriction, or hide its configured source.
+#[test]
+fn derived_perimeter_reports_effective_read_restrictions() {
+    use ego_core::permit::{AdaptivePerimeter, ProfileRoot, RootAccess};
+    let effective = resolve(
+        &[ConfigLayer::parse(Source::User, "roots=[]").unwrap()],
+        Trust::Untrusted,
+        None,
+    )
+    .unwrap();
+    let workspace = CanonPath::new("/work");
+    let derived = CanonPath::new("/main/.git");
+    for (read, expected) in [("/main", "read-write"), ("/main/.git", "read")] {
+        let roots = vec![ProfileRoot::new(CanonPath::new(read), RootAccess::Read)];
+        let confinement = RunConfinement::new(Confinement::Adaptive, false, workspace.clone())
+            .unwrap()
+            .with_adaptive_perimeter(AdaptivePerimeter {
+                home: CanonPath::new("/home"),
+                writable: vec![derived.clone()],
+                credentials: vec![],
+                controls: vec![],
+            });
+        let json =
+            serde_json::to_value(Perimeter::session(&confinement, &effective, &roots)).unwrap();
+        let root = &json["roots"][1];
+        assert_eq!(root["access"], expected);
+        assert_eq!(
+            root["source"],
+            if expected == "read" {
+                "user"
+            } else {
+                "derived"
+            }
+        );
+    }
+}
