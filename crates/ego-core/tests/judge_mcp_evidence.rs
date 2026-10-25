@@ -117,3 +117,16 @@ fn server_remembering_is_explicit_and_keeps_other_servers_uncovered() {
         assert!(!exact.candidates[0].matches(&op, Path::new("/ws")));
     }
 }
+
+// Catches: a URL-encoded JSON HTTP body bypasses secret-key redaction.
+#[test]
+fn mcp_percent_encoded_json_body_does_not_disclose_password_to_judge() {
+    let body = "%7B%22username%22%3A%22fixture-user%22%2C%22PASSWORD%22%3A%22fixture-private-password%22%7D";
+    let call = mcp_call(json!({"tool_name":"http_request", "arguments":{"body":body}}));
+    let request = support::judge_request(&call, &JudgeTaskContext::default());
+    let text = serde_json::to_string(&request.messages).unwrap();
+    assert!(
+        !text.contains("fixture-private-password"),
+        "percent-encoded JSON credential leaked to judge: {text}"
+    );
+}
