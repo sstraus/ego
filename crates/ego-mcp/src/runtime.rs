@@ -156,7 +156,8 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                         inventory.prompts,
                         cache,
                         None,
-                    ),
+                    )
+                    .with_annotations(inventory.annotations),
                     Arc::new(factory),
                 )
                 .map_err(|error| invalid_candidate(error.to_string()));
@@ -318,7 +319,8 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                         inventory.prompts,
                         cache,
                         None,
-                    ),
+                    )
+                    .with_annotations(inventory.annotations),
                     factory,
                 )
                 .map_err(|error| invalid_candidate(error.to_string()))

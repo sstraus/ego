@@ -1467,17 +1467,62 @@ pub(super) fn parse_permission(answer: &str) -> Option<PermissionWord> {
 }
 
 fn remember_permission(
-    status: &SharedStatus,
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
     request: &PermissionRequest,
 ) -> Result<String, String> {
     let presentation = request
         .presentation()
         .ok_or_else(|| "this permission request has no presentation facts".to_owned())?;
-    let plan = presentation
+    let mut plan = presentation
         .suggested_remember_plan()
         .map_err(str::to_owned)?
         .clone();
-    let application = status
+    if let Some(server_plan) = plan.server_scope() {
+        let rules = |plan: &ego_core::config::rule_management::RememberPlan| {
+            plan.candidates
+                .iter()
+                .map(|rule| ego_core::permit::terminal_safe(&rule.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let question = QuestionRequest::new(
+            "Remember which scope?",
+            QuestionMode::Single,
+            vec![
+                QuestionOption::new("tool", format!("Only these tools: {}", rules(&plan))),
+                QuestionOption::new(
+                    "server",
+                    format!(
+                        "All current and future tools of this server: {}",
+                        rules(&server_plan)
+                    ),
+                ),
+            ],
+            false,
+        );
+        // This follow-up uses ordinary question input, not the approval hotkeys.
+        surface
+            .status
+            .lock()
+            .expect("surface status lock")
+            .permission_modal = false;
+        let answer = answer_question(editor, surface, &question);
+        surface
+            .status
+            .lock()
+            .expect("surface status lock")
+            .permission_modal = true;
+        match answer {
+            QuestionOutcome::Answered(QuestionAnswer::Single(choice)) if choice == "tool" => {}
+            QuestionOutcome::Answered(QuestionAnswer::Single(choice)) if choice == "server" => {
+                plan = server_plan
+            }
+            _ => return Err("scope selection cancelled".into()),
+        }
+    }
+    let application = surface
+        .status
         .lock()
         .map_err(|_| "the permission surface is unavailable".to_owned())?
         .permission_rules
@@ -1527,7 +1572,7 @@ fn settle_permission(
                 .permission_modal = false;
             amendment(editor, surface, request, notice)
         }
-        PermissionWord::Remember => match remember_permission(surface.status, request) {
+        PermissionWord::Remember => match remember_permission(editor, surface, request) {
             Ok(receipt) => {
                 *notice = Some(receipt);
                 PermissionDecision::Allow

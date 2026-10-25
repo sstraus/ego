@@ -196,6 +196,12 @@ fn cache_key_with_prompt(
     let frame = super::prepared_call::frame;
     frame(&mut digest, b"ego:permission-analysis:pure-data2:codec1");
     frame(&mut digest, &pure_data_fingerprint(call));
+    if let Some(envelope) = call.mcp_envelope() {
+        frame(
+            &mut digest,
+            &serde_json::to_vec(envelope.annotations()).expect("annotation codec"),
+        );
+    }
     frame(
         &mut digest,
         &serde_json::to_vec(&(policy, observation, trust)).expect("closed analysis context"),

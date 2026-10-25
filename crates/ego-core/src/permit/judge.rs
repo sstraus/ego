@@ -24,7 +24,7 @@ const TRUNCATION_MARKER: &str = "…[truncated]";
 
 pub(crate) fn prompt_revision() -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"ego:judge:action-evidence-v4\0");
+    digest.update(b"ego:judge:action-evidence-v5\0");
     digest.update(JUDGE_INSTRUCTIONS.as_bytes());
     digest.finalize().into()
 }
@@ -155,6 +155,48 @@ impl JudgeInput {
         };
         facts["task_context"] = serde_json::to_value(context).expect("bounded context");
         facts
+    }
+}
+
+/// Parameter keys carry secret semantics even when a value has no token prefix.
+/// Keep effect-bearing data intact; server hints never become policy authority.
+fn redact_mcp_value(value: &mut serde_json::Value, depth: usize) {
+    if depth >= 8 {
+        *value = serde_json::json!({"incomplete": "nesting exceeds 8 levels"});
+        return;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
+                if [
+                    "token",
+                    "password",
+                    "secret",
+                    "authorization",
+                    "apikey",
+                    "cookie",
+                    "credential",
+                    "privatekey",
+                ]
+                .iter()
+                .any(|name| normalized.contains(name))
+                {
+                    *value = serde_json::Value::String("<secret:redacted>".into());
+                } else {
+                    redact_mcp_value(value, depth + 1);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_mcp_value(item, depth + 1);
+            }
+        }
+        serde_json::Value::String(text) => {
+            *text = bounded_text(&super::shell::redact_text(text), 16 * 1024)
+        }
+        _ => {}
     }
 }
 
@@ -399,6 +441,7 @@ struct CanonicalCall {
     tool: String,
     operations: Vec<CanonicalOp>,
     risk: super::analysis::RiskAssessment,
+    mcp: Option<serde_json::Value>,
 }
 
 impl From<&PreparedCall> for CanonicalCall {
@@ -407,6 +450,23 @@ impl From<&PreparedCall> for CanonicalCall {
             tool: call.tool().to_owned(),
             operations: call.ops().iter().map(CanonicalOp::from).collect(),
             risk: super::analysis::assess(call),
+            mcp: call.mcp_envelope().map(|envelope| {
+                let mut parameters = serde_json::from_slice(envelope.parameters())
+                    .unwrap_or(serde_json::json!({"incomplete": "invalid JSON"}));
+                redact_mcp_value(&mut parameters, 0);
+                let rendered = serde_json::to_string(&parameters).expect("JSON evidence");
+                if rendered.len() > 16 * 1024 {
+                    parameters = serde_json::json!({"incomplete": "parameters exceed 16384 bytes", "preview": bounded_text(&rendered, 16 * 1024)});
+                }
+                let annotations = envelope.annotations().as_object().map(|tools| {
+                    tools.iter().take(2).map(|(name, hints)| {
+                        let hints: serde_json::Map<String, serde_json::Value> = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]
+                            .iter().filter_map(|key| hints.get(*key).and_then(serde_json::Value::as_bool).map(|value| ((*key).to_owned(), value.into()))).collect();
+                        (bounded_text(&super::shell::redact_atom(name), 256), serde_json::Value::Object(hints))
+                    }).collect::<serde_json::Map<_, _>>()
+                });
+                serde_json::json!({"parameters": parameters, "annotations": annotations, "annotations_are_untrusted_hints": true})
+            }),
         }
     }
 }
