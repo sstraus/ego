@@ -436,11 +436,21 @@ fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
     if hidden > 0 {
         rows.push(hidden_lines(hidden, width));
     }
-    rows.extend(
-        lines[hidden..]
-            .iter()
-            .map(|line| dim(format!("  {line}")).truncate_to(width)),
-    );
+    rows.extend(lines[hidden..].iter().flat_map(|line| {
+        let row = dim(format!("  {line}"));
+        // Recovery is an operator action, not disposable command output:
+        // keep it visible without requiring the user to expand the tool.
+        if !call.ok
+            && line
+                .strip_prefix("stderr: ")
+                .unwrap_or(line)
+                .starts_with("sandbox exec denied ")
+        {
+            row.wrap_hanging(width, 2)
+        } else {
+            vec![row.truncate_to(width)]
+        }
+    }));
     rows
 }
 
@@ -698,6 +708,26 @@ mod tests {
                     rendered.rows
                 );
             }
+        }
+    }
+
+    // Catches: the recovery exception expands unrelated failure output or a
+    // successful command that merely prints text resembling a denial.
+    #[test]
+    fn ordinary_exec_previews_still_truncate_long_lines() {
+        for (ok, prefix) in [
+            (false, "ordinary error "),
+            (false, "sandbox denied read "),
+            (true, "sandbox exec denied "),
+        ] {
+            let result = format!("[stderr]\n{prefix}{}END-OF-LONG-OUTPUT", "x".repeat(200));
+            let rendered = record(
+                &call("exec", r#"{"argv":["/bin/echo"]}"#, ok, &result),
+                at(40),
+            );
+            assert_eq!(rendered.rows.lines().count(), 2, "{}", rendered.rows);
+            assert!(!rendered.rows.contains("END-OF-LONG-OUTPUT"));
+            assert!(rendered.detail.contains("END-OF-LONG-OUTPUT"));
         }
     }
 

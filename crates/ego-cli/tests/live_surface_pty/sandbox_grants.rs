@@ -271,6 +271,10 @@ fn interactive_exec_refusal(bad_interpreter: bool) {
         !offered_grant,
         "filesystem grant offered for executable: {transcript}"
     );
+    let visible: String = transcript
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
     for expected in [
         "sandbox exec denied",
         "exec_paths",
@@ -284,8 +288,9 @@ fn interactive_exec_refusal(bad_interpreter: bool) {
         program.to_str().unwrap(),
         tools.to_str().unwrap(),
     ] {
+        let expected_cells: String = expected.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(
-            transcript.contains(expected),
+            visible.contains(&expected_cells),
             "missing {expected:?}: {transcript}"
         );
     }
