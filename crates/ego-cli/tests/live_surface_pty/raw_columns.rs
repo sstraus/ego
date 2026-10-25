@@ -43,6 +43,8 @@ fn raw_terminal_startup_resume_and_exit_keep_column_zero() {
         support::FIXTURE_SESSION_ID,
         "--sandbox",
         "off",
+        "--model",
+        "ollama/qwen3",
     ]));
     let shown = lines.join("\n");
     for needle in [
