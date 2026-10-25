@@ -2540,7 +2540,7 @@ fn recovery_waiting_and_settlement_emit_exact_osc() {
                 &state
             ),
             if exit_reason == ego_core::event::domain::ExitReason::Provider {
-                "\x1b]7770;ego-recovery=clear\x07\x1b]9;4;2;0\x07\x1b]777;notify;εgo;the provider response failed; review the output, then send a new prompt to continue\x07\x1b]7770;state=awaiting\x07"
+                "\x1b]7770;ego-recovery=clear\x07\x1b]9;4;2;0\x07\x1b]777;notify;εgo;the provider response failed; review the output, then send a new prompt to continue\x07\x1b]7770;state=idle\x07"
             } else {
                 "\x1b]7770;ego-recovery=clear\x07\x1b]7770;state=idle\x07"
             }
@@ -3670,7 +3670,7 @@ impl FailureReceiptOutput {
     }
 }
 
-// Catches: a parsed-but-unrun tool hides the cause and reports normal idle.
+// Catches: a failed turn hides its cause or advertises a question that blocks submit.
 #[test]
 fn regression_case_unrun_tools_keep_failure_receipt_and_host_signal() {
     for fixture in [
@@ -3737,7 +3737,7 @@ fn regression_case_unrun_tools_keep_failure_receipt_and_host_signal() {
                     "{terminal_signal:?}"
                 );
                 assert!(
-                    terminal_signal.contains("\x1b]7770;state=awaiting\x07"),
+                    terminal_signal.contains("\x1b]7770;state=idle\x07"),
                     "{terminal_signal:?}"
                 );
                 assert!(
@@ -3749,7 +3749,7 @@ fn regression_case_unrun_tools_keep_failure_receipt_and_host_signal() {
                     "{terminal_signal:?}"
                 );
                 assert!(
-                    !terminal_signal.contains("state=idle"),
+                    !terminal_signal.contains("state=awaiting"),
                     "{terminal_signal:?}"
                 );
                 assert!(
