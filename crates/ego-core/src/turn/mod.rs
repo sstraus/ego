@@ -2168,7 +2168,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         })
     }
 
-    /// One private, independently reserved and settled compaction generation.
+    /// Private checkpoint generation; every retry is independently reserved and settled.
     async fn generate_compaction_text(
         &mut self,
         turn: TurnId,
@@ -2195,141 +2195,178 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 error,
             })?;
 
-        let budget = self
-            .gate
-            .snapshot()
-            .map_err(|error| CompactionError::Internal(error.to_string()))?;
-        self.journal
-            .publish(&PublicEvent::metering_selected(
-                turn,
-                &profile.metering,
-                budget.ledger(),
-                profile
-                    .rates
-                    .as_ref()
-                    .map_or(&RateSource::None, |rates| &rates.source),
-            ))
-            .map_err(|error| CompactionError::Store(error.into()))?;
+        self.recovery_deadline = None;
+        let mut additional_attempts = 0;
+        loop {
+            if let Some(cause) = self.cancel.cause() {
+                return Err(CompactionError::Cancelled(cause));
+            }
+            if additional_attempts > 0 {
+                self.journal.publish(&PublicEvent::ProviderRetrying {
+                    turn,
+                    attempt: additional_attempts,
+                })?;
+            }
+            let budget = self
+                .gate
+                .snapshot()
+                .map_err(|error| CompactionError::Internal(error.to_string()))?;
+            self.journal
+                .publish(&PublicEvent::metering_selected(
+                    turn,
+                    &profile.metering,
+                    budget.ledger(),
+                    profile
+                        .rates
+                        .as_ref()
+                        .map_or(&RateSource::None, |rates| &rates.source),
+                ))
+                .map_err(|error| CompactionError::Store(error.into()))?;
 
-        let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-        let reservation = self
-            .gate
-            .reserve(
+            let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
+            let reservation = self
+                .gate
+                .reserve(
+                    &profile.metering,
+                    quote.as_ref(),
+                    request,
+                    &profile.capabilities,
+                )
+                .map_err(|error| match error {
+                    SharedBudgetError::Denied(error) => CompactionError::Budget(error),
+                    error => CompactionError::Internal(error.to_string()),
+                })?;
+            let attempt = GenerationAttempt::new(
+                GenerationId::new(),
+                reservation,
                 &profile.metering,
                 quote.as_ref(),
                 request,
                 &profile.capabilities,
             )
-            .map_err(|error| match error {
-                SharedBudgetError::Denied(error) => CompactionError::Budget(error),
-                error => CompactionError::Internal(error.to_string()),
-            })?;
-        let attempt = GenerationAttempt::new(
-            GenerationId::new(),
-            reservation,
-            &profile.metering,
-            quote.as_ref(),
-            request,
-            &profile.capabilities,
-        )
-        .map_err(CompactionError::Budget)?;
-        let reference = attempt.attempt();
-        self.admit_generation(
-            profile,
-            reference,
-            GenerationRole::Compaction,
-            &request.tools,
-        )
-        .map_err(CompactionError::Store)?;
-        let generation = self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::GenerationStarted {
-                attempt: reference,
-                role: GenerationRole::Compaction,
-                snapshot: None,
-            },
-        )?;
-
-        let stream = profile.generator.generate(request.clone(), attempt);
-        let drained = self
-            .drain(
-                turn,
-                stream,
-                DrainGeneration {
-                    event: generation,
-                    metering: &profile.metering,
-                    quote: quote.as_ref(),
-                    visibility: GenerationVisibility::CompactionPrivate,
-                    catalogue: None,
-                },
+            .map_err(CompactionError::Budget)?;
+            let reference = attempt.attempt();
+            self.admit_generation(
+                profile,
+                reference,
+                GenerationRole::Compaction,
+                &request.tools,
             )
-            .await;
+            .map_err(CompactionError::Store)?;
+            let generation = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::GenerationStarted {
+                    attempt: reference,
+                    role: GenerationRole::Compaction,
+                    snapshot: None,
+                },
+            )?;
 
-        let settlement = self
-            .gate
-            .settle(drained.stream)
-            .map_err(|error| CompactionError::Internal(error.to_string()))?;
-        if let Some(error) = drained.failure {
-            return Err(CompactionError::Store(error));
-        }
-        if !drained.accounting_booked {
+            let stream = profile.generator.generate(request.clone(), attempt);
+            let drained = self
+                .drain(
+                    turn,
+                    stream,
+                    DrainGeneration {
+                        event: generation,
+                        metering: &profile.metering,
+                        quote: quote.as_ref(),
+                        visibility: GenerationVisibility::CompactionPrivate,
+                        catalogue: None,
+                    },
+                )
+                .await;
+
+            let settlement = self
+                .gate
+                .settle(drained.stream)
+                .map_err(|error| CompactionError::Internal(error.to_string()))?;
+            if let Some(error) = drained.failure {
+                return Err(CompactionError::Store(error));
+            }
+            if !drained.accounting_booked {
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::UsageUpdated {
+                        usage: Usage::IDENTITY,
+                        cost_delta: settled_cost(
+                            &profile.metering,
+                            quote.as_ref(),
+                            UsageReport::Missing,
+                            None,
+                            self.gate
+                                .snapshot()
+                                .map_err(|error| CompactionError::Internal(error.to_string()))?
+                                .currency(),
+                        ),
+                        attempt: Some(reference),
+                    },
+                )?;
+            }
             self.journal.append(
                 turn,
                 None,
                 None,
-                EventKind::UsageUpdated {
-                    usage: Usage::IDENTITY,
-                    cost_delta: settled_cost(
-                        &profile.metering,
-                        quote.as_ref(),
-                        UsageReport::Missing,
-                        None,
-                        self.gate
-                            .snapshot()
-                            .map_err(|error| CompactionError::Internal(error.to_string()))?
-                            .currency(),
-                    ),
-                    attempt: Some(reference),
+                EventKind::AttemptSettled {
+                    attempt: settlement.attempt,
+                    outcome: settlement.outcome,
                 },
             )?;
+            if drained.cancelled {
+                return Err(CompactionError::Cancelled(
+                    self.cancel.cause().unwrap_or(CancelCause::User),
+                ));
+            }
+            // Checkpoint text and tool calls stay private and cannot execute
+            // effects, so even a partial checkpoint has shown nothing to replay.
+            let retryable = settlement.outcome.stop() == StopReason::Error
+                && drained.error_kind == Some(ErrorKind::Transient);
+            let (reported, retry_after) = drained.provider_failure.unzip();
+            let cause = provider_cause(reported.as_deref(), drained.error_kind);
+            match self
+                .retry_generation(
+                    turn,
+                    retryable,
+                    retry_after.flatten(),
+                    &mut additional_attempts,
+                    cause,
+                )
+                .await?
+            {
+                RetryProgress::Retry => continue,
+                RetryProgress::Cancelled => {
+                    return Err(CompactionError::Cancelled(
+                        self.cancel.cause().unwrap_or(CancelCause::User),
+                    ));
+                }
+                RetryProgress::Finished => {}
+            }
+            if let Some(message) = drained.error_message {
+                return Err(CompactionError::Generation {
+                    message,
+                    kind: drained.error_kind.unwrap_or(ErrorKind::Unclassified),
+                });
+            }
+            if drained.private_tool_use
+                || drained.error_kind.is_some()
+                || settlement.outcome.stop() != StopReason::Stop
+            {
+                return Err(CompactionError::UnexpectedStop(
+                    if drained.private_tool_use {
+                        StopReason::ToolUse
+                    } else if drained.error_kind.is_some() {
+                        StopReason::Error
+                    } else {
+                        settlement.outcome.stop()
+                    },
+                ));
+            }
+            return Ok(drained.private_text);
         }
-        self.journal.append(
-            turn,
-            None,
-            None,
-            EventKind::AttemptSettled {
-                attempt: settlement.attempt,
-                outcome: settlement.outcome,
-            },
-        )?;
-        if drained.cancelled {
-            return Err(CompactionError::Cancelled(
-                self.cancel.cause().unwrap_or(CancelCause::User),
-            ));
-        }
-        if let Some(message) = drained.error_message {
-            return Err(CompactionError::Generation {
-                message,
-                kind: drained.error_kind.unwrap_or(ErrorKind::Unclassified),
-            });
-        }
-        if drained.private_tool_use
-            || drained.error_kind.is_some()
-            || settlement.outcome.stop() != StopReason::Stop
-        {
-            return Err(CompactionError::UnexpectedStop(
-                if drained.private_tool_use {
-                    StopReason::ToolUse
-                } else if drained.error_kind.is_some() {
-                    StopReason::Error
-                } else {
-                    settlement.outcome.stop()
-                },
-            ));
-        }
-        Ok(drained.private_text)
     }
 
     /// Enable pressure yielding only when the host owns a durable session transition.

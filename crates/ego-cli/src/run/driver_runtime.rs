@@ -750,6 +750,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 }
                             };
 
+                            // Fresh work re-arms pressure recovery. The turn journals it
+                            // before yielding at pressure, so the next checkpoint includes
+                            // the prompt rather than refusing it forever after a failure.
+                            automatic_compaction_failed = false;
                             let (exit, next_perimeter) = drive_interactive_turn_phase(
                                 InteractiveTurnPhase {
                                     prompt_warmup_attempted: &prompt_warmup_attempted,
@@ -2210,6 +2214,10 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
     )
     .map_err(|error| CompactionError::Internal(error.to_string()))?
     .with_context_policy(args.context_clear, args.context_interval)
+    .with_provider_recovery(
+        args.provider_recovery
+            .then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON),
+    )
     .with_last_generation_request(last_generation_request.clone())
     .with_hook_binding(
         session_hooks.state.clone(),
@@ -3238,8 +3246,8 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     }
     // Required pressure recovery cannot return to a prompt that cannot run.
     let required_compaction = automatic_compaction && ego_core::turn::compaction_due(state.context);
-    // Failed pressure recovery must wait for an explicit retry, including when
-    // that retry fails. Operator cancellation also stays idle.
+    // Failed or cancelled pressure recovery stays idle until fresh work or an
+    // explicit /compact retry. The core owns backoff within each preparation.
     *automatic_compaction_failed =
         automatic_compaction || ego_core::turn::compaction_due(state.context);
     seat.busy();
@@ -3347,10 +3355,10 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
                     ..
                 })
             ) {
-                // Keep automatic_compaction_failed latched until an explicit retry:
-                // pressure is unchanged, so immediate re-entry would spin.
+                // Keep the latch until fresh work or /compact: unchanged pressure
+                // must not start another exhausted recovery without input.
                 diagnostics.note(&format!(
-                    "Compaction paused; the session is still open: {error}. Use /compact to retry before continuing."
+                    "Compaction paused; the session is still open: {error}. Use /compact to retry, or send a new prompt to try again."
                 ));
                 return Ok(CommandOutcome::Continue);
             }

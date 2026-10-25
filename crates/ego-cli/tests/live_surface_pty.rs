@@ -9553,6 +9553,124 @@ fn context_pressure_compacts_and_continues_without_operator_input() {
     );
 }
 
+// Catches: private checkpoint generation bypasses the normal transient backoff.
+#[cfg(not(windows))]
+#[test]
+fn recorded_compaction_failure_retries_with_backoff() {
+    replay_recorded_compaction_failure(false);
+}
+
+// Catches: an exhausted checkpoint latches pressure recovery off for later prompts.
+#[cfg(not(windows))]
+#[test]
+fn recorded_compaction_failure_new_prompt_rearms() {
+    replay_recorded_compaction_failure(true);
+}
+
+#[cfg(not(windows))]
+fn replay_recorded_compaction_failure(new_prompt: bool) {
+    let recording: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/compaction/590-recorded-failure.json"
+    ))
+    .unwrap();
+    let pressure = &recording["events"][0]["kind"];
+    let recorded_error = recording["events"][5]["kind"]["message"].as_str().unwrap();
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing(
+                "REGRESSION-MARKER",
+                pressure["used_tokens"].as_u64().unwrap() - 4,
+                4,
+            )),
+            // Replay the recorded HTTP-body failure through the real adapter.
+            Reply::TruncatedSse,
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(text("REGRESSION-MARKER")),
+        ],
+        context_length: Some(pressure["window"].as_u64().unwrap()),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# recorded checkpoint recovery fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--retry",
+        if new_prompt { "0" } else { "1" },
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    if new_prompt {
+        until_notice_prose(&reader, &mut output, start, "Use /compact to retry");
+        until_prompt_from(&reader, &mut output, start);
+        assert_eq!(stub.generations().len(), 2, "finite retries exhausted");
+        input.write_all(b"REGRESSION-MARKER\r").unwrap();
+        input.flush().unwrap();
+    }
+    let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    }));
+    if let Err(failure) = recovered {
+        let _ = input.write_all(b"/quit\r");
+        let _ = input.flush();
+        let _ = session.quit(input);
+        std::panic::resume_unwind(failure);
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let requests = stub.generations();
+    assert_eq!(
+        requests.len(),
+        4,
+        "one failed checkpoint, one successful checkpoint"
+    );
+    assert!(requests[2].to_string().contains("REGRESSION-MARKER"));
+    assert!(requests[3].to_string().contains("Continue the task."));
+    if new_prompt {
+        assert_eq!(
+            requests[2].to_string().matches("REGRESSION-MARKER").count(),
+            1,
+            "fresh work must reach checkpoint history exactly once"
+        );
+    }
+    let journal = std::fs::read_to_string(
+        places
+            .home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        journal.contains(recorded_error),
+        "recorded failure must reach the journal"
+    );
+    let shown = support::notice_prose(&normalized(&output));
+    assert_eq!(
+        shown.contains("connection problem, retrying in"),
+        !new_prompt
+    );
+    if !new_prompt {
+        assert!(
+            shown.contains("attempt 1/1"),
+            "finite shared retry notice: {shown}"
+        );
+    }
+}
+
 // Catches: a transient checkpoint failure exits the session instead of keeping
 // the source usable for an explicit retry, or silently starts a retry storm.
 #[cfg(not(windows))]
@@ -9579,6 +9697,8 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
         support::FIXTURE_SESSION_ID,
         "--sandbox",
         "off",
+        "--retry",
+        "0",
     ]);
     let (mut session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
     let mut output = Vec::new();
