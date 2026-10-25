@@ -2286,35 +2286,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             if let Some(error) = drained.failure {
                 return Err(CompactionError::Store(error));
             }
-            if !drained.accounting_booked {
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::UsageUpdated {
-                        usage: Usage::IDENTITY,
-                        cost_delta: settled_cost(
-                            &profile.metering,
-                            quote.as_ref(),
-                            UsageReport::Missing,
-                            None,
-                            self.gate
-                                .snapshot()
-                                .map_err(|error| CompactionError::Internal(error.to_string()))?
-                                .currency(),
-                        ),
-                        attempt: Some(reference),
-                    },
-                )?;
-            }
-            self.journal.append(
+            self.record_generation_settlement(
                 turn,
-                None,
-                None,
-                EventKind::AttemptSettled {
-                    attempt: settlement.attempt,
-                    outcome: settlement.outcome,
-                },
+                profile,
+                reference,
+                &settlement,
+                drained.accounting_booked,
             )?;
             if drained.cancelled {
                 return Err(CompactionError::Cancelled(
