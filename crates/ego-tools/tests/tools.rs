@@ -2562,6 +2562,7 @@ mod end_to_end {
         );
         let (output, is_error) = calls[1]
             .messages
+            .messages()
             .iter()
             .flat_map(|message| &message.content)
             .find_map(|block| match block {
