@@ -22,10 +22,11 @@ fn pnpm_11_engine_store_writes_keep_host_links_readonly() {
     std::fs::create_dir_all(&links).unwrap();
     let engine = links.join("pnpm");
     std::fs::write(&engine, "host engine").unwrap();
+    std::fs::create_dir_all(store.join("tmp/engine-locks")).unwrap();
     let policy = admit(&root.join("workspace")).unwrap();
     for path in [
         store.join("index.db"),
-        store.join("pnpm-store-operation-locks"),
+        store.join("tmp/engine-locks/package-manager-env.lock"),
     ] {
         let outcome = execute(
             policy.clone(),
@@ -117,6 +118,7 @@ fn pnpm_11_live_exec_uses_the_installed_engine_under_adaptive() {
         CanonPath::new(workspace.canonicalize().unwrap()),
     )
     .unwrap();
+    let warnings = policy.admission_warnings().to_vec();
     let output = execute(
         policy,
         root.path(),
@@ -128,7 +130,7 @@ fn pnpm_11_live_exec_uses_the_installed_engine_under_adaptive() {
     );
     assert!(
         output.is_ok(),
-        "real pnpm@11.15.1 must execute through the admitted perimeter: {output:?}"
+        "real pnpm@11.15.1 must execute through the admitted perimeter: {output:?}; warnings: {warnings:?}"
     );
 }
 
@@ -145,6 +147,9 @@ fn reported_layout_child(root: &Path, name: &str, require_write: bool) -> bool {
         "#!/bin/sh\nexec /usr/bin/touch \"$PWD/discovery-write\"\n".to_owned()
     } else {
         r#"#!/bin/sh
+if [ "$1" = '--version' ]; then printf '%s\n' '11.15.1'; exit 0; fi
+if [ "$1 $2" != 'with current' ]; then exit 1; fi
+shift 2
 case "$1 $2" in
   'store path') printf '%s\n' "$HOME/Library/pnpm/store/v11" ;;
   'root -g') printf '%s\n' "$HOME/Library/pnpm/global/v11" ;;
@@ -170,6 +175,77 @@ esac
         .unwrap();
     reexec::assert_one_child_test(&output);
     false
+}
+
+// Catches: bypassing selection reports the host layout for a different pin.
+#[test]
+fn pnpm_11_mismatched_version_warns_without_runtime_grants() {
+    let name = "pnpm_11_layout::pnpm_11_mismatched_version_warns_without_runtime_grants";
+    let Some(root) = isolated(name) else {
+        return;
+    };
+    if !reported_layout_child(&root, name, false) {
+        return;
+    }
+    std::fs::write(
+        root.join("workspace/package.json"),
+        r#"{"packageManager":"pnpm@10.33.1"}"#,
+    )
+    .unwrap();
+    let engine = root.join("home/Library/pnpm/package-manager-store/v11");
+    std::fs::create_dir_all(&engine).unwrap();
+    let policy = admit(&root.join("workspace")).unwrap();
+    assert!(
+        policy
+            .admission_warnings()
+            .iter()
+            .any(|warning| warning.contains("11.15.1")
+                && warning.contains("10.33.1")
+                && warning.contains("mismatch"))
+    );
+    assert!(
+        execute(
+            policy,
+            &root,
+            vec![
+                "/usr/bin/touch".into(),
+                engine.join("index.db").into_os_string()
+            ]
+        )
+        .is_err()
+    );
+}
+
+// Catches: no package-manager selector is mistaken for a mismatched pin,
+// preventing the installed runtime's legitimate database writes.
+#[test]
+fn pnpm_11_no_selector_uses_the_installed_runtime_layout() {
+    let name = "pnpm_11_layout::pnpm_11_no_selector_uses_the_installed_runtime_layout";
+    let Some(root) = isolated(name) else {
+        return;
+    };
+    if !reported_layout_child(&root, name, false) {
+        return;
+    }
+    std::fs::write(root.join("workspace/package.json"), "{}").unwrap();
+    let engine = root.join("home/Library/pnpm/package-manager-store/v11");
+    std::fs::create_dir_all(&engine).unwrap();
+    let policy = admit(&root.join("workspace")).unwrap();
+    assert!(
+        policy.admission_warnings().is_empty(),
+        "{:?}",
+        policy.admission_warnings()
+    );
+    execute(
+        policy,
+        &root,
+        vec![
+            "/usr/bin/touch".into(),
+            engine.join("index.db").into_os_string(),
+        ],
+    )
+    .unwrap();
+    assert!(engine.join("index.db").exists());
 }
 
 // Catches: discovery silently executes a pinned runtime without confinement,

@@ -169,16 +169,21 @@ and npm `_npx` stay read-only: the host runs their code later. Admission protect
 every captured store version's `links` path, or `store/v11/links` when no version
 exists yet (pnpm 12's default). Store versions created later require fresh
 admission to capture their host-code paths.
-On macOS, admission also queries the installed pnpm for `store path`, `root -g`
-and `bin -g` from the workspace. Each query runs under a read-only Seatbelt
+On macOS, admission also checks the installed pnpm version against the exact project pin (or
+requires no selector), then queries `with current store path` and
+`with current root -g` from the workspace. A mismatch warns with both versions
+and admits no additional roots. Each query runs under a read-only Seatbelt
 profile with network disabled and a two-second limit. Project-selected pnpm
 code never runs unconfined for discovery. Reported paths cannot grant writes
 outside the operator-selected pnpm home. A relocated store outside that boundary
 requires explicit authority rather than trusting project configuration.
-For the recorded pnpm 11 layout, the reported bin and store version identify the
-sibling `package-manager-store/vN`. Only its database companions, operation-lock
-path and `tmp` are writable; engine links and the reported global directory
-remain read-only. Missing or symlinked engine stores add a perimeter warning,
+For the recorded pnpm 11 layout, the reported global root and store version identify the
+sibling `package-manager-store/vN`. Only its database companions and `tmp` are
+writable; engine links and the reported global directory remain read-only.
+The recorded macOS runtime also needs its current-user operation-lock directory,
+`/private/tmp/pnpm-store-operation-locks-<UID>`. Only that namespace is admitted,
+not the shared temporary directory. An existing alias, non-directory, foreign
+owner or group/other permission bits refuse the discovered roots. Missing or symlinked engine stores add a perimeter warning,
 not a broad write grant. If pnpm requires writes to answer a query, admission
 adds no query-derived roots and `/config perimeter` reports the declared pnpm
 version and the discovery failure. It does not guess a layout from that version.

@@ -14,9 +14,9 @@ pub(super) struct Layout {
 }
 
 impl Layout {
-    // Recorded pnpm 11 contract: bin's parent owns the versioned engine store.
-    // pnpm does not expose this default through `config get`.
-    fn reported(store: PathBuf, global: PathBuf, bin: PathBuf) -> Option<Self> {
+    // Recorded pnpm 11 contract: global/vN and package-manager-store/vN are
+    // siblings. `bin -g` is not a read-only query: it probes bin writability.
+    fn reported(store: PathBuf, global: PathBuf) -> Option<Self> {
         let version = store.file_name()?.to_str()?;
         if version.len() < 2
             || !version.starts_with('v')
@@ -24,11 +24,11 @@ impl Layout {
         {
             return None;
         }
-        let home = if bin.file_name()? == "bin" {
-            bin.parent()?
-        } else {
-            &bin
-        };
+        let parent = global.parent()?;
+        if parent.file_name()? != "global" {
+            return None;
+        }
+        let home = parent.parent()?;
         Some(Self {
             engine: home.join("package-manager-store").join(version),
             store,
@@ -41,24 +41,39 @@ pub(super) fn capture(workspace: &Path, credentials: &[PathBuf]) -> Result<Optio
     let Some(executable) = installed(workspace) else {
         return Ok(None);
     };
-    let version = selected_version(workspace);
+    let selected = selected_version(workspace);
+    let selected_label = selected
+        .as_ref()
+        .ok()
+        .and_then(|pin| pin.as_deref())
+        .unwrap_or("unknown or no selector");
     let profile = readonly_profile(credentials)?;
+    let version = query_text(&executable, workspace, &profile, &["--version"])
+        .map_err(|reason| format!("pnpm installed version unknown, project {selected_label}: {reason}; no additional pnpm roots admitted"))?;
+    let selected = selected
+        .map_err(|reason| format!("pnpm installed {version}, project unknown: {reason}"))?;
+    let selected_label = selected.as_deref().unwrap_or("no selector");
+    if !exact_version(&version) || selected.as_ref().is_some_and(|pin| pin != &version) {
+        return Err(format!(
+            "pnpm installed {version}, project {selected_label}: exact version mismatch or unsupported selector; no additional pnpm roots admitted"
+        ));
+    }
     let query = |args: &[&str]| {
-        query(&executable, workspace, &profile, args).map_err(|reason| {
+        let mut current = vec!["with", "current"];
+        current.extend_from_slice(args);
+        query(&executable, workspace, &profile, &current).map_err(|reason| {
             format!(
-                "pnpm {version}: {} discovery failed: {reason}; no additional pnpm roots admitted",
+                "pnpm installed {version}, project {selected_label}: {} discovery failed: {reason}; no additional pnpm roots admitted",
                 args.join(" ")
             )
         })
     };
-    let layout = Layout::reported(
-        query(&["store", "path"])?,
-        query(&["root", "-g"])?,
-        query(&["bin", "-g"])?,
-    )
-    .ok_or_else(|| {
-        format!("pnpm {version}: unsupported reported layout; no additional pnpm roots admitted")
-    })?;
+    let layout =
+        Layout::reported(query(&["store", "path"])?, query(&["root", "-g"])?).ok_or_else(|| {
+            format!(
+                "pnpm {version}: unsupported reported layout; no additional pnpm roots admitted"
+            )
+        })?;
     Ok(Some(layout))
 }
 
@@ -114,7 +129,12 @@ fn admitted_paths(
     for path in [&layout.store, &layout.global] {
         super::check_write_root(home, workspace, &super::resolve(path)?, &credentials)?;
     }
-    let mut writable = vec![layout.store.clone()];
+    // Recorded macOS pnpm 11 uses /tmp regardless of the process TMPDIR.
+    // Admit its current-UID lock namespace, never the shared temporary root.
+    let uid = nix::unistd::getuid().as_raw();
+    let operation_locks = PathBuf::from(format!("/private/tmp/pnpm-store-operation-locks-{uid}"));
+    validate_operation_locks(&operation_locks, uid)?;
+    let mut writable = vec![layout.store.clone(), operation_locks];
     let mut protected = vec![layout.store.join("links"), layout.global.clone()];
     let mut warnings = Vec::new();
     let engine = super::resolve(&layout.engine);
@@ -138,7 +158,6 @@ fn admitted_paths(
                 "index.db-wal",
                 "index.db-shm",
                 "index.db-journal",
-                "pnpm-store-operation-locks",
                 "tmp",
             ]
             .map(|name| layout.engine.join(name)),
@@ -154,26 +173,83 @@ fn admitted_paths(
     Ok((writable, protected, warnings))
 }
 
-fn selected_version(workspace: &Path) -> String {
-    // Diagnostic only. Never use a project-declared version to guess roots.
+fn validate_operation_locks(path: &Path, uid: u32) -> Result<(), ego_core::permit::ProcessError> {
+    use std::os::unix::fs::MetadataExt as _;
+    if super::resolve(path)? != path {
+        return Err(super::error(
+            "pnpm operation-lock directory contains a symlink",
+        ));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o077 == 0 =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(super::error(
+            "pnpm operation-lock directory is not private and user-owned",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(super::error(format!(
+            "cannot inspect pnpm operation locks: {error}"
+        ))),
+    }
+}
+
+fn selected_version(workspace: &Path) -> Result<Option<String>, String> {
     let mut text = String::new();
-    let value = std::fs::File::open(workspace.join("package.json"))
-        .and_then(|file| file.take(65537).read_to_string(&mut text))
-        .ok()
-        .filter(|_| text.len() <= 65536)
-        .and_then(|_| serde_json::from_str::<serde_json::Value>(&text).ok());
-    value
-        .as_ref()
-        .and_then(|value| value["packageManager"].as_str())
-        .and_then(|value| value.strip_prefix("pnpm@"))
-        .filter(|value| {
-            value.len() <= 96
-                && value
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c))
-        })
-        .unwrap_or("(installed; no project version declared)")
-        .to_owned()
+    let file = match std::fs::File::open(workspace.join("package.json")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "pnpm project selector unreadable: {error}; no additional pnpm roots admitted"
+            ));
+        }
+    };
+    file.take(65537)
+        .read_to_string(&mut text)
+        .map_err(|_| "pnpm project selector unreadable; no additional pnpm roots admitted")?;
+    if text.len() > 65536 {
+        return Err(
+            "pnpm project selector exceeds 65536 bytes; no additional pnpm roots admitted".into(),
+        );
+    }
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| "pnpm project selector invalid; no additional pnpm roots admitted")?;
+    match value.get("packageManager") {
+        Some(value) => Ok(Some(
+            value
+                .as_str()
+                .and_then(|value| value.strip_prefix("pnpm@"))
+                .filter(|value| {
+                    value.len() <= 96
+                        && value
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b".-+^~*".contains(&c))
+                })
+                .unwrap_or("invalid or unsupported selector")
+                .to_owned(),
+        )),
+        None if value.pointer("/devEngines/packageManager").is_some() => Err(
+            "pnpm project devEngines selector unsupported; no additional pnpm roots admitted"
+                .into(),
+        ),
+        None => Ok(None),
+    }
+}
+
+fn exact_version(version: &str) -> bool {
+    let (core, suffix) = version.split_once('-').unwrap_or((version, ""));
+    let parts: Vec<_> = core.split('.').collect();
+    version.len() <= 96
+        && parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()))
+        && suffix
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
 }
 
 fn installed(workspace: &Path) -> Option<PathBuf> {
@@ -212,14 +288,32 @@ fn readonly_profile(credentials: &[PathBuf]) -> Result<String, String> {
     Ok(profile)
 }
 
-/// Three sequential queries cost at most six seconds of child runtime. Output
-/// is never interpreted as shell/SBPL, and no inherited pipe can hold us open.
 fn query(
     program: &Path,
     workspace: &Path,
     profile: &str,
     args: &[&str],
 ) -> Result<PathBuf, String> {
+    let text = query_text(program, workspace, profile, args)?;
+    let path = PathBuf::from(text);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("reported path is not absolute or contains parent traversal".into());
+    }
+    Ok(path)
+}
+
+/// Version plus two path queries cost at most six seconds of child runtime.
+/// Output is never shell/SBPL, and no inherited pipe can hold us open.
+fn query_text(
+    program: &Path,
+    workspace: &Path,
+    profile: &str,
+    args: &[&str],
+) -> Result<String, String> {
     let mut output = tempfile::tempfile().map_err(|error| error.to_string())?;
     let mut child = Command::new("/usr/bin/sandbox-exec")
         .args(["-p", profile])
@@ -268,15 +362,7 @@ fn query(
     if text.len() > 4096 || text.chars().any(char::is_control) {
         return Err("reported path is not a bounded single line".into());
     }
-    let path = PathBuf::from(text);
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
-        return Err("reported path is not absolute or contains parent traversal".into());
-    }
-    Ok(path)
+    Ok(text.to_owned())
 }
 
 #[cfg(test)]
@@ -294,22 +380,17 @@ mod tests {
         let layout = Layout::reported(
             fixture["store"].as_str().unwrap().into(),
             fixture["global"].as_str().unwrap().into(),
-            fixture["bin"].as_str().unwrap().into(),
         )
         .unwrap();
         assert_eq!(
             layout.engine,
             PathBuf::from("/home/example/workspace")
         );
-        let relocated = Layout::reported(
-            "/custom/content/v42".into(),
-            "/custom/global/v11".into(),
-            "/custom/home/bin".into(),
-        )
-        .unwrap();
+        let relocated =
+            Layout::reported("/custom/content/v42".into(), "/custom/global/v11".into()).unwrap();
         assert_eq!(
             relocated.engine,
-            PathBuf::from("/custom/home/package-manager-store/v42")
+            PathBuf::from("/custom/package-manager-store/v42")
         );
         assert_eq!(relocated.global, PathBuf::from("/custom/global/v11"));
     }
@@ -373,6 +454,30 @@ mod tests {
         let error =
             admitted_paths(&home, &pnpm, &root.path().join("workspace"), &[], &layout).unwrap_err();
         assert!(error.to_string().contains("operator-selected pnpm home"));
+    }
+
+    // Catches: a pre-created operation-lock alias or foreign/shared directory
+    // launders authority over unrelated temporary files.
+    #[test]
+    fn operation_lock_directory_refuses_aliases_and_unsafe_ownership() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("locks");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let uid = nix::unistd::getuid().as_raw();
+        assert!(validate_operation_locks(&directory, uid).is_ok());
+        assert!(validate_operation_locks(&directory, uid + 1).is_err());
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_operation_locks(&directory, uid).is_err());
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = root.path().join("alias");
+        symlink(&directory, &alias).unwrap();
+        assert!(validate_operation_locks(&alias, uid).is_err());
+        let file = root.path().join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        assert!(validate_operation_locks(&file, uid).is_err());
+        assert!(validate_operation_locks(&root.path().join("absent"), uid).is_ok());
     }
 
     // Catches: fail-closed discovery rejects a valid read-only query as well.
