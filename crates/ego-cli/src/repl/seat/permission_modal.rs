@@ -322,7 +322,9 @@ fn risk_words(risk: &RiskAssessment) -> String {
         .map(|reason| match reason {
             RiskReason::ReadOnly => "only reads",
             RiskReason::SessionProcessControl => "controls a session process",
-            RiskReason::ScopedWrite => "changes files in the workspace",
+            RiskReason::ScopedWrite => "changes files",
+            RiskReason::WorkspaceWrite => "changes files in the workspace",
+            RiskReason::OutsideWorkspaceWrite => "changes files outside the workspace",
             RiskReason::ProcessEffectsUnknown => "runs a program",
             RiskReason::IdentityIncomplete => "program not fully identified",
             RiskReason::DynamicCode => "runs code from its arguments",
@@ -470,11 +472,27 @@ mod tests {
         RiskAssessment { class, reasons }
     }
 
+    // Catches: an external write retaining the misleading workspace wording.
+    #[test]
+    fn outside_workspace_write_risk_names_the_location() {
+        assert_eq!(
+            risk_words(&risk(
+                RiskClass::Bounded,
+                vec![RiskReason::OutsideWorkspaceWrite]
+            )),
+            "Risk: limited - changes files outside the workspace"
+        );
+        assert_eq!(
+            risk_words(&risk(RiskClass::Bounded, vec![RiskReason::ScopedWrite])),
+            "Risk: limited - changes files"
+        );
+    }
+
     /// Catches the classifications collapsing into one message, and Rust
     /// variant names leaking into the words.
     #[test]
     fn bounded_and_unknown_risk_read_differently_in_plain_words() {
-        let bounded = risk_words(&risk(RiskClass::Bounded, vec![RiskReason::ScopedWrite]));
+        let bounded = risk_words(&risk(RiskClass::Bounded, vec![RiskReason::WorkspaceWrite]));
         let unknown = risk_words(&risk(
             RiskClass::Unknown,
             vec![RiskReason::ProcessEffectsUnknown, RiskReason::DynamicCode],

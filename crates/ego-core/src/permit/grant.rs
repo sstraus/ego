@@ -1245,11 +1245,28 @@ impl PolicyEngine {
     }
 
     pub(crate) fn risk(&self, call: &PreparedCall) -> super::analysis::RiskAssessment {
-        if self.coordinator {
+        use super::analysis::RiskReason;
+        let mut risk = if self.coordinator {
             super::orchestration::assess(call)
         } else {
             super::analysis::assess(call)
+        };
+        // The prepared paths are canonical; a tool name says nothing about
+        // whether its writes land inside this workspace.
+        risk.reasons
+            .retain(|reason| *reason != RiskReason::ScopedWrite);
+        for op in call.ops() {
+            if let Op::Write { path, .. } = op {
+                risk.reasons.push(if path.is_or_under(&self.workspace) {
+                    RiskReason::WorkspaceWrite
+                } else {
+                    RiskReason::OutsideWorkspaceWrite
+                });
+            }
         }
+        risk.reasons.sort();
+        risk.reasons.dedup();
+        risk
     }
 
     fn coordinator_high(&self, call: &PreparedCall) -> bool {
@@ -2058,6 +2075,33 @@ mod tests {
         use crate::permit::analysis::{RiskClass, RiskReason};
         use crate::permit::{HttpRequest, HttpRequestDigest};
 
+        // Catches: workspace labels inferred from the tool kind or a string prefix.
+        #[test]
+        fn write_risk_uses_canonical_path_not_tool_name() {
+            let engine =
+                PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
+            for (tool, path, expected) in [
+                ("write", "/elsewhere/result.md", "outside_workspace_write"),
+                ("edit", "/ws-other/result.md", "outside_workspace_write"),
+                ("custom", "/ws/result.md", "workspace_write"),
+            ] {
+                let call = PreparedCall::new(
+                    tool,
+                    Op::Write {
+                        path: CanonPath::new(path),
+                        change: Change::Whole(b"hello".to_vec()),
+                    },
+                );
+                let risk = engine.risk(&call);
+                assert_eq!(risk.class, RiskClass::Bounded);
+                assert_eq!(
+                    serde_json::to_value(&risk.reasons).unwrap(),
+                    json!([expected]),
+                    "{tool} {path}"
+                );
+            }
+        }
+
         #[test]
         fn pending_permission_retains_exact_input_risk_and_canonical_rule_facts() {
             let params = json!({
@@ -2101,7 +2145,10 @@ mod tests {
             assert_eq!(presentation.parameters(), &params);
             assert_eq!(presentation.schema(), &schema);
             assert_eq!(presentation.risk().class, RiskClass::Bounded);
-            assert_eq!(presentation.risk().reasons, vec![RiskReason::ScopedWrite]);
+            assert_eq!(
+                presentation.risk().reasons,
+                vec![RiskReason::WorkspaceWrite]
+            );
             let plan = presentation
                 .remember_plan()
                 .expect("a workspace write is representable");

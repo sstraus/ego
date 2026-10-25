@@ -22,6 +22,8 @@ pub enum RiskReason {
     ReadOnly,
     SessionProcessControl,
     ScopedWrite,
+    WorkspaceWrite,
+    OutsideWorkspaceWrite,
     ProcessEffectsUnknown,
     IdentityIncomplete,
     DynamicCode,
