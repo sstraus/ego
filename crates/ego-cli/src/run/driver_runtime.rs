@@ -40,8 +40,57 @@ async fn admit_saved_session_policy(
     .await
     .map_err(|error| RunTermination::PermissionRequired {
         action: error.to_string(),
-        by: DeniedBy::Nobody,
+        by: if matches!(
+            error,
+            ego_core::run::RunError::ExecutionPolicyDenied { decided: true }
+        ) {
+            DeniedBy::Decided(ego_core::permit::Authority::Party)
+        } else {
+            DeniedBy::Nobody
+        },
     })?;
+    let state = journal.state().clone();
+    drop(journal);
+    active.replace_state(state);
+    Ok(())
+}
+
+fn record_session_selections(
+    active: &mut ActiveSession<'_>,
+    effective: &Effective,
+    confinement: &RunConfinement,
+    clock: &SystemClock,
+    sink: &dyn EventSink,
+) -> Result<(), RunTermination> {
+    let selections = RunSelections::new(
+        effective.model.clone(),
+        None,
+        Some(effective.mode.unwrap_or(Mode::Default)),
+        None,
+        None,
+    )
+    .with_sandbox(confinement.level());
+    if active.state().session_selections.as_ref() == Some(&selections) {
+        return Ok(());
+    }
+    let mut journal = Journal::new(
+        active.id(),
+        active.store(),
+        clock,
+        sink,
+        Producer::Main,
+        active.state().clone(),
+    );
+    journal
+        .append(
+            TurnId::new(),
+            None,
+            None,
+            EventKind::SessionSelectionsSelected { selections },
+        )
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
     let state = journal.state().clone();
     drop(journal);
     active.replace_state(state);
@@ -385,6 +434,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 None,
             )
             .await?;
+            record_session_selections(&mut active, &effective, &confinement, &clock, sink)?;
             let opening = active.state().clone();
             let pause = PauseToken::default();
             let driven = drive_headless_turn(
@@ -529,6 +579,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                         human.as_ref().map(|human| human as &dyn HumanApprover),
                     )
                     .await?;
+                    record_session_selections(&mut active, &effective, &confinement, &clock, sink)?;
                     perimeter =
                         perimeter.with_execution_observation(&observation, probe_evidence.as_ref());
                     let (recovered_epoch_policy, session_policy) =

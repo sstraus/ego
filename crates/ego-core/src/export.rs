@@ -302,6 +302,9 @@ pub enum ExportEvent {
         candidate: ModelRef,
         decision: ExportFallbackDecision,
     },
+    SessionSelectionsSelected {
+        selections: crate::run::RunSelections,
+    },
     ExecutionObserved {
         observation: ExecObservation,
         probe_evidence: Option<crate::store::evidence::EvidenceRef>,
@@ -1046,6 +1049,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::FallbackDecision {
                 candidate: candidate.clone(),
                 decision,
+            }
+        }
+        EventKind::SessionSelectionsSelected { selections } => {
+            ExportEvent::SessionSelectionsSelected {
+                selections: selections.clone(),
             }
         }
         EventKind::ExecutionObserved {

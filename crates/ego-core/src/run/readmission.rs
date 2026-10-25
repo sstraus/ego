@@ -148,10 +148,9 @@ pub async fn admit_execution_policy(
         true
     };
     if !allowed {
-        return Err(RunExecutorError::new(
-            "execution policy re-admission was denied; no effects started",
-        )
-        .into());
+        return Err(RunError::ExecutionPolicyDenied {
+            decided: human.is_some(),
+        });
     }
     Ok(automatic)
 }

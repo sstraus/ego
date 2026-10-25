@@ -1106,6 +1106,8 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_observation: Option<crate::permit::ExecObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_selections: Option<RunSelections>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_snapshot: Option<crate::session::PromptSnapshot>,
     /// The `seq` carried by the most recently applied event. `apply` trusts
     /// the caller's replay order and never reorders, clamps or rejects on
@@ -1268,6 +1270,7 @@ impl Default for SessionState {
             context_request: None,
             context_cooldown: 0,
             execution_observation: None,
+            session_selections: None,
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
             lineage: None,
@@ -2218,6 +2221,9 @@ impl SessionState {
                 }
             }
             EventKind::FallbackDecision { .. } => {}
+            EventKind::SessionSelectionsSelected { selections } => {
+                self.session_selections = Some(selections.clone());
+            }
             EventKind::ExecutionObserved { observation, .. } => {
                 self.execution_observation = Some(observation.clone());
             }
