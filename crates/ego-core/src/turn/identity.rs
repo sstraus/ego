@@ -54,7 +54,7 @@ impl AgentIdentity {
              an optional permissions.judge; accept-edits admits workspace file edits; yolo relaxes ordinary \
              approvals, not confinement or hard denies. User config can select mode and sandbox \
              silently. {confinement} Saved perimeter changes require \
-             exit and resume without a positional prompt; they do not apply live. Ask the user \
+             /quit, then ego resume <session-id> without a positional prompt; they do not apply live. Ask the user \
              to inspect /config perimeter for this session, or ego config ls --effective and \
              ego doctor for a fresh resolution. Use ego rules ls/explain/remember to inspect \
              approval rules; remembered shell commands stay exact. When blocked, report the \

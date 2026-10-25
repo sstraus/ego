@@ -192,7 +192,25 @@ fn recover(legacy: bool, allow: bool, wider: bool) {
             let text = frame["params"]["update"]["content"]["text"]
                 .as_str()
                 .unwrap_or_default();
-            noticed |= text.contains("Execution policy changed:") && text.contains("policy digest");
+            if text.contains("Execution policy changed:") {
+                assert!(
+                    !text.contains("policy digest"),
+                    "ACP must not restore opaque digest diagnostics: {text}"
+                );
+                if wider {
+                    assert!(text.contains("filesystem root added"), "{text}");
+                    assert!(
+                        text.contains(extra.path().canonicalize().unwrap().to_str().unwrap()),
+                        "ACP must name the added root: {text}"
+                    );
+                } else if legacy {
+                    assert!(
+                        text.contains("historical roots/policy cannot be reconstructed"),
+                        "{text}"
+                    );
+                }
+                noticed = true;
+            }
         }
         if frame["method"] == "session/request_permission" {
             asked = true;

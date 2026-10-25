@@ -301,7 +301,13 @@ fn readmission_cases() {
                 "{name}"
             );
             if asks && !allow {
-                assert!(answer.is_err(), "{name}: denial admitted a turn");
+                assert!(
+                    matches!(
+                        answer,
+                        Err(ego_core::run::RunError::ExecutionPolicyDenied { decided: true })
+                    ),
+                    "{name}: denial attribution lost"
+                );
                 assert_eq!(
                     store
                         .transactions(run.session_id())
@@ -594,4 +600,34 @@ fn overlapping_core_readmission_has_one_journal_authority() {
             .all(|pair| pair[0].env.seq < pair[1].env.seq)
     );
     assert_eq!(events[1].env.parent, Some(events[0].env.id));
+}
+
+// Catches: re-admission prints complete Debug policy snapshots and opaque hashes
+// instead of the few changed executable paths the operator must approve.
+#[test]
+fn readmission_diff_names_changed_paths_without_debug_dump() {
+    let base = RunConfinement::new(Confinement::Workspace, false, CanonPath::new("/work")).unwrap();
+    let changed = base.clone().with_exec_paths(vec![
+        CanonPath::new("/tools/one"),
+        CanonPath::new("/tools/two"),
+    ]);
+    let before = observation(
+        &base,
+        "sandbox",
+        Confinement::Workspace.required_caps(),
+        "1",
+    );
+    let after = observation(
+        &changed,
+        "sandbox",
+        Confinement::Workspace.required_caps(),
+        "2",
+    );
+    let diff = after.changes_from(&before);
+    assert!(diff.contains("exec_paths added: /tools/one"), "{diff}");
+    assert!(diff.contains("exec_paths added: /tools/two"), "{diff}");
+    for forbidden in ["CanonPath", "ProfileRoot", &"1".repeat(64), &"2".repeat(64)] {
+        assert!(!diff.contains(forbidden), "{diff}");
+    }
+    assert!(diff.len() < 512, "{diff}");
 }

@@ -1670,6 +1670,9 @@ impl RunRetention {
 
 #[derive(Debug)]
 pub enum RunError {
+    ExecutionPolicyDenied {
+        decided: bool,
+    },
     InvalidRequestDigest,
     InvalidRoot {
         path: PathBuf,
@@ -1712,6 +1715,11 @@ pub enum RunError {
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ExecutionPolicyDenied { decided } => f.write_str(if *decided {
+                "execution policy re-admission declined by the user; no effects started"
+            } else {
+                "execution policy re-admission requires a human decision; no effects started"
+            }),
             Self::InvalidRequestDigest => f.write_str("request digest is empty"),
             Self::InvalidRoot { path } => write!(f, "run root is not absolute: {}", path.display()),
             Self::NotFound { run_id } => write!(f, "run {run_id} was not found"),

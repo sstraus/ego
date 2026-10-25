@@ -255,7 +255,7 @@ async fn execute_inner(
                 .map_err(store_failure)?;
             roots::receipt(result, out)?;
             output::note(
-                "Running sessions keep their current permissions; exit and resume to apply saved roots.",
+                "Running sessions keep their current permissions; /quit, then ego resume <session-id> to apply saved roots.",
             );
         }
         ConfigAction::Set { target, key, value } => {

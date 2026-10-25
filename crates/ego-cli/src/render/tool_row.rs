@@ -436,11 +436,21 @@ fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
     if hidden > 0 {
         rows.push(hidden_lines(hidden, width));
     }
-    rows.extend(
-        lines[hidden..]
-            .iter()
-            .map(|line| dim(format!("  {line}")).truncate_to(width)),
-    );
+    rows.extend(lines[hidden..].iter().flat_map(|line| {
+        let row = dim(format!("  {line}"));
+        // Recovery is an operator action, not disposable command output:
+        // keep it visible without requiring the user to expand the tool.
+        if !call.ok
+            && line
+                .strip_prefix("stderr: ")
+                .unwrap_or(line)
+                .starts_with("sandbox exec denied ")
+        {
+            row.wrap_hanging(width, 2)
+        } else {
+            vec![row.truncate_to(width)]
+        }
+    }));
     rows
 }
 
@@ -654,6 +664,71 @@ mod tests {
         let rows: Vec<_> = record.rows.lines().collect();
         assert_eq!(rows[0], "✗ $ sh -c 'exit 3' · exit 3 · 1.5s");
         assert_eq!(rows[1..], ["  stderr: boom"]);
+    }
+
+    // Catches: compact exec failure clips the program or recovery instructions,
+    // leaving the user unable to repair executable authority without /expand.
+    #[test]
+    fn sandbox_exec_recovery_is_visible_without_expanding_the_tool() {
+        let result = "[stderr]\nsandbox exec denied /outside/tools/program (confinement workspace); no read or write grant can authorize execution. Add the program and required interpreter locations to exec_paths in the user configuration with `ego config edit`. Then /quit and run `ego resume <session-id> --mode <same-mode> --sandbox workspace --model <same-model>`; retain the session's --mode, --sandbox and --model selections. No command was retried.\nprocess exited unsuccessfully with code Some(126)";
+        for width in [20, 40, 80, 120] {
+            let rendered = record(
+                &call(
+                    "exec",
+                    r#"{"argv":["/bin/sh","-c","program"]}"#,
+                    false,
+                    result,
+                ),
+                at(width),
+            );
+            assert!(
+                rendered.rows.lines().all(|row| cells(row) <= width),
+                "{width}: {}",
+                rendered.rows
+            );
+            let visible: String = rendered
+                .rows
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            for expected in [
+                "/outside/tools/program",
+                "exec_paths",
+                "egoconfigedit",
+                "/quit",
+                "egoresume<session-id>",
+                "--mode<same-mode>",
+                "--sandboxworkspace",
+                "--model<same-model>",
+                "Nocommandwasretried.",
+            ] {
+                assert!(
+                    visible.contains(expected),
+                    "width {width} missing {expected:?}: {}",
+                    rendered.rows
+                );
+            }
+        }
+    }
+
+    // Catches: the recovery exception expands unrelated failure output or a
+    // successful command that merely prints text resembling a denial.
+    #[test]
+    fn ordinary_exec_previews_still_truncate_long_lines() {
+        for (ok, prefix) in [
+            (false, "ordinary error "),
+            (false, "sandbox denied read "),
+            (true, "sandbox exec denied "),
+        ] {
+            let result = format!("[stderr]\n{prefix}{}END-OF-LONG-OUTPUT", "x".repeat(200));
+            let rendered = record(
+                &call("exec", r#"{"argv":["/bin/echo"]}"#, ok, &result),
+                at(40),
+            );
+            assert_eq!(rendered.rows.lines().count(), 2, "{}", rendered.rows);
+            assert!(!rendered.rows.contains("END-OF-LONG-OUTPUT"));
+            assert!(rendered.detail.contains("END-OF-LONG-OUTPUT"));
+        }
     }
 
     #[test]

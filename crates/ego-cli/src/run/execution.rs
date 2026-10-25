@@ -38,8 +38,40 @@ async fn resolve_invocation_phase(
         }),
         None => {
             let home = config::ego_home();
-            let mut settings = settings(
-                args,
+            let cwd = workspace(args.directory.as_ref()).map_err(usage)?;
+            let chosen_session = chosen(args, &cwd, None).map_err(usage)?;
+            let mut resumed = args.clone();
+            if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
+                use ego_core::store::session_store::SessionEntry;
+                use futures::TryStreamExt as _;
+                let entries = ego_core::store::session_store::SessionStore::read(
+                    chosen_session.store.as_ref(),
+                    &chosen_session.id,
+                )
+                .map_err(|error| usage(UsageError(error.to_string())))?
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(|error| usage(UsageError(error.to_string())))?;
+                for entry in entries.into_iter().rev() {
+                    if let SessionEntry::Event(event) = entry
+                        && let EventKind::SessionSelectionsSelected { selections } = event.kind
+                    {
+                        if resumed.model.is_none() {
+                            resumed.model = selections.model().map(|model| model.0.clone());
+                        }
+                        if resumed.mode.is_none() {
+                            resumed.mode = selections.mode();
+                        }
+                        if resumed.sandbox.is_none() {
+                            resumed.sandbox = selections.sandbox();
+                        }
+                        break;
+                    }
+                }
+            }
+            let mut settings = rooted_settings(
+                &resumed,
+                cwd,
                 |root| run_trust(args, driver, root, home.as_deref(), diagnostics),
                 diagnostics,
             )
@@ -63,7 +95,6 @@ async fn resolve_invocation_phase(
                     message: "direct CI execution is missing its preflight token".to_owned(),
                 });
             }
-            let chosen_session = chosen(args, &settings.root, None).map_err(usage)?;
             let recorded_model = if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
                 chosen_session
                     .store
@@ -76,7 +107,7 @@ async fn resolve_invocation_phase(
             } else {
                 None
             };
-            if settings.effective.model.is_none() && args.model.is_none() {
+            if resumed.model.is_none() && recorded_model.is_some() {
                 settings.effective.model = recorded_model.clone();
             }
             select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;

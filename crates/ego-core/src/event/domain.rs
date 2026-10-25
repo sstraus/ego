@@ -232,7 +232,7 @@ pub struct ToolTiming {
 ///
 /// ```text
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
-/// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
+/// SessionPaused | SessionPauseObserved | SessionResumed | SessionSelectionsSelected | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
 /// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
@@ -512,6 +512,8 @@ pub enum EventKind {
         candidate: crate::config::ModelRef,
         decision: FallbackDecision,
     },
+    /// Admitted direct-session selections retained across process restarts.
+    SessionSelectionsSelected { selections: RunSelections },
     /// The process backend evidence for an admitted execution authority.
     ExecutionObserved {
         observation: ExecObservation,
@@ -866,6 +868,7 @@ impl EventKind {
             EventKind::PermissionDecided { .. } => "permission_decided",
             EventKind::GenerationStarted { .. } => "generation_started",
             EventKind::FallbackDecision { .. } => "fallback_decision",
+            EventKind::SessionSelectionsSelected { .. } => "session_selections_selected",
             EventKind::ExecutionObserved { .. } => "execution_observed",
             EventKind::ExecutionMeasured { .. } => "execution_measured",
             EventKind::JudgeResponse { .. } => "judge_response",

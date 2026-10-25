@@ -90,29 +90,60 @@ impl ExecutionPolicy {
         if self.workspace != old.workspace {
             changes.push(format!("workspace {} -> {}", old.workspace, self.workspace));
         }
-        if self.roots != old.roots {
-            changes.push(format!(
-                "filesystem roots/access {:?} -> {:?}",
-                old.roots, self.roots
-            ));
-        }
-        if self.exec_paths != old.exec_paths {
-            changes.push(format!(
-                "executable paths {:?} -> {:?}",
-                old.exec_paths, self.exec_paths
-            ));
-        }
-        if self.runtime_roots != old.runtime_roots {
-            changes.push(format!(
-                "runtime roots {:?} -> {:?}",
-                old.runtime_roots, self.runtime_roots
-            ));
-        }
+        path_changes(
+            &mut changes,
+            "filesystem root",
+            old.roots
+                .iter()
+                .map(|root| format!("{} ({})", root.path(), root.access().as_str())),
+            self.roots
+                .iter()
+                .map(|root| format!("{} ({})", root.path(), root.access().as_str())),
+        );
+        path_changes(
+            &mut changes,
+            "exec_paths",
+            old.exec_paths.iter().map(ToString::to_string),
+            self.exec_paths.iter().map(ToString::to_string),
+        );
+        path_changes(
+            &mut changes,
+            "runtime root",
+            old.runtime_roots.iter().map(ToString::to_string),
+            self.runtime_roots.iter().map(ToString::to_string),
+        );
         if self.adaptive != old.adaptive {
-            changes.push(format!(
-                "adaptive perimeter {:?} -> {:?}",
-                old.adaptive, self.adaptive
-            ));
+            match (&old.adaptive, &self.adaptive) {
+                (Some(previous), Some(current)) => {
+                    if previous.home != current.home {
+                        changes.push(format!(
+                            "adaptive home {} -> {}",
+                            previous.home, current.home
+                        ));
+                    }
+                    for (label, before, after) in [
+                        ("derived write root", &previous.writable, &current.writable),
+                        (
+                            "credential floor",
+                            &previous.credentials,
+                            &current.credentials,
+                        ),
+                        ("control floor", &previous.controls, &current.controls),
+                    ] {
+                        path_changes(
+                            &mut changes,
+                            label,
+                            before.iter().map(ToString::to_string),
+                            after.iter().map(ToString::to_string),
+                        );
+                    }
+                }
+                _ => changes.push(format!(
+                    "adaptive derivation {} -> {}",
+                    old.adaptive.is_some(),
+                    self.adaptive.is_some()
+                )),
+            }
         }
         changes
     }
@@ -122,4 +153,28 @@ fn covered(path: &CanonPath, roots: &[CanonPath]) -> bool {
     roots
         .iter()
         .any(|root| path.as_path().starts_with(root.as_path()))
+}
+
+fn path_changes(
+    changes: &mut Vec<String>,
+    label: &str,
+    before: impl Iterator<Item = String>,
+    after: impl Iterator<Item = String>,
+) {
+    let before = before.collect::<std::collections::BTreeSet<_>>();
+    let after = after.collect::<std::collections::BTreeSet<_>>();
+    for (action, paths) in [
+        ("removed", before.difference(&after).collect::<Vec<_>>()),
+        ("added", after.difference(&before).collect::<Vec<_>>()),
+    ] {
+        for path in paths.iter().take(8) {
+            changes.push(format!("{label} {action}: {}", path.escape_debug()));
+        }
+        if paths.len() > 8 {
+            changes.push(format!(
+                "{label} {action}: {} more paths (inspect /config perimeter)",
+                paths.len() - 8
+            ));
+        }
+    }
 }
