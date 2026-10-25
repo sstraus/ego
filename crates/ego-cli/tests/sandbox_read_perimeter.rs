@@ -138,12 +138,7 @@ fn broad_modes_refuse_credential_paths_even_with_user_allow() {
                 ..Plan::default()
             });
             let finished = places.ego(&stub).args(["Inspect credential"]).run();
-            assert_eq!(
-                finished.code,
-                Some(0),
-                "{}",
-                finished.stderr
-            );
+            assert_eq!(finished.code, Some(0), "{}", finished.stderr);
             assert!(
                 finished.stderr.contains(if index == 0 {
                     "protected credential path"
@@ -156,7 +151,11 @@ fn broad_modes_refuse_credential_paths_even_with_user_allow() {
             let generations = stub.generations();
             assert_eq!(generations.len(), 2);
             if index == 0 {
-                assert!(generations[1].to_string().contains("protected credential path"));
+                assert!(
+                    generations[1]
+                        .to_string()
+                        .contains("protected credential path")
+                );
             }
             assert!(
                 !serde_json::to_string(&generations)
@@ -189,7 +188,11 @@ fn off_refuses_a_public_symlink_to_a_credential_file() {
     assert!(finished.stderr.contains("protected credential path"));
     let generations = stub.generations();
     assert_eq!(generations.len(), 2);
-    assert!(generations[1].to_string().contains("protected credential path"));
+    assert!(
+        generations[1]
+            .to_string()
+            .contains("protected credential path")
+    );
     assert!(
         !serde_json::to_string(&generations)
             .unwrap()
