@@ -292,3 +292,97 @@ fn custom_store_with_missing_parents_still_requests_exact_write_authority() {
         assert!(!path.exists() || path == home);
     }
 }
+
+fn executable_refusal_fixture(bad_interpreter: bool) {
+    use ego_core::permit::{
+        CanonPath, Confinement, ProfileRoot, RootAccess, RunConfinement, SandboxAccess,
+        SandboxGrant, StreamProvenance, ToolContentBlock, ToolOutputEncoding, ToolOutputProvenance,
+        ToolResult,
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let tools = base.join("tools");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&tools).unwrap();
+    let program = tools.join("program");
+    std::fs::copy("/bin/echo", &program).unwrap();
+    let spec = SpawnSpec::new(
+        vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            program.clone().into_os_string(),
+        ],
+        Some(CanonPath::new(&workspace)),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let policy = RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace))
+        .unwrap()
+        .with_roots(vec![ProfileRoot::new(
+            CanonPath::new(&tools),
+            RootAccess::Read,
+        )]);
+    // Recorded diagnostic forms from usability round two, not an inferred
+    // syscall: Bash names the executable or its refused interpreter chain.
+    let text = if bad_interpreter {
+        format!(
+            "/bin/bash: {}: /usr/bin/env: bad interpreter: Operation not permitted",
+            program.display()
+        )
+    } else {
+        format!("/bin/bash: {}: Operation not permitted", program.display())
+    };
+    let result = ToolResult::new(vec![ToolContentBlock {
+        text,
+        provenance: ToolOutputProvenance::Process {
+            stream: StreamProvenance::Stderr,
+            encoding: ToolOutputEncoding::Utf8,
+            truncated: false,
+            omitted_bytes: 0,
+        },
+        full_output: None,
+    }]);
+    for grants in [
+        vec![],
+        vec![SandboxGrant::new(
+            CanonPath::new(&program),
+            SandboxAccess::Read,
+        )],
+    ] {
+        let denied = super::analyze(&spec, &result, &policy, &grants)
+            .expect("executable refusal recognized");
+        assert!(
+            denied.request.is_none(),
+            "filesystem grant offered for executable: {denied:?}"
+        );
+        let note = super::note(&denied, &policy, super::Outcome::NobodyToAsk);
+        for expected in [
+            "exec",
+            "exec_paths",
+            "/quit",
+            "ego resume",
+            "--mode",
+            "--sandbox",
+            "--model",
+            tools.to_str().unwrap(),
+            program.to_str().unwrap(),
+        ] {
+            assert!(note.contains(expected), "missing {expected:?}: {note}");
+        }
+        assert!(note.contains("read-only root"), "{note}");
+    }
+}
+
+// Catches: a shell-launched executable is misclassified as a read, then write grant.
+#[test]
+fn shell_exec_denial_never_offers_binary_read_or_write() {
+    executable_refusal_fixture(false);
+}
+
+// Catches: bad-interpreter exit 126 is ignored and supplies no executable recovery.
+#[test]
+fn refused_interpreter_chain_names_exec_recovery_and_read_root() {
+    executable_refusal_fixture(true);
+}
