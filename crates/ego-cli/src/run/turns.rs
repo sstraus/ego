@@ -593,6 +593,15 @@ impl Turns<'_> {
                         stopped = true;
                     }
                     done = &mut running => {
+                        // A provider can observe the shared deadline before
+                        // stop_signal is polled again. Only successful completion
+                        // is authoritative over that deadline.
+                        if !matches!(&done, Ok(outcome) if outcome.ok)
+                            && self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                        {
+                            cancel.cancel(CancelCause::Timeout);
+                            stopped = true;
+                        }
                         break (Some(done), stopped);
                     }
                 }
