@@ -6080,18 +6080,24 @@ mod turn {
         assert!(tool_result_text(&calls["outside"]).contains("outside the workspace"));
     }
 
-    /// Critic regression_case. Plausible bug: the exception widens from "read the
-    /// boundary refused" to every `OutsideWorkspace`, so a write outside the
-    /// workspace is handed back to the model instead of ending the run.
+    // Catches: a boundary write denial stops instead of returning the refusal, or writes anyway.
     #[test]
-    fn a_write_outside_the_workspace_still_ends_the_turn() {
+    fn a_write_outside_the_workspace_returns_the_refusal_and_changes_nothing() {
         let fx = Fixture::new(writing("/etc/ego-owned", "x")).with_write_tool();
+        fx.fs.file("/etc/ego-owned", "original");
 
-        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+        let (reason, ok, state) = run(&fx, SessionState::default(), "write it");
 
-        assert_eq!(reason, ExitReason::PermissionRequired);
-        assert!(!ok);
-        assert!(fx.fs.read(&CanonPath::new("/etc/ego-owned")).is_err());
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/etc/ego-owned")).unwrap(),
+            b"original"
+        );
+        let calls = tool_calls_by_id(&state);
+        assert_eq!(calls["call_1"].ok, Some(false));
+        assert!(tool_result_text(&calls["call_1"]).contains("outside the workspace"));
+        assert_eq!(fx.generator.calls().len(), 2);
     }
 
     /// Critic regression_case. Plausible bug: the exception widens to every refused
@@ -6111,9 +6117,7 @@ mod turn {
         assert!(!tool_result_text(&calls["call_1"]).contains("hunter2"));
     }
 
-    /// Critic regression_case. Plausible bug: the exception is keyed on something a
-    /// spawn also satisfies, so a command nobody can approve is returned to
-    /// the model instead of ending the run.
+    // Catches: an unanswered spawn permission is mistaken for a boundary refusal.
     #[test]
     fn a_spawn_nobody_can_approve_still_ends_the_turn() {
         let fx = Fixture::new(vec![
@@ -6392,6 +6396,11 @@ mod turn {
         assert_eq!(reason, ExitReason::PermissionRequired);
         assert!(!ok);
         assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "a user denial must not ask the model again"
+        );
         let recorded = permission_events(&fx);
         assert!(matches!(
             recorded.as_slice(),
@@ -6455,8 +6464,9 @@ mod turn {
 
         let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
 
-        assert_eq!(reason, ExitReason::PermissionRequired);
-        assert!(!ok);
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert_eq!(fx.generator.calls().len(), 2);
         assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
         assert!(fx.fs.read(&CanonPath::new("/etc/ego-owned")).is_err());
         let recorded = permission_events(&fx);

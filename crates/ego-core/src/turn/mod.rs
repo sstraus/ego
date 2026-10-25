@@ -4340,10 +4340,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     self.close_unstarted_siblings(turn, &pending[index + 1..])?;
                     return Ok(Some(DriveOutcome::QuestionRequired));
                 }
-                // A boundary refusal of a read is the model's to learn
-                // from, not the run's to end on: the denial text is the
-                // tool result and the batch carries on.
-                ToolOutcome::Refused { denial } if denial.is_unreachable_read() => {
+                // Boundary refusals happen before an effect. Return the refusal
+                // to the model for reads, writes and exec alike; a user or
+                // rule denial still ends the turn below (regression case).
+                ToolOutcome::Refused { denial } if denial.authority() == Authority::Boundary => {
                     let call = &pending[index];
                     self.journal.append(
                         turn,

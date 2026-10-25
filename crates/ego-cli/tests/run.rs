@@ -329,7 +329,7 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
             "write",
-            &serde_json::json!({ "path": HOSTS_PATH, "contents": "x" }).to_string(),
+            &serde_json::json!({ "path": "notes.md", "contents": "x" }).to_string(),
         ))],
         ..Plan::default()
     });
@@ -341,7 +341,9 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
             support::FIXTURE_SESSION_ID,
             "--output",
             "json",
-            "Overwrite the host table",
+            "--deny",
+            "write(**)",
+            "Overwrite the notes",
         ])
         .run();
 
@@ -351,20 +353,10 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
     assert_eq!(report["exit_reason"], "permission");
     let denied = report["denied"].as_str().expect("§4.4 requires the action");
     assert!(
-        denied.contains("write") && denied.contains(HOSTS_PATH),
+        denied.contains("write") && denied.contains("notes.md"),
         "a script handed exit 3 and no subject has been told nothing: {denied}"
     );
-    // And *who* refused, which is what picks the remedy. §4.4 offers three
-    // and is explicit that this one is not a permission at all: "the workspace
-    // boundary belongs to ARCHITECTURE.md §3.4 axis 4 — the execution
-    // backend — and no mode moves it", so `--yolo` cannot help and
-    // `--sandbox` is the only thing that can. A caller reading prose has to
-    // regex ego's sentences to learn that; `denied_by` is the key that says it.
-    assert_eq!(
-        report["denied_by"],
-        serde_json::json!({ "by": "boundary" }),
-        "the boundary names no rule and no mode, because nobody wrote it"
-    );
+    assert_eq!(report["denied_by"]["by"], "rules");
 }
 
 /// `denied` is absent rather than null when nothing was denied: an optional key
@@ -1131,6 +1123,56 @@ fn a_read_outside_the_workspace_tells_the_model_the_grant_and_leaks_nothing() {
         "the model was not told the grant: {second}"
     );
     assert!(!second.contains("SIBLING-CONTENTS"), "{second}");
+}
+
+// Catches: a real write refused by a read-only root ends the turn before the model sees it.
+#[test]
+fn boundary_denied_write_returns_refusal_and_continues() {
+    let elsewhere = tempfile::tempdir().expect("a temp dir");
+    let target = elsewhere.path().join("unchanged.txt");
+    std::fs::write(&target, "original").unwrap();
+    let root = std::fs::canonicalize(elsewhere.path()).unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "refused_write",
+                "write",
+                &serde_json::json!({"path": target, "contents": "overwritten"}).to_string(),
+            )),
+            Reply::Sse(text("The boundary refused the write.")),
+        ],
+        ..Plan::default()
+    });
+    let places = Places::new();
+    places.0.ego(&stub).home_file(
+        "config.toml",
+        &format!(
+            "sandbox='workspace'\nroots=[{{path='{}',access='read'}}]\n",
+            root.display()
+        ),
+    );
+    let finished = places
+        .raw_ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--output",
+            "json",
+            "Write the file",
+        ])
+        .run();
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(
+        finished.report()["result"],
+        "The boundary refused the write."
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    let next = generations[1].to_string();
+    assert!(next.contains("read-only root"), "{next}");
+    assert!(next.contains("refused_write"), "{next}");
 }
 
 /// regression case, the other half: the grant the refusal names works. Same

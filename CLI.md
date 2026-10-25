@@ -966,10 +966,11 @@ never an unresolvable *permission* for them to resolve. Widening what ego may
 reach is `--sandbox`'s business, which is why that clause is listed beside
 `--yolo` rather than subsumed by it.
 
-A read, list or search the boundary refuses is the one exception to exit 3: it
-changed nothing, so the refusal is returned to the model as a failed tool
-result and the turn continues (regression case). Writes and spawns outside the
-workspace still end the run.
+A tool call the boundary refuses is an exception to exit 3: it changed
+nothing, so the refusal is returned to the model as a failed tool result and
+the turn continues. This includes reads, writes and execs, including writes
+to read-only roots (regression case and regression_case). A user-decided denial, a
+deny rule, or an unanswered permission question still ends the turn.
 
 ### Host PID-to-session index
 
