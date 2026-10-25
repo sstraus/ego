@@ -692,6 +692,7 @@ pub(crate) struct McpClientInventory {
     /// What the server said about itself at `initialize`, verbatim.
     pub(crate) instructions: Option<String>,
     pub(crate) tools: Vec<ToolDescriptor>,
+    pub(crate) annotations: std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) resources: Vec<Resource>,
     pub(crate) prompts: Vec<Prompt>,
     pub(crate) expires_at: Option<Instant>,
@@ -1060,10 +1061,23 @@ impl McpClient {
                 })
             })
             .transpose()?;
+        let annotations = tools
+            .items
+            .iter()
+            .filter_map(|tool| {
+                tool.annotations.as_ref().map(|annotations| {
+                    (
+                        tool.name.to_string(),
+                        serde_json::to_value(annotations).expect("MCP annotations serialize"),
+                    )
+                })
+            })
+            .collect();
         Ok(McpClientInventory {
             capabilities,
             instructions,
             tools: project_tools(tools.items),
+            annotations,
             resources: resources.items,
             prompts: prompts.items,
             expires_at,

@@ -9,11 +9,35 @@ impl JudgeTaskContext {
     pub fn from_state(state: &SessionState, turn: TurnId, roots: Vec<String>) -> Self {
         let mut items: Vec<_> = state.items.values().collect();
         items.sort_by_key(|item| item.seq);
-        let task = items
+        let latest = items
             .iter()
             .rev()
-            .find(|item| item.kind == ItemKind::UserPrompt)
-            .map_or(String::new(), |item| item.text.clone());
+            .find(|item| item.kind == ItemKind::UserPrompt);
+        let prompts: Vec<_> = items
+            .iter()
+            .filter(|item| item.turn == turn && item.kind == ItemKind::UserPrompt)
+            .collect();
+        let task = if prompts.len() > 1 {
+            let mut task = String::from(
+                "User prompts in chronological order; later prompts take precedence:\n",
+            );
+            for (index, prompt) in prompts.iter().enumerate() {
+                if index + 1 == prompts.len() {
+                    task.push_str("Latest user prompt (takes precedence):\n");
+                } else {
+                    task.push_str("Earlier user prompt:\n");
+                }
+                task.push_str(&prompt.text);
+                task.push('\n');
+            }
+            task
+        } else {
+            prompts
+                .first()
+                .copied()
+                .or(latest)
+                .map_or(String::new(), |item| item.text.clone())
+        };
         let agent_reason = items
             .iter()
             .rev()
@@ -53,6 +77,5 @@ impl JudgeTaskContext {
             recent_calls,
             roots,
         }
-        .bounded()
     }
 }

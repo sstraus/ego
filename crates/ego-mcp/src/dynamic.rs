@@ -131,6 +131,7 @@ struct CompiledSchema {
     schema: Value,
     validator: Validator,
     fingerprint: Arc<str>,
+    annotations: Value,
 }
 
 impl CompiledSchema {
@@ -141,6 +142,7 @@ impl CompiledSchema {
             schema,
             validator,
             fingerprint: Arc::from(fingerprint),
+            annotations: Value::Null,
         })
     }
 }
@@ -217,7 +219,14 @@ impl McpCollapsedCatalogue {
         requested: &str,
         definition: CollapsedSchemaDefinition,
     ) -> Result<Self, McpError> {
-        Self::reconcile(previous, requested, definition.into_descriptor())
+        let annotations = definition.annotations.clone();
+        let mut catalogue = Self::reconcile(previous, requested, definition.into_descriptor())?;
+        let inner = Arc::make_mut(&mut catalogue.inner);
+        let schema = inner.get_mut(requested).expect("reconciled tool");
+        Arc::get_mut(schema)
+            .expect("fresh compiled schema")
+            .annotations = annotations;
+        Ok(catalogue)
     }
 
     pub(crate) fn reconcile(
@@ -273,7 +282,7 @@ struct CollapsedSchemaDefinition {
     #[serde(default, rename = "outputSchema")]
     _output_schema: serde::de::IgnoredAny,
     #[serde(default, rename = "annotations")]
-    _annotations: serde::de::IgnoredAny,
+    annotations: Value,
     #[serde(default, rename = "_meta")]
     _meta: serde::de::IgnoredAny,
 }
@@ -375,9 +384,19 @@ pub(crate) struct McpToolDefinition {
     descriptor: GeneratorToolDescriptor,
     outer: Arc<CompiledSchema>,
     collapsed: Option<McpCollapsedCatalogue>,
+    annotations: Value,
 }
 
 impl McpToolDefinition {
+    pub(crate) fn with_annotations(mut self, annotations: Value) -> Self {
+        self.annotations = annotations;
+        self
+    }
+
+    pub(crate) fn annotations(&self) -> &Value {
+        &self.annotations
+    }
+
     pub(crate) fn direct(descriptor: GeneratorToolDescriptor) -> Result<Self, McpError> {
         if descriptor.name.trim().is_empty() {
             return Err(invalid("MCP tool identity is invalid"));
@@ -390,6 +409,7 @@ impl McpToolDefinition {
             descriptor,
             outer,
             collapsed: None,
+            annotations: Value::Null,
         })
     }
 
@@ -409,6 +429,7 @@ impl McpToolDefinition {
             descriptor,
             outer,
             collapsed: Some(catalogue),
+            annotations: Value::Null,
         })
     }
 
@@ -464,6 +485,7 @@ impl McpToolDefinition {
             admission,
             outer: Arc::clone(&self.outer),
             collapsed: self.collapsed.clone(),
+            annotations: self.annotations.clone(),
         }))
     }
 }
@@ -478,6 +500,7 @@ pub struct McpCapturedTool {
     admission: McpAdmissionFingerprint,
     outer: Arc<CompiledSchema>,
     collapsed: Option<McpCollapsedCatalogue>,
+    annotations: Value,
 }
 
 pub(crate) type PreparedCapturedToolOperation = (
@@ -505,14 +528,28 @@ impl McpCapturedTool {
         params: Value,
     ) -> Result<PreparedCapturedToolOperation, ToolError> {
         let operation = self.operation(&params)?;
+        let annotations = self.operation_annotations(&params);
         let call = self
             .factory
-            .prepare(Arc::clone(&self.server_admission), operation)?;
+            .prepare(Arc::clone(&self.server_admission), operation)?
+            .with_mcp_annotations(annotations);
         Ok((
             Arc::clone(&self.server_admission),
             Arc::clone(&self.factory),
             call,
         ))
+    }
+
+    fn operation_annotations(&self, params: &Value) -> Value {
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(self.descriptor.name.clone(), self.annotations.clone());
+        if let Some(catalogue) = &self.collapsed
+            && let Some(name) = params["tool_name"].as_str()
+            && let Some(schema) = catalogue.inner.get(name)
+        {
+            annotations.insert(name.to_owned(), schema.annotations.clone());
+        }
+        Value::Object(annotations)
     }
 
     fn operation(&self, params: &Value) -> Result<McpOperation, ToolError> {
@@ -570,6 +607,7 @@ impl Tool for McpCapturedTool {
         let operation = self.operation(&params)?;
         self.factory
             .prepare(Arc::clone(&self.server_admission), operation)
+            .map(|call| call.with_mcp_annotations(self.operation_annotations(&params)))
     }
 
     fn execute<'a, 'io>(

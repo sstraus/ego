@@ -71,6 +71,35 @@ pub struct RememberPlan {
 }
 
 impl RememberPlan {
+    /// Explicit alternative to the tool-specific plan, never the default.
+    /// Transport/process candidates stay exact; only tools of the named server widen.
+    pub fn server_scope(&self) -> Option<Self> {
+        if !self
+            .candidates
+            .iter()
+            .any(|rule| matches!(rule, Rule::Tool { .. }))
+        {
+            return None;
+        }
+        let mut plan = self.clone();
+        plan.candidates.clear();
+        plan.candidate_operations.clear();
+        for (operation, rule) in self.candidate_rows() {
+            let rule = match rule {
+                Rule::Tool { server, .. } => Rule::Tool {
+                    server: server.clone(),
+                    name: "*".into(),
+                },
+                other => other.clone(),
+            };
+            if !plan.candidates.contains(&rule) {
+                plan.candidates.push(rule);
+                plan.candidate_operations.push(operation);
+            }
+        }
+        Some(plan)
+    }
+
     pub fn candidate_rows(&self) -> impl Iterator<Item = (usize, &Rule)> {
         self.candidate_operations
             .iter()
