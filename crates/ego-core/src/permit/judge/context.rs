@@ -13,16 +13,30 @@ impl JudgeTaskContext {
             .iter()
             .rev()
             .find(|item| item.kind == ItemKind::UserPrompt);
-        let first = items
+        let prompts: Vec<_> = items
             .iter()
-            .find(|item| item.turn == turn && item.kind == ItemKind::UserPrompt);
-        let task = match (first, latest) {
-            (Some(first), Some(latest)) if first.seq != latest.seq => format!(
-                "Earlier user task in this turn:\n{}\nLatest user prompt (takes precedence):\n{}",
-                first.text, latest.text
-            ),
-            (_, Some(latest)) => latest.text.clone(),
-            _ => String::new(),
+            .filter(|item| item.turn == turn && item.kind == ItemKind::UserPrompt)
+            .collect();
+        let task = if prompts.len() > 1 {
+            let mut task = String::from(
+                "User prompts in chronological order; later prompts take precedence:\n",
+            );
+            for (index, prompt) in prompts.iter().enumerate() {
+                if index + 1 == prompts.len() {
+                    task.push_str("Latest user prompt (takes precedence):\n");
+                } else {
+                    task.push_str("Earlier user prompt:\n");
+                }
+                task.push_str(&prompt.text);
+                task.push('\n');
+            }
+            task
+        } else {
+            prompts
+                .first()
+                .copied()
+                .or(latest)
+                .map_or(String::new(), |item| item.text.clone())
         };
         let agent_reason = items
             .iter()
