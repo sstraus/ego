@@ -5,6 +5,7 @@
 //! common executor grants capabilities only after its paired behavioural and
 //! production-path probes succeed.
 
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
@@ -23,7 +24,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v6-read-root-deny";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v7-path-metadata";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -48,6 +49,8 @@ struct ProfileBase {
     roots: Vec<SandboxGrant>,
     read_only_roots: Vec<CanonPath>,
     write_restrictions: Vec<CanonPath>,
+    lookup_metadata: Vec<PathBuf>,
+    lookup_targets: Vec<PathBuf>,
 }
 
 impl SeatbeltBackend {
@@ -90,7 +93,10 @@ impl SeatbeltBackend {
         } else {
             Vec::new()
         };
+        let (lookup_metadata, lookup_targets) = lookup_metadata(derived_runtime_roots);
         let base = ProfileBase {
+            lookup_metadata,
+            lookup_targets,
             user_config: if policy.level() == Confinement::Off {
                 Vec::new()
             } else {
@@ -188,6 +194,34 @@ impl SeatbeltBackend {
             grants: &grants,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
+        if matches!(base.level, Confinement::Workspace | Confinement::Ro)
+            && !base.lookup_metadata.is_empty()
+        {
+            // Shell lookup needs stat/access, not file contents or exec. Capture
+            // the operator PATH only; a child PATH override grants no new reach.
+            profile.push_str("(allow file-read-metadata\n");
+            for root in &base.lookup_metadata {
+                profile.push_str(&format!(
+                    "  (subpath {})\n",
+                    profile::path_literal(root)
+                        .map_err(|error| ProcessError::Backend(error.to_string()))?
+                ));
+            }
+            let literals = base
+                .lookup_metadata
+                .iter()
+                .chain(&base.lookup_targets)
+                .flat_map(|path| path.ancestors())
+                .collect::<BTreeSet<_>>();
+            for target in literals {
+                profile.push_str(&format!(
+                    "  (literal {})\n",
+                    profile::path_literal(target)
+                        .map_err(|error| ProcessError::Backend(error.to_string()))?
+                ));
+            }
+            profile.push_str(")\n");
+        }
         if base.level != Confinement::Off {
             // Explicit denies win over workspace, adaptive and later human grants.
             // Protect ancestor entries too: renaming one would move the subtree
@@ -245,8 +279,18 @@ impl SeatbeltBackend {
         "seatbelt"
     }
 
-    pub(crate) const fn revision(&self) -> &'static str {
-        BACKEND_REVISION
+    pub(crate) fn revision(&self) -> String {
+        let mut hash = Sha256::new();
+        for path in self
+            .base
+            .lookup_metadata
+            .iter()
+            .chain(&self.base.lookup_targets)
+        {
+            hash.update(path.as_os_str().as_encoded_bytes());
+            hash.update([0]);
+        }
+        format!("{BACKEND_REVISION}:{:x}", hash.finalize())
     }
 
     pub(crate) fn identity(&self) -> BackendIdentity {
@@ -390,4 +434,52 @@ pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
         }
         Ok(roots.into_iter().map(CanonPath::new).collect())
     })
+}
+
+/// Metadata-only command discovery. Canonical symlink targets need their own
+/// exact metadata literals, but never become read-data or executable roots.
+fn lookup_metadata(runtime_roots: &[CanonPath]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut roots = BTreeSet::new();
+    let mut targets = BTreeSet::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        for root in std::env::split_paths(&path).filter(|root| root.is_absolute()) {
+            let Ok(canonical) = fs::canonicalize(&root) else {
+                continue;
+            };
+            if !canonical.is_dir() {
+                continue;
+            }
+            roots.insert(root.clone());
+            roots.insert(canonical);
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    if entry.file_type().is_ok_and(|kind| kind.is_symlink())
+                        && let Ok(target) = fs::canonicalize(entry.path())
+                    {
+                        // Seatbelt also checks the named target while walking
+                        // intermediate directory aliases (for example an old
+                        // tool-version directory linked to the current one).
+                        if let Ok(named) = fs::read_link(entry.path()) {
+                            targets.insert(if named.is_absolute() {
+                                named
+                            } else {
+                                entry.path().parent().unwrap().join(named)
+                            });
+                        }
+                        targets.insert(target);
+                    }
+                }
+            }
+        }
+    }
+    // Most PATH links point into an already-readable runtime (Homebrew,
+    // Apple tools). Do not expand thousands of redundant target ancestors
+    // into SBPL: large profiles fail to compile on the native backend.
+    targets.retain(|target| {
+        !roots.iter().any(|root| target.starts_with(root))
+            && !runtime_roots
+                .iter()
+                .any(|root| target.starts_with(root.as_path()))
+    });
+    (roots.into_iter().collect(), targets.into_iter().collect())
 }

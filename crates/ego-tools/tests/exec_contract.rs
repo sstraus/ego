@@ -4674,3 +4674,194 @@ fn detached_foreground_promotion_preserves_the_read_only_sandbox() {
         "promotion bypassed the original read-only sandbox"
     );
 }
+
+// Catches: an out-of-perimeter MCP image becomes an opaque protocol/config error.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_mcp_executable_outside_perimeter_reports_denied_path() {
+    use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let outer = tempfile::tempdir().unwrap();
+    let base = outer.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let executable = base.join("mcp-server");
+    // A copied Apple platform binary is killed by code-signing enforcement;
+    // use an actual executable script with the installed system interpreter.
+    std::fs::write(&executable, "#!/bin/sh\nexec /bin/cat\n").unwrap();
+    std::fs::set_permissions(
+        &executable,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let alias = base.join("mcp-alias");
+    std::os::unix::fs::symlink(&executable, &alias).unwrap();
+    let run = open_policy(workspace_policy(&workspace, vec![]), 1024 * 1024, 1024).unwrap();
+    let spec = |path: &std::path::Path| {
+        SpawnSpec::new(
+            vec![path.as_os_str().to_owned()],
+            Some(CanonPath::new(&workspace)),
+            Some(Duration::from_secs(5)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap()
+    };
+    for path in [&executable, &alias] {
+        let error = match block_on(run.ports.duplex().spawn(spec(path))) {
+            Err(error) => error,
+            Ok(child) => {
+                block_on(child.interrupt());
+                panic!("MCP executable outside the perimeter was not refused before spawn");
+            }
+        };
+        let message = error.to_string();
+        assert!(message.contains("sandbox"), "{message}");
+        assert!(message.contains(executable.to_str().unwrap()), "{message}");
+        assert!(message.contains("exec_paths"), "{message}");
+    }
+    let missing = base.join("missing");
+    let error = block_on(run.ports.duplex().spawn(spec(&missing)))
+        .err()
+        .expect("missing binary");
+    assert!(error.to_string().contains("program not found"), "{error}");
+    let admitted = open_policy(
+        workspace_policy(&workspace, vec![CanonPath::new(&executable)]),
+        1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    block_on(async {
+        let mut child = admitted
+            .ports
+            .duplex()
+            .spawn(spec(&alias))
+            .await
+            .expect("explicit exec path");
+        child.write_all(b"ADMITTED\n").await.unwrap();
+        child.flush().await.unwrap();
+        let mut bytes = [0; 9];
+        let read = child.read_exact(&mut bytes).await;
+        let settled = child.interrupt().await;
+        read.unwrap_or_else(|error| panic!("admitted child read failed: {error}; {settled:?}"));
+        assert_eq!(&bytes, b"ADMITTED\n");
+    });
+}
+
+// Catches: read-root MCP denial recommends exec_paths, which cannot override the root.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_mcp_read_root_denial_names_effective_remedy() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let workspace = cwd();
+    let (_keep, tools, executable) = script_dir("exec /bin/cat");
+    for level in [Confinement::Workspace, Confinement::Adaptive] {
+        for exec_paths in [vec![], vec![CanonPath::new(&executable)]] {
+            let policy = ego_tools::exec::admit_confinement(level, false, workspace.clone())
+                .unwrap()
+                .with_roots(vec![ProfileRoot::new(tools.clone(), RootAccess::Read)])
+                .with_exec_paths(exec_paths);
+            let run = open_policy(policy, 1024 * 1024, 1024).unwrap();
+            let error = match block_on(run.ports.duplex().spawn(script_spec(
+                &executable,
+                &[],
+                workspace.as_path(),
+            ))) {
+                Err(error) => error,
+                Ok(child) => {
+                    block_on(child.interrupt());
+                    panic!("read-only root did not refuse MCP execution under {level:?}");
+                }
+            };
+            let message = error.to_string();
+            assert!(message.contains(executable.to_str().unwrap()), "{message}");
+            assert!(
+                message.contains(tools.as_path().to_str().unwrap()),
+                "{message}"
+            );
+            assert!(message.contains("read-only root"), "{message}");
+            assert!(message.contains("change or remove"), "{message}");
+            assert!(!message.contains("exec_paths"), "{message}");
+        }
+    }
+}
+
+// Catches: the workspace profile hides PATH candidates instead of denying their execution.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_path_lookup_finds_tools_without_granting_execution() {
+    const CHILD: &str = "EGO_REGRESSION_LOOKUP_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        let workspace = root.join("workspace");
+        let executable = root.join("tools/ego627-tool");
+        // Preserve the complete inherited PATH rather than asserting against
+        // the tool's intentionally truncated presentation of long output.
+        let run =
+            open_policy(workspace_policy(&workspace, vec![]), 1024 * 1024, 64 * 1024).unwrap();
+        let spec = |script: &str| {
+            SpawnSpec::new(
+                vec!["/bin/bash".into(), "-c".into(), script.into()],
+                Some(CanonPath::new(&workspace)),
+                Some(Duration::from_secs(5)),
+                EnvPolicy::Inherited,
+            )
+            .unwrap()
+        };
+        let found = block_on(run.ports.process().execute(&spec("command -v ego627-tool")))
+            .expect("PATH lookup");
+        assert!(format!("{found:?}").contains(executable.to_str().unwrap()));
+        let alias = block_on(
+            run.ports
+                .process()
+                .execute(&spec("command -v ego627-alias")),
+        )
+        .expect("symlink PATH lookup");
+        assert!(format!("{alias:?}").contains(root.join("tools/ego627-alias").to_str().unwrap()));
+        let environment =
+            block_on(run.ports.process().execute(&spec("printf '%s' \"$PATH\""))).unwrap();
+        assert_eq!(environment.content[0].text, std::env::var("PATH").unwrap());
+        let denied = execute(&run, spec("ego627-tool UNEXPECTED-EXEC")).unwrap_err();
+        let message = format!("{denied:?}");
+        assert!(
+            message.contains("permitted") || message.contains("denied"),
+            "{message}"
+        );
+        assert!(!message.contains("command not found"), "{message}");
+        assert!(execute(&run, spec("cat \"$EGO_REGRESSION_LOOKUP_CHILD/tools/private\"")).is_err());
+        return;
+    }
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("workspace")).unwrap();
+    std::fs::create_dir(root.join("tools")).unwrap();
+    std::fs::copy("/bin/echo", root.join("tools/ego627-tool")).unwrap();
+    std::fs::create_dir(root.join("version-current")).unwrap();
+    std::fs::copy("/bin/echo", root.join("version-current/alias-target")).unwrap();
+    std::os::unix::fs::symlink("version-current", root.join("version-old")).unwrap();
+    std::os::unix::fs::symlink(
+        root.join("version-old/alias-target"),
+        root.join("tools/ego627-alias"),
+    )
+    .unwrap();
+    std::fs::write(root.join("tools/private"), "PRIVATE-CONTENT").unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(root.join("tools"))
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "workspace_path_lookup_finds_tools_without_granting_execution",
+            "--nocapture",
+        ])
+        .env(CHILD, &root)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

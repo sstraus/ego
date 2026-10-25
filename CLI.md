@@ -313,6 +313,17 @@ an explicit empty list clears configured roots. Project and project-local
 configuration cannot add exec roots. Paths must be absolute and must exist;
 the runner canonicalizes symlinks before creating the confinement policy.
 On macOS and Linux these roots add read and execute access, never write access.
+On macOS the inherited operator PATH remains unchanged. The sandbox permits
+metadata lookup in those PATH directories and for their captured symlink targets,
+so a tool outside the exec perimeter is found but its execution is denied. This
+metadata grant does not permit file contents, directory listing, writes, or execution.
+A declared MCP server does not add exec authority. If its executable is outside
+the perimeter, startup names its canonical path and asks you to add that exact path
+to `exec_paths`, then exit and resume. If a read-only root denies execution, startup
+names that root instead: change or remove its read-only restriction, then exit and
+resume. Adding `exec_paths` cannot override a read-only root, including under
+adaptive confinement. MCP diagnostics do not expose child stderr,
+arguments, or environment values.
 On macOS an installed `/opt/homebrew` is also a default runtime root, including
 its `bin` symlinks, Cellar targets and libraries. Other installation prefixes
 must be listed explicitly. Git can also read existing `~/.gitconfig` and
@@ -1441,10 +1452,11 @@ then edit its schema-derived fields with exact values prefilled; nested shapes
 remain in one prefilled JSON fallback instead of requiring a whole call to be
 typed as JSON.
 
-An unresolved permission modal is at most four rows: the call as a readable
-command, its risk in plain words, and the keys `[y] yes`, `[a] yes, do not ask
+An unresolved permission modal shows the call as a readable command, its risk
+in plain words, and the keys `[y] yes`, `[a] yes, do not ask
 again for <rules>`, `[n] no, say what to do instead`, `[e] edit`, `[d]
-details`. The risk row never shows an internal name; a limited risk (changes
+details`. The complete rule list wraps to the terminal width before `a` can
+save it. The risk row never shows an internal name; a limited risk (changes
 inside the workspace) and an unknown one (a program ego cannot inspect) read
 differently. `d` shows the rest: the reason, the canonical operations, the exact
 parameters, and what `a` would store with every widening. `y`, `a`, `n`, `e`,
@@ -1456,8 +1468,17 @@ confirmation. Its rules are the narrowest the grammar can express that still
 match the next call: a program-plus-subcommand prefix for recognized `exec`
 programs (`exec(git commit *)`, `exec(npm run *)`), the workspace glob
 for writes (`write(<workspace>/**)`), and the exact form for everything else.
-A command whose prefix would authorise code the operator never saw keeps its
-exact form: a shell, interpreter, or launcher (`bash -c`, `python3 -c`,
+A static shell list or pipeline in the workspace can offer one rule per inner
+program instead of one literal shell script. Every command must be a known
+process program (or `pwd`), with literal words and no shell effects. A later
+compound is covered only when every command has an allow rule and its initial
+cwd is in the workspace. Inner deny rules still win. Redirects, expansion,
+assignments, background jobs, shell state changes such as `cd`, unsupported
+syntax, and unknown programs keep the exact shell form. `rtk git status` keeps
+the wrapper and action (`exec(rtk git status *)`); `pnpm exec biome` keeps the
+selected tool (`exec(pnpm exec biome *)`).
+A command whose prefix would authorize code the operator never saw keeps its
+exact form: an unsupported shell, interpreter, or launcher (`python3 -c`,
 `env`, `sudo`, `xargs`, ...), a program given by path, or a name carrying shell
 metacharacters or `*`. A bare program, a leading option or toolchain selector,
 and programs without recognized subcommands also keep exact argv. Suggestions

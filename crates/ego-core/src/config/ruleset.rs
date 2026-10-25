@@ -128,11 +128,57 @@ impl SourcedRule {
 
     /// Match a deny, allowing only an effective user grant to lift defaults.
     pub(crate) fn denies(&self, op: &Op, root: &Path, allow: &[SourcedRule]) -> bool {
-        self.rule.matches(op, root)
+        let direct = self.rule.matches(op, root)
             && !(self.origins == OriginSet::just(Source::Default)
                 && allow.iter().any(|entry| {
                     entry.origins.contains(Source::User) && entry.rule.matches_allow(op, root)
-                }))
+                }));
+        if direct {
+            return true;
+        }
+        let (Rule::Exec(pattern), Op::Spawn { spec }) = (&self.rule, op) else {
+            return false;
+        };
+        crate::permit::shell::static_commands(spec.argv()).is_some_and(|commands| {
+            commands.iter().any(|argv| {
+                pattern.matches(argv)
+                    && !(self.origins == OriginSet::just(Source::Default)
+                        && allow.iter().any(|entry| {
+                            entry.origins.contains(Source::User)
+                                && matches!(&entry.rule, Rule::Exec(pattern) if pattern.matches(argv))
+                        }))
+            })
+        })
+    }
+
+    /// Every authority needed by an operation, including all literal commands
+    /// inside a shell list. Direct shell grants keep their exact semantics.
+    pub(crate) fn allowing<'a>(allow: &'a [Self], op: &Op, root: &Path) -> Option<Vec<&'a Self>> {
+        if let Some(entry) = allow
+            .iter()
+            .find(|entry| entry.rule.matches_allow(op, root))
+        {
+            return Some(vec![entry]);
+        }
+        let Op::Spawn { spec } = op else {
+            return None;
+        };
+        let cwd = spec.cwd()?.as_path();
+        if !cwd.starts_with(root)
+            || cwd
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        crate::permit::shell::static_commands(spec.argv())?
+            .iter()
+            .map(|argv| {
+                allow.iter().find(
+                    |entry| matches!(&entry.rule, Rule::Exec(pattern) if pattern.matches(argv)),
+                )
+            })
+            .collect()
     }
 
     pub fn rule(&self) -> &Rule {

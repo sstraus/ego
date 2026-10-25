@@ -3,6 +3,7 @@ use super::*;
 pub struct SurfaceEditMode {
     editor: Box<dyn EditMode>,
     modal_editor: Emacs,
+    modal_command: bool,
     phase: SurfacePhase,
     status: SharedStatus,
     asked_for_image: Arc<AtomicBool>,
@@ -35,6 +36,7 @@ impl SurfaceEditMode {
         Self {
             editor,
             modal_editor: emacs_composer(),
+            modal_command: false,
             phase,
             status,
             asked_for_image: Arc::new(AtomicBool::new(false)),
@@ -160,6 +162,34 @@ impl EditMode for SurfaceEditMode {
                         Some(reason.to_owned());
                     ReedlineEvent::Repaint
                 }
+            };
+        }
+
+        // Key-only selectors still offer the same slash-command composer.
+        // This mode owns only the temporary command text, never the selection.
+        if self.phase.get() != EditPhase::Modal {
+            self.modal_command = false;
+        }
+        if (picker_open || question_selector_open || permission_modal)
+            && matches!(&raw, Event::Key(key) if key.code == KeyCode::Char('/')
+                && key.modifiers.difference(KeyModifiers::SHIFT).is_empty())
+        {
+            self.modal_command = true;
+        }
+        if self.modal_command {
+            if matches!(&raw, Event::Key(key) if key.code == KeyCode::Esc) {
+                self.modal_command = false;
+                return ReedlineEvent::Multiple(vec![
+                    ReedlineEvent::Edit(vec![EditCommand::Clear]),
+                    ReedlineEvent::Repaint,
+                ]);
+            }
+            if matches!(&raw, Event::Key(key) if key.code == KeyCode::Enter) {
+                self.modal_command = false;
+            }
+            return match ReedlineRawEvent::try_from(raw) {
+                Ok(event) => self.modal_editor.parse_event(event),
+                Err(()) => ReedlineEvent::None,
             };
         }
 

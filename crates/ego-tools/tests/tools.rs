@@ -1870,6 +1870,26 @@ mod glob {
 mod grep {
     use super::*;
 
+    // Catches: directory-only search validation and widening a file search to siblings.
+    #[test]
+    fn grep_searches_a_single_file_without_searching_its_siblings() {
+        let ws = Workspace::new();
+        ws.file("src/Transcript.tsx", "first\nonOpenFile\nhandleMdLink\n");
+        ws.file("src/sibling.tsx", "onOpenFile\n");
+        let content = ws
+            .call(
+                "grep",
+                json!({
+                    "query": "onOpenFile|handleMdLink", "path": "src/Transcript.tsx"
+                }),
+            )
+            .expect("a named file is searchable");
+        assert_eq!(
+            content,
+            "Transcript.tsx:2:onOpenFile\nTranscript.tsx:3:handleMdLink"
+        );
+    }
+
     // Catches: a hidden subtree spends the entry budget before a top-level hit.
     #[test]
     fn grep_finds_top_level_matches_before_a_large_hidden_subtree() {

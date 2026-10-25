@@ -234,6 +234,9 @@ pub trait McpCandidateAdmission: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpCandidateError {
     CredentialRequired,
+    ExecutableDenied {
+        denial: ego_core::permit::ExecutableDenial,
+    },
     Invalid {
         cause: String,
     },
@@ -249,6 +252,7 @@ impl McpCandidateError {
         match self {
             Self::CredentialRequired => McpFailure::Credential,
             Self::Invalid { .. } => McpFailure::InvalidValue,
+            Self::ExecutableDenied { .. } => McpFailure::Authority,
             Self::AuthorizationRequired { .. } => McpFailure::Authorization,
         }
     }
@@ -258,6 +262,7 @@ struct CandidateFailure {
     failure: McpFailure,
     authorization: Option<CandidateAuthorizationFailure>,
     detail: Option<String>,
+    denied_executable: Option<ego_core::permit::ExecutableDenial>,
 }
 
 struct CandidateAuthorizationFailure {
@@ -272,12 +277,17 @@ impl CandidateFailure {
             failure,
             authorization: None,
             detail: None,
+            denied_executable: None,
         }
     }
 
     fn admission(error: McpCandidateError) -> Self {
         match error {
             McpCandidateError::CredentialRequired => Self::materialization(McpFailure::Credential),
+            McpCandidateError::ExecutableDenied { denial } => Self {
+                denied_executable: Some(denial),
+                ..Self::materialization(McpFailure::Authority)
+            },
             McpCandidateError::Invalid { cause } => Self {
                 detail: Some(cause),
                 ..Self::materialization(McpFailure::InvalidValue)
@@ -294,6 +304,7 @@ impl CandidateFailure {
                     scopes,
                 }),
                 detail: None,
+                denied_executable: None,
             },
         }
     }
@@ -302,8 +313,16 @@ impl CandidateFailure {
         failure_message(self.failure)
     }
 
-    /// Public diagnostics contain only the fixed failure classification.
+    /// Public diagnostics contain a fixed classification or a typed host path.
     fn diagnostic_message(&self) -> String {
+        if let Some(denial) = &self.denied_executable {
+            // Only host-observed image and policy root paths are public. Never publish child
+            // stderr, command arguments, environment values or raw causes.
+            return ego_core::permit::TransportError::definitely_unsent(
+                ego_core::permit::TransportFailure::ExecutableDenied(denial.clone()),
+            )
+            .to_string();
+        }
         self.sanitized_cause().to_owned()
     }
 }
@@ -382,6 +401,7 @@ pub struct McpCandidateInventory {
     capabilities: McpCapabilities,
     instructions: Option<String>,
     tools: Vec<GeneratorToolDescriptor>,
+    annotations: BTreeMap<String, serde_json::Value>,
     resources: Vec<Resource>,
     prompts: Vec<Prompt>,
     cache: McpCacheMetadata,
@@ -389,6 +409,14 @@ pub struct McpCandidateInventory {
 }
 
 impl McpCandidateInventory {
+    pub(crate) fn with_annotations(
+        mut self,
+        annotations: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        self.annotations = annotations;
+        self
+    }
+
     /// `instructions` is what the server said about itself at `initialize`;
     /// `None` is a server that said nothing, which behaves exactly as before.
     pub fn new(
@@ -404,6 +432,7 @@ impl McpCandidateInventory {
             capabilities,
             instructions,
             tools,
+            annotations: BTreeMap::new(),
             resources,
             prompts,
             cache,
@@ -447,6 +476,7 @@ impl McpAdmittedCandidate {
             capabilities,
             instructions,
             tools,
+            annotations,
             resources,
             prompts,
             cache,
@@ -470,6 +500,7 @@ impl McpAdmittedCandidate {
             &descriptors,
             collapsed_bootstrap.as_ref(),
             collapsed.as_ref(),
+            &annotations,
         )?;
         let mut names = std::collections::BTreeSet::new();
         for definition in &definitions {
@@ -500,6 +531,7 @@ fn compile_candidate_tool_definitions(
     descriptors: &[GeneratorToolDescriptor],
     collapsed_bootstrap: Option<&McpCollapsedBootstrap>,
     collapsed: Option<&McpCollapsedCatalogue>,
+    annotations: &BTreeMap<String, serde_json::Value>,
 ) -> Result<Vec<McpToolDefinition>, McpRegistryError> {
     let mut definitions = Vec::new();
     for descriptor in descriptors {
@@ -517,7 +549,13 @@ fn compile_candidate_tool_definitions(
         if let Some(definition) = definition {
             definitions.push(
                 definition
-                    .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
+                    .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?
+                    .with_annotations(
+                        annotations
+                            .get(&descriptor.name)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
             );
         }
     }
@@ -599,6 +637,11 @@ impl AdmittedServerSlice {
             &self.descriptors,
             Some(bootstrap),
             Some(&catalogue),
+            &self
+                .tools
+                .iter()
+                .map(|tool| (tool.name().to_owned(), tool.annotations().clone()))
+                .collect(),
         )?;
         Ok(Self {
             admission: Arc::clone(&self.admission),
@@ -2656,7 +2699,7 @@ mod collapsed_mcp_red {
     use ego_core::config::{McpConfigProvenance, McpServerConfig, Source};
     use ego_core::generator::types::ToolDescriptor;
     use ego_core::mcp::ToolExecution;
-    use ego_core::permit::{CanonPath, GuardedIo, Op, PreparedCall, ToolError};
+    use ego_core::permit::{CanonPath, GuardedIo, PreparedCall, ToolError};
     use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 
     use super::*;
@@ -2721,14 +2764,18 @@ mod collapsed_mcp_red {
         fn prepare(
             &self,
             _admission: Arc<McpServerAdmission>,
-            _operation: crate::McpOperation,
+            operation: crate::McpOperation,
         ) -> Result<PreparedCall, ToolError> {
-            Ok(PreparedCall::new(
-                "collapsed-test",
-                Op::Read {
-                    path: CanonPath::new("/fixture"),
-                },
-            ))
+            PreparedCall::mcp_acp(
+                operation.subject().clone(),
+                operation.operation(),
+                operation.invocations().to_vec(),
+                operation.admission().clone(),
+                "fixture",
+                operation.subject().server(),
+                operation.parameters(),
+            )
+            .map_err(|error| ToolError::InvalidParams(error.to_string()))
         }
 
         fn execute<'a, 'io>(
@@ -3054,6 +3101,28 @@ mod collapsed_mcp_red {
                 .any(|name| name == "call_tool")
         );
         assert_unadmitted_dispatch_refused(&old_capture);
+        let tool = second
+            .capture()
+            .tools()
+            .iter()
+            .find(|tool| tool.descriptor().name == "call_tool")
+            .expect("captured dispatcher");
+        let fs = ego_core::permit::fake::FakeFs::default();
+        let ctx = ego_core::permit::PrepareCtx {
+            cwd: CanonPath::new("/workspace"),
+            resolver: &fs,
+        };
+        let prepared = tool
+            .prepare(
+                json!({"tool_name":"weather", "arguments":{"city":"Rome"}}),
+                &ctx,
+            )
+            .expect("admitted call");
+        assert_eq!(
+            prepared.mcp_envelope().unwrap().annotations()["weather"]["readOnlyHint"],
+            true
+        );
+
         assert!(
             second
                 .capture()

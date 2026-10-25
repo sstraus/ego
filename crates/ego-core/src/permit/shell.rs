@@ -12,6 +12,12 @@ pub use trust::trusted_read_only;
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_DISPLAY_BYTES: usize = 16 * 1024;
 
+/// Known external program families with named subcommands. Shared by shell
+/// decomposition and remember suggestions, never a read-only proof.
+pub(crate) const SUBCOMMAND_PROGRAMS: &[&str] = &[
+    "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ShellObservation {
     pub skeleton: String,
@@ -42,6 +48,88 @@ pub fn observe(argv: &[String]) -> ShellObservation {
             programs: Vec::new(),
         }
     }
+}
+
+/// Literal commands in a bounded shell list. This does not prove read-only
+/// behavior: callers must authorize every command independently. Anything with
+/// shell effects (including redirects, expansion, assignments and background
+/// jobs) stays an indivisible shell invocation.
+pub(crate) fn static_commands(argv: &[std::ffi::OsString]) -> Option<Vec<Vec<String>>> {
+    let argv = argv
+        .iter()
+        .map(|word| word.to_str())
+        .collect::<Option<Vec<_>>>()?;
+    if argv.len() != 3
+        || !matches!(
+            argv[0],
+            "bash" | "sh" | "zsh" | "/bin/bash" | "/bin/sh" | "/bin/zsh"
+        )
+        || !matches!(argv[1], "-c" | "-lc")
+        || argv[2].len() > MAX_SOURCE_BYTES
+    {
+        return None;
+    }
+    let source = argv[2];
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+    if tree.root_node().has_error() {
+        return None;
+    }
+    let mut commands = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "command" => {
+                let mut cursor = node.walk();
+                let words = node
+                    .named_children(&mut cursor)
+                    .map(|child| {
+                        if !matches!(
+                            child.kind(),
+                            "command_name" | "word" | "number" | "string" | "raw_string"
+                        ) {
+                            return None;
+                        }
+                        proof_word(child.utf8_text(source.as_bytes()).ok()?)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                // Shell builtins can change the meaning or cwd of later
+                // commands (cd, exec, source, trap, hash, ...). Only known
+                // process programs and the inert pwd builtin can be split.
+                let program = words.first()?.as_str();
+                if !SUBCOMMAND_PROGRAMS.contains(&program)
+                    && !matches!(
+                        program,
+                        "rtk"
+                            | "pwd"
+                            | "ls"
+                            | "cat"
+                            | "head"
+                            | "tail"
+                            | "wc"
+                            | "rg"
+                            | "grep"
+                            | "sed"
+                            | "find"
+                    )
+                {
+                    return None;
+                }
+                commands.push(words);
+            }
+            "program" | "list" | "pipeline" => {
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                stack.extend(children.into_iter().rev());
+            }
+            ";" | "&&" | "||" | "|" => {}
+            _ => return None,
+        }
+    }
+    (!commands.is_empty()).then_some(commands)
 }
 
 fn observe_script(script: &str) -> ShellObservation {

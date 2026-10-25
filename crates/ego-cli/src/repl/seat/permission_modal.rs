@@ -16,8 +16,8 @@ const COMMAND_CAP: usize = 100;
 /// The same for the rule list on the `a` row, which also carries the key text.
 const RULE_CAP: usize = 60;
 
-/// Four rows at most: what, how risky, and the keys; a fifth when the judge
-/// passed the call to the human says why.
+/// What, how risky, and the keys. Remembered authority is shown in full,
+/// wrapping to the terminal width, before the operator can save it.
 pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> String {
     let width = width.max(1);
     let mut rows = vec![String::new()];
@@ -48,12 +48,7 @@ pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> Strin
     rows.push(format!("{prefix}Allow {operations}?"));
     rows.extend(headline_rows(request).into_iter().skip(1));
     rows.push(if let Some(rules) = remembered_rules(request) {
-        let exact = format!("[y] yes   [a] yes, do not ask again for {rules}");
-        if crate::render::line::Line::plain(&exact).width() <= width {
-            exact
-        } else {
-            "[y] yes   [a] yes, remember rule (details: d)".into()
-        }
+        format!("[y] yes   [a] yes, do not ask again for {}", safe(&rules))
     } else {
         "[y] yes".into()
     });
@@ -329,7 +324,9 @@ fn risk_words(risk: &RiskAssessment) -> String {
         .map(|reason| match reason {
             RiskReason::ReadOnly => "only reads",
             RiskReason::SessionProcessControl => "controls a session process",
-            RiskReason::ScopedWrite => "changes files in the workspace",
+            RiskReason::ScopedWrite => "changes files",
+            RiskReason::WorkspaceWrite => "changes files in the workspace",
+            RiskReason::OutsideWorkspaceWrite => "changes files outside the workspace",
             RiskReason::ProcessEffectsUnknown => "runs a program",
             RiskReason::IdentityIncomplete => "program not fully identified",
             RiskReason::DynamicCode => "runs code from its arguments",
@@ -477,11 +474,27 @@ mod tests {
         RiskAssessment { class, reasons }
     }
 
+    // Catches: an external write retaining the misleading workspace wording.
+    #[test]
+    fn outside_workspace_write_risk_names_the_location() {
+        assert_eq!(
+            risk_words(&risk(
+                RiskClass::Bounded,
+                vec![RiskReason::OutsideWorkspaceWrite]
+            )),
+            "Risk: limited - changes files outside the workspace"
+        );
+        assert_eq!(
+            risk_words(&risk(RiskClass::Bounded, vec![RiskReason::ScopedWrite])),
+            "Risk: limited - changes files"
+        );
+    }
+
     /// Catches the classifications collapsing into one message, and Rust
     /// variant names leaking into the words.
     #[test]
     fn bounded_and_unknown_risk_read_differently_in_plain_words() {
-        let bounded = risk_words(&risk(RiskClass::Bounded, vec![RiskReason::ScopedWrite]));
+        let bounded = risk_words(&risk(RiskClass::Bounded, vec![RiskReason::WorkspaceWrite]));
         let unknown = risk_words(&risk(
             RiskClass::Unknown,
             vec![RiskReason::ProcessEffectsUnknown, RiskReason::DynamicCode],

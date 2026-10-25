@@ -68,6 +68,8 @@ impl McpRegistryJournal for Journal {
 
 enum Outcome {
     Invalid(String),
+    Denied(&'static str),
+    ReadRoot(&'static str, &'static str),
     Authorization,
 }
 
@@ -89,6 +91,17 @@ impl McpCandidateAdmission for Admission {
         Box::pin(async move {
             Err(match outcome {
                 Outcome::Invalid(cause) => McpCandidateError::Invalid { cause },
+                Outcome::Denied(path) => McpCandidateError::ExecutableDenied {
+                    denial: ego_core::permit::ExecutableDenial::OutsidePerimeter {
+                        path: ego_core::permit::CanonPath::new(path),
+                    },
+                },
+                Outcome::ReadRoot(path, root) => McpCandidateError::ExecutableDenied {
+                    denial: ego_core::permit::ExecutableDenial::ReadOnlyRoot {
+                        path: ego_core::permit::CanonPath::new(path),
+                        root: ego_core::permit::CanonPath::new(root),
+                    },
+                },
                 Outcome::Authorization => McpCandidateError::AuthorizationRequired {
                     issuer: "https://issuer.example".to_owned(),
                     protected_resource: "https://mcp.example".to_owned(),
@@ -205,4 +218,74 @@ async fn private_port_gets_exactly_one_record_per_invalid_failure_and_none_for_a
         .await
         .expect("authorization publishes status");
     assert_eq!(journal.private.lock().expect("private").len(), 1);
+}
+
+/// Catches: a typed host executable denial is sanitized into invalid configuration.
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_mcp_denial_reports_exact_exec_path_without_raw_cause() {
+    let journal = Arc::new(Journal::default());
+    let registry = controller(
+        vec![Outcome::Denied("/operator/tools/mcp-server")],
+        Arc::clone(&journal),
+    );
+    registry.reconcile(refresh()).await.unwrap();
+    let errors = registry.status().mcp_errors();
+    assert_eq!(
+        errors,
+        [
+            "MCP server `alpha`: sandbox denies execution of /operator/tools/mcp-server; add this exact canonical path to exec_paths in ego config edit, then exit and resume"
+        ]
+    );
+    assert!(journal.private.lock().unwrap().is_empty());
+    assert!(!format!("{:?}", journal.events.lock().unwrap()).contains("/operator/tools"));
+}
+
+/// Catches: a host filename injects terminal controls into public MCP diagnostics.
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_mcp_denial_escapes_filename_controls() {
+    let journal = Arc::new(Journal::default());
+    let registry = controller(
+        vec![Outcome::Denied("/operator/tools/server\n\u{1b}[2J")],
+        journal,
+    );
+    registry.reconcile(refresh()).await.unwrap();
+    let message = registry.status().mcp_errors().join(" ");
+    assert!(
+        message.contains("'/operator/tools/server\\n\\u{1b}[2J'"),
+        "{message:?}"
+    );
+    assert!(!message.contains('\n'));
+    assert!(!message.contains('\u{1b}'));
+}
+
+/// Catches: registry drops the read-root reason or emits active root-name controls.
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_mcp_read_root_denial_preserves_remedy_and_escapes_root() {
+    let journal = Arc::new(Journal::default());
+    let registry = controller(
+        vec![Outcome::ReadRoot(
+            "/operator/tools/server",
+            "/operator/read\n\u{1b}[2J",
+        )],
+        Arc::clone(&journal),
+    );
+    registry.reconcile(refresh()).await.unwrap();
+    let message = registry.status().mcp_errors().join(" ");
+    assert!(
+        message.contains("execution of /operator/tools/server"),
+        "{message}"
+    );
+    assert!(
+        message.contains("read-only root '/operator/read\\n\\u{1b}[2J'"),
+        "{message:?}"
+    );
+    assert!(
+        message.contains("change or remove its read-only restriction"),
+        "{message}"
+    );
+    assert!(!message.contains("exec_paths"), "{message}");
+    assert!(!message.contains('\n'));
+    assert!(!message.contains('\u{1b}'));
+    assert!(journal.private.lock().unwrap().is_empty());
+    assert!(!format!("{:?}", journal.events.lock().unwrap()).contains("/operator/"));
 }

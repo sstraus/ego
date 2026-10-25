@@ -442,9 +442,7 @@ pub(super) fn surface_line(
                 continue;
             }
         }
-        if let Line::Submitted(text) = &line
-            && phase.get() != EditPhase::Modal
-        {
+        if let Line::Submitted(text) = &line {
             let dispatch = {
                 let mut current = status.lock().expect("surface status lock");
                 let dispatch = current
@@ -457,6 +455,46 @@ pub(super) fn surface_line(
                 current.origin = InputOrigin::Typed;
                 dispatch
             };
+            if phase.get() == EditPhase::Modal {
+                // Answers retain their grammar. Commands never become answers,
+                // and only inspections may cross an outstanding modal wait.
+                let command = match dispatch {
+                    Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {
+                        return (line, failed);
+                    }
+                    Dispatch::Action(action) => Some(HostCommand::Action(action)),
+                    Dispatch::Config(arguments) => Some(HostCommand::Config(arguments)),
+                    Dispatch::Tasks(arguments) => Some(HostCommand::Tasks(arguments)),
+                    Dispatch::UnknownSlash(message) => {
+                        commit_to_transcript(status, &message);
+                        continue;
+                    }
+                    Dispatch::Refused { reason } => {
+                        commit_to_transcript(status, reason);
+                        continue;
+                    }
+                    _ => None,
+                };
+                let inspections = status
+                    .lock()
+                    .expect("surface status lock")
+                    .inspections
+                    .clone();
+                if let Some(command) = command.filter(HostCommand::is_read_only_inspection)
+                    && let Some((sender, waker)) = inspections
+                {
+                    if sender.send(command).is_err() {
+                        return (Line::Ended, failed);
+                    }
+                    waker.wake();
+                } else {
+                    commit_to_transcript(
+                        status,
+                        "this command is unavailable while a question or permission prompt is open; answer or cancel it first",
+                    );
+                }
+                continue;
+            }
             if phase.get() == EditPhase::Busy
                 && !matches!(dispatch, Dispatch::Resume(_))
                 && refuse_busy_dispatch(status, &dispatch)

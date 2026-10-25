@@ -426,6 +426,7 @@ pub struct McpPreparedEnvelope {
     transport_fingerprint: String,
     transport: ForeignTransportTarget,
     parameters: Vec<u8>,
+    annotations: Value,
 }
 
 impl McpPreparedEnvelope {
@@ -447,6 +448,10 @@ impl McpPreparedEnvelope {
 
     pub fn transport(&self) -> &ForeignTransportTarget {
         &self.transport
+    }
+
+    pub fn annotations(&self) -> &Value {
+        &self.annotations
     }
 
     pub fn parameters(&self) -> &[u8] {
@@ -586,6 +591,7 @@ impl PreparedCall {
                 transport_fingerprint,
                 transport,
                 parameters,
+                annotations: Value::Null,
             })),
             hook_http: None,
             web_http: None,
@@ -639,6 +645,7 @@ impl PreparedCall {
                 transport_fingerprint,
                 transport,
                 parameters,
+                annotations: Value::Null,
             })),
             hook_http: None,
             web_http: None,
@@ -689,11 +696,20 @@ impl PreparedCall {
                 transport_fingerprint,
                 transport,
                 parameters,
+                annotations: Value::Null,
             })),
             hook_http: None,
             web_http: None,
             provenance: PreparedCallProvenance::CapturedForeign,
         })
+    }
+
+    /// Server-supplied advisory metadata. This never changes operations or authority.
+    pub fn with_mcp_annotations(mut self, annotations: Value) -> Self {
+        if let Some(envelope) = self.mcp.as_mut() {
+            envelope.annotations = annotations;
+        }
+        self
     }
 
     pub fn mcp_envelope(&self) -> Option<&McpPreparedEnvelope> {
