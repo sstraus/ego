@@ -1115,17 +1115,18 @@ async fn codex_dropped_body_after_text_does_not_replay_and_has_uncertain_notice(
 }
 
 #[tokio::test]
-async fn codex_dropped_body_after_tool_bytes_never_replays_or_executes_partial_call() {
-    // Catches: a buffered tool call is discarded from retry safety and requested again.
+async fn codex_dropped_body_after_unrun_tool_bytes_retries_without_executing_partial_call() {
+    // Catches: a parsed-but-unrun tool still blocks recovery, or executes its partial arguments.
     let prefix = CODEX_TOOL
         .split("data: {\"type\":\"response.completed\"")
         .next()
         .unwrap();
     let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6).await;
-    assert_eq!(outcome.exit_reason, ExitReason::Provider);
-    assert_eq!(requests.len(), 1);
-    assert!(delays.is_empty());
-    assert!(!outcome.provider_failure.unwrap().effect_known);
+    assert_eq!(outcome.exit_reason, ExitReason::Completed);
+    assert_eq!(answer(&state), "ok");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(delays, [std::time::Duration::from_secs(1)]);
+    assert!(outcome.provider_failure.is_none());
     assert!(
         state
             .items

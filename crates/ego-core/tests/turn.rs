@@ -6080,18 +6080,24 @@ mod turn {
         assert!(tool_result_text(&calls["outside"]).contains("outside the workspace"));
     }
 
-    /// Critic regression_case. Plausible bug: the exception widens from "read the
-    /// boundary refused" to every `OutsideWorkspace`, so a write outside the
-    /// workspace is handed back to the model instead of ending the run.
+    // Catches: a boundary write denial stops instead of returning the refusal, or writes anyway.
     #[test]
-    fn a_write_outside_the_workspace_still_ends_the_turn() {
+    fn a_write_outside_the_workspace_returns_the_refusal_and_changes_nothing() {
         let fx = Fixture::new(writing("/etc/ego-owned", "x")).with_write_tool();
+        fx.fs.file("/etc/ego-owned", "original");
 
-        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+        let (reason, ok, state) = run(&fx, SessionState::default(), "write it");
 
-        assert_eq!(reason, ExitReason::PermissionRequired);
-        assert!(!ok);
-        assert!(fx.fs.read(&CanonPath::new("/etc/ego-owned")).is_err());
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/etc/ego-owned")).unwrap(),
+            b"original"
+        );
+        let calls = tool_calls_by_id(&state);
+        assert_eq!(calls["call_1"].ok, Some(false));
+        assert!(tool_result_text(&calls["call_1"]).contains("outside the workspace"));
+        assert_eq!(fx.generator.calls().len(), 2);
     }
 
     /// Critic regression_case. Plausible bug: the exception widens to every refused
@@ -6111,9 +6117,7 @@ mod turn {
         assert!(!tool_result_text(&calls["call_1"]).contains("hunter2"));
     }
 
-    /// Critic regression_case. Plausible bug: the exception is keyed on something a
-    /// spawn also satisfies, so a command nobody can approve is returned to
-    /// the model instead of ending the run.
+    // Catches: an unanswered spawn permission is mistaken for a boundary refusal.
     #[test]
     fn a_spawn_nobody_can_approve_still_ends_the_turn() {
         let fx = Fixture::new(vec![
@@ -6392,6 +6396,11 @@ mod turn {
         assert_eq!(reason, ExitReason::PermissionRequired);
         assert!(!ok);
         assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "a user denial must not ask the model again"
+        );
         let recorded = permission_events(&fx);
         assert!(matches!(
             recorded.as_slice(),
@@ -6455,8 +6464,9 @@ mod turn {
 
         let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
 
-        assert_eq!(reason, ExitReason::PermissionRequired);
-        assert!(!ok);
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert_eq!(fx.generator.calls().len(), 2);
         assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
         assert!(fx.fs.read(&CanonPath::new("/etc/ego-owned")).is_err());
         let recorded = permission_events(&fx);
@@ -11207,6 +11217,273 @@ mod turn {
             block_on(turn.run("are you there?")).expect("the store accepted every append")
         }
 
+        // Recorded events, not invented provider fixtures: regression case retained the live JSONL slices.
+        fn regression_case_attempts() -> Vec<(&'static str, Vec<AiEvent>)> {
+            [
+                (
+                    "exec",
+                    include_str!("../../ego-cli/tests/fixtures/615-unrun-exec.jsonl"),
+                ),
+                (
+                    "swift-live-617",
+                    include_str!("../../ego-cli/tests/fixtures/617-unrun-swift.jsonl"),
+                ),
+                (
+                    "write",
+                    include_str!("../../ego-cli/tests/fixtures/615-unrun-write.jsonl"),
+                ),
+                (
+                    "exec-without-reasoning",
+                    include_str!(
+                        "../../ego-cli/tests/fixtures/615-unrun-exec-without-reasoning.jsonl"
+                    ),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, fixture)| {
+                let mut events = Vec::new();
+                for line in fixture.lines() {
+                    let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    let kind: EventKind =
+                        serde_json::from_value(record["payload"]["event"]["kind"].clone()).unwrap();
+                    match kind {
+                        EventKind::ReasoningState { state } => {
+                            events.push(AiEvent::ReasoningState(state))
+                        }
+                        EventKind::ToolCallStarted {
+                            name,
+                            args,
+                            call_id,
+                        } => events.push(AiEvent::ToolCall {
+                            name,
+                            args,
+                            call_id: call_id.expect("recorded provider call ID"),
+                        }),
+                        EventKind::Error { message, kind } => {
+                            events.push(AiEvent::Error { message, kind })
+                        }
+                        EventKind::AttemptSettled { outcome, .. } => {
+                            assert_eq!(outcome.stop(), StopReason::Error);
+                            events.push(AiEvent::DeliveryObserved(outcome.delivery()));
+                            events.push(AiEvent::Stop(outcome.stop()));
+                        }
+                        _ => {}
+                    }
+                }
+                (name, events)
+            })
+            .collect()
+        }
+
+        // Catches: opaque reasoning and parsed-but-unrun tools suppress safe recovery or remain open.
+        #[test]
+        fn regression_case_unrun_attempts_retry_once_and_close_tools() {
+            let mut failed = Vec::new();
+            for (name, events) in regression_case_attempts() {
+                let trace = GenerationTrace::default();
+                let source = Arc::new(
+                    ScriptedGenerationSource::new([
+                        Ok(profile(
+                            "ollama/primary-model",
+                            false,
+                            events,
+                            &trace,
+                            Some(1_024),
+                        )),
+                        Ok(profile(
+                            "ollama/primary-model",
+                            false,
+                            vec![
+                                AiEvent::TextDelta {
+                                    text: "Recovered.".into(),
+                                },
+                                AiEvent::Stop(StopReason::Stop),
+                            ],
+                            &trace,
+                            Some(1_024),
+                        )),
+                    ])
+                    .with_trace(trace.clone()),
+                );
+                let fx = Fixture::new(vec![]);
+                let pause = Arc::new(RecordedPause::default());
+                let outcome = run_retrying(&fx, source, 6, pause.clone(), CancelToken::new());
+                let events = fx.store.events();
+                let starts: Vec<_> = events
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, event)| matches!(event.kind, EventKind::GenerationStarted { .. }))
+                    .map(|(i, _)| i)
+                    .collect();
+                let completions: Vec<_> = events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, event)| match &event.kind {
+                        EventKind::ToolCallCompleted { ok, result } => {
+                            Some((i, *ok, result.model_text()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let settlements = events
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::AttemptSettled { .. }))
+                    .count();
+                let charges = events
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::UsageUpdated { .. }))
+                    .count();
+                if !outcome.ok || trace.requests.lock().unwrap().len() != 2 {
+                    failed.push(format!(
+                        "{name}: {:?}, {} requests",
+                        outcome.exit_reason,
+                        trace.requests.lock().unwrap().len()
+                    ));
+                    continue;
+                }
+                assert_eq!(settlements, 2, "{name}: every attempt settles");
+                assert_eq!(charges, 2, "{name}: every attempt keeps its accounting");
+                assert_eq!(
+                    completions.len(),
+                    1,
+                    "{name}: no partial tool executes or closes twice"
+                );
+                assert!(!completions[0].1);
+                assert_eq!(completions[0].2, "interrupted: not run");
+                assert!(
+                    completions[0].0 < starts[1],
+                    "{name}: pending tools must close before retry"
+                );
+                assert_eq!(pause.delays.lock().unwrap().len(), 1);
+                assert!(events.iter().any(|event| matches!(&event.kind, EventKind::AssistantMessage { text } if text == "Recovered.")));
+            }
+            assert!(failed.is_empty(), "{}", failed.join("\n"));
+        }
+
+        // Catches: the new recovery bypasses zero retry, cancellation, or the one-retry cap.
+        #[test]
+        fn unrun_retry_respects_one_retry_zero_allowance_and_cancellation() {
+            for opaque_only in [false, true] {
+                for (retry, recovery, cancel_wait, expected) in [
+                    (0, None, false, 1),
+                    (6, None, false, 2),
+                    (6, Some(ego_core::turn::PROVIDER_RECOVERY_HORIZON), false, 2),
+                    (6, None, true, 1),
+                ] {
+                    let trace = GenerationTrace::default();
+                    let mut recorded = regression_case_attempts().remove(0).1;
+                    if opaque_only {
+                        recorded.retain(|event| !matches!(event, AiEvent::ToolCall { .. }));
+                    }
+                    let source = Arc::new(
+                        ScriptedGenerationSource::new((0..3).map(|index| {
+                            let mut events = recorded.clone();
+                            for event in &mut events {
+                                if let AiEvent::ToolCall { call_id, .. } = event {
+                                    call_id.push_str(&index.to_string());
+                                }
+                            }
+                            Ok(profile(
+                                "ollama/primary-model",
+                                false,
+                                events,
+                                &trace,
+                                Some(1_024),
+                            ))
+                        }))
+                        .with_trace(trace.clone()),
+                    );
+                    let fx = Fixture::new(vec![]);
+                    let cancel = CancelToken::new();
+                    let pause = Arc::new(RecordedPause {
+                        cancel_on_wait: cancel_wait.then(|| cancel.clone()),
+                        ..Default::default()
+                    });
+                    let outcome =
+                        run_retrying_controlled(&fx, source, retry, pause, cancel, None, recovery);
+                    assert_eq!(
+                        trace.requests.lock().unwrap().len(),
+                        expected,
+                        "opaque={opaque_only}, retry={retry}, recovery={recovery:?}, cancel={cancel_wait}"
+                    );
+                    assert_eq!(
+                        outcome.exit_reason,
+                        if cancel_wait {
+                            ExitReason::Cancelled(ego_core::event::domain::CancelCause::Host)
+                        } else {
+                            ExitReason::Provider
+                        }
+                    );
+                    if !cancel_wait {
+                        assert!(
+                            outcome.provider_failure.unwrap().effect_known,
+                            "no output or tool effect is uncertain"
+                        );
+                    }
+                    let events = fx.store.events();
+                    let started = events
+                        .iter()
+                        .filter(|event| matches!(event.kind, EventKind::ToolCallStarted { .. }))
+                        .count();
+                    let completed = events
+                        .iter()
+                        .filter(|event| matches!(event.kind, EventKind::ToolCallCompleted { .. }))
+                        .count();
+                    assert_eq!(
+                        started, completed,
+                        "even a cancelled retry must close pending tools"
+                    );
+                }
+            }
+        }
+
+        // Catches: retry executes a failed attempt's partial tool, or repeats a recovered effect.
+        #[test]
+        fn recovered_unrun_attempt_dispatches_only_the_successful_tool_once() {
+            let trace = GenerationTrace::default();
+            let mut scripts = vec![regression_case_attempts().remove(0).1];
+            scripts.extend(writing("/ws/recovered.txt", "one effect"));
+            let source = Arc::new(
+                ScriptedGenerationSource::new(scripts.into_iter().map(|events| {
+                    Ok(profile_with_carryover(
+                        "ollama/primary-model",
+                        events,
+                        &trace,
+                        ReasoningCarryover::SameProviderOnly,
+                        Some("openai-codex-responses"),
+                    ))
+                }))
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![])
+                .with_write_tool()
+                .with_rules(&["write(**)"], &[]);
+            let outcome = run_retrying(
+                &fx,
+                source,
+                6,
+                Arc::new(RecordedPause::default()),
+                CancelToken::new(),
+            );
+            assert!(outcome.ok);
+            assert_eq!(
+                fx.fs.read(&CanonPath::new("/ws/recovered.txt")).unwrap(),
+                b"one effect"
+            );
+            let events = fx.store.events();
+            let results: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::ToolCallCompleted { ok, result } => Some((*ok, result.model_text())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0], (false, "interrupted: not run".into()));
+            assert!(results[1].0);
+            assert_eq!(trace.requests.lock().unwrap().len(), 3);
+        }
+
         struct RecoveryBoundaryClock {
             now: Mutex<std::time::Instant>,
         }
@@ -11861,13 +12138,15 @@ mod turn {
                     false,
                 ),
                 (
-                    AiEvent::ToolCall {
-                        call_id: "call-288".to_owned(),
-                        name: "read".to_owned(),
-                        args: r#"{"path":"/ws/a"}"#.to_owned(),
+                    AiEvent::ProviderContent {
+                        state: ReasoningState {
+                            blob: "unknown server-side effect".into(),
+                            dialect: "fixture".into(),
+                        },
+                        visible: false,
                     },
-                    true,
-                    true,
+                    false,
+                    false,
                 ),
             ] {
                 let trace = GenerationTrace::default();
@@ -14153,6 +14432,12 @@ mod turn {
                     ),
                     AiEvent::Stop(StopReason::ToolUse),
                 ],
+                vec![
+                    AiEvent::TextDelta {
+                        text: "The boundary refused the child write.".into(),
+                    },
+                    AiEvent::Stop(StopReason::Stop),
+                ],
                 vec![AiEvent::Stop(StopReason::Stop)],
             ]));
             let (exit, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
@@ -14163,7 +14448,15 @@ mod turn {
                 .values()
                 .find(|i| i.tool_name.as_deref() == Some("task"))
                 .unwrap();
-            assert_eq!(task.ok, Some(false));
+            assert_eq!(task.ok, Some(true));
+            assert_eq!(generator.calls().len(), 4);
+            assert_eq!(
+                fx.fs.read(&CanonPath::new("/outside/stolen")).unwrap(),
+                b"original"
+            );
+            let child_continuation = serde_json::to_string(&generator.calls()[2]).unwrap();
+            assert!(child_continuation.contains("escape"));
+            assert!(child_continuation.contains("outside"));
             assert!(
                 state
                     .items

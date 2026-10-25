@@ -15,11 +15,6 @@ use support::{
     Ego as HarnessEgo, Places as HarnessPlaces, Plan, Reply, Stub, costing, paced, text, tool_call,
 };
 
-#[cfg(not(windows))]
-const HOSTS_PATH: &str = "/etc/hosts";
-#[cfg(windows)]
-const HOSTS_PATH: &str = r"C:\Windows\System32\drivers\etc\hosts";
-
 /// This suite isolates the CLI/provider contract from host sandbox
 /// availability. Step 14's dedicated sandbox contract owns the workspace
 /// default, capability probing, and fail-closed behavior.
@@ -329,7 +324,7 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
             "write",
-            &serde_json::json!({ "path": HOSTS_PATH, "contents": "x" }).to_string(),
+            &serde_json::json!({ "path": "notes.md", "contents": "x" }).to_string(),
         ))],
         ..Plan::default()
     });
@@ -341,7 +336,9 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
             support::FIXTURE_SESSION_ID,
             "--output",
             "json",
-            "Overwrite the host table",
+            "--deny",
+            "write(**)",
+            "Overwrite the notes",
         ])
         .run();
 
@@ -351,20 +348,10 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
     assert_eq!(report["exit_reason"], "permission");
     let denied = report["denied"].as_str().expect("§4.4 requires the action");
     assert!(
-        denied.contains("write") && denied.contains(HOSTS_PATH),
+        denied.contains("write") && denied.contains("notes.md"),
         "a script handed exit 3 and no subject has been told nothing: {denied}"
     );
-    // And *who* refused, which is what picks the remedy. §4.4 offers three
-    // and is explicit that this one is not a permission at all: "the workspace
-    // boundary belongs to ARCHITECTURE.md §3.4 axis 4 — the execution
-    // backend — and no mode moves it", so `--yolo` cannot help and
-    // `--sandbox` is the only thing that can. A caller reading prose has to
-    // regex ego's sentences to learn that; `denied_by` is the key that says it.
-    assert_eq!(
-        report["denied_by"],
-        serde_json::json!({ "by": "boundary" }),
-        "the boundary names no rule and no mode, because nobody wrote it"
-    );
+    assert_eq!(report["denied_by"]["by"], "rules");
 }
 
 /// `denied` is absent rather than null when nothing was denied: an optional key
@@ -1133,6 +1120,56 @@ fn a_read_outside_the_workspace_tells_the_model_the_grant_and_leaks_nothing() {
     assert!(!second.contains("SIBLING-CONTENTS"), "{second}");
 }
 
+// Catches: a real write refused by a read-only root ends the turn before the model sees it.
+#[test]
+fn boundary_denied_write_returns_refusal_and_continues() {
+    let elsewhere = tempfile::tempdir().expect("a temp dir");
+    let target = elsewhere.path().join("unchanged.txt");
+    std::fs::write(&target, "original").unwrap();
+    let root = std::fs::canonicalize(elsewhere.path()).unwrap();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "refused_write",
+                "write",
+                &serde_json::json!({"path": target, "contents": "overwritten"}).to_string(),
+            )),
+            Reply::Sse(text("The boundary refused the write.")),
+        ],
+        ..Plan::default()
+    });
+    let places = Places::new();
+    places.0.ego(&stub).home_file(
+        "config.toml",
+        &format!(
+            "sandbox='workspace'\nroots=[{{path='{}',access='read'}}]\n",
+            root.display()
+        ),
+    );
+    let finished = places
+        .raw_ego(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--output",
+            "json",
+            "Write the file",
+        ])
+        .run();
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(
+        finished.report()["result"],
+        "The boundary refused the write."
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    let next = generations[1].to_string();
+    assert!(next.contains("read-only root"), "{next}");
+    assert!(next.contains("refused_write"), "{next}");
+}
+
 /// regression case, the other half: the grant the refusal names works. Same
 /// real file, refused first, then `ego roots add --access read`, then
 /// `ego resume` reads it.
@@ -1636,22 +1673,24 @@ fn the_session_flags_are_a_mutually_exclusive_group() {
 }
 
 /// Exit 3, reached the only way a headless run can reach it: a tool asked for
-/// something the policy will not grant, and there is nobody to ask (a write
-/// outside the workspace: a refused read goes back to the model instead,
-/// regression case). This is
+/// permission to write inside the workspace, and there is nobody to ask.
+/// Boundary refusals instead return to the model (regression case). This is
 /// also §4.4's proof — the process is given no stdin at all, so a run that
 /// prompted would hang here and the test would never finish.
 #[test]
 fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
+    let places = Places::new();
+    let target = places.0.file("unchanged.txt", "original");
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
             "write",
-            &serde_json::json!({ "path": HOSTS_PATH, "contents": "x" }).to_string(),
+            &serde_json::json!({ "path": target, "contents": "x" }).to_string(),
         ))],
         ..Plan::default()
     });
-    let finished = Ego::against(&stub)
+    let finished = places
+        .ego(&stub)
         .args([
             "--model",
             "ollama/qwen3",
@@ -1662,6 +1701,8 @@ fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
         .run();
 
     assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
+    assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    assert_eq!(stub.generations().len(), 1);
     assert!(
         finished.stderr.contains("permission"),
         "{}",
