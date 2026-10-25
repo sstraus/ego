@@ -1,0 +1,25 @@
+Native macOS observation, 2002-01-01, branch fix/regression_case.
+Command through mbx/build-slot, TMPDIR under ~/Gits/.tmp:
+cargo nextest run -p ego-tools --lib --test adaptive_admission --run-ignored all --no-fail-fast -E 'test(exec::denial::tests) | test(pnpm_11_layout) | test(exec::pnpm::tests) | test(pnpm_static_profile)'
+Log: ~/Gits/.tmp/example-evidence-c.log
+
+Summary [20.100s] 16 tests run: 15 passed, 1 failed, 134 skipped; exit 100.
+PASS custom_store_with_missing_parents_still_requests_exact_write_authority
+PASS pnpm_11_live_exec_uses_the_installed_engine_under_adaptive (3.631s)
+FAIL pnpm_11_live_exec_recovers_a_dead_selector_lock_owner (20.097s, includes APFS clone and child baseline)
+
+The failing test clones the existing package-manager-store under its temporary
+PNPM_HOME, removes only the clone's tmp state, and runs the same sandboxed argv:
+/opt/homebrew/bin/pnpm exec /usr/bin/true
+The cloned-home baseline passed within the unchanged 10-second child limit.
+The test spawned /usr/bin/true, waited for it to exit, and verified signal-zero
+returned ESRCH for PID 20012 before seeding the task-owned selector owner file.
+No operator selector lock was modified. The clone was removed on test exit.
+
+Captured assertion:
+real pnpm must recover dead owner 20012-1009843231000000000-0 within the unchanged 10s child limit: Err(Timeout { timeout: 10s }); elapsed=10.500000000s; remaining_owner=Ok("20012-1009843231000000000-0")
+
+This proves no autonomous recovery within the required limit for this fresh
+abandoned-owner fixture under the current whole-home grant. It does not prove
+pnpm never expires old locks, or identify why it retained this owner. No retry,
+manual cleanup, longer deadline, or product recovery mechanism was added.

@@ -196,14 +196,14 @@ pub(super) fn renderable(_: &Path) -> bool {
 }
 
 /// The resolved location, and whether the path itself exists. A path that is
-/// not there yet resolves through its parent, so the grant names the exact
-/// file a write would create.
+/// not there yet resolves through its nearest existing ancestor, so the grant
+/// still names the exact path a write would create.
 pub(super) fn canonical(path: &Path) -> Option<(CanonPath, bool)> {
     if let Ok(resolved) = std::fs::canonicalize(path) {
         return Some((CanonPath::new(resolved), true));
     }
-    let parent = std::fs::canonicalize(path.parent()?).ok()?;
-    Some((CanonPath::new(parent.join(path.file_name()?)), false))
+    let resolved = super::adaptive::resolve_filesystem(path).ok()?;
+    Some((CanonPath::new(resolved), false))
 }
 
 fn exec_target(spec: &SpawnSpec) -> Option<PathBuf> {

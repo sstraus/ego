@@ -144,3 +144,101 @@ fn pnpm_home_is_writable_for_workspace_and_adaptive_without_discovery() {
         }
     }
 }
+
+// Catches: whole-home authority still leaves pnpm unable to recover a selector
+// lock whose owner has exited. Clone the cached engine so no operator lock is
+// created, removed or replaced by this deliberately failing-state fixture.
+#[test]
+#[ignore = "live installed pnpm@11.15.1 and APFS clone prerequisite; run explicitly"]
+fn pnpm_11_live_exec_recovers_a_dead_selector_lock_owner() {
+    const NAME: &str = "pnpm_11_layout::pnpm_11_live_exec_recovers_a_dead_selector_lock_owner";
+    if let Some(root) = std::env::var_os("EGO_PNPM_STALE_ROOT") {
+        let root = PathBuf::from(root);
+        let workspace = root.join("workspace");
+        let policy = admit_confinement(
+            Confinement::Adaptive,
+            false,
+            CanonPath::new(workspace.canonicalize().unwrap()),
+        )
+        .unwrap();
+        let witness = || {
+            execute(
+                policy.clone(),
+                &root,
+                vec![
+                    "/opt/homebrew/bin/pnpm".into(),
+                    "exec".into(),
+                    "/usr/bin/true".into(),
+                ],
+            )
+        };
+        // Establish that the real copied cached engine works before poisoning
+        // only its task-owned lock; this is not an engine-install test.
+        witness().expect("isolated cached pnpm baseline within 10 seconds");
+        let mut owner = Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = owner.id();
+        assert!(owner.wait().unwrap().success());
+        assert_eq!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None),
+            Err(nix::errno::Errno::ESRCH),
+            "fixture owner must be dead"
+        );
+        let lock =
+            root.join("pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock");
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::create_dir(&lock).expect("baseline must release its selector lock");
+        // Match the real owner format recorded in the stale-selector fixture.
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let value = format!("{pid}-{timestamp}-0");
+        std::fs::write(lock.join("owner"), &value).unwrap();
+        let started = std::time::Instant::now();
+        let output = witness();
+        assert!(
+            output.is_ok(),
+            "real pnpm must recover dead owner {value} within the unchanged 10s child limit: {output:?}; elapsed={:?}; remaining_owner={:?}",
+            started.elapsed(),
+            std::fs::read_to_string(lock.join("owner"))
+        );
+        assert!(
+            !lock.exists(),
+            "successful pnpm must release its selector lock"
+        );
+        return;
+    }
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("package.json"),
+        r#"{"name":"regression_case-stale-lock","private":true,"packageManager":"pnpm@11.15.1"}"#,
+    )
+    .unwrap();
+    let home = std::env::var_os("PNPM_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(|root| PathBuf::from(root).join("pnpm")))
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join("Library/pnpm"));
+    let pnpm = root.path().join("pnpm");
+    std::fs::create_dir(&pnpm).unwrap();
+    let copy = Command::new("/bin/cp")
+        .arg("-cR")
+        .arg(home.join("package-manager-store"))
+        .arg(&pnpm)
+        .output()
+        .unwrap();
+    assert!(copy.status.success(), "APFS cached-engine clone: {copy:?}");
+    let tmp = pnpm.join("package-manager-store/v11/tmp");
+    if tmp.exists() {
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--ignored", "--nocapture"])
+        .env("EGO_PNPM_STALE_ROOT", root.path())
+        .env("PNPM_HOME", &pnpm)
+        .output()
+        .unwrap();
+    reexec::assert_one_child_test(&output);
+}
