@@ -39,7 +39,7 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
-use ego_core::generator::types::{StopReason, ThinkingLevel};
+use ego_core::generator::types::{ContentBlock, StopReason, ThinkingLevel};
 use ego_core::mcp::ToolExecution;
 use ego_core::permit::rule::{Head, Rule};
 use ego_core::permit::{
@@ -49,7 +49,6 @@ use ego_core::permit::{
     Resolution, ResolvedConnect, Resolver, ScanRequest, SpawnSpec, Tool, ToolError, ToolResult,
     TransportError, TransportFailure, Typed, TypedTool,
 };
-use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
@@ -2537,9 +2536,9 @@ mod end_to_end {
         (outcome, generator)
     }
 
-    // Catches: treating a boundary-refused write as a recoverable read refusal.
+    // Catches: a builtin write refusal ending the turn, appearing successful, or changing the file.
     #[test]
-    fn a_turn_stops_when_a_tool_call_is_refused_and_names_what_was_refused() {
+    fn a_boundary_refused_write_reaches_the_model_as_an_error_and_changes_nothing() {
         let outside = Workspace::new();
         let secret = outside.file("secret.txt", "not yours");
         let (outcome, generator) = refused_call(
@@ -2547,41 +2546,40 @@ mod end_to_end {
             json!({ "path": secret.display().to_string(), "contents": "overwritten" }),
         );
 
-        assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
-        assert!(!outcome.ok);
-
-        let denial = outcome
-            .denied
-            .expect("a permission-required turn names the action it was refused");
-        let action = &denial.action;
-        assert!(
-            action.contains("outside the workspace") && action.contains("secret.txt"),
-            "the denial must name what it denied: {action}"
-        );
-        assert!(
-            !action.contains("not yours"),
-            "and must not quote what it refused to read: {action}"
-        );
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        assert!(outcome.ok);
+        assert!(outcome.denied.is_none());
         assert_eq!(
             fs::read_to_string(&secret).expect("the target still exists"),
             "not yours"
         );
-        // And *who* denied it, which is the fact that picks the remedy.
-        // `CLI.md` §4.4 is explicit that the boundary is not a permission at
-        // all: `--sandbox` moves it and `--yolo` does not, so a caller that
-        // reads `Boundary` must not be sent to the flag that cannot help.
-        assert_eq!(
-            denial.by,
-            DeniedBy::Decided(Authority::Boundary),
-            "an operation refused at the workspace boundary names no rule and no mode"
-        );
 
+        let calls = generator.calls();
         assert_eq!(
-            generator.calls().len(),
-            1,
-            "the run stopped, so there is no second generation"
+            calls.len(),
+            2,
+            "the model must be able to explain the refused write"
         );
-        let history = format!("{:?}", generator.calls()[0].messages);
+        let (output, is_error) = calls[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                } if call_id == "call_1" => Some((output, is_error)),
+                _ => None,
+            })
+            .expect("the next generation receives the refused call's result");
+        assert!(*is_error, "the refused write must not appear successful");
+        assert!(
+            output.contains("outside the workspace") && output.contains("secret.txt"),
+            "the refusal must name the boundary and denied file: {output}"
+        );
+        let history = format!("{calls:?}");
         assert!(
             !history.contains("not yours"),
             "the refused contents must not reach the model: {history}"
