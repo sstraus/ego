@@ -11445,12 +11445,12 @@ mod turn {
             scripts.extend(writing("/ws/recovered.txt", "one effect"));
             let source = Arc::new(
                 ScriptedGenerationSource::new(scripts.into_iter().map(|events| {
-                    Ok(profile(
+                    Ok(profile_with_carryover(
                         "ollama/primary-model",
-                        false,
                         events,
                         &trace,
-                        Some(1_024),
+                        ReasoningCarryover::SameProviderOnly,
+                        Some("openai-codex-responses"),
                     ))
                 }))
                 .with_trace(trace.clone()),
