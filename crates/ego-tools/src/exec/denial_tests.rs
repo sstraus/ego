@@ -293,6 +293,50 @@ fn custom_store_with_missing_parents_still_requests_exact_write_authority() {
     }
 }
 
+// Catches: reading an external executable script is misreported as an exec
+// denial, suppressing the read grant that would actually unblock cat.
+#[cfg(unix)]
+#[test]
+fn reading_executable_script_still_offers_read_authority() {
+    use ego_core::permit::{
+        CanonPath, Confinement, RunConfinement, SandboxAccess, StreamProvenance, ToolContentBlock,
+        ToolOutputEncoding, ToolOutputProvenance, ToolResult,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let script = base.join("tool.sh");
+    std::fs::write(&script, "#!/bin/sh\necho fixture\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let spec = SpawnSpec::new(
+        vec!["/bin/cat".into(), script.clone().into_os_string()],
+        Some(CanonPath::new(&workspace)),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    let result = ToolResult::new(vec![ToolContentBlock {
+        text: format!("cat: {}: Operation not permitted", script.display()),
+        provenance: ToolOutputProvenance::Process {
+            stream: StreamProvenance::Stderr,
+            encoding: ToolOutputEncoding::Utf8,
+            truncated: false,
+            omitted_bytes: 0,
+        },
+        full_output: None,
+    }]);
+    let denied = super::analyze(&spec, &result, &policy, &[]).unwrap();
+    assert_eq!(
+        denied.request.as_ref().map(|request| request.access),
+        Some(SandboxAccess::Read),
+        "reading a script must not be classified as executing it: {denied:?}"
+    );
+}
+
 fn executable_refusal_fixture(bad_interpreter: bool) {
     use ego_core::permit::{
         CanonPath, Confinement, ProfileRoot, RootAccess, RunConfinement, SandboxAccess,
