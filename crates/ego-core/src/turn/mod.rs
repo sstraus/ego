@@ -6384,6 +6384,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             };
         let key = cache.as_ref().zip(self.analysis_observation.as_ref()).map(
             |((_, trust), observation)| {
+                let mut cache_context = context.clone();
+                if let Some(root) = self.tools.mcp_output_root() {
+                    // Match analysis_cache_digest: only the session-owned read
+                    // pin rotates; keep all execution and disclosure authority.
+                    let pin = format!("{} ({:?})", root, crate::permit::RootAccess::Read);
+                    cache_context.roots.retain(|root| root != &pin);
+                }
                 cache_key_for_context(
                     pending.call(),
                     &analysis_policy,
@@ -6391,7 +6398,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     *trust,
                     &config,
                     profile.thinking,
-                    &context,
+                    &cache_context,
                 )
             },
         );
