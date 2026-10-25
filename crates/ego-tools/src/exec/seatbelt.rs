@@ -353,12 +353,17 @@ pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
             .as_ref()
             .map(|home| home.join(".gitconfig"))
             .into_iter()
-            .chain(xdg.map(|xdg| xdg.join("git/config")))
+            .chain(
+                xdg.into_iter()
+                    .flat_map(|xdg| [xdg.join("git/config"), xdg.join("git/ignore")]),
+            )
         {
             match fs::canonicalize(&path) {
-                Ok(root) => {
+                Ok(root) if root.is_file() => {
                     roots.insert(root);
                 }
+                // A config-shaped directory must not grant its whole subtree.
+                Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(ProcessError::Backend(format!(

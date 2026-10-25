@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 #[path = "adaptive_floor.rs"]
 pub(super) mod floor;
+#[cfg(target_os = "macos")]
+#[path = "pnpm_layout.rs"]
+mod pnpm_layout;
 
 /// The process-edge constructor shared by CLI, ACP, and diagnostics.
 pub fn admit_confinement(
@@ -127,8 +130,21 @@ pub fn admit_confinement(
     credentials.extend([cargo.join("credentials"), cargo.join("credentials.toml")]);
     let ego = env("EGO_HOME").unwrap_or_else(|| home.join(".ego"));
     credentials.extend([ego.join("auth.json"), ego.join("auth.json.tmp")]);
+    #[cfg(target_os = "macos")]
+    let warnings = pnpm_layout::extend(
+        &home,
+        &pnpm,
+        workspace.as_path(),
+        &credentials,
+        &mut writable,
+        &mut controls,
+    );
+    #[cfg(not(target_os = "macos"))]
+    let warnings = Vec::new();
     let perimeter = capture(&home, workspace.as_path(), writable, credentials, controls)?;
-    Ok(policy.with_adaptive_perimeter(perimeter))
+    Ok(policy
+        .with_adaptive_perimeter(perimeter)
+        .with_admission_warnings(warnings))
 }
 
 fn error(message: impl Into<String>) -> ProcessError {

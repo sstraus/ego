@@ -994,6 +994,7 @@ pub struct RunConfinement {
     exec_paths: Vec<CanonPath>,
     roots: Vec<super::ProfileRoot>,
     adaptive: Option<super::AdaptivePerimeter>,
+    admission_warnings: Vec<String>,
     requirements: ExecRequirements,
 }
 
@@ -1019,6 +1020,7 @@ impl RunConfinement {
             exec_paths: Vec::new(),
             roots: Vec::new(),
             adaptive: None,
+            admission_warnings: Vec::new(),
             requirements: ExecRequirements::new(required),
         })
     }
@@ -1054,6 +1056,17 @@ impl RunConfinement {
 
     pub fn adaptive_perimeter(&self) -> Option<&super::AdaptivePerimeter> {
         self.adaptive.as_ref()
+    }
+
+    /// Diagnostics from fail-closed discovery; these confer no authority.
+    #[must_use]
+    pub fn with_admission_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.admission_warnings = warnings;
+        self
+    }
+
+    pub fn admission_warnings(&self) -> &[String] {
+        &self.admission_warnings
     }
 
     pub fn exec_paths(&self) -> &[CanonPath] {

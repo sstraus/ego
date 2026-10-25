@@ -43,6 +43,7 @@ fn isolated(name: &str) -> Option<PathBuf> {
         .env("GH_CONFIG_DIR", root.path().join("github"))
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("PNPM_HOME")
+        .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CACHE_HOME")
         .env_remove("npm_config_cache")
@@ -89,6 +90,8 @@ mod git_layouts;
 mod js_caches;
 #[path = "support/adaptive_js_host_code.rs"]
 mod js_host_code;
+#[path = "support/pnpm_11_layout.rs"]
+mod pnpm_11_layout;
 
 // Catches: the outside probe uses only the workspace parent even when that
 // parent is host-unwritable.
