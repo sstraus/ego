@@ -176,6 +176,15 @@ esac
     } else {
         script
     };
+    let script = if name.ends_with("::pnpm_11_discovery_bootstraps_only_the_selector_lock") {
+        script.replacen(
+            "#!/bin/sh\n",
+            "#!/bin/sh\ntouch \"$HOME/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock\" || exit 1\n",
+            1,
+        )
+    } else {
+        script
+    };
     let program = bin.join("pnpm");
     std::fs::write(&program, script).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -399,4 +408,39 @@ fn pnpm_11_discovery_allows_its_private_scratch_probe() {
     )
     .unwrap();
     assert!(!root.join("workspace/discovery-write").exists());
+}
+
+// Catches: cached exact-version selection needs its engine lock before the
+// reported runtime layout is available, so scratch-only discovery admits none.
+#[test]
+fn pnpm_11_discovery_bootstraps_only_the_selector_lock() {
+    let name = "pnpm_11_layout::pnpm_11_discovery_bootstraps_only_the_selector_lock";
+    let Some(root) = isolated(name) else {
+        return;
+    };
+    let engine = root.join("home/Library/pnpm/package-manager-store/v11");
+    std::fs::create_dir_all(engine.join("tmp/engine-locks")).unwrap();
+    if !reported_layout_child(&root, name, false, false) {
+        return;
+    }
+    let policy = admit(&root.join("workspace")).unwrap();
+    assert!(
+        policy.admission_warnings().is_empty(),
+        "{:?}",
+        policy.admission_warnings()
+    );
+    assert!(
+        engine
+            .join("tmp/engine-locks/package-manager-env.lock")
+            .exists()
+    );
+    execute(
+        policy,
+        &root,
+        vec![
+            "/usr/bin/touch".into(),
+            engine.join("index.db").into_os_string(),
+        ],
+    )
+    .unwrap();
 }

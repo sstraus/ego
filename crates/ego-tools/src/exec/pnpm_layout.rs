@@ -1,4 +1,4 @@
-//! Query an offline pnpm runtime with only a private scratch cwd writable.
+//! Query an offline pnpm runtime with private scratch and bounded selector locks.
 
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::process::CommandExt as _;
@@ -37,7 +37,12 @@ impl Layout {
     }
 }
 
-pub(super) fn capture(workspace: &Path, credentials: &[PathBuf]) -> Result<Option<Layout>, String> {
+fn capture(
+    home: &Path,
+    pnpm_home: &Path,
+    workspace: &Path,
+    credentials: &[PathBuf],
+) -> Result<Option<Layout>, String> {
     let Some(executable) = installed(workspace) else {
         return Ok(None);
     };
@@ -48,7 +53,9 @@ pub(super) fn capture(workspace: &Path, credentials: &[PathBuf]) -> Result<Optio
         .and_then(|pin| pin.as_deref())
         .unwrap_or("unknown or no selector");
     let scratch = private_scratch()?;
-    let profile = discovery_profile(workspace, scratch.path(), credentials)?;
+    let locks = selector_locks(home, pnpm_home, workspace, credentials)
+        .map_err(|error| format!("pnpm selector locks refused: {error}"))?;
+    let profile = discovery_profile(workspace, scratch.path(), credentials, &locks)?;
     let version = query_text(&executable, scratch.path(), &profile, &["--version"])
         .map_err(|reason| format!("pnpm installed version unknown, project {selected_label}: {reason}; no additional pnpm roots admitted"))?;
     let selected = selected
@@ -87,7 +94,7 @@ pub(super) fn extend(
     writable: &mut Vec<PathBuf>,
     controls: &mut Vec<PathBuf>,
 ) -> Vec<String> {
-    let layout = match capture(workspace, credentials) {
+    let layout = match capture(home, pnpm_home, workspace, credentials) {
         Ok(Some(layout)) => layout,
         Ok(None) => return Vec::new(),
         Err(warning) => return vec![warning],
@@ -124,6 +131,7 @@ fn admitted_paths(
             "reported pnpm roots leave the operator-selected pnpm home",
         ));
     }
+    let locks = selector_locks(home, pnpm_home, workspace, credentials)?;
     let credentials = credentials
         .iter()
         .map(|path| super::resolve(path).map(CanonPath::new))
@@ -131,12 +139,8 @@ fn admitted_paths(
     for path in [&layout.store, &layout.global] {
         super::check_write_root(home, workspace, &super::resolve(path)?, &credentials)?;
     }
-    // Recorded macOS pnpm 11 uses /tmp regardless of the process TMPDIR.
-    // Admit its current-UID lock namespace, never the shared temporary root.
-    let uid = nix::unistd::getuid().as_raw();
-    let operation_locks = PathBuf::from(format!("/private/tmp/pnpm-store-operation-locks-{uid}"));
-    validate_operation_locks(&operation_locks, uid)?;
-    let mut writable = vec![layout.store.clone(), operation_locks];
+    let mut writable = vec![layout.store.clone()];
+    writable.extend(locks);
     let mut protected = vec![layout.store.join("links"), layout.global.clone()];
     let mut warnings = Vec::new();
     let engine = super::resolve(&layout.engine);
@@ -173,6 +177,34 @@ fn admitted_paths(
         }
     }
     Ok((writable, protected, warnings))
+}
+
+// pnpm v11.15.1 config/defaults.rs and store-dir/store_dir.rs define the
+// operator home and v11 store format. No pnpm subprocess supplies this authority.
+fn selector_locks(
+    home: &Path,
+    pnpm_home: &Path,
+    workspace: &Path,
+    credentials: &[PathBuf],
+) -> Result<[PathBuf; 2], ego_core::permit::ProcessError> {
+    let uid = nix::unistd::getuid().as_raw();
+    // This module is macOS-only. The recorded native stream proves /private/tmp
+    // rather than TMPDIR; do not extrapolate this namespace to Linux.
+    let operation = PathBuf::from(format!("/private/tmp/pnpm-store-operation-locks-{uid}"));
+    validate_operation_locks(&operation, uid)?;
+    let engine = pnpm_home.join("package-manager-store/v11/tmp/engine-locks");
+    let credentials = credentials
+        .iter()
+        .cloned()
+        .map(ego_core::permit::CanonPath::new)
+        .collect::<Vec<_>>();
+    for path in [&operation, &engine] {
+        if super::resolve(path)? != *path {
+            return Err(super::error("pnpm selector-lock path is symlinked"));
+        }
+        super::check_write_root(home, workspace, path, &credentials)?;
+    }
+    Ok([operation, engine])
 }
 
 fn validate_operation_locks(path: &Path, uid: u32) -> Result<(), ego_core::permit::ProcessError> {
@@ -285,13 +317,26 @@ fn discovery_profile(
     workspace: &Path,
     scratch: &Path,
     credentials: &[PathBuf],
+    locks: &[PathBuf],
 ) -> Result<String, String> {
     let mut profile = String::from(
         "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n(allow process-exec*)\n(allow file-read* file-test-existence)\n(deny network*)\n",
     );
     let scratch = crate::exec::profile::path_literal(scratch).map_err(|error| error.to_string())?;
+    let mut writable = vec![format!("(subpath {scratch})")];
+    profile.push_str(&format!("(allow file-write* (subpath {scratch}))\n"));
+    for lock in locks {
+        let literal =
+            crate::exec::profile::path_literal(lock).map_err(|error| error.to_string())?;
+        let filter = format!("(subpath {literal})");
+        profile.push_str(&format!(
+            "(allow file-write-create file-write-mode {filter})\n"
+        ));
+        writable.push(filter);
+    }
     profile.push_str(&format!(
-        "(allow file-write* (subpath {scratch}))\n(deny file-write* (require-not (subpath {scratch})))\n"
+        "(deny file-write* (require-not (require-any {})))\n",
+        writable.join(" ")
     ));
     // The parent reads only the selector as data. The discovery runtime must
     // neither inspect nor execute project manifests, pnpmfiles or helpers.
@@ -360,7 +405,7 @@ fn query_text(program: &Path, cwd: &Path, profile: &str, args: &[&str]) -> Resul
             Ok(Some(status)) if status.success() => break Ok(()),
             Ok(Some(status)) => {
                 break Err(format!(
-                    "offline scratch discovery exited {status}; writes outside private scratch and network are disabled"
+                    "offline scratch discovery exited {status}; writes outside private scratch and network are disabled (except approved selector locks)"
                 ));
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
@@ -426,7 +471,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("must-not-exist");
         let scratch = private_scratch().unwrap();
-        let profile = discovery_profile(root.path(), scratch.path(), &[]).unwrap();
+        let profile = discovery_profile(root.path(), scratch.path(), &[], &[]).unwrap();
         let result = query(
             Path::new("/usr/bin/touch"),
             scratch.path(),
@@ -436,7 +481,7 @@ mod tests {
         assert!(
             result
                 .unwrap_err()
-                .contains("writes outside private scratch and network are disabled")
+                .contains("writes outside private scratch and network are disabled (except approved selector locks)")
         );
         assert!(!file.exists());
     }
@@ -450,7 +495,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let scratch = private_scratch().unwrap();
-        let profile = discovery_profile(root.path(), scratch.path(), &[]).unwrap();
+        let profile = discovery_profile(root.path(), scratch.path(), &[], &[]).unwrap();
         assert!(
             query(
                 Path::new("/usr/bin/curl"),
@@ -507,12 +552,67 @@ mod tests {
         assert!(validate_operation_locks(&root.path().join("absent"), uid).is_ok());
     }
 
+    // Catches: a lock exception opens its parent, sibling engine data, or
+    // file contents instead of only lock creation/mode in the two namespaces.
+    #[test]
+    fn selector_lock_profile_keeps_neighbors_and_data_writes_denied() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = private_scratch().unwrap();
+        let locks = [
+            root.path().join("operation"),
+            root.path().join("engine/tmp/engine-locks"),
+        ];
+        for path in &locks {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let profile =
+            discovery_profile(&root.path().join("project"), scratch.path(), &[], &locks).unwrap();
+        for path in &locks {
+            let file = path.join("test.lock");
+            query_text(
+                Path::new("/usr/bin/touch"),
+                scratch.path(),
+                &profile,
+                &[file.to_str().unwrap()],
+            )
+            .unwrap();
+            assert!(file.exists());
+        }
+        for path in [
+            root.path().join("neighbor"),
+            root.path().join("engine/tmp/neighbor"),
+            root.path().join("engine/index.db"),
+        ] {
+            assert!(
+                query_text(
+                    Path::new("/usr/bin/touch"),
+                    scratch.path(),
+                    &profile,
+                    &[path.to_str().unwrap()]
+                )
+                .is_err()
+            );
+            assert!(!path.exists());
+        }
+        let file = locks[0].join("test.lock");
+        assert!(
+            query_text(
+                Path::new("/bin/sh"),
+                scratch.path(),
+                &profile,
+                &["-c", &format!("printf forbidden > '{}'", file.display())]
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(file).unwrap(), b"");
+    }
+
     // Catches: fail-closed discovery rejects a valid read-only query as well.
     #[test]
     fn readonly_discovery_accepts_an_absolute_reported_path() {
         let root = tempfile::tempdir().unwrap();
         let scratch = private_scratch().unwrap();
-        let profile = discovery_profile(root.path(), scratch.path(), &[]).unwrap();
+        let profile = discovery_profile(root.path(), scratch.path(), &[], &[]).unwrap();
         assert_eq!(
             query(
                 Path::new("/bin/echo"),
@@ -538,7 +638,7 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o700
         );
-        let profile = discovery_profile(project.path(), &path, &[]).unwrap();
+        let profile = discovery_profile(project.path(), &path, &[], &[]).unwrap();
         query_text(Path::new("/usr/bin/touch"), &path, &profile, &["probe"]).unwrap();
         assert!(path.join("probe").exists());
         assert!(

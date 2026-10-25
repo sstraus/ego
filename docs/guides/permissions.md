@@ -173,7 +173,10 @@ On macOS, admission reads the project's exact pnpm pin as data, checks the
 installed runtime version, then queries `with <exact version> store path` and
 `with <exact version> root -g`. Without a selector it queries the installed
 version. These child processes run from a fresh private scratch directory, not
-the project. Only that scratch directory is writable; it is removed afterward.
+the project. The scratch directory is writable and is removed afterward. Before executing pnpm,
+admission also resolves two selector-lock namespaces: the current-UID operation
+locks and the operator pnpm home's `package-manager-store/v11/tmp/engine-locks`.
+Discovery permits only lock creation and mode changes there, not parent/store writes.
 Project reads/execution and all network access are denied. Each child has a
 two-second limit. A pin unavailable under this offline, scratch-only contract
 warns with the installed and project versions and adds no query-derived roots.
@@ -187,7 +190,7 @@ The recorded macOS runtime also needs its current-user operation-lock directory,
 `/private/tmp/pnpm-store-operation-locks-<UID>`. Only that namespace is admitted,
 not the shared temporary directory. An existing alias, non-directory, foreign
 owner or group/other permission bits refuse the discovered roots. Missing or symlinked engine stores add a perimeter warning,
-not a broad write grant. If pnpm requires writes outside private scratch to answer a query, admission
+not a broad write grant. If pnpm requires writes outside private scratch and those selector locks to answer a query, admission
 adds no query-derived roots and `/config perimeter` reports the declared pnpm
 version and the discovery failure. It does not guess a layout from that version.
 The existing default cache roots remain unchanged.
