@@ -1887,3 +1887,76 @@ fn over_window_compaction_fits_summarizer_instead_of_refusing() {
         Some(&Message::text(Role::User, COMPACTION_PROMPT))
     );
 }
+
+// Catches: private compaction reports an unknown bill for a definitely-unsent
+// failure, or incorrectly waives a possibly-sent failure with missing usage.
+#[test]
+fn compaction_missing_usage_settles_from_delivery_evidence() {
+    use ego_core::budget::{PricingQuote, ResolvedRates, SettlementSource};
+    use ego_core::cost::{CostAttribution, PricingRevision, RateSource};
+
+    for delivery in [
+        DeliveryCertainty::DefinitelyUnsent,
+        DeliveryCertainty::PossiblySent,
+    ] {
+        let (mut profile, _) = compaction_profile(
+            "summary",
+            ThinkingLevel::Low,
+            32_000,
+            4096,
+            false,
+            vec![
+                AiEvent::DeliveryObserved(delivery),
+                AiEvent::Error {
+                    message: "connection failed".to_string(),
+                    kind: ErrorKind::Invalid,
+                },
+                AiEvent::Stop(StopReason::Error),
+            ],
+        );
+        profile.metering = Metering::Currency {
+            settlement: SettlementSource::Quote,
+        };
+        let rate = Some("0.000001".parse::<Amount>().unwrap());
+        profile.rates = Some(ResolvedRates {
+            source: RateSource::Operator,
+            quote: PricingQuote {
+                web_search: None,
+                revision: PricingRevision("compaction-delivery-test".to_string()),
+                currency: CurrencyCode::new("USD").unwrap(),
+                uncached_input: rate,
+                cache_read: rate,
+                cache_write: rate,
+                cache_write_extended: rate,
+                output: rate,
+            },
+        });
+        let source = CompactionSource::new([(GenerationRole::Compaction, Ok(profile))]);
+        let (mut turn, store, _) = compaction_turn(source);
+        assert!(futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).is_err());
+        let events = store.events();
+        let charges: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::UsageUpdated { cost_delta, .. } => Some(cost_delta),
+                _ => None,
+            })
+            .collect();
+        let expected = if delivery == DeliveryCertainty::DefinitelyUnsent {
+            CostDelta::free(
+                CurrencyCode::new("USD").unwrap(),
+                CostAttribution::DefinitelyUnsent,
+            )
+        } else {
+            CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage)
+        };
+        assert_eq!(charges, vec![&expected], "{delivery:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::AttemptSettled { .. }))
+                .count(),
+            1
+        );
+    }
+}

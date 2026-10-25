@@ -1025,3 +1025,47 @@ fn tool_catalogue_digest_mismatch_is_refused() {
     });
     assert!(opened.writer.write(record.key(), record).is_err());
 }
+
+// Catches: one strict-decoder failure aborts history search or leaves stale hits
+// instead of returning readable sessions and naming the unreadable session.
+#[test]
+fn history_search_skips_and_reports_unsupported_capabilities_session() {
+    let root = tempdir().unwrap();
+    let unreadable = SessionId::new();
+    let readable = SessionId::new();
+    let mut wire = serde_json::to_value(SessionEntry::Evidence(
+        EvidenceRecord::GenerationAdmission(generation(
+            unreadable,
+            RunInvocationId::new(),
+            AttemptRef::first(GenerationId::new()),
+        )),
+    ))
+    .unwrap();
+    wire["evidence"]["capabilities"]["schema_version"] = json!(5);
+    let log = write_evidence_log(root.path(), unreadable, &[wire]);
+    let original = std::fs::read(&log).unwrap();
+    let store = std::sync::Arc::new(JsonlStore::new(root.path(), "/workspace", Box::new(OsIo)));
+    let mut prompt = generation_started(AttemptRef::first(GenerationId::new()));
+    prompt.kind = EventKind::UserPrompt {
+        text: "history-readable".to_owned(),
+        images: Vec::new(),
+        audio: Vec::new(),
+        queued_prompt: None,
+    };
+    store.append(&readable, &prompt).unwrap();
+    for _ in 0..2 {
+        let output = store.history().search("history-readable").unwrap();
+        assert!(output.len() <= 1024);
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["hits"][0]["id"], readable.to_string());
+        assert_eq!(result["unreadable"][0]["id"], unreadable.to_string());
+        assert!(
+            result["unreadable"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported capabilities schema 5")
+        );
+        assert_eq!(result["omitted_unreadable"], 0);
+    }
+    assert_eq!(std::fs::read(&log).unwrap(), original);
+}

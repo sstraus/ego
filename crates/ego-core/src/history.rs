@@ -39,7 +39,7 @@ impl HistoryTool {
         let (name, description, field, format) = match self {
             Self::Search => (
                 "history.search",
-                "Search prior conversations across workspace roots; returns titles, dates and snippets in at most 1 KiB",
+                "Search prior conversations across workspace roots; returns JSON hits (titles, dates, snippets), unreadable sessions and omitted_unreadable count in at most 1 KiB",
                 "query",
                 None,
             ),

@@ -43,6 +43,20 @@ pub struct HistoryHit {
     pub snippet: String,
 }
 
+/// A session omitted because its authoritative log cannot be read.
+#[derive(Debug, Serialize)]
+struct UnreadableSession {
+    id: SessionId,
+    error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResult {
+    hits: Vec<HistoryHit>,
+    unreadable: Vec<UnreadableSession>,
+    omitted_unreadable: usize,
+}
+
 /// One store-owned derived index. Connections never survive the file lock.
 #[derive(Clone)]
 pub struct HistoryIndex {
@@ -56,6 +70,10 @@ impl HistoryIndex {
 
     /// Search all catalogue roots. Callers can map ids back to SessionMeta.
     pub fn matches(&self, query: &str) -> Result<Vec<HistoryHit>, HistoryError> {
+        self.search_result(query).map(|result| result.hits)
+    }
+
+    fn search_result(&self, query: &str) -> Result<SearchResult, HistoryError> {
         let query = query
             .split_whitespace()
             .filter(|term| term.chars().any(char::is_alphanumeric))
@@ -63,9 +81,13 @@ impl HistoryIndex {
             .collect::<Vec<_>>()
             .join(" AND ");
         if query.is_empty() {
-            return Ok(Vec::new());
+            return Ok(SearchResult {
+                hits: Vec::new(),
+                unreadable: Vec::new(),
+                omitted_unreadable: 0,
+            });
         }
-        self.with_index(|connection| {
+        self.with_index(|connection, unreadable| {
             let mut statement = connection.prepare(
                 "SELECT id, title, updated, snippet(history, -1, '', '', '…', 20) FROM history
                  WHERE history MATCH ?1 ORDER BY rank, updated DESC, id LIMIT 50",
@@ -91,25 +113,43 @@ impl HistoryIndex {
                     snippet,
                 });
             }
-            Ok(hits)
+            Ok(SearchResult {
+                hits,
+                unreadable,
+                omitted_unreadable: 0,
+            })
         })
     }
 
     /// Model-facing JSON always fits one KiB, including punctuation and escaping.
     pub fn search(&self, query: &str) -> Result<String, HistoryError> {
-        let mut selected = Vec::new();
-        for mut hit in self.matches(query)? {
-            hit.title = bounded(&hit.title, 60).to_owned();
-            hit.snippet = bounded(&hit.snippet, 80).to_owned();
-            selected.push(hit);
-            let encoded = serde_json::to_string(&selected)
-                .map_err(|error| HistoryError(error.to_string()))?;
-            if encoded.len() > 1024 {
-                selected.pop();
+        let result = self.search_result(query)?;
+        let mut selected = SearchResult {
+            hits: Vec::new(),
+            unreadable: Vec::new(),
+            omitted_unreadable: result.unreadable.len(),
+        };
+        // Keep room for readable hits even when many sessions are unreadable.
+        for mut unreadable in result.unreadable {
+            unreadable.error = bounded(&unreadable.error, 240).to_owned();
+            selected.unreadable.push(unreadable);
+            selected.omitted_unreadable -= 1;
+            if encode(&selected)?.len() > 512 {
+                selected.unreadable.pop();
+                selected.omitted_unreadable += 1;
                 break;
             }
         }
-        serde_json::to_string(&selected).map_err(|error| HistoryError(error.to_string()))
+        for mut hit in result.hits {
+            hit.title = bounded(&hit.title, 60).to_owned();
+            hit.snippet = bounded(&hit.snippet, 80).to_owned();
+            selected.hits.push(hit);
+            if encode(&selected)?.len() > 1024 {
+                selected.hits.pop();
+                break;
+            }
+        }
+        encode(&selected)
     }
 
     /// Opening bypasses the index and reads only this session's conversation.
@@ -161,7 +201,7 @@ impl HistoryIndex {
 
     fn with_index<T>(
         &self,
-        action: impl FnOnce(&Connection) -> Result<T, HistoryError>,
+        action: impl FnOnce(&Connection, Vec<UnreadableSession>) -> Result<T, HistoryError>,
     ) -> Result<T, HistoryError> {
         let parent = self
             .path
@@ -188,8 +228,8 @@ impl HistoryIndex {
             "CREATE VIRTUAL TABLE IF NOT EXISTS history USING fts5(
              id UNINDEXED, title, summary, conversation, updated UNINDEXED, source_key UNINDEXED);",
         )?;
-        self.refresh(&mut connection)?;
-        action(&connection)
+        let unreadable = self.refresh(&mut connection)?;
+        action(&connection, unreadable)
     }
 
     fn connect(&self) -> rusqlite::Result<Connection> {
@@ -216,7 +256,7 @@ impl HistoryIndex {
         Ok(connection)
     }
 
-    fn refresh(&self, connection: &mut Connection) -> Result<(), HistoryError> {
+    fn refresh(&self, connection: &mut Connection) -> Result<Vec<UnreadableSession>, HistoryError> {
         let root = self
             .path
             .parent()
@@ -230,6 +270,7 @@ impl HistoryIndex {
         };
         let transaction = connection.transaction()?;
         let mut present = HashSet::new();
+        let mut unreadable = Vec::new();
         for directory in directories {
             let Some(id) = directory
                 .file_name()
@@ -252,15 +293,33 @@ impl HistoryIndex {
             if cached.get(&key) == Some(&source_key) {
                 continue;
             }
-            let Some(meta) = self
-                .store
-                .lifecycle_meta(id)
-                .map_err(|error| HistoryError(error.to_string()))?
-            else {
-                present.remove(&key);
-                continue;
+            let session = (|| {
+                let meta = self
+                    .store
+                    .lifecycle_meta(id)
+                    .map_err(|error| HistoryError(error.to_string()))?;
+                let Some(meta) = meta else {
+                    return Ok(None);
+                };
+                let conversation = self.conversation(id)?;
+                Ok::<_, HistoryError>(Some((meta, conversation)))
+            })();
+            let (meta, (conversation, deleted)) = match session {
+                Ok(Some(session)) => session,
+                Ok(None) => {
+                    present.remove(&key);
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(session = %id, %error, "history skipped unreadable session");
+                    unreadable.push(UnreadableSession {
+                        id,
+                        error: error.to_string(),
+                    });
+                    present.remove(&key);
+                    continue;
+                }
             };
-            let (conversation, deleted) = self.conversation(id)?;
             transaction.execute("DELETE FROM history WHERE id=?1", [&key])?;
             if deleted {
                 continue;
@@ -273,8 +332,12 @@ impl HistoryIndex {
             transaction.execute("DELETE FROM history WHERE id=?1", [id])?;
         }
         transaction.commit()?;
-        Ok(())
+        Ok(unreadable)
     }
+}
+
+fn encode(result: &SearchResult) -> Result<String, HistoryError> {
+    serde_json::to_string(result).map_err(|error| HistoryError(error.to_string()))
 }
 
 fn is_corrupt(error: &rusqlite::Error) -> bool {
