@@ -107,6 +107,45 @@ fn judge_cache_binds_task_authority_not_only_action_identity() {
     assert_eq!(key("Commit the fix"), key("Commit the fix"));
 }
 
+// Catches: restoring the initial task silently discards an intervening authority revocation.
+#[test]
+fn later_steer_does_not_resurrect_commit_authority_revoked_by_an_earlier_steer() {
+    let turn = TurnId::new();
+    let mut seq = Seq::default();
+    let events = [
+        "Inspect and commit the fix",
+        "Do not commit until I approve the diff",
+        "Also check the tests",
+    ]
+    .into_iter()
+    .map(|text| DomainEvent {
+        env: Envelope {
+            seq: seq.next(),
+            id: EventId::new(),
+            turn,
+            item: Some(ItemId::new()),
+            parent: None,
+            ts: Timestamp::from_millis(1_787_000_000_000),
+            producer: Producer::Main,
+        },
+        kind: EventKind::UserPrompt {
+            text: text.into(),
+            images: vec![],
+            audio: vec![],
+            queued_prompt: None,
+        },
+    });
+    let state = SessionState::replay(events);
+    let context = JudgeTaskContext::from_state(&state, turn, vec![]);
+    let call = support::judge_call(&["git".into(), "commit".into()]);
+    let request = support::judge_request(&call, &context);
+    let text = serde_json::to_string(&request.messages).unwrap();
+    assert!(
+        text.contains("Do not commit until I approve the diff"),
+        "judge lost the still-effective authority revocation: {text}"
+    );
+}
+
 // Catches: a steer replaces the task or host context is mistaken for user authority.
 #[test]
 fn same_turn_steer_retains_original_task_with_latest_user_precedence() {

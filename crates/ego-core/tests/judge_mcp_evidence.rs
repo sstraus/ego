@@ -58,6 +58,24 @@ fn mcp_evidence_redacts_nested_secrets_and_retains_only_boolean_hints() {
     }
 }
 
+// Catches: credentials inside a serialized JSON request body leave the machine for judging.
+#[test]
+fn mcp_serialized_json_body_does_not_disclose_password_to_judge() {
+    let call = mcp_call(json!({
+        "tool_name": "http_request",
+        "arguments": {
+            "method": "POST",
+            "body": r#"{"username":"fixture-user","password":"fixture-private-password"}"#
+        }
+    }));
+    let request = support::judge_request(&call, &JudgeTaskContext::default());
+    let text = serde_json::to_string(&request.messages).unwrap();
+    assert!(
+        !text.contains("fixture-private-password"),
+        "serialized JSON credential leaked to judge: {text}"
+    );
+}
+
 // Catches: oversized or deeply nested arguments are silently presented as complete.
 #[test]
 fn mcp_evidence_marks_truncation_and_bounds_parameter_disclosure() {
