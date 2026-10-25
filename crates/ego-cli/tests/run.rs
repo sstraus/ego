@@ -15,11 +15,6 @@ use support::{
     Ego as HarnessEgo, Places as HarnessPlaces, Plan, Reply, Stub, costing, paced, text, tool_call,
 };
 
-#[cfg(not(windows))]
-const HOSTS_PATH: &str = "/etc/hosts";
-#[cfg(windows)]
-const HOSTS_PATH: &str = r"C:\Windows\System32\drivers\etc\hosts";
-
 /// This suite isolates the CLI/provider contract from host sandbox
 /// availability. Step 14's dedicated sandbox contract owns the workspace
 /// default, capability probing, and fail-closed behavior.
@@ -1678,22 +1673,24 @@ fn the_session_flags_are_a_mutually_exclusive_group() {
 }
 
 /// Exit 3, reached the only way a headless run can reach it: a tool asked for
-/// something the policy will not grant, and there is nobody to ask (a write
-/// outside the workspace: a refused read goes back to the model instead,
-/// regression case). This is
+/// permission to write inside the workspace, and there is nobody to ask.
+/// Boundary refusals instead return to the model (regression case). This is
 /// also §4.4's proof — the process is given no stdin at all, so a run that
 /// prompted would hang here and the test would never finish.
 #[test]
 fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
+    let places = Places::new();
+    let target = places.0.file("unchanged.txt", "original");
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(tool_call(
             "call_a",
             "write",
-            &serde_json::json!({ "path": HOSTS_PATH, "contents": "x" }).to_string(),
+            &serde_json::json!({ "path": target, "contents": "x" }).to_string(),
         ))],
         ..Plan::default()
     });
-    let finished = Ego::against(&stub)
+    let finished = places
+        .ego(&stub)
         .args([
             "--model",
             "ollama/qwen3",
@@ -1704,6 +1701,8 @@ fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
         .run();
 
     assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
+    assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    assert_eq!(stub.generations().len(), 1);
     assert!(
         finished.stderr.contains("permission"),
         "{}",

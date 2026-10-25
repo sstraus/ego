@@ -14432,6 +14432,12 @@ mod turn {
                     ),
                     AiEvent::Stop(StopReason::ToolUse),
                 ],
+                vec![
+                    AiEvent::TextDelta {
+                        text: "The boundary refused the child write.".into(),
+                    },
+                    AiEvent::Stop(StopReason::Stop),
+                ],
                 vec![AiEvent::Stop(StopReason::Stop)],
             ]));
             let (exit, state) = run_tasks(&fx, &generator, CancelToken::new(), None);
@@ -14442,7 +14448,15 @@ mod turn {
                 .values()
                 .find(|i| i.tool_name.as_deref() == Some("task"))
                 .unwrap();
-            assert_eq!(task.ok, Some(false));
+            assert_eq!(task.ok, Some(true));
+            assert_eq!(generator.calls().len(), 4);
+            assert_eq!(
+                fx.fs.read(&CanonPath::new("/outside/stolen")).unwrap(),
+                b"original"
+            );
+            let child_continuation = serde_json::to_string(&generator.calls()[2]).unwrap();
+            assert!(child_continuation.contains("escape"));
+            assert!(child_continuation.contains("outside"));
             assert!(
                 state
                     .items

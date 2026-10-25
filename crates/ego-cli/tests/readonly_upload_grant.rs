@@ -80,14 +80,17 @@ fn grant_is_read_only() {
         exec_result.contains(refusal),
         "exec must return a refusal: {exec_result}"
     );
-    // A valid denied write stops the CLI with permission-refused exit 3; it
-    // runs separately from the execution check above.
+    // A boundary-denied write returns to the model without changing the upload;
+    // it runs separately from the execution check above.
     let write_stub = Stub::start(Plan {
-        completions: vec![call(
-            "write_upload",
-            "write",
-            json!({"path": source, "contents": "OVERWRITTEN"}),
-        )],
+        completions: vec![
+            call(
+                "write_upload",
+                "write",
+                json!({"path": source, "contents": "OVERWRITTEN"}),
+            ),
+            Reply::Sse(text("The upload remains read-only.")),
+        ],
         ..Plan::default()
     });
     let denied = places
@@ -98,12 +101,13 @@ fn grant_is_read_only() {
             "Try writing upload",
         ])
         .run();
-    assert_eq!(denied.code, Some(3), "{}", denied.stderr);
-    assert!(
-        denied.stderr.contains("inside a read-only root"),
-        "{}",
-        denied.stderr
-    );
+    assert_eq!(denied.code, Some(0), "{}", denied.stderr);
+    assert!(denied.stdout.contains("The upload remains read-only."));
+    let generations = write_stub.generations();
+    assert_eq!(generations.len(), 2);
+    let refusal = generations[1].to_string();
+    assert!(refusal.contains("inside a read-only root"), "{refusal}");
+    assert!(refusal.contains("write_upload"), "{refusal}");
     assert_eq!(std::fs::read(&source).unwrap(), b"UPLOAD-READ-CONTENT");
 }
 
@@ -145,6 +149,7 @@ fn nested_launch_grant_starts_and_preserves_builtin_read_only_authority() {
                     "write",
                     json!({"path": source, "contents": "OVERWRITTEN"}),
                 ),
+                Reply::Sse(text("The nested upload remains read-only.")),
             ],
             ..Plan::default()
         });
@@ -158,15 +163,20 @@ fn nested_launch_grant_starts_and_preserves_builtin_read_only_authority() {
             .run();
         assert_eq!(
             finished.code,
-            Some(3),
+            Some(0),
             "{sandbox} external={external_root}: {}",
             finished.stderr
         );
         assert!(
-            finished.stderr.contains("inside a read-only root"),
-            "{}",
-            finished.stderr
+            finished
+                .stdout
+                .contains("The nested upload remains read-only.")
         );
+        let generations = stub.generations();
+        assert_eq!(generations.len(), 4);
+        let refusal = generations[3].to_string();
+        assert!(refusal.contains("inside a read-only root"), "{refusal}");
+        assert!(refusal.contains("write_upload"), "{refusal}");
         assert!(stub.generations()[2].to_string().contains("NESTED-UPLOAD"));
         assert_eq!(std::fs::read(&source).unwrap(), b"NESTED-UPLOAD");
         assert_eq!(std::fs::read(&sibling).unwrap(), b"SIBLING-WRITE");
