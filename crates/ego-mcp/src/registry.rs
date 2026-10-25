@@ -235,7 +235,7 @@ pub trait McpCandidateAdmission: Send + Sync {
 pub enum McpCandidateError {
     CredentialRequired,
     ExecutableDenied {
-        path: ego_core::permit::CanonPath,
+        denial: ego_core::permit::ExecutableDenial,
     },
     Invalid {
         cause: String,
@@ -262,7 +262,7 @@ struct CandidateFailure {
     failure: McpFailure,
     authorization: Option<CandidateAuthorizationFailure>,
     detail: Option<String>,
-    denied_executable: Option<ego_core::permit::CanonPath>,
+    denied_executable: Option<ego_core::permit::ExecutableDenial>,
 }
 
 struct CandidateAuthorizationFailure {
@@ -284,8 +284,8 @@ impl CandidateFailure {
     fn admission(error: McpCandidateError) -> Self {
         match error {
             McpCandidateError::CredentialRequired => Self::materialization(McpFailure::Credential),
-            McpCandidateError::ExecutableDenied { path } => Self {
-                denied_executable: Some(path),
+            McpCandidateError::ExecutableDenied { denial } => Self {
+                denied_executable: Some(denial),
                 ..Self::materialization(McpFailure::Authority)
             },
             McpCandidateError::Invalid { cause } => Self {
@@ -315,11 +315,11 @@ impl CandidateFailure {
 
     /// Public diagnostics contain a fixed classification or a typed host path.
     fn diagnostic_message(&self) -> String {
-        if let Some(path) = &self.denied_executable {
-            // Only host-observed image identity is public. Never publish child
+        if let Some(denial) = &self.denied_executable {
+            // Only host-observed image and policy root paths are public. Never publish child
             // stderr, command arguments, environment values or raw causes.
             return ego_core::permit::TransportError::definitely_unsent(
-                ego_core::permit::TransportFailure::ExecutableDenied(path.clone()),
+                ego_core::permit::TransportFailure::ExecutableDenied(denial.clone()),
             )
             .to_string();
         }

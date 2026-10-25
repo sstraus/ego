@@ -364,7 +364,9 @@ fn invalid_candidate(cause: impl Into<String>) -> McpCandidateError {
 
 fn candidate_error(error: crate::McpError) -> McpCandidateError {
     match error.denied_executable() {
-        Some(path) => McpCandidateError::ExecutableDenied { path: path.clone() },
+        Some(denial) => McpCandidateError::ExecutableDenied {
+            denial: denial.clone(),
+        },
         None => invalid_candidate(error.to_string()),
     }
 }

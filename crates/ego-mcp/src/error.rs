@@ -1,5 +1,5 @@
 use ego_core::generator::attempt::DeliveryCertainty;
-use ego_core::permit::{CanonPath, TransportError, TransportFailure};
+use ego_core::permit::{ExecutableDenial, TransportError, TransportFailure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpFailure {
@@ -19,7 +19,7 @@ pub struct McpError {
     failure: McpFailure,
     message: String,
     delivery: Option<DeliveryCertainty>,
-    denied_executable: Option<CanonPath>,
+    denied_executable: Option<ExecutableDenial>,
 }
 
 impl McpError {
@@ -45,7 +45,7 @@ impl McpError {
         }
     }
 
-    pub(crate) fn denied_executable(&self) -> Option<&CanonPath> {
+    pub(crate) fn denied_executable(&self) -> Option<&ExecutableDenial> {
         self.denied_executable.as_ref()
     }
 
@@ -70,8 +70,8 @@ impl From<TransportError> for McpError {
     fn from(error: TransportError) -> Self {
         let delivery = error.delivery();
         let mut result = Self::with_delivery(McpFailure::Transport, error.to_string(), delivery);
-        if let TransportFailure::ExecutableDenied(path) = error.failure() {
-            result.denied_executable = Some(path.clone());
+        if let TransportFailure::ExecutableDenied(denial) = error.failure() {
+            result.denied_executable = Some(denial.clone());
         }
         result
     }

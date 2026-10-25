@@ -319,7 +319,10 @@ so a tool outside the exec perimeter is found but its execution is denied. This
 metadata grant does not permit file contents, directory listing, writes, or execution.
 A declared MCP server does not add exec authority. If its executable is outside
 the perimeter, startup names its canonical path and asks you to add that exact path
-to `exec_paths`, then exit and resume. MCP diagnostics do not expose child stderr,
+to `exec_paths`, then exit and resume. If a read-only root denies execution, startup
+names that root instead: change or remove its read-only restriction, then exit and
+resume. Adding `exec_paths` cannot override a read-only root, including under
+adaptive confinement. MCP diagnostics do not expose child stderr,
 arguments, or environment values.
 On macOS an installed `/opt/homebrew` is also a default runtime root, including
 its `bin` symlinks, Cellar targets and libraries. Other installation prefixes

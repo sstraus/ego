@@ -1315,8 +1315,8 @@ pub struct TransportError {
 pub enum TransportFailure {
     AuthoritySpent,
     AuthorityMismatch,
-    /// A host-observed executable lies outside the active sandbox exec perimeter.
-    ExecutableDenied(CanonPath),
+    /// A host-observed executable is refused by the active sandbox policy.
+    ExecutableDenied(ExecutableDenial),
     Offline,
     Resolution(String),
     InvalidRequest(String),
@@ -1325,6 +1325,34 @@ pub enum TransportFailure {
     ResponseBody(String),
     Cancelled,
     TimedOut,
+}
+
+/// Host-observed execution refusal, including the policy restriction to change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutableDenial {
+    OutsidePerimeter { path: CanonPath },
+    ReadOnlyRoot { path: CanonPath, root: CanonPath },
+}
+
+impl fmt::Display for ExecutableDenial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let word = |path: &CanonPath| {
+            crate::permit::terminal_text::shell_word(&path.as_path().to_string_lossy())
+        };
+        match self {
+            Self::OutsidePerimeter { path } => write!(
+                f,
+                "sandbox denies execution of {}; add this exact canonical path to exec_paths in ego config edit, then exit and resume",
+                word(path)
+            ),
+            Self::ReadOnlyRoot { path, root } => write!(
+                f,
+                "sandbox denies execution of {} inside read-only root {}; change or remove its read-only restriction in ego config edit, then exit and resume",
+                word(path),
+                word(root)
+            ),
+        }
+    }
 }
 
 impl TransportError {
@@ -1357,12 +1385,8 @@ fn authority_mismatch() -> TransportError {
 
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let TransportFailure::ExecutableDenied(path) = &self.failure {
-            return write!(
-                f,
-                "sandbox denies execution of {}; add this exact canonical path to exec_paths in ego config edit, then exit and resume",
-                crate::permit::terminal_text::shell_word(&path.as_path().to_string_lossy())
-            );
+        if let TransportFailure::ExecutableDenied(denial) = &self.failure {
+            return denial.fmt(f);
         }
         write!(
             f,

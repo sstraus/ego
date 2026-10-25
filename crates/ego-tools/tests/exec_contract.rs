@@ -4746,6 +4746,44 @@ fn workspace_mcp_executable_outside_perimeter_reports_denied_path() {
     });
 }
 
+// Catches: read-root MCP denial recommends exec_paths, which cannot override the root.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_mcp_read_root_denial_names_effective_remedy() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let workspace = cwd();
+    let (_keep, tools, executable) = script_dir("exec /bin/cat");
+    for level in [Confinement::Workspace, Confinement::Adaptive] {
+        for exec_paths in [vec![], vec![CanonPath::new(&executable)]] {
+            let policy = ego_tools::exec::admit_confinement(level, false, workspace.clone())
+                .unwrap()
+                .with_roots(vec![ProfileRoot::new(tools.clone(), RootAccess::Read)])
+                .with_exec_paths(exec_paths);
+            let run = open_policy(policy, 1024 * 1024, 1024).unwrap();
+            let error = match block_on(run.ports.duplex().spawn(script_spec(
+                &executable,
+                &[],
+                workspace.as_path(),
+            ))) {
+                Err(error) => error,
+                Ok(child) => {
+                    block_on(child.interrupt());
+                    panic!("read-only root did not refuse MCP execution under {level:?}");
+                }
+            };
+            let message = error.to_string();
+            assert!(message.contains(executable.to_str().unwrap()), "{message}");
+            assert!(
+                message.contains(tools.as_path().to_str().unwrap()),
+                "{message}"
+            );
+            assert!(message.contains("read-only root"), "{message}");
+            assert!(message.contains("change or remove"), "{message}");
+            assert!(!message.contains("exec_paths"), "{message}");
+        }
+    }
+}
+
 // Catches: the workspace profile hides PATH candidates instead of denying their execution.
 #[cfg(target_os = "macos")]
 #[test]

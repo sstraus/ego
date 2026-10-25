@@ -929,16 +929,26 @@ async fn spawn_duplex(
         && !identity.files.is_empty()
         && context.confinement.level() != ego_core::permit::Confinement::Off
     {
-        let read_only = context.confinement.roots().iter().any(|root| {
+        let denial = if let Some(root) = context.confinement.roots().iter().find(|root| {
             root.access() == ego_core::permit::RootAccess::Read
                 && identity.target.is_or_under(root.path())
-        });
-        if read_only
-            || !super::setup_exec_reachable(&context.confinement, &identity.target)
-                .map_err(process_before_spawn)?
+        }) {
+            Some(ego_core::permit::ExecutableDenial::ReadOnlyRoot {
+                path: identity.target.clone(),
+                root: root.path().clone(),
+            })
+        } else if !super::setup_exec_reachable(&context.confinement, &identity.target)
+            .map_err(process_before_spawn)?
         {
+            Some(ego_core::permit::ExecutableDenial::OutsidePerimeter {
+                path: identity.target.clone(),
+            })
+        } else {
+            None
+        };
+        if let Some(denial) = denial {
             return Err(TransportError::definitely_unsent(
-                TransportFailure::ExecutableDenied(identity.target.clone()),
+                TransportFailure::ExecutableDenied(denial),
             ));
         }
     }
