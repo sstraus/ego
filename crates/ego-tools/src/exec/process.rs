@@ -1887,42 +1887,78 @@ mod sandbox_question_tests {
         assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
     }
 
-    /// Catches: merging sandbox questions with detached execution loses the
-    /// command's cancellation token and leaves an unanswered question running.
+    /// Catches: treating every per-call token as background authority drops
+    /// foreground questions, or cancellation leaves an unanswered question open.
     #[test]
-    fn a_cancelled_detached_exec_does_not_wait_for_a_sandbox_answer() {
+    fn a_cancelled_foreground_promotable_exec_does_not_wait_for_a_sandbox_answer() {
         let rig = rig(Arc::new(Widening), true);
-        let executor = super::super::GuardedExec::new(Arc::new(rig.context));
-        use ego_core::permit::ProcessExecutor as _;
-        let id = DetachedExecId::new();
-        block_on(executor.start_background(id, &rig.spec)).expect("start detached exec");
-        block_on(async {
+        let context = Arc::new(rig.context);
+        let outcome = block_on(async {
             tokio::time::timeout(Duration::from_secs(10), async {
-                while rig.seat.asked.load(Ordering::SeqCst) == 0 {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-                executor
-                    .cancel_background(id)
-                    .expect("cancel detached exec");
-                loop {
-                    let status = executor.background_status(id).expect("detached status");
-                    if let Some(outcome) = status.outcome {
-                        assert!(
-                            matches!(outcome, DetachedExecOutcome::Cancelled),
-                            "{outcome:?}"
-                        );
-                        break;
+                let cancel_call = async {
+                    while rig.seat.asked.load(Ordering::SeqCst) == 0 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
+                    let id = context.foreground_exec().expect("still foreground");
+                    context
+                        .cancel_background(id)
+                        .expect("cancel per-call token");
+                };
+                let (outcome, ()) =
+                    tokio::join!(context.execute_promotable(&context, &rig.spec), cancel_call,);
+                outcome
             })
             .await
-            .expect("cancel must settle without a sandbox answer");
+            .expect("cancel must settle without a sandbox answer")
         });
+        assert!(
+            matches!(outcome, Err(ProcessError::Cancelled)),
+            "{outcome:?}"
+        );
         assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
         assert!(
             !rig.cancel.is_cancelled(),
             "command cancellation must not cancel the run"
         );
+    }
+
+    /// Catches: an explicitly background exec inherits terminal grant authority
+    /// and waits for a human answer instead of settling its denied child.
+    #[test]
+    fn an_explicit_background_exec_never_asks_for_sandbox_authority() {
+        let rig = rig(Arc::new(Widening), true);
+        let executor = super::super::GuardedExec::new(Arc::new(rig.context));
+        use ego_core::permit::ProcessExecutor as _;
+        let id = DetachedExecId::new();
+        block_on(executor.start_background(id, &rig.spec)).expect("start detached exec");
+        let outcome = block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(outcome) = executor
+                        .background_status(id)
+                        .expect("detached status")
+                        .outcome
+                    {
+                        break outcome;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("background denial must settle without an answer")
+        });
+        let DetachedExecOutcome::Exited { code, result } = outcome else {
+            panic!("denied child must exit: {outcome:?}");
+        };
+        assert_eq!(code, 1);
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 0);
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|block| block.text.contains("no one was available")),
+            "{result:?}"
+        );
+        assert!(!rig.cancel.is_cancelled());
     }
 }
