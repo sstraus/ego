@@ -40,11 +40,24 @@ pub(super) fn analyze(
     }
     let stderr = stderr(result);
     let mut first = None;
-    for printed in stderr.lines().filter_map(printed_path) {
-        // Filesystem grants cannot admit a program or its interpreter chain.
-        // Refuse even a proposed write grant on an executable: stderr is only
-        // a hint and must never make an outside-workspace binary writable.
-        if executable(Path::new(printed)) {
+    for line in stderr.lines() {
+        let Some(printed) = printed_path(line) else {
+            continue;
+        };
+        // Mode bits alone do not distinguish reading a script from launching
+        // it. Shell and launcher diagnostics identify execution refusals.
+        let launch_refusal = line.contains(": bad interpreter:")
+            || line.starts_with("sandbox-exec: execvp() of '")
+            || line.split_once(": ").is_some_and(|(program, _)| {
+                matches!(
+                    Path::new(program)
+                        .file_name()
+                        .and_then(|name| name.to_str()),
+                    Some("sh" | "bash" | "zsh" | "dash" | "fish")
+                )
+            })
+            || exec_target(spec).is_some_and(|target| target == Path::new(printed));
+        if launch_refusal && executable(Path::new(printed)) {
             return Some(Denial {
                 printed: printed.to_owned(),
                 request: None,
@@ -205,6 +218,11 @@ fn request_for(
     } else {
         SandboxAccess::Read
     };
+    // A read allowance must never escalate into permission to overwrite an
+    // outside-workspace executable, even when stderr suggests a write.
+    if access == SandboxAccess::Write && executable(path.as_path()) {
+        return None;
+    }
     if granted.iter().any(|grant| grant.covers(&path, access)) {
         // Asked and allowed already: asking again cannot change the outcome.
         return None;

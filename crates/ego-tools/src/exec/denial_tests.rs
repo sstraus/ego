@@ -335,6 +335,12 @@ fn reading_executable_script_still_offers_read_authority() {
         Some(SandboxAccess::Read),
         "reading a script must not be classified as executing it: {denied:?}"
     );
+    let granted = [denied.request.unwrap()];
+    let denied = super::analyze(&spec, &result, &policy, &granted).unwrap();
+    assert!(
+        denied.request.is_none(),
+        "a read allowance must not offer an executable write: {denied:?}"
+    );
 }
 
 fn executable_refusal_fixture(bad_interpreter: bool) {
