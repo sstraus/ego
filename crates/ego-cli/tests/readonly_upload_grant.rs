@@ -71,15 +71,25 @@ fn grant_is_read_only() {
         .find(|message| message["role"] == "tool" && message["tool_call_id"] == "exec_upload")
         .expect("the uploaded executable refusal reaches the next generation")
         .to_string();
-    let refusal = if cfg!(target_os = "macos") {
-        "sandbox denied exec"
+    if cfg!(target_os = "macos") {
+        for expected in [
+            "sandbox exec denied",
+            program.to_str().unwrap(),
+            "read-only root",
+            "forbids execution",
+            "exec_paths cannot override it",
+        ] {
+            assert!(
+                exec_result.contains(expected),
+                "exec refusal must name {expected:?}: {exec_result}"
+            );
+        }
     } else {
-        "error"
-    };
-    assert!(
-        exec_result.contains(refusal),
-        "exec must return a refusal: {exec_result}"
-    );
+        assert!(
+            exec_result.contains("error"),
+            "exec must return a refusal: {exec_result}"
+        );
+    }
     // A boundary-denied write returns to the model without changing the upload;
     // it runs separately from the execution check above.
     let write_stub = Stub::start(Plan {
