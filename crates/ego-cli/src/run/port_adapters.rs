@@ -28,6 +28,7 @@ pub(super) async fn effect_scope(
     cancel: &CancelToken,
     run_deadline: Option<std::time::Instant>,
     residual: Option<Arc<ResidualWriteDesk>>,
+    sandbox_grants: Option<Arc<dyn ego_core::permit::SandboxGrantPort>>,
 ) -> Result<
     (
         Arc<RunEffectPorts>,
@@ -42,7 +43,7 @@ pub(super) async fn effect_scope(
         cancel.clone(),
         run_deadline,
         None,
-        None,
+        sandbox_grants,
         residual,
     )
     .await

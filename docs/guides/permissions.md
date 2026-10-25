@@ -195,6 +195,14 @@ raises that question. Paths inside the workspace, `/`, the home directory, a
 workspace ancestor or a floor never raise one. Under Adaptive a question about a
 path other than the program asks for write access, because reads are already open.
 
+In the native interactive CLI, a separate sandbox prompt names the canonical
+path and requested access. `[y]` grants that access for the current session and
+runs the displayed command again. The retry can repeat earlier side effects.
+The grant applies to later exec calls in the same session, not to a new,
+forked, or compacted session. It does not edit saved roots or permission rules.
+A command approval alone does not grant path access. Unattended sessions have
+no terminal grant seat and remain fail-closed.
+
 ### Sandbox judge for residual writes
 
 `sandbox="adaptive"` with permission mode `auto` and a configured judge lets the

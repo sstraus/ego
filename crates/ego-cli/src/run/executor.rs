@@ -596,10 +596,16 @@ impl CliCompactionCommand {
             retry: 0,
             fallbacks: Vec::new(),
         };
-        let (ports, observation, probe_evidence) =
-            effect_scope(&confinement, active.evidence(), &cancel, run_deadline, None)
-                .await
-                .map_err(compaction_termination)?;
+        let (ports, observation, probe_evidence) = effect_scope(
+            &confinement,
+            active.evidence(),
+            &cancel,
+            run_deadline,
+            None,
+            None,
+        )
+        .await
+        .map_err(compaction_termination)?;
         let fs = &active.checkpoint_fs;
         let sink = NullSink;
         let session = Session {
