@@ -126,8 +126,8 @@ fn history_tools_search_and_open_conversation_from_another_root() {
     assert_eq!(search.len(), 1);
     assert!(search[0].len() <= 1024);
     let hits: serde_json::Value = serde_json::from_str(search[0]).unwrap();
-    assert_eq!(hits[0]["id"], id.to_string());
-    assert_eq!(hits[0]["title"], "ACP trust notes");
+    assert_eq!(hits["hits"][0]["id"], id.to_string());
+    assert_eq!(hits["hits"][0]["title"], "ACP trust notes");
     let opened = results(2);
     let conversation = opened.last().unwrap();
     assert!(conversation.contains("user: acp trust user observation"));
