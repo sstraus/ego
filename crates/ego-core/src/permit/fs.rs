@@ -855,7 +855,26 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
 
     fn search(&self, req: &ScanRequest, matcher: &dyn LineMatcher) -> Result<Found, IoDenied> {
         let admitted = self.admit(req, Permit::allows_search)?;
-        let scan = self.fs.scan(&admitted)?;
+        let scan = match self.fs.scan(&admitted) {
+            Ok(scan) => scan,
+            // Search authority can name one file; list authority still requires
+            // a directory. Keep the same re-resolution and byte budget below.
+            Err(FsError::NotADirectory { path }) if path == admitted.root => {
+                if admitted.limits.max_entries == 0 {
+                    Scan::new(Vec::new(), true)
+                } else {
+                    Scan::new(
+                        vec![Entry {
+                            relative: path.as_path().file_name().unwrap_or_default().into(),
+                            path,
+                            kind: EntryKind::File,
+                        }],
+                        false,
+                    )
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
         self.all_in_scope(&scan.entries, Permit::allows_search)?;
 
         let mut matches = Vec::new();

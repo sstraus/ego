@@ -13,7 +13,7 @@ use super::{note_truncation, only_op, root_of, scan_of, wrong_op};
 pub struct GrepParams {
     /// A regular expression, matched against each line.
     pub query: String,
-    /// The directory to search. Defaults to the working directory.
+    /// The file or directory to search. Defaults to the working directory.
     #[serde(default)]
     pub path: Option<String>,
 }
@@ -83,7 +83,19 @@ impl TypedTool for GrepTool {
                         .path
                         .as_path()
                         .strip_prefix(root.as_path())
-                        .unwrap_or(hit.path.as_path());
+                        .ok()
+                        .filter(|path| !path.as_os_str().is_empty())
+                        .unwrap_or_else(|| {
+                            if hit.path == root {
+                                hit.path
+                                    .as_path()
+                                    .file_name()
+                                    .map(std::path::Path::new)
+                                    .unwrap_or(hit.path.as_path())
+                            } else {
+                                hit.path.as_path()
+                            }
+                        });
                     format!("{}:{}:{}", path.display(), hit.line, hit.text)
                 })
                 .collect();

@@ -6933,6 +6933,75 @@ fn question_session(
     (stub.generations(), after_turn)
 }
 
+// Catches: modal input bypassing slash parsing and consuming a command as an answer.
+#[test]
+fn slash_config_during_a_question_is_not_sent_as_the_answer() {
+    for mode in ["free_text", "single", "multiple"] {
+        let call = serde_json::json!({
+            "prompt": "Keep this question open",
+            "mode": mode,
+            "options": if mode == "free_text" { serde_json::json!([]) } else {
+                serde_json::json!([{"id": "choice", "label": "Keep going"}])
+            },
+            "free_text": mode == "free_text",
+        })
+        .to_string();
+        let (generations, _) = question_session(&call, |input, reader, output| {
+            if mode == "free_text" {
+                until_normalized(reader, output, 0, "Keep this question open\n");
+            } else {
+                until_normalized(
+                    reader,
+                    output,
+                    0,
+                    if mode == "multiple" {
+                        "Space or number toggles"
+                    } else {
+                        "Up/Down or number selects"
+                    },
+                );
+            }
+            let start = output.len();
+            input.write_all(b"/config perimeter\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(reader, output, start, "capabilities");
+            let start = output.len();
+            input.write_all(b"/config missing-section\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(reader, output, start, "usage: /config");
+            let start = output.len();
+            input.write_all(b"/config set budget 1\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(reader, output, start, "unavailable while a question");
+            let answer: &[u8] = match mode {
+                "free_text" => b"actual answer\r",
+                "multiple" => b" \r",
+                _ => b"\r",
+            };
+            input.write_all(answer).unwrap();
+            input.flush().unwrap();
+        });
+        assert_eq!(generations.len(), 2, "{mode}");
+        let answer = match mode {
+            "free_text" => "actual answer",
+            "multiple" => "[\"choice\"]",
+            _ => "choice",
+        };
+        let reply = generations[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == "question")
+            .expect("the question reply reaches the model");
+        assert_eq!(reply["content"], answer, "{mode}");
+        assert_eq!(
+            count_exact_strings(&generations[1], "/config perimeter"),
+            0,
+            "{mode}"
+        );
+    }
+}
+
 /// Waits for the selector to be fully drawn and returns the screen.
 fn selector_screen(reader: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) -> Vec<String> {
     until_from(reader, output, 0, b"Up/Down or number selects");
