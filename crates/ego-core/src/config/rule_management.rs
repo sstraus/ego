@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::permit::rule::{ArgvPattern, Endpoint, PathPattern, Rule, RuleId};
+use crate::permit::shell::SUBCOMMAND_PROGRAMS;
 use crate::permit::{Op, OpName, PreparedCall, RuleAuthority};
 
 use super::{ManagedRuleEffect, OriginSet, RuleSnapshot, Ruleset, Source, SourcedRule};
@@ -229,16 +230,16 @@ impl RuleManagement {
         let mut authorities = Vec::new();
         let mut uncovered = Vec::new();
         for (operation, op) in call.ops().iter().enumerate() {
-            match rules
-                .allow
-                .iter()
-                .find(|entry| entry.rule().matches_allow(op, workspace))
-            {
-                Some(entry) => authorities.push(explained_authority(
-                    operation,
-                    ManagedRuleEffect::Allow,
-                    entry,
-                )),
+            match SourcedRule::allowing(&rules.allow, op, workspace) {
+                Some(entries) => {
+                    for entry in entries {
+                        let authority =
+                            explained_authority(operation, ManagedRuleEffect::Allow, entry);
+                        if !authorities.contains(&authority) {
+                            authorities.push(authority);
+                        }
+                    }
+                }
                 None => uncovered.push(operation),
             }
         }
@@ -260,7 +261,9 @@ impl RuleManagement {
         effect: ManagedRuleEffect,
         workspace: &Path,
     ) -> Result<RememberPlan, RuleManagementError> {
-        Self::plan(call, |op| Self::remember_op(op, effect, workspace))
+        Self::plan(call, |op| {
+            Self::remember_op(op, effect, workspace).map(|row| vec![row])
+        })
     }
 
     /// The rules offered to a human who asks not to be asked again: an argv
@@ -273,26 +276,72 @@ impl RuleManagement {
         effect: ManagedRuleEffect,
         workspace: &Path,
     ) -> Result<RememberPlan, RuleManagementError> {
-        Self::plan(call, |op| Self::suggest_op(op, effect, workspace))
+        Self::plan(call, |op| {
+            if let Op::Spawn { spec } = op
+                && spec.cwd().is_some_and(|cwd| {
+                    cwd.as_path().starts_with(workspace)
+                        && !cwd
+                            .as_path()
+                            .components()
+                            .any(|part| part == std::path::Component::ParentDir)
+                })
+                && let Some(commands) = crate::permit::shell::static_commands(spec.argv())
+            {
+                let commands: Vec<Vec<std::ffi::OsString>> = commands
+                    .into_iter()
+                    .map(|words| words.into_iter().map(Into::into).collect())
+                    .collect();
+                // Only offer decomposition when a named action can actually be
+                // generalized. Other shells retain the existing exact preview.
+                if commands.iter().any(|argv| exec_prefix(argv).is_some()) {
+                    return commands
+                        .iter()
+                        .map(|argv| {
+                            let text = exec_prefix(argv)
+                                .or_else(|| render_argv(argv))
+                                .ok_or_else(|| RuleManagementError::NonPersistible(op.name()))?;
+                            let pattern = ArgvPattern::parse(&text)
+                                .map_err(|_| RuleManagementError::NonPersistible(op.name()))?;
+                            Ok((
+                                Rule::Exec(pattern),
+                                vec![
+                                    OmittedDimension::Cwd,
+                                    OmittedDimension::Timeout,
+                                    OmittedDimension::Environment,
+                                ],
+                            ))
+                        })
+                        .collect();
+                }
+            }
+            Self::suggest_op(op, effect, workspace).map(|row| vec![row])
+        })
     }
 
     fn plan(
         call: &PreparedCall,
-        mut derive: impl FnMut(&Op) -> Result<(Rule, Vec<OmittedDimension>), RuleManagementError>,
+        mut derive: impl FnMut(&Op) -> Result<Vec<(Rule, Vec<OmittedDimension>)>, RuleManagementError>,
     ) -> Result<RememberPlan, RuleManagementError> {
         let mut candidates = Vec::new();
         let mut candidate_operations = Vec::new();
         let mut omitted = Vec::new();
         let mut omitted_operations = Vec::new();
         for (operation, op) in call.ops().iter().enumerate() {
-            let (candidate, dimensions) = derive(op)?;
-            if !candidates.contains(&candidate) {
-                candidates.push(candidate);
-                candidate_operations.push(operation);
-            }
-            for dimension in dimensions {
-                omitted.push(dimension);
-                omitted_operations.push(operation);
+            for (candidate, dimensions) in derive(op)? {
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                    candidate_operations.push(operation);
+                }
+                for dimension in dimensions {
+                    if !omitted
+                        .iter()
+                        .zip(&omitted_operations)
+                        .any(|(existing, index)| *existing == dimension && *index == operation)
+                    {
+                        omitted.push(dimension);
+                        omitted_operations.push(operation);
+                    }
+                }
             }
         }
         Ok(RememberPlan {
@@ -515,17 +564,21 @@ fn operation_subject(op: &Op, workspace: &Path) -> String {
     }
 }
 
-/// Recognized program families whose next bare word names a subcommand.
-/// Suggestions retain that named action; other program shapes stay exact.
-const SUBCOMMAND_PROGRAMS: &[&str] = &[
-    "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
-];
-
 /// Suggest only a program-plus-subcommand prefix, never a program wildcard.
-/// This follows the documented Claude Code prefix shape; paths, options,
-/// wrappers, interpreters and unrecognized programs use exact argv instead.
+/// Preserve RTK's known inner action and pnpm exec's selected tool. Paths,
+/// leading options, other wrappers, interpreters and unknown programs stay exact.
 fn exec_prefix(argv: &[std::ffi::OsString]) -> Option<String> {
     let program = argv.first()?.to_str()?;
+    if program == "rtk" {
+        let inner = argv.get(1)?.to_str()?;
+        return SUBCOMMAND_PROGRAMS
+            .contains(&inner)
+            .then(|| exec_prefix(&argv[1..]).map(|prefix| format!("rtk {prefix}")))?;
+    }
+    if program == "pnpm" && argv.get(1)?.to_str()? == "exec" {
+        let tool = argv.get(2)?.to_str()?;
+        return is_plain_word(tool).then(|| format!("pnpm exec {tool} *"));
+    }
     if !SUBCOMMAND_PROGRAMS.contains(&program) {
         return None;
     }

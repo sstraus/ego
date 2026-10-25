@@ -16,8 +16,8 @@ const COMMAND_CAP: usize = 100;
 /// The same for the rule list on the `a` row, which also carries the key text.
 const RULE_CAP: usize = 60;
 
-/// Four rows at most: what, how risky, and the keys; a fifth when the judge
-/// passed the call to the human says why.
+/// What, how risky, and the keys. Remembered authority is shown in full,
+/// wrapping to the terminal width, before the operator can save it.
 pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> String {
     let width = width.max(1);
     let mut rows = vec![String::new()];
@@ -45,12 +45,7 @@ pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> Strin
     rows.push(format!("{prefix}Allow {operations}?"));
     rows.extend(headline_rows(request).into_iter().skip(1));
     rows.push(if let Some(rules) = remembered_rules(request) {
-        let exact = format!("[y] yes   [a] yes, do not ask again for {rules}");
-        if crate::render::line::Line::plain(&exact).width() <= width {
-            exact
-        } else {
-            "[y] yes   [a] yes, remember rule (details: d)".into()
-        }
+        format!("[y] yes   [a] yes, do not ask again for {}", safe(&rules))
     } else {
         "[y] yes".into()
     });
