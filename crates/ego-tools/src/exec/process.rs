@@ -45,6 +45,11 @@ const MAX_SANDBOX_QUESTIONS: usize = 3;
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
 
+type TrackedExec<'a> = (
+    &'a Arc<Mutex<BTreeMap<DetachedExecId, BackgroundEntry>>>,
+    DetachedExecId,
+);
+
 type WidenedBackend = (Vec<SandboxGrant>, Vec<CanonPath>, Arc<dyn Backend>);
 
 /// Process state captured once and shared by the run's normal and duplex
@@ -146,7 +151,7 @@ impl RunProcessContext {
     }
 
     pub(crate) async fn execute(&self, spec: &SpawnSpec) -> Result<ToolResult, ProcessError> {
-        self.execute_inner(spec, None, None, None).await
+        self.execute_inner(spec, None, None, None, None).await
     }
 
     pub(crate) fn start_background(
@@ -198,7 +203,13 @@ impl RunProcessContext {
         let changed = Arc::clone(&self.background_changed);
         super::runtime_handle().spawn(async move {
             let result = context
-                .execute_inner(&spec, None, Some(cancel), Some(output))
+                .execute_inner(
+                    &spec,
+                    None,
+                    Some(cancel),
+                    Some(output),
+                    Some((&registry, id)),
+                )
                 .await;
             if let Ok(mut entries) = registry.lock()
                 && let Some(entry) = entries.get_mut(&id)
@@ -354,7 +365,7 @@ impl RunProcessContext {
                 timeout: scope.timeout(),
             });
         }
-        self.execute_inner(spec, Some((input.to_vec(), scope)), None, None)
+        self.execute_inner(spec, Some((input.to_vec(), scope)), None, None, None)
             .await
     }
 
@@ -364,6 +375,7 @@ impl RunProcessContext {
         handler: Option<(Vec<u8>, EffectScope)>,
         background_cancel: Option<CancelToken>,
         live_output: Option<Arc<Mutex<LiveOutput>>>,
+        tracked: Option<TrackedExec<'_>>,
     ) -> Result<ToolResult, ProcessError> {
         self.confinement
             .requirements()
@@ -371,7 +383,7 @@ impl RunProcessContext {
             .map_err(ProcessError::MissingCapabilities)?;
         match (&self.sandbox_grants, &self.residual, &handler) {
             (Some(_), _, None) | (_, Some(_), None) => {
-                self.execute_asking(spec, background_cancel, live_output)
+                self.execute_asking(spec, background_cancel, live_output, tracked)
                     .await
             }
             _ => {
@@ -425,11 +437,15 @@ impl RunProcessContext {
         spec: &SpawnSpec,
         background_cancel: Option<CancelToken>,
         live_output: Option<Arc<Mutex<LiveOutput>>>,
+        tracked: Option<TrackedExec<'_>>,
     ) -> Result<ToolResult, ProcessError> {
-        let grants = self.sandbox_grants.as_deref();
         let mut questions = 0;
         let mut decisions = 0;
         loop {
+            let grants = self
+                .sandbox_grants
+                .as_deref()
+                .filter(|_| !is_promoted(tracked));
             let judged = self
                 .residual
                 .as_ref()
@@ -488,7 +504,7 @@ impl RunProcessContext {
                         }
                         None => false,
                     };
-                    match grants {
+                    match grants.filter(|_| !is_promoted(tracked)) {
                         _ if judged_grant => denial::Outcome::JudgeGranted,
                         Some(grants) if questions < MAX_SANDBOX_QUESTIONS => {
                             questions += 1;
@@ -498,10 +514,12 @@ impl RunProcessContext {
                                     request,
                                     spec,
                                     background_cancel.as_ref(),
+                                    tracked,
                                 )
                                 .await
                             {
                                 Some(true) => continue,
+                                Some(false) if is_promoted(tracked) => denial::Outcome::NobodyToAsk,
                                 Some(false) => denial::Outcome::Declined,
                                 None => return Err(ProcessError::Cancelled),
                             }
@@ -529,18 +547,37 @@ impl RunProcessContext {
         request: &SandboxGrant,
         spec: &SpawnSpec,
         background_cancel: Option<&CancelToken>,
+        tracked: Option<TrackedExec<'_>>,
     ) -> Option<bool> {
         let command = denial::command_line(spec);
-        let question = grants.ask(request, &command);
+        let question = async { grants.ask(request, &command).await };
         tokio::pin!(question);
+        // Serialize polling the grant port with promotion. The port may record
+        // an Allow while it is polled; after detach returns it must not be
+        // polled again, even if an answer was already queued by the terminal.
+        let foreground_question = futures::future::poll_fn(|cx| {
+            let entry =
+                tracked.map(|(registry, id)| (registry.lock().expect("background exec lock"), id));
+            if entry
+                .as_ref()
+                .is_some_and(|(entries, id)| entries.get(id).is_none_or(|entry| entry.promoted))
+            {
+                return Poll::Ready(false);
+            }
+            question.as_mut().poll(cx)
+        });
+        tokio::pin!(foreground_question);
         loop {
             tokio::select! {
-                answer = &mut question => return Some(answer),
+                answer = &mut foreground_question => return Some(answer),
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {
                     if self.cancel.is_cancelled()
                         || background_cancel.is_some_and(CancelToken::is_cancelled)
                     {
                         return None;
+                    }
+                    if is_promoted(tracked) {
+                        return Some(false);
                     }
                 }
             }
@@ -596,6 +633,16 @@ impl RunProcessContext {
                 )))
             })?
     }
+}
+
+fn is_promoted(tracked: Option<TrackedExec<'_>>) -> bool {
+    tracked.is_some_and(|(registry, id)| {
+        registry
+            .lock()
+            .expect("background exec lock")
+            .get(&id)
+            .is_none_or(|entry| entry.promoted)
+    })
 }
 
 async fn execute(

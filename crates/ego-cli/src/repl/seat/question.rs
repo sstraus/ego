@@ -355,6 +355,23 @@ pub(super) fn answer_control(
                             },
                         }
                     }
+                    Line::HostCommand(HostCommand::Background) => {
+                        match futures::executor::block_on(surface.ingress.background()) {
+                            Ok(id) => {
+                                commit_to_transcript(
+                                    surface.status,
+                                    &format!("background exec id: {id}"),
+                                );
+                                break PermissionDecision::Deny;
+                            }
+                            Err(error) => {
+                                surface.status.lock().expect("surface status lock").notice =
+                                    Some(error.to_string());
+                                repaint_status(surface.status);
+                                continue;
+                            }
+                        }
+                    }
                     Line::Submitted(answer) => match parse_permission(&answer) {
                         Some(word) => {
                             break settle_permission(editor, surface, &request, word, &mut notice);

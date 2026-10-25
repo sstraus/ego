@@ -232,6 +232,11 @@ impl EditMode for SurfaceEditMode {
 
         if permission_modal {
             return match &raw {
+                Event::Key(key)
+                    if key.code == KeyCode::Char('b') && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    ReedlineEvent::ExecuteHostCommand(BACKGROUND_COMMAND.to_string())
+                }
                 Event::Key(key) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                     match key.code {
                         KeyCode::Char('y' | 'Y') => permission_decision_command("allow"),

@@ -169,7 +169,7 @@ fn cli_saved_session_wider_sandbox_requires_consent() {
             "--bare",
             "resume wider",
         ])
-        .run_pty_responding_seeded("Allow ?", "y");
+        .run_pty_responding_seeded("[y] yes", "y");
     assert_eq!(resumed.code, Some(0), "{}", resumed.stdout);
     assert!(
         resumed.stdout.contains("WIDER-RESUME-DONE"),
