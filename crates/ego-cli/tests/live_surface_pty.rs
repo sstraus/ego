@@ -52,6 +52,8 @@ mod prompt_readiness;
 mod queued_controls;
 #[path = "live_surface_pty/raw_columns.rs"]
 mod raw_columns;
+#[path = "live_surface_pty/remembered_exec.rs"]
+mod remembered_exec;
 #[path = "live_surface_pty/render_efficiency.rs"]
 mod render_efficiency;
 #[path = "live_surface_pty/retry_line.rs"]

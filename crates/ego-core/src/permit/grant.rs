@@ -1505,7 +1505,7 @@ impl PolicyEngine {
                 ) if read == path => Some(write),
                 _ => None,
             };
-            let Some(entry) = self
+            let Some(entries) = self
                 .matching_allow(op)
                 .or_else(|| supporting_write.and_then(|write| self.matching_allow(write)))
             else {
@@ -1525,9 +1525,11 @@ impl PolicyEngine {
                 };
                 return Classification::Ask(self.pending(call, why));
             };
-            let authority = RuleAuthority::of(entry);
-            if !rules.contains(&authority) {
-                rules.push(authority);
+            for entry in entries {
+                let authority = RuleAuthority::of(entry);
+                if !rules.contains(&authority) {
+                    rules.push(authority);
+                }
             }
         }
         let permit = self.mint(scope_of(&call));
@@ -1796,10 +1798,8 @@ impl PolicyEngine {
         Ok(())
     }
 
-    fn matching_allow(&self, op: &Op) -> Option<&SourcedRule> {
-        self.allow
-            .iter()
-            .find(|entry| entry.rule().matches_allow(op, self.workspace.as_path()))
+    fn matching_allow(&self, op: &Op) -> Option<Vec<&SourcedRule>> {
+        SourcedRule::allowing(&self.allow, op, self.workspace.as_path())
     }
 
     /// The first rule in `rules` that covers `op`, if any.
