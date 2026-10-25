@@ -24,7 +24,7 @@ const TRUNCATION_MARKER: &str = "…[truncated]";
 
 pub(crate) fn prompt_revision() -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"ego:judge:action-evidence-v6\0");
+    digest.update(b"ego:judge:action-evidence-v7\0");
     digest.update(JUDGE_INSTRUCTIONS.as_bytes());
     digest.finalize().into()
 }
@@ -194,7 +194,16 @@ fn redact_mcp_value(value: &mut serde_json::Value, depth: usize) {
             }
         }
         serde_json::Value::String(text) => {
-            *text = bounded_text(&super::shell::redact_text(text), 16 * 1024)
+            if text.len() > 16 * 1024 {
+                *value = serde_json::json!({"incomplete": "string exceeds 16384 bytes"});
+            } else if let Ok(mut encoded) = serde_json::from_str::<serde_json::Value>(text) {
+                // Encoded request bodies carry the same secret-key semantics.
+                // Share the nesting limit rather than restarting it per string.
+                redact_mcp_value(&mut encoded, depth + 1);
+                *text = serde_json::to_string(&encoded).expect("JSON evidence");
+            } else {
+                *text = super::shell::redact_text(text);
+            }
         }
         _ => {}
     }
