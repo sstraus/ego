@@ -169,12 +169,15 @@ and npm `_npx` stay read-only: the host runs their code later. Admission protect
 every captured store version's `links` path, or `store/v11/links` when no version
 exists yet (pnpm 12's default). Store versions created later require fresh
 admission to capture their host-code paths.
-On macOS, admission also checks the installed pnpm version against the exact project pin (or
-requires no selector), then queries `with current store path` and
-`with current root -g` from the workspace. A mismatch warns with both versions
-and admits no additional roots. Each query runs under a read-only Seatbelt
-profile with network disabled and a two-second limit. Project-selected pnpm
-code never runs unconfined for discovery. Reported paths cannot grant writes
+On macOS, admission reads the project's exact pnpm pin as data, checks the
+installed runtime version, then queries `with <exact version> store path` and
+`with <exact version> root -g`. Without a selector it queries the installed
+version. These child processes run from a fresh private scratch directory, not
+the project. Only that scratch directory is writable; it is removed afterward.
+Project reads/execution and all network access are denied. Each child has a
+two-second limit. A pin unavailable under this offline, scratch-only contract
+warns with the installed and project versions and adds no query-derived roots.
+Project-selected pnpm code never runs unconfined for discovery. Reported paths cannot grant writes
 outside the operator-selected pnpm home. A relocated store outside that boundary
 requires explicit authority rather than trusting project configuration.
 For the recorded pnpm 11 layout, the reported global root and store version identify the
@@ -184,7 +187,7 @@ The recorded macOS runtime also needs its current-user operation-lock directory,
 `/private/tmp/pnpm-store-operation-locks-<UID>`. Only that namespace is admitted,
 not the shared temporary directory. An existing alias, non-directory, foreign
 owner or group/other permission bits refuse the discovered roots. Missing or symlinked engine stores add a perimeter warning,
-not a broad write grant. If pnpm requires writes to answer a query, admission
+not a broad write grant. If pnpm requires writes outside private scratch to answer a query, admission
 adds no query-derived roots and `/config perimeter` reports the declared pnpm
 version and the discovery failure. It does not guess a layout from that version.
 The existing default cache roots remain unchanged.

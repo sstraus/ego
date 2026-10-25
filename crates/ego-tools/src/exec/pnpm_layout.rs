@@ -1,4 +1,4 @@
-//! Query the installed pnpm without running project-selected code unconfined.
+//! Query an offline pnpm runtime with only a private scratch cwd writable.
 
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::os::unix::process::CommandExt as _;
@@ -47,21 +47,23 @@ pub(super) fn capture(workspace: &Path, credentials: &[PathBuf]) -> Result<Optio
         .ok()
         .and_then(|pin| pin.as_deref())
         .unwrap_or("unknown or no selector");
-    let profile = readonly_profile(credentials)?;
-    let version = query_text(&executable, workspace, &profile, &["--version"])
+    let scratch = private_scratch()?;
+    let profile = discovery_profile(workspace, scratch.path(), credentials)?;
+    let version = query_text(&executable, scratch.path(), &profile, &["--version"])
         .map_err(|reason| format!("pnpm installed version unknown, project {selected_label}: {reason}; no additional pnpm roots admitted"))?;
     let selected = selected
         .map_err(|reason| format!("pnpm installed {version}, project unknown: {reason}"))?;
     let selected_label = selected.as_deref().unwrap_or("no selector");
-    if !exact_version(&version) || selected.as_ref().is_some_and(|pin| pin != &version) {
+    if !exact_version(&version) || selected.as_ref().is_some_and(|pin| !exact_version(pin)) {
         return Err(format!(
-            "pnpm installed {version}, project {selected_label}: exact version mismatch or unsupported selector; no additional pnpm roots admitted"
+            "pnpm installed {version}, project {selected_label}: unsupported installed version or project selector; no additional pnpm roots admitted"
         ));
     }
+    let target = selected.as_deref().unwrap_or(&version);
     let query = |args: &[&str]| {
-        let mut current = vec!["with", "current"];
+        let mut current = vec!["with", target];
         current.extend_from_slice(args);
-        query(&executable, workspace, &profile, &current).map_err(|reason| {
+        query(&executable, scratch.path(), &profile, &current).map_err(|reason| {
             format!(
                 "pnpm installed {version}, project {selected_label}: {} discovery failed: {reason}; no additional pnpm roots admitted",
                 args.join(" ")
@@ -267,10 +269,42 @@ fn installed(workspace: &Path) -> Option<PathBuf> {
     })
 }
 
-fn readonly_profile(credentials: &[PathBuf]) -> Result<String, String> {
+fn private_scratch() -> Result<tempfile::TempDir, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let parent = std::env::temp_dir()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    tempfile::Builder::new()
+        .prefix("ego-pnpm-discovery-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .map_err(|error| format!("cannot create private pnpm discovery scratch: {error}"))
+}
+
+fn discovery_profile(
+    workspace: &Path,
+    scratch: &Path,
+    credentials: &[PathBuf],
+) -> Result<String, String> {
     let mut profile = String::from(
-        "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n(allow process-exec*)\n(allow file-read* file-test-existence)\n(deny file-write*)\n(deny network*)\n",
+        "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n(allow process-exec*)\n(allow file-read* file-test-existence)\n(deny network*)\n",
     );
+    let scratch = crate::exec::profile::path_literal(scratch).map_err(|error| error.to_string())?;
+    profile.push_str(&format!(
+        "(allow file-write* (subpath {scratch}))\n(deny file-write* (require-not (subpath {scratch})))\n"
+    ));
+    // The parent reads only the selector as data. The discovery runtime must
+    // neither inspect nor execute project manifests, pnpmfiles or helpers.
+    for path in [
+        workspace.to_owned(),
+        super::resolve(workspace).map_err(|error| error.to_string())?,
+    ] {
+        let literal =
+            crate::exec::profile::path_literal(&path).map_err(|error| error.to_string())?;
+        profile.push_str(&format!(
+            "(deny file-read* process-exec* (subpath {literal}))\n"
+        ));
+    }
     // The discovery child gets no more credential reach than the final child.
     // Protect both names so replacing a captured alias cannot reopen it.
     for path in credentials {
@@ -288,13 +322,8 @@ fn readonly_profile(credentials: &[PathBuf]) -> Result<String, String> {
     Ok(profile)
 }
 
-fn query(
-    program: &Path,
-    workspace: &Path,
-    profile: &str,
-    args: &[&str],
-) -> Result<PathBuf, String> {
-    let text = query_text(program, workspace, profile, args)?;
+fn query(program: &Path, cwd: &Path, profile: &str, args: &[&str]) -> Result<PathBuf, String> {
+    let text = query_text(program, cwd, profile, args)?;
     let path = PathBuf::from(text);
     if !path.is_absolute()
         || path
@@ -308,18 +337,14 @@ fn query(
 
 /// Version plus two path queries cost at most six seconds of child runtime.
 /// Output is never shell/SBPL, and no inherited pipe can hold us open.
-fn query_text(
-    program: &Path,
-    workspace: &Path,
-    profile: &str,
-    args: &[&str],
-) -> Result<String, String> {
+fn query_text(program: &Path, cwd: &Path, profile: &str, args: &[&str]) -> Result<String, String> {
     let mut output = tempfile::tempfile().map_err(|error| error.to_string())?;
     let mut child = Command::new("/usr/bin/sandbox-exec")
         .args(["-p", profile])
         .arg(program)
         .args(args)
-        .current_dir(workspace)
+        .current_dir(cwd)
+        .env("TMPDIR", cwd)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .stdout(output.try_clone().map_err(|error| error.to_string())?)
@@ -335,11 +360,11 @@ fn query_text(
             Ok(Some(status)) if status.success() => break Ok(()),
             Ok(Some(status)) => {
                 break Err(format!(
-                    "read-only discovery exited {status}; runtime writes and network are disabled"
+                    "offline scratch discovery exited {status}; writes outside private scratch and network are disabled"
                 ));
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            Ok(None) => break Err("read-only discovery timed out after 2 seconds".to_owned()),
+            Ok(None) => break Err("offline scratch discovery timed out after 2 seconds".to_owned()),
             Err(error) => break Err(error.to_string()),
         }
     };
@@ -395,39 +420,41 @@ mod tests {
         assert_eq!(relocated.global, PathBuf::from("/custom/global/v11"));
     }
 
-    // Catches: a project-selected executable can write while discovering roots.
+    // Catches: permitting scratch writes also opens the project workspace.
     #[test]
-    fn readonly_discovery_cannot_write_even_inside_the_workspace() {
+    fn scratch_discovery_cannot_write_inside_the_workspace() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("must-not-exist");
-        let profile = readonly_profile(&[]).unwrap();
+        let scratch = private_scratch().unwrap();
+        let profile = discovery_profile(root.path(), scratch.path(), &[]).unwrap();
         let result = query(
             Path::new("/usr/bin/touch"),
-            root.path(),
+            scratch.path(),
             &profile,
             &[file.to_str().unwrap()],
         );
         assert!(
             result
                 .unwrap_err()
-                .contains("runtime writes and network are disabled")
+                .contains("writes outside private scratch and network are disabled")
         );
         assert!(!file.exists());
     }
 
-    // Catches: project-selected discovery can use loopback to escape its
-    // read-only/no-network authority before the run perimeter exists.
+    // Catches: discovery can use loopback to escape its scratch-only/no-network
+    // authority before the run perimeter exists.
     #[test]
     fn readonly_discovery_cannot_connect_to_a_local_listener() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let root = tempfile::tempdir().unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
-        let profile = readonly_profile(&[]).unwrap();
+        let scratch = private_scratch().unwrap();
+        let profile = discovery_profile(root.path(), scratch.path(), &[]).unwrap();
         assert!(
             query(
                 Path::new("/usr/bin/curl"),
-                root.path(),
+                scratch.path(),
                 &profile,
                 &["--noproxy", "*", "--silent", &url]
             )
@@ -484,16 +511,46 @@ mod tests {
     #[test]
     fn readonly_discovery_accepts_an_absolute_reported_path() {
         let root = tempfile::tempdir().unwrap();
-        let profile = readonly_profile(&[]).unwrap();
+        let scratch = private_scratch().unwrap();
+        let profile = discovery_profile(root.path(), scratch.path(), &[]).unwrap();
         assert_eq!(
             query(
                 Path::new("/bin/echo"),
-                root.path(),
+                scratch.path(),
                 &profile,
                 &["/reported/store/v11"]
             )
             .unwrap(),
             PathBuf::from("/reported/store/v11")
         );
+    }
+    // Catches: scratch probes fail, cleanup leaves writable data behind, or
+    // discovery reads project code even though its cwd was moved away.
+    #[test]
+    fn scratch_discovery_writes_privately_removes_scratch_and_refuses_project_reads() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let project = tempfile::tempdir().unwrap();
+        let manifest = project.path().join("package.json");
+        std::fs::write(&manifest, "PROJECT-MUST-NOT-BE-READ").unwrap();
+        let scratch = private_scratch().unwrap();
+        let path = scratch.path().to_owned();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let profile = discovery_profile(project.path(), &path, &[]).unwrap();
+        query_text(Path::new("/usr/bin/touch"), &path, &profile, &["probe"]).unwrap();
+        assert!(path.join("probe").exists());
+        assert!(
+            query_text(
+                Path::new("/bin/cat"),
+                &path,
+                &profile,
+                &[manifest.to_str().unwrap()]
+            )
+            .is_err()
+        );
+        drop(scratch);
+        assert!(!path.exists());
     }
 }
