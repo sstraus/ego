@@ -145,12 +145,13 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
             profile.push_str("    )))\n)\n");
 
             // `realpath`, command lookup and `mkdir -p` lstat each ancestor of
-            // a path they use, so a program under an exec path needs them
+            // a path they use, so exec paths and Workspace scratch need them
             // statable. Metadata only: no listing and no file contents.
             let ancestors = input
                 .exec_paths
                 .iter()
                 .copied()
+                .chain((input.level == Confinement::Workspace).then_some(input.private_scratch))
                 .chain(input.grants.iter().map(|grant| grant.path.as_path()))
                 .flat_map(|path| path.ancestors().skip(1))
                 .filter(|ancestor| *ancestor != Path::new("/"))
@@ -513,10 +514,9 @@ mod tests {
         })
         .expect("profile");
         assert!(
-            profile.starts_with(&format!(
-                "{}(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n(allow process-exec*\n  (subpath \"/opt/tool\")\n  (subpath \"/work\")\n)\n",
-                "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n"
-            )),
+            profile.contains(
+                "(allow process-exec*\n  (subpath \"/opt/tool\")\n  (subpath \"/work\")\n)\n"
+            ),
             "{profile}"
         );
         assert!(

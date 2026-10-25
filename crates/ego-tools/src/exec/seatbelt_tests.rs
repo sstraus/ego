@@ -670,9 +670,10 @@ fn workspace_resolves_var_metadata_and_shell_selector_without_var_contents() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().canonicalize().unwrap();
     let workspace = base.join("workspace");
-    let scratch = base.join("scratch");
+    let scratch_parent = base.join("scratch-only-parent");
+    let scratch = scratch_parent.join("scratch");
     fs::create_dir(&workspace).unwrap();
-    fs::create_dir(&scratch).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
     fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
     let policy =
         RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
@@ -683,12 +684,15 @@ fn workspace_resolves_var_metadata_and_shell_selector_without_var_contents() {
     )
     .unwrap();
     let node = fs::canonicalize("/opt/homebrew/bin/node").unwrap();
-    let output = run(&backend, node.to_str().unwrap(), &["-e".as_ref(), "const fs=require('fs'); if(!fs.statSync('/var').isDirectory())process.exit(2); fs.readFileSync('/private/var/select/sh'); console.log('metadata and shell selector ok')".as_ref()]);
+    // pnpm's temp-dir realpaths scratch, including each parent, before use.
+    let output = run(&backend, node.to_str().unwrap(), &["-e".as_ref(), "const fs=require('fs'); if(!fs.statSync('/var').isDirectory())process.exit(2); fs.readFileSync('/private/var/select/sh'); fs.realpathSync(process.argv[1]); console.log('metadata and shell selector ok')".as_ref(), scratch.as_os_str()]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"metadata and shell selector ok\n");
-    let listing = run(&backend, "/bin/ls", &["/private/var".as_ref()]);
-    assert!(
-        !listing.status.success(),
-        "var listing exposed: {listing:?}"
-    );
+    for directory in [Path::new("/private/var"), scratch_parent.as_path()] {
+        let listing = run(&backend, "/bin/ls", &[directory.as_os_str()]);
+        assert!(
+            !listing.status.success(),
+            "metadata-only directory exposed: {directory:?}: {listing:?}"
+        );
+    }
 }
