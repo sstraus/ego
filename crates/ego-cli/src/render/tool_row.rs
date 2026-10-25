@@ -656,6 +656,51 @@ mod tests {
         assert_eq!(rows[1..], ["  stderr: boom"]);
     }
 
+    // Catches: compact exec failure clips the program or recovery instructions,
+    // leaving the user unable to repair executable authority without /expand.
+    #[test]
+    fn sandbox_exec_recovery_is_visible_without_expanding_the_tool() {
+        let result = "[stderr]\nsandbox exec denied /outside/tools/program (confinement workspace); no read or write grant can authorize execution. Add the program and required interpreter locations to exec_paths in the user configuration with `ego config edit`. Then /quit and run `ego resume <session-id> --mode <same-mode> --sandbox workspace --model <same-model>`; retain the session's --mode, --sandbox and --model selections. No command was retried.\nprocess exited unsuccessfully with code Some(126)";
+        for width in [20, 40, 80, 120] {
+            let rendered = record(
+                &call(
+                    "exec",
+                    r#"{"argv":["/bin/sh","-c","program"]}"#,
+                    false,
+                    result,
+                ),
+                at(width),
+            );
+            assert!(
+                rendered.rows.lines().all(|row| cells(row) <= width),
+                "{width}: {}",
+                rendered.rows
+            );
+            let visible: String = rendered
+                .rows
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            for expected in [
+                "/outside/tools/program",
+                "exec_paths",
+                "egoconfigedit",
+                "/quit",
+                "egoresume<session-id>",
+                "--mode<same-mode>",
+                "--sandboxworkspace",
+                "--model<same-model>",
+                "Nocommandwasretried.",
+            ] {
+                assert!(
+                    visible.contains(expected),
+                    "width {width} missing {expected:?}: {}",
+                    rendered.rows
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_exec_tail_keeps_the_last_three_lines_and_counts_the_rest() {
         let result = format!(
