@@ -9230,6 +9230,7 @@ mod turn {
             verdict: &str,
             mode: Mode,
             deny: bool,
+            task: &str,
         ) -> Vec<DomainEvent> {
             let mut fx = Fixture::new(Vec::new()).with_exec_tool();
             fx.set_mode(mode);
@@ -9289,7 +9290,7 @@ mod turn {
             .with_judge(judge_context())
             .with_execution_observation(observation, None)
             .with_permission_analysis_cache(cache, Trust::Trusted);
-            block_on(turn.run("run the process")).unwrap();
+            block_on(turn.run(task)).unwrap();
             drop(turn);
             fx.store.events()
         }
@@ -9307,6 +9308,7 @@ mod turn {
                 verdict,
                 Mode::Auto,
                 false,
+                "run the process",
             );
             let second = analysis_session(
                 cache,
@@ -9315,6 +9317,7 @@ mod turn {
                 verdict,
                 Mode::Auto,
                 false,
+                "run the process",
             );
             assert_eq!(
                 trace
@@ -9367,6 +9370,7 @@ mod turn {
                         verdict,
                         Mode::Auto,
                         false,
+                        "run the process",
                     );
                 }
                 assert_eq!(
@@ -9399,6 +9403,7 @@ mod turn {
                     r#"{"verdict":"allow","reason":"ok"}"#,
                     Mode::Auto,
                     false,
+                    "run the process",
                 );
                 assert_eq!(process.calls.load(Ordering::SeqCst), executions);
                 assert_eq!(process.observations.load(Ordering::SeqCst), 2);
@@ -9417,6 +9422,7 @@ mod turn {
                     r#"{"verdict":"allow","reason":"ok"}"#,
                     mode,
                     false,
+                    "run the process",
                 );
                 assert_eq!(process.calls.load(Ordering::SeqCst), executions);
                 assert_eq!(
@@ -9445,6 +9451,7 @@ mod turn {
                 verdict,
                 Mode::Auto,
                 false,
+                "run the process",
             );
             analysis_session(
                 cache.clone(),
@@ -9453,6 +9460,7 @@ mod turn {
                 verdict,
                 Mode::Auto,
                 true,
+                "run the process",
             );
             analysis_session(
                 cache,
@@ -9461,6 +9469,7 @@ mod turn {
                 verdict,
                 Mode::Plan,
                 false,
+                "run the process",
             );
             assert_eq!(process.calls.load(Ordering::SeqCst), 1);
             assert_eq!(
@@ -9472,6 +9481,82 @@ mod turn {
                     .filter(|request| request.model == "judge")
                     .count(),
                 1
+            );
+        }
+
+        // Catches: a changed user task reuses the prior task's cached allow.
+        #[test]
+        fn judge_cache_binds_task_authority_not_only_action_identity() {
+            let cache = Arc::new(AnalysisCache::default());
+            let process = Arc::new(ObservedProcess::default());
+            let trace = GenerationTrace::default();
+            let allow = r#"{"verdict":"allow","reason":"task authorizes execution"}"#;
+            let deny = r#"{"verdict":"deny","reason":"new task forbids execution"}"#;
+            analysis_session(
+                cache.clone(),
+                process.clone(),
+                trace.clone(),
+                allow,
+                Mode::Auto,
+                false,
+                "Run the process",
+            );
+            let repeated = analysis_session(
+                cache.clone(),
+                process.clone(),
+                trace.clone(),
+                allow,
+                Mode::Auto,
+                false,
+                "Run the process",
+            );
+            assert!(repeated.iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided {
+                    by: Some(Authority::CachedJudge { .. }),
+                    allowed: Some(true),
+                    ..
+                }
+            )));
+            let changed = analysis_session(
+                cache,
+                process.clone(),
+                trace.clone(),
+                deny,
+                Mode::Auto,
+                false,
+                "Inspect only; do not run the process",
+            );
+            assert_eq!(
+                process.calls.load(Ordering::SeqCst),
+                2,
+                "the new task must not inherit execution authority"
+            );
+            assert!(changed.iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided {
+                    by: Some(Authority::Judge { .. }),
+                    allowed: Some(false),
+                    ..
+                }
+            )));
+            assert!(!changed.iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided {
+                    by: Some(Authority::CachedJudge { .. }),
+                    ..
+                }
+            )));
+            assert_eq!(
+                trace
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.model == "judge")
+                    .count(),
+                2,
+                "the changed task requires a fresh judge generation"
             );
         }
 

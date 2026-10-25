@@ -61,52 +61,6 @@ fn long_unicode_task_retains_boundaries_and_marks_missing_authority() {
     assert!(context.task.len() <= 16384);
 }
 
-// Catches: changing the user task leaves a reusable allow for the same command.
-#[test]
-fn judge_cache_binds_task_authority_not_only_action_identity() {
-    use ego_core::config::{Mode, ModelRef, Ruleset, Trust};
-    use ego_core::generator::types::ThinkingLevel;
-    use ego_core::permit::analysis::cache_key_for_context;
-    use ego_core::permit::judge::JudgeConfig;
-    use ego_core::permit::{BackendIdentity, CanonPath, ExecCaps, ExecObservation};
-    let call = support::judge_call(&["git".into(), "commit".into()]);
-    let policy = ego_core::turn::GenerationPolicyCapture::new(
-        CanonPath::new("/ws"),
-        Mode::Auto,
-        Ruleset::default(),
-        None,
-    )
-    .unwrap()
-    .snapshot()
-    .digest();
-    let observation = ExecObservation::new(
-        BackendIdentity::new("test", "1"),
-        ExecCaps::READ_SCOPED,
-        "11".repeat(32).try_into().unwrap(),
-    );
-    let judge = JudgeConfig {
-        identity: ModelRef("provider/model".into()),
-        request_model: "model".into(),
-        max_output_tokens: Some(100),
-    };
-    let key = |task: &str| {
-        cache_key_for_context(
-            &call,
-            &policy,
-            &observation,
-            Trust::Trusted,
-            &judge,
-            ThinkingLevel::Off,
-            &JudgeTaskContext {
-                task: task.into(),
-                ..Default::default()
-            },
-        )
-    };
-    assert_ne!(key("Commit the fix"), key("Inspect only; do not commit"));
-    assert_eq!(key("Commit the fix"), key("Commit the fix"));
-}
-
 // Catches: restoring the initial task silently discards an intervening authority revocation.
 #[test]
 fn later_steer_does_not_resurrect_commit_authority_revoked_by_an_earlier_steer() {
@@ -183,9 +137,18 @@ fn same_turn_steer_retains_original_task_with_latest_user_precedence() {
     });
     let state = SessionState::replay(events);
     let context = JudgeTaskContext::from_state(&state, turn, vec![]);
-    assert!(context.task.contains("Inspect and commit the fix"));
-    assert!(context.task.contains(
-        "Latest user prompt (takes precedence):\nDo not commit yet; show the diff first"
-    ));
-    assert!(!context.task.contains("push everything"));
+    let call = support::judge_call(&["git".into(), "commit".into()]);
+    let request = support::judge_request(&call, &context);
+    let text = serde_json::to_string(&request.messages).unwrap();
+    let original = text
+        .find("Inspect and commit the fix")
+        .expect("original task disclosed");
+    let revocation = text
+        .find("Do not commit yet; show the diff first")
+        .expect("latest user restriction disclosed");
+    assert!(original < revocation, "user authority order lost: {text}");
+    assert!(
+        !text.contains("push everything"),
+        "host note became authority: {text}"
+    );
 }
