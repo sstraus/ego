@@ -52,6 +52,7 @@ impl Perimeter {
         roots: &[ProfileRoot],
     ) -> Self {
         let mut warnings = root_warnings(confinement.workspace().as_path(), roots);
+        warnings.extend_from_slice(confinement.admission_warnings());
         if confinement.level() == crate::permit::Confinement::Off {
             warnings.push(
                 "open-perimeter: sandbox is off; exec children have unrestricted filesystem access"

@@ -24,7 +24,7 @@ pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> Strin
     let prefix = request
         .child_name()
         .map_or_else(String::new, |name| format!("Child {}: ", safe(name)));
-    let operations = request
+    let mut operations = request
         .ops()
         .iter()
         .map(|op| {
@@ -42,6 +42,9 @@ pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> Strin
         })
         .collect::<Vec<_>>()
         .join("; ");
+    if request.ops().is_empty() {
+        operations = safe(request.tool());
+    }
     rows.push(format!("{prefix}Allow {operations}?"));
     rows.extend(headline_rows(request).into_iter().skip(1));
     rows.push(if let Some(rules) = remembered_rules(request) {
@@ -172,7 +175,11 @@ pub(super) fn settled_receipt(
     decision: &PermissionDecision,
     notice: Option<&str>,
 ) -> String {
-    let mut call = truncate(&describe_operations(request.ops()), COMMAND_CAP);
+    let mut call = if request.ops().is_empty() {
+        safe(request.tool())
+    } else {
+        truncate(&describe_operations(request.ops()), COMMAND_CAP)
+    };
     if let Some(name) = request.child_name() {
         call = format!("child {}: {call}", safe(name));
     }
@@ -699,5 +706,32 @@ mod permission_modal_diff_tests {
         assert!(!out.contains('\x1b'));
         assert!(out.contains('�'));
         assert!(out.len() < 2000);
+    }
+}
+
+#[cfg(test)]
+mod sandbox_grant_tests {
+    use super::*;
+    // Catches: a sandbox question renders as "Allow ?", hides its path/retry,
+    // or offers a persisted permission rule instead of session-only authority.
+    #[test]
+    fn sandbox_prompt_names_session_path_and_retry_without_remembering() {
+        let grant = ego_core::permit::SandboxGrant::new(
+            ego_core::permit::CanonPath::new("/outside/input"),
+            ego_core::permit::SandboxAccess::Read,
+        );
+        let request = PermissionRequest::sandbox_grant(&grant, "/bin/cat /outside/input");
+        let prompt = compact_prompt(&request, 160);
+        for text in [
+            "read /outside/input",
+            "for this session",
+            "will run again",
+            "/bin/cat",
+            "[y] yes",
+        ] {
+            assert!(prompt.contains(text), "{prompt}");
+        }
+        assert!(!prompt.contains("[a]"), "{prompt}");
+        assert!(request.requires_explicit_answer());
     }
 }

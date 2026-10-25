@@ -54,6 +54,26 @@ pub(super) fn analyze(
         }
         first.get_or_insert(printed);
     }
+    #[cfg(target_os = "macos")]
+    if matches!(
+        confinement.level(),
+        ego_core::permit::Confinement::Workspace | ego_core::permit::Confinement::Adaptive
+    ) && stderr.contains("ERR_PNPM")
+        && (stderr.contains("Operation not permitted") || stderr.contains("Permission denied"))
+        && let Some(home) = confinement
+            .adaptive_perimeter()
+            .map(|perimeter| perimeter.home.as_path().to_path_buf())
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        && let Some(path) = super::pnpm::custom_store(&home, confinement.workspace().as_path())
+        && let Some(printed) = path.to_str()
+        && !floor_refusal(printed, confinement)
+        && let Some(request) = request_for(printed, spec, confinement, granted)
+    {
+        return Some(Denial {
+            printed: printed.to_owned(),
+            request: Some(request),
+        });
+    }
     first.map(|printed| Denial {
         printed: printed.to_owned(),
         request: None,
@@ -176,14 +196,14 @@ pub(super) fn renderable(_: &Path) -> bool {
 }
 
 /// The resolved location, and whether the path itself exists. A path that is
-/// not there yet resolves through its parent, so the grant names the exact
-/// file a write would create.
+/// not there yet resolves through its nearest existing ancestor, so the grant
+/// still names the exact path a write would create.
 pub(super) fn canonical(path: &Path) -> Option<(CanonPath, bool)> {
     if let Ok(resolved) = std::fs::canonicalize(path) {
         return Some((CanonPath::new(resolved), true));
     }
-    let parent = std::fs::canonicalize(path.parent()?).ok()?;
-    Some((CanonPath::new(parent.join(path.file_name()?)), false))
+    let resolved = super::adaptive::resolve_filesystem(path).ok()?;
+    Some((CanonPath::new(resolved), false))
 }
 
 fn exec_target(spec: &SpawnSpec) -> Option<PathBuf> {

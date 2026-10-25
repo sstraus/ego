@@ -651,6 +651,9 @@ pub(super) fn surface_line(
         }
 
         match command {
+            HostCommand::Background if phase.get() == EditPhase::Modal => {
+                return (Line::HostCommand(HostCommand::Background), false);
+            }
             HostCommand::Background => {
                 let notice = if phase.get() == EditPhase::Busy {
                     match futures::executor::block_on(ingress.background()) {

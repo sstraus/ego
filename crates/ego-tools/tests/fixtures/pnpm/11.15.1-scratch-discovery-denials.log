@@ -1,0 +1,25 @@
+Filtering the log data using "composedMessage CONTAINS[c] "Sandbox:" AND composedMessage CONTAINS[c] "pnpm""
+Timestamp               Ty Process[PID:TID]
+2002-01-01 00:00:13.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:14.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /_tmp_20008_a0000001
+2002-01-01 00:00:14.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /Users/_tmp_20008_a0000002
+2002-01-01 00:00:15.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:15.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:15.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:16.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:17.000 E  kernel[0:1000004] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:18.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-mode /private/tmp/pnpm-store-operation-locks-1000
+2002-01-01 00:00:19.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:20.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /_tmp_20009_a0000008
+2002-01-01 00:00:21.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /Users/_tmp_20009_a0000009
+2002-01-01 00:00:21.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:22.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:23.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:24.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:24.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:25.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:25.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:26.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:27.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:28.000 E  kernel[0:1000007] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:00:29.000 E  kernel[0:1000006] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-mode /private/tmp/pnpm-store-operation-locks-1000

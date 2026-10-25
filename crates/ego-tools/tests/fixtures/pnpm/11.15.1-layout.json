@@ -1,0 +1,17 @@
+{
+  "version": "11.15.1",
+  "store": "/home/example/workspace",
+  "global": "/home/example/workspace",
+  "bin": "/home/example/workspace",
+  "package_manager_store_config": "undefined",
+  "captured_at": "2002-01-01",
+  "engine_store_entries": [
+    "files",
+    "index.db",
+    "index.db-shm",
+    "index.db-wal",
+    "links",
+    "projects",
+    "tmp"
+  ]
+}

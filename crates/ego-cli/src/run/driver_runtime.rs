@@ -55,9 +55,16 @@ async fn paste_image_limits(
     run_deadline: Option<std::time::Instant>,
 ) -> Result<ego_core::generator::capabilities::ImageLimits, String> {
     let paste_cancel = CancelToken::new();
-    let (ports, _, _) = effect_scope(confinement, evidence, &paste_cancel, run_deadline, None)
-        .await
-        .map_err(|error| format!("image paste could not check the model: {error:?}"))?;
+    let (ports, _, _) = effect_scope(
+        confinement,
+        evidence,
+        &paste_cancel,
+        run_deadline,
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| format!("image paste could not check the model: {error:?}"))?;
     let http = Arc::new(ProviderHttpAdapter::new(ports)) as Arc<dyn ego_ai::http::Http>;
     let profile = source
         .bind(http, paste_cancel, run_deadline)
@@ -366,6 +373,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 &cancel,
                 run_deadline,
                 residual.clone(),
+                None,
             )
             .await?;
             admit_saved_session_policy(
@@ -498,10 +506,17 @@ pub(super) async fn drive_execution<S: EventSink>(
                 // A new, forked, compacted or resumed epoch is another
                 // session, so the judge's grants do not cross into it.
                 let residual = judge_available.then(ResidualWriteDesk::new);
+                let sandbox_grants = SeatSandboxGrants::for_seat(Arc::clone(&seat));
                 let (transition, source_state, session_end) = {
-                    let (session_hook_ports, observation, probe_evidence) =
-                        effect_scope(&confinement, active.evidence(), &cancel, run_deadline, None)
-                            .await?;
+                    let (session_hook_ports, observation, probe_evidence) = effect_scope(
+                        &confinement,
+                        active.evidence(),
+                        &cancel,
+                        run_deadline,
+                        None,
+                        None,
+                    )
+                    .await?;
                     let human = seat
                         .has_human()
                         .then(|| SeatApprover { seat: seat.clone() });
@@ -744,6 +759,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     active: &active,
                                     run_deadline,
                                     residual: residual.clone(),
+                                    sandbox_grants: sandbox_grants.clone(),
                                     perimeter,
                                     session_hook_ports: &session_hook_ports,
                                     pending_attachments: &mut pending_attachments,
@@ -1060,7 +1076,7 @@ async fn answer_image_request(
                 Ok(Vec::new())
             } else {
                 let cancel = CancelToken::new();
-                match effect_scope(confinement, evidence, &cancel, deadline, None).await {
+                match effect_scope(confinement, evidence, &cancel, deadline, None, None).await {
                     Ok((ports, _, _)) => acquire_image_inputs(
                         &inputs,
                         source,
@@ -2140,6 +2156,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         active.evidence(),
         compaction_cancel,
         run_deadline,
+        None,
         None,
     )
     .await
@@ -3768,6 +3785,7 @@ struct InteractiveTurnPhase<'a, 'session, 'store> {
     active: &'session ActiveSession<'store>,
     run_deadline: Option<std::time::Instant>,
     residual: Option<Arc<ResidualWriteDesk>>,
+    sandbox_grants: Option<Arc<dyn ego_core::permit::SandboxGrantPort>>,
     perimeter: crate::perimeter::Perimeter,
     session_hook_ports: &'a Arc<RunEffectPorts>,
     pending_attachments: &'a mut Vec<String>,
@@ -3821,6 +3839,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         active,
         run_deadline,
         residual,
+        sandbox_grants,
         mut perimeter,
         session_hook_ports,
         pending_attachments,
@@ -3875,6 +3894,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         &turn_cancel,
         run_deadline,
         residual.clone(),
+        sandbox_grants,
     )
     .await?;
     perimeter = perimeter.with_execution_observation(&observation, probe_evidence.as_ref());

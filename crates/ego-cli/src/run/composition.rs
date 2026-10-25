@@ -1434,8 +1434,15 @@ pub(super) async fn generation_preflight_inner(
                 message: format!("could not open the sandbox proof store: {error}"),
             },
         )?;
-    let (proof_ports, proof_observation, _) =
-        effect_scope(confinement, &proof_evidence, cancel, run_deadline, None).await?;
+    let (proof_ports, proof_observation, _) = effect_scope(
+        confinement,
+        &proof_evidence,
+        cancel,
+        run_deadline,
+        None,
+        None,
+    )
+    .await?;
     let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
 
     let mode = effective.mode.unwrap_or(Mode::Default);

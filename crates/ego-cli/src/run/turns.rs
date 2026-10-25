@@ -202,6 +202,53 @@ impl HumanApprover for SeatApprover {
     }
 }
 
+/// The native terminal's session-only path authority. Command permission and
+/// sandbox widening use the same terminal owner but retain separate decisions.
+pub(super) struct SeatSandboxGrants {
+    seat: Arc<dyn InteractiveSeat>,
+    grants: Mutex<Vec<ego_core::permit::SandboxGrant>>,
+}
+
+impl SeatSandboxGrants {
+    pub(super) fn for_seat(
+        seat: Arc<dyn InteractiveSeat>,
+    ) -> Option<Arc<dyn ego_core::permit::SandboxGrantPort>> {
+        seat.has_human().then(|| {
+            Arc::new(Self {
+                seat,
+                grants: Mutex::new(Vec::new()),
+            }) as Arc<dyn ego_core::permit::SandboxGrantPort>
+        })
+    }
+}
+
+impl ego_core::permit::SandboxGrantPort for SeatSandboxGrants {
+    fn granted(&self) -> Vec<ego_core::permit::SandboxGrant> {
+        self.grants.lock().expect("session sandbox grants").clone()
+    }
+
+    fn ask<'a>(
+        &'a self,
+        grant: &'a ego_core::permit::SandboxGrant,
+        command: &'a str,
+    ) -> futures::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let request = PermissionRequest::sandbox_grant(grant, command);
+            if !matches!(
+                self.seat.permission_future(&request).await,
+                PermissionDecision::Allow
+            ) {
+                return false;
+            }
+            let mut grants = self.grants.lock().expect("session sandbox grants");
+            if !grants.contains(grant) {
+                grants.push(grant.clone());
+            }
+            true
+        })
+    }
+}
+
 /// The run-level limits, and the loop that applies them between turns.
 ///
 /// Between turns is where they belong: `max_turns` fires *between* two

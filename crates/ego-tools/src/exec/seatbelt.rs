@@ -82,6 +82,17 @@ impl SeatbeltBackend {
                     .map(|root| root.path().clone()),
             );
         }
+        let pnpm = if matches!(
+            policy.level(),
+            Confinement::Workspace | Confinement::Adaptive
+        ) {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| ProcessError::Backend("pnpm runtime requires HOME".into()))?;
+            let home = super::adaptive::resolve(Path::new(&home))?;
+            super::pnpm::roots(&home, policy.workspace().as_path())?.to_vec()
+        } else {
+            Vec::new()
+        };
         let (lookup_metadata, lookup_targets) = lookup_metadata(derived_runtime_roots);
         let base = ProfileBase {
             lookup_metadata,
@@ -99,6 +110,7 @@ impl SeatbeltBackend {
             runtime_roots: derived_runtime_roots
                 .iter()
                 .map(|root| root.as_path().to_path_buf())
+                .chain(pnpm.iter().take(1).cloned())
                 .collect(),
             exec_paths,
             read_only_roots: policy
@@ -128,6 +140,9 @@ impl SeatbeltBackend {
                         ego_core::permit::SandboxAccess::Read
                     },
                 })
+                .chain(pnpm.into_iter().map(|path| {
+                    SandboxGrant::new(CanonPath::new(path), ego_core::permit::SandboxAccess::Write)
+                }))
                 .collect(),
         };
         Self::render_profile(base, &[], &[], policy.requirements().required())
@@ -397,12 +412,17 @@ pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
             .as_ref()
             .map(|home| home.join(".gitconfig"))
             .into_iter()
-            .chain(xdg.map(|xdg| xdg.join("git/config")))
+            .chain(
+                xdg.into_iter()
+                    .flat_map(|xdg| [xdg.join("git/config"), xdg.join("git/ignore")]),
+            )
         {
             match fs::canonicalize(&path) {
-                Ok(root) => {
+                Ok(root) if root.is_file() => {
                     roots.insert(root);
                 }
+                // A config-shaped directory must not grant its whole subtree.
+                Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(ProcessError::Backend(format!(

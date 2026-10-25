@@ -3865,3 +3865,20 @@ fn provider_failure_notices_are_scoped_to_the_failed_turn() {
         );
     }
 }
+
+// Catches: a declined sandbox question still leaves reusable session authority.
+#[test]
+fn sandbox_grant_decline_does_not_widen_the_session() {
+    let seat = Arc::new(TrustingSeat {
+        asked: AtomicUsize::new(0),
+    });
+    let grants = SeatSandboxGrants::for_seat(seat).unwrap();
+    let grant = ego_core::permit::SandboxGrant::new(
+        CanonPath::new("/outside/input"),
+        ego_core::permit::SandboxAccess::Read,
+    );
+    assert!(!futures::executor::block_on(
+        grants.ask(&grant, "/bin/cat /outside/input")
+    ));
+    assert!(grants.granted().is_empty());
+}

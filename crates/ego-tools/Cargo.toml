@@ -49,6 +49,7 @@ toml_edit = "0.25.13"
 tracing = "0.1.44"
 url = "2.5.8"
 zeroize = "1.9.0"
+yaml-rust2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["process", "signal", "term", "user", "fs"] }

@@ -491,3 +491,54 @@ fn user_config_parent_component_does_not_refuse_sandboxed_work() {
         assert!(!config.parent().unwrap().exists());
     }
 }
+
+// Catches: static pnpm authority is omitted from Workspace or depends on the
+// command being pnpm, or system-info is widened beyond the two named selectors.
+#[test]
+fn pnpm_static_profile_contains_home_locks_and_named_system_info() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let scratch = base.join("scratch");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let home =
+        super::super::adaptive::resolve(Path::new(&std::env::var_os("HOME").unwrap())).unwrap();
+    let expected = super::super::pnpm::roots(&home, &workspace).unwrap();
+    for level in [Confinement::Workspace, Confinement::Adaptive] {
+        let policy = RunConfinement::new(level, false, CanonPath::new(&workspace))
+            .unwrap()
+            .with_adaptive_perimeter(AdaptivePerimeter {
+                home: CanonPath::new(&home),
+                writable: vec![],
+                credentials: vec![],
+                controls: vec![],
+            });
+        let backend = SeatbeltBackend::prepare(
+            &policy,
+            &CanonPath::new(&scratch),
+            &derived_runtime_roots().unwrap(),
+        )
+        .unwrap();
+        for path in &expected {
+            let literal = profile::path_literal(path).unwrap();
+            assert!(
+                backend.profile.contains(&format!("(subpath {literal})")),
+                "{}",
+                backend.profile
+            );
+            assert!(
+                backend
+                    .base
+                    .roots
+                    .iter()
+                    .any(|root| root.path.as_path() == path && root.access == SandboxAccess::Write)
+            );
+        }
+        assert!(backend.profile.contains(
+            "(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))"
+        ));
+        assert!(!backend.profile.contains("(allow system-info)"));
+    }
+}

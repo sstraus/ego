@@ -1,8 +1,8 @@
 use super::*;
 
-const CASE: &str = "js_caches::adaptive_derives_js_caches_but_keeps_host_executed_js_code_readonly";
+const CASE: &str = "js_caches::adaptive_derives_pnpm_home_but_keeps_npx_and_dlx_readonly";
 
-/// Each child write must match the expectation: caches open, host-run code closed.
+/// Each child write must match the approved pnpm-home/cache boundary.
 fn assert_writes(root: &Path, expectations: &[(PathBuf, bool)]) {
     let policy = admit(&root.join("workspace")).unwrap();
     for (directory, writable) in expectations {
@@ -39,26 +39,26 @@ fn rerun(layout: &str, env: &[(&str, PathBuf)]) {
 }
 
 // Catches: Adaptive omits the pnpm store and npm cache, so pnpm fails with
-// ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK; or the derivation opens the pnpm
-// home, pnpm itself or npx packages that the host later executes; or ignores
+// ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK; or the derivation opens
+// npx packages that the host later executes; or ignores
 // the operator's relocated PNPM_HOME/XDG/npm cache; or an empty XDG variable
 // refuses admission instead of meaning unset as it does for pnpm.
-// Also catches missing-store admission leaving future v11 links or dlx writable.
+// The approved whole-pnpm-home contract includes engine/global/bin writes.
 #[test]
-fn adaptive_derives_js_caches_but_keeps_host_executed_js_code_readonly() {
+fn adaptive_derives_pnpm_home_but_keeps_npx_and_dlx_readonly() {
     let Some(root) = isolated(CASE) else {
         return;
     };
     let home = root.join("home");
     let defaults = [
         (home.join("Library/pnpm/store/v11/files/00"), true),
-        (home.join("Library/pnpm/store/v11/links"), false),
+        (home.join("Library/pnpm/store/v11/links"), true),
         (home.join("Library/Caches/pnpm/metadata"), true),
         (home.join("Library/Caches/pnpm/dlx"), false),
         (home.join(".npm/_cacache"), true),
         (home.join(".npm/_logs"), true),
-        (home.join("Library/pnpm/bin"), false),
-        (home.join("Library/pnpm/package-manager-store"), false),
+        (home.join("Library/pnpm/bin"), true),
+        (home.join("Library/pnpm/package-manager-store"), true),
         (home.join(".npm/_npx"), false),
     ];
     match std::env::var("EGO_JS_LAYOUT").as_deref() {
@@ -67,11 +67,11 @@ fn adaptive_derives_js_caches_but_keeps_host_executed_js_code_readonly() {
                 &root,
                 &[
                     (root.join("pnpm-home/store/v11/files/00"), true),
-                    (root.join("pnpm-home/store/v11/links"), false),
+                    (root.join("pnpm-home/store/v11/links"), true),
                     (root.join("xdg-cache/pnpm/metadata"), true),
                     (root.join("xdg-cache/pnpm/dlx"), false),
                     (root.join("npm-cache/_cacache"), true),
-                    (root.join("pnpm-home/bin"), false),
+                    (root.join("pnpm-home/bin"), true),
                     (root.join("npm-cache/_npx"), false),
                     (home.join("Library/pnpm/store"), false),
                 ],

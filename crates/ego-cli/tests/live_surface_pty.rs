@@ -58,6 +58,8 @@ mod remembered_exec;
 mod render_efficiency;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
+#[path = "live_surface_pty/sandbox_grants.rs"]
+mod sandbox_grants;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
 #[path = "live_surface_pty/shell_rows.rs"]

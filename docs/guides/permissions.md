@@ -160,15 +160,39 @@ currently requires macOS Seatbelt and successful native capability probes;
 explicit adaptive selections on unsupported platforms fail admission with explicit alternatives. It captures
 operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
 and linked-worktree metadata, `TMPDIR`, an operator `CARGO_TARGET_DIR`, the pnpm
-store (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`, plus `/store`), the
+home (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`), the
 pnpm cache (`XDG_CACHE_HOME` or `~/Library/Caches`, plus `/pnpm`) and the npm
 `_cacache` and `_logs` (`npm_config_cache` or `~/.npm`) before commands.
-Cargo/rustup defaults apply when their environment variables are absent. The pnpm
-home, its `bin`, global virtual-store `store/v*/links`, cached `pnpm/dlx` tools
-and npm `_npx` stay read-only: the host runs their code later. Admission protects
-every captured store version's `links` path, or `store/v11/links` when no version
-exists yet (pnpm 12's default). Store versions created later require fresh
-admission to capture their host-code paths.
+Cargo/rustup defaults apply when their environment variables are absent.
+
+On macOS, Workspace and Adaptive grant read/write access to the **whole operator
+pnpm home**, including its binaries, engine store, links and global environments.
+This is an intentional shared-toolchain write authority, not a content-only
+cache. Cached `pnpm/dlx` tools outside that home and npm `_npx` stay read-only.
+No pnpm subprocess runs during admission. These grants apply to all children,
+including scripts and test runners that spawn pnpm.
+
+Both modes also grant the exact current-user operation-lock directory,
+`/private/tmp/pnpm-store-operation-locks-<UID>`, and the two system-info selectors
+`vfs.disk-space` and `net.link.addr`. An existing operation-lock alias,
+non-directory, foreign owner or group/other permission bits refuse admission.
+No shared temp root or writable pnpm ancestor is added. Ancestor `_tmp_*` probes
+remain denied. Read-only mode receives none of these additional grants.
+
+Custom stores inside the workspace or pnpm home are already covered. After a
+pnpm permission refusal, project/user `.npmrc` `store-dir` and top-level
+`pnpm-workspace.yaml` `storeDir` are read as bounded data to identify an external
+store for the existing interactive path approval. Configuration alone grants
+nothing. Project YAML takes precedence over project `.npmrc`, then user `.npmrc`.
+Environment interpolation is not executed by this hint reader; unresolved values
+fall back to ordinary path-denial handling. Credential and configured read-only
+floors still apply to all grants.
+
+On macOS, strict runtime reads also admit the individual existing Git config and
+ignore files (`~/.gitconfig`, and `git/config` plus `git/ignore` under
+`XDG_CONFIG_HOME` or `~/.config`). A directory at one of those names is not a
+runtime root; neighboring files do not become readable.
+
 Those roots appear as `derived` in perimeter inspection, with no per-cache judge.
 Configured ceilings and readonly roots remain binding. Shared-cache writes are
 intentional. Workspace and derived toolchain/target executables remain runnable.
@@ -194,6 +218,14 @@ that the approved command line does not name (for example inside a script) also
 raises that question. Paths inside the workspace, `/`, the home directory, a
 workspace ancestor or a floor never raise one. Under Adaptive a question about a
 path other than the program asks for write access, because reads are already open.
+
+In the native interactive CLI, a separate sandbox prompt names the canonical
+path and requested access. `[y]` grants that access for the current session and
+runs the displayed command again. The retry can repeat earlier side effects.
+The grant applies to later exec calls in the same session, not to a new,
+forked, or compacted session. It does not edit saved roots or permission rules.
+A command approval alone does not grant path access. Unattended sessions have
+no terminal grant seat and remain fail-closed.
 
 ### Sandbox judge for residual writes
 

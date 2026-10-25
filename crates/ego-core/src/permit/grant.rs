@@ -901,6 +901,22 @@ impl PermissionRequest {
         request
     }
 
+    /// A separate path capability, never a remembered command permission.
+    pub fn sandbox_grant(grant: &super::SandboxGrant, command: &str) -> Self {
+        let mut request = Self::new(
+            format!(
+                "sandbox {grant} for this session. The command will run again and may repeat prior effects: {command}"
+            ),
+            Vec::new(),
+            Escalation::NoRuleCovers {
+                op: super::OpName::Opaque,
+                path: grant.path.clone(),
+            },
+        );
+        request.explicit_answer = true;
+        request
+    }
+
     pub const fn requires_explicit_answer(&self) -> bool {
         self.explicit_answer
     }

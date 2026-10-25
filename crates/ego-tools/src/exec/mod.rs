@@ -10,6 +10,8 @@ mod identity;
 #[cfg(target_os = "linux")]
 mod landlock;
 mod null;
+#[cfg(target_os = "macos")]
+mod pnpm;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod probe;
 pub(crate) mod process;

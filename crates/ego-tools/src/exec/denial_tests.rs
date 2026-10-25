@@ -208,3 +208,87 @@ fn the_v3_parser_suite_matches_the_production_parser() {
         );
     }
 }
+
+// Catches: a new external pnpm store loses human consent when more than its
+// final path component is absent. No ancestor may replace the requested path.
+#[cfg(target_os = "macos")]
+#[test]
+fn custom_store_with_missing_parents_still_requests_exact_write_authority() {
+    use ego_core::permit::{
+        AdaptivePerimeter, CanonPath, Confinement, RunConfinement, SandboxAccess, SandboxGrant,
+        StreamProvenance, ToolContentBlock, ToolOutputEncoding, ToolOutputProvenance, ToolResult,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let workspace = base.join("workspace");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+    let policy = RunConfinement::new(Confinement::Adaptive, false, CanonPath::new(&workspace))
+        .unwrap()
+        .with_adaptive_perimeter(AdaptivePerimeter {
+            home: CanonPath::new(&home),
+            writable: vec![],
+            credentials: vec![CanonPath::new(home.join(".ssh"))],
+            controls: vec![],
+        });
+    let spec = SpawnSpec::new(
+        vec!["/opt/homebrew/bin/pnpm".into(), "install".into()],
+        Some(CanonPath::new(&workspace)),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let result = ToolResult::new(vec![ToolContentBlock {
+        text: "ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK: Permission denied".into(),
+        provenance: ToolOutputProvenance::Process {
+            stream: StreamProvenance::Stderr,
+            encoding: ToolOutputEncoding::Utf8,
+            truncated: false,
+            omitted_bytes: 0,
+        },
+        full_output: None,
+    }]);
+    let store = home.join("pnpm-stores/project/store");
+    std::fs::write(
+        workspace.join(".npmrc"),
+        format!("store-dir={}\n", store.display()),
+    )
+    .unwrap();
+    let denial = super::analyze(&spec, &result, &policy, &[]).expect("custom-store consent");
+    assert_eq!(
+        denial.request,
+        Some(SandboxGrant::new(
+            CanonPath::new(&store),
+            SandboxAccess::Write
+        ))
+    );
+    assert!(
+        !home.join("pnpm-stores").exists(),
+        "analysis must not create directories"
+    );
+
+    // The existing-parent case still names the store, not its writable parent.
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    assert_eq!(
+        super::analyze(&spec, &result, &policy, &[]).unwrap(),
+        denial
+    );
+    for path in [
+        workspace.join("nested/store"),
+        home.clone(),
+        home.join(".ssh/new/store"),
+    ] {
+        std::fs::write(
+            workspace.join(".npmrc"),
+            format!("store-dir={}\n", path.display()),
+        )
+        .unwrap();
+        assert!(
+            super::analyze(&spec, &result, &policy, &[]).is_none(),
+            "{}",
+            path.display()
+        );
+        assert!(!path.exists() || path == home);
+    }
+}
