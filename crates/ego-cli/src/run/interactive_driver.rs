@@ -837,7 +837,8 @@ impl<'a> Announce<'a> {
                         self.clear_recovery(),
                         self.osc.progress(Progress::Failed),
                         self.osc.notify(crate::DISPLAY_NAME, &notice),
-                        self.osc.state(State::Awaiting),
+                        // The turn failed, but no question owns the composer.
+                        self.osc.state(State::Idle),
                     ]
                     .concat()
                 } else {
