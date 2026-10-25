@@ -6319,7 +6319,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             return Ok(JudgeRun::Unavailable);
         }
         use crate::permit::analysis::{
-            AnalysisOpinion, RiskClass, cache_key_for_effort, complete_identity,
+            AnalysisOpinion, RiskClass, cache_key_for_context, complete_identity,
         };
         if policy.risk(pending.call()).class == RiskClass::High {
             return Ok(JudgeRun::Unavailable);
@@ -6366,6 +6366,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             request_model: profile.request_model.clone(),
             max_output_tokens: profile.output_ceiling(),
         };
+        let context = crate::permit::judge::JudgeTaskContext::from_state(
+            &self.state(),
+            turn,
+            policy.judge_roots(),
+        );
         let cache = self.analysis_cache.clone();
         // Classification already enforced the full policy's roots and denies.
         // Cache only an opinion: the live policy still mints the call-bound permit.
@@ -6379,13 +6384,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             };
         let key = cache.as_ref().zip(self.analysis_observation.as_ref()).map(
             |((_, trust), observation)| {
-                cache_key_for_effort(
+                cache_key_for_context(
                     pending.call(),
                     &analysis_policy,
                     observation,
                     *trust,
                     &config,
                     profile.thinking,
+                    &context,
                 )
             },
         );
@@ -6431,11 +6437,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             &confinement,
             exec_caps,
             pending.request().why(),
-        );
-        let context = crate::permit::judge::JudgeTaskContext::from_state(
-            &self.state(),
-            turn,
-            policy.judge_roots(),
         );
         let generated = judge::JudgeGeneration {
             journal: &self.journal,
@@ -6963,10 +6964,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     return Ok(answered(false, error.to_string()));
                 }
                 identity_refreshes += 1;
+                let fingerprint = authorized.call().authority_fingerprint();
                 prepared = match self.tools.refresh_processes(authorized.into_parts().0) {
                     Ok(refreshed) => refreshed,
                     Err(diagnostic) => return Ok(answered(false, diagnostic)),
                 };
+                // Reasking cannot repair an unchanged identity. Preserve the
+                // revalidation failure instead of replaying an answered prompt.
+                if prepared.authority_fingerprint() == fingerprint {
+                    return Ok(answered(false, error.to_string()));
+                }
                 continue;
             }
             break authorized;

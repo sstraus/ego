@@ -184,6 +184,29 @@ pub fn cache_key_for_effort(
     digest.finalize().into()
 }
 
+/// Task authority is part of an opinion. The same action under a different
+/// user request cannot inherit a cached allow or escalation.
+pub fn cache_key_for_context(
+    call: &PreparedCall,
+    policy: &crate::turn::GenerationPolicyDigest,
+    observation: &super::ExecObservation,
+    trust: crate::config::Trust,
+    judge: &super::judge::JudgeConfig,
+    effort: crate::generator::types::ThinkingLevel,
+    context: &super::judge::JudgeTaskContext,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    super::prepared_call::frame(
+        &mut digest,
+        &cache_key_for_effort(call, policy, observation, trust, judge, effort),
+    );
+    super::prepared_call::frame(
+        &mut digest,
+        &serde_json::to_vec(context).expect("task evidence codec"),
+    );
+    digest.finalize().into()
+}
+
 fn cache_key_with_prompt(
     call: &PreparedCall,
     policy: &crate::turn::GenerationPolicyDigest,

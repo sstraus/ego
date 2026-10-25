@@ -6273,6 +6273,63 @@ mod turn {
         ));
     }
 
+    // Catches: a transient revalidation failure refreshes the identical call and asks twice.
+    #[test]
+    fn identical_revalidation_failure_does_not_repeat_an_answered_permission() {
+        #[derive(Default)]
+        struct UnchangedProcess {
+            validations: AtomicUsize,
+            executions: AtomicUsize,
+        }
+        impl ProcessExecutor for UnchangedProcess {
+            fn revalidate(&self, _spec: &SpawnSpec) -> Result<(), ProcessError> {
+                if self.validations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(ProcessError::Invariant(
+                        "transient observation failure".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            fn execute<'a>(
+                &'a self,
+                _spec: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                self.executions.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(ToolResult::builtin("executed")) })
+            }
+        }
+        let process = Arc::new(UnchangedProcess::default());
+        let mut fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "one".into(),
+                    name: "exec".into(),
+                    args: r#"{"argv":["pwd"]}"#.into(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_exec_tool()
+        .with_human([PermissionDecision::Allow, PermissionDecision::Allow]);
+        fx.with_process(process.clone());
+        run(&fx, SessionState::default(), "inspect the directory");
+        assert_eq!(
+            permission_events(&fx)
+                .iter()
+                .filter(|kind| matches!(kind, EventKind::PermissionRequested { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            process.executions.load(Ordering::SeqCst),
+            0,
+            "a failed revalidation cannot be repaired by another yes"
+        );
+        assert!(fx.store.events().iter().any(|event| matches!(&event.kind, EventKind::ToolCallCompleted { result, .. } if result.model_text().contains("transient observation failure"))));
+    }
+
     #[test]
     fn a_human_allow_mints_for_and_executes_the_exact_prepared_call() {
         let fx = Fixture::new(writing("/ws/out.txt", "allowed"))

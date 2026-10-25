@@ -9,11 +9,21 @@ impl JudgeTaskContext {
     pub fn from_state(state: &SessionState, turn: TurnId, roots: Vec<String>) -> Self {
         let mut items: Vec<_> = state.items.values().collect();
         items.sort_by_key(|item| item.seq);
-        let task = items
+        let latest = items
             .iter()
             .rev()
-            .find(|item| item.kind == ItemKind::UserPrompt)
-            .map_or(String::new(), |item| item.text.clone());
+            .find(|item| item.kind == ItemKind::UserPrompt);
+        let first = items
+            .iter()
+            .find(|item| item.turn == turn && item.kind == ItemKind::UserPrompt);
+        let task = match (first, latest) {
+            (Some(first), Some(latest)) if first.seq != latest.seq => format!(
+                "Earlier user task in this turn:\n{}\nLatest user prompt (takes precedence):\n{}",
+                first.text, latest.text
+            ),
+            (_, Some(latest)) => latest.text.clone(),
+            _ => String::new(),
+        };
         let agent_reason = items
             .iter()
             .rev()
@@ -53,6 +63,5 @@ impl JudgeTaskContext {
             recent_calls,
             roots,
         }
-        .bounded()
     }
 }
