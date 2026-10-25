@@ -79,6 +79,17 @@ impl SeatbeltBackend {
                     .map(|root| root.path().clone()),
             );
         }
+        let pnpm = if matches!(
+            policy.level(),
+            Confinement::Workspace | Confinement::Adaptive
+        ) {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| ProcessError::Backend("pnpm runtime requires HOME".into()))?;
+            let home = super::adaptive::resolve(Path::new(&home))?;
+            super::pnpm::roots(&home, policy.workspace().as_path())?.to_vec()
+        } else {
+            Vec::new()
+        };
         let base = ProfileBase {
             user_config: if policy.level() == Confinement::Off {
                 Vec::new()
@@ -93,6 +104,7 @@ impl SeatbeltBackend {
             runtime_roots: derived_runtime_roots
                 .iter()
                 .map(|root| root.as_path().to_path_buf())
+                .chain(pnpm.iter().take(1).cloned())
                 .collect(),
             exec_paths,
             read_only_roots: policy
@@ -122,6 +134,9 @@ impl SeatbeltBackend {
                         ego_core::permit::SandboxAccess::Read
                     },
                 })
+                .chain(pnpm.into_iter().map(|path| {
+                    SandboxGrant::new(CanonPath::new(path), ego_core::permit::SandboxAccess::Write)
+                }))
                 .collect(),
         };
         Self::render_profile(base, &[], &[], policy.requirements().required())

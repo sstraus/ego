@@ -6,10 +6,6 @@ use std::path::{Path, PathBuf};
 
 #[path = "adaptive_floor.rs"]
 pub(super) mod floor;
-#[cfg(target_os = "macos")]
-#[path = "pnpm_layout.rs"]
-mod pnpm_layout;
-
 /// The process-edge constructor shared by CLI, ACP, and diagnostics.
 pub fn admit_confinement(
     level: Confinement,
@@ -48,22 +44,14 @@ pub fn admit_confinement(
     ];
     writable.extend(mbx);
     writable.extend(env("CARGO_TARGET_DIR"));
-    // Empty variables mean unset. Content caches open; host-executed pnpm
-    // home/bin, store links, dlx tools and npm `_npx` remain read-only.
     let set = |key| env(key).filter(|path| !path.as_os_str().is_empty());
-    let pnpm = set("PNPM_HOME")
-        .or_else(|| set("XDG_DATA_HOME").map(|data| data.join("pnpm")))
-        .unwrap_or_else(|| home.join("Library/pnpm"));
+    #[cfg(target_os = "macos")]
+    writable.extend(super::pnpm::roots(&home, workspace.as_path())?);
     let caches = set("XDG_CACHE_HOME").unwrap_or_else(|| home.join("Library/Caches"));
     let npm = set("npm_config_cache")
         .or_else(|| set("NPM_CONFIG_CACHE"))
         .unwrap_or_else(|| home.join(".npm"));
-    writable.extend([
-        pnpm.join("store"),
-        caches.join("pnpm"),
-        npm.join("_cacache"),
-        npm.join("_logs"),
-    ]);
+    writable.extend([caches.join("pnpm"), npm.join("_cacache"), npm.join("_logs")]);
     let (git, mut controls) = git_roots(workspace.as_path())?;
     // Broad workspace/temp/grant roots must not reopen host-executed controls.
     // Protect defaults too when an operator relocates the active toolchain home.
@@ -85,22 +73,6 @@ pub fn admit_confinement(
             .extend(["settings.toml", "toolchains", "update-hashes"].map(|path| root.join(path)));
     }
     writable.extend(git);
-    let store = pnpm.join("store");
-    let versions = match std::fs::read_dir(&store) {
-        Ok(entries) => entries.collect::<Result<Vec<_>, _>>(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e),
-    }
-    .map_err(|e| error(format!("cannot inspect pnpm store versions: {e}")))?;
-    let mut links: Vec<_> = versions
-        .into_iter()
-        .filter(|entry| entry.file_name().as_encoded_bytes().starts_with(b"v"))
-        .map(|entry| entry.path().join("links"))
-        .collect();
-    if links.is_empty() {
-        links.push(store.join("v11/links")); // pnpm 12's default store version.
-    }
-    controls.extend(links);
     controls.push(caches.join("pnpm/dlx"));
     let mut credentials = [
         ".ssh",
@@ -130,24 +102,11 @@ pub fn admit_confinement(
     credentials.extend([cargo.join("credentials"), cargo.join("credentials.toml")]);
     let ego = env("EGO_HOME").unwrap_or_else(|| home.join(".ego"));
     credentials.extend([ego.join("auth.json"), ego.join("auth.json.tmp")]);
-    #[cfg(target_os = "macos")]
-    let warnings = pnpm_layout::extend(
-        &home,
-        &pnpm,
-        workspace.as_path(),
-        &credentials,
-        &mut writable,
-        &mut controls,
-    );
-    #[cfg(not(target_os = "macos"))]
-    let warnings = Vec::new();
     let perimeter = capture(&home, workspace.as_path(), writable, credentials, controls)?;
-    Ok(policy
-        .with_adaptive_perimeter(perimeter)
-        .with_admission_warnings(warnings))
+    Ok(policy.with_adaptive_perimeter(perimeter))
 }
 
-fn error(message: impl Into<String>) -> ProcessError {
+pub(super) fn error(message: impl Into<String>) -> ProcessError {
     ProcessError::Backend(message.into())
 }
 
@@ -234,7 +193,7 @@ fn capture(
     })
 }
 
-fn check_write_root(
+pub(super) fn check_write_root(
     home: &Path,
     workspace: &Path,
     path: &Path,

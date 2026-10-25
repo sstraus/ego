@@ -85,6 +85,11 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
          (allow process-fork)\n",
     );
 
+    if matches!(input.level, Confinement::Workspace | Confinement::Adaptive) {
+        profile.push_str(
+            "(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n",
+        );
+    }
     match input.level {
         Confinement::Adaptive => profile.push_str(&adaptive::render(input)?),
         Confinement::Off => profile.push_str("(allow process-exec*)\n(allow file*)\n"),
@@ -394,6 +399,7 @@ mod tests {
                 "(deny default)\n",
                 "(import \"system.sb\")\n",
                 "(allow process-fork)\n",
+                "(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n",
                 "(allow process-exec*\n",
                 "  (subpath \"/work\")\n",
                 ")\n",
@@ -497,7 +503,7 @@ mod tests {
         .expect("profile");
         assert!(
             profile.starts_with(&format!(
-                "{}(allow process-exec*\n  (subpath \"/opt/tool\")\n  (subpath \"/work\")\n)\n",
+                "{}(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n(allow process-exec*\n  (subpath \"/opt/tool\")\n  (subpath \"/work\")\n)\n",
                 "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n"
             )),
             "{profile}"

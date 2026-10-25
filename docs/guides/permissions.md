@@ -160,40 +160,33 @@ currently requires macOS Seatbelt and successful native capability probes;
 explicit adaptive selections on unsupported platforms fail admission with explicit alternatives. It captures
 operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
 and linked-worktree metadata, `TMPDIR`, an operator `CARGO_TARGET_DIR`, the pnpm
-store (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`, plus `/store`), the
+home (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`), the
 pnpm cache (`XDG_CACHE_HOME` or `~/Library/Caches`, plus `/pnpm`) and the npm
 `_cacache` and `_logs` (`npm_config_cache` or `~/.npm`) before commands.
-Cargo/rustup defaults apply when their environment variables are absent. The pnpm
-home, its `bin`, global virtual-store `store/v*/links`, cached `pnpm/dlx` tools
-and npm `_npx` stay read-only: the host runs their code later. Admission protects
-every captured store version's `links` path, or `store/v11/links` when no version
-exists yet (pnpm 12's default). Store versions created later require fresh
-admission to capture their host-code paths.
-On macOS, admission reads the project's exact pnpm pin as data, checks the
-installed runtime version, then queries `with <exact version> store path` and
-`with <exact version> root -g`. Without a selector it queries the installed
-version. These child processes run from a fresh private scratch directory, not
-the project. The scratch directory is writable and is removed afterward. Before executing pnpm,
-admission also resolves two selector-lock namespaces: the current-UID operation
-locks and the operator pnpm home's `package-manager-store/v11/tmp/engine-locks`.
-Discovery permits only lock creation and mode changes there, not parent/store writes.
-Project reads/execution and all network access are denied. Each child has a
-two-second limit. A pin unavailable under this offline, scratch-only contract
-warns with the installed and project versions and adds no query-derived roots.
-Project-selected pnpm code never runs unconfined for discovery. Reported paths cannot grant writes
-outside the operator-selected pnpm home. A relocated store outside that boundary
-requires explicit authority rather than trusting project configuration.
-For the recorded pnpm 11 layout, the reported global root and store version identify the
-sibling `package-manager-store/vN`. Only its database companions and `tmp` are
-writable; engine links and the reported global directory remain read-only.
-The recorded macOS runtime also needs its current-user operation-lock directory,
-`/private/tmp/pnpm-store-operation-locks-<UID>`. Only that namespace is admitted,
-not the shared temporary directory. An existing alias, non-directory, foreign
-owner or group/other permission bits refuse the discovered roots. Missing or symlinked engine stores add a perimeter warning,
-not a broad write grant. If pnpm requires writes outside private scratch and those selector locks to answer a query, admission
-adds no query-derived roots and `/config perimeter` reports the declared pnpm
-version and the discovery failure. It does not guess a layout from that version.
-The existing default cache roots remain unchanged.
+Cargo/rustup defaults apply when their environment variables are absent.
+
+On macOS, Workspace and Adaptive grant read/write access to the **whole operator
+pnpm home**, including its binaries, engine store, links and global environments.
+This is an intentional shared-toolchain write authority, not a content-only
+cache. Cached `pnpm/dlx` tools outside that home and npm `_npx` stay read-only.
+No pnpm subprocess runs during admission. These grants apply to all children,
+including scripts and test runners that spawn pnpm.
+
+Both modes also grant the exact current-user operation-lock directory,
+`/private/tmp/pnpm-store-operation-locks-<UID>`, and the two system-info selectors
+`vfs.disk-space` and `net.link.addr`. An existing operation-lock alias,
+non-directory, foreign owner or group/other permission bits refuse admission.
+No shared temp root or writable pnpm ancestor is added. Ancestor `_tmp_*` probes
+remain denied. Read-only mode receives none of these additional grants.
+
+Custom stores inside the workspace or pnpm home are already covered. After a
+pnpm permission refusal, project/user `.npmrc` `store-dir` and top-level
+`pnpm-workspace.yaml` `storeDir` are read as bounded data to identify an external
+store for the existing interactive path approval. Configuration alone grants
+nothing. Project YAML takes precedence over project `.npmrc`, then user `.npmrc`.
+Environment interpolation is not executed by this hint reader; unresolved values
+fall back to ordinary path-denial handling. Credential and configured read-only
+floors still apply to all grants.
 
 On macOS, strict runtime reads also admit the individual existing Git config and
 ignore files (`~/.gitconfig`, and `git/config` plus `git/ignore` under
