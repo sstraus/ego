@@ -662,3 +662,33 @@ fn adaptive_linked_git_read_ancestor_preserves_operational_metadata() {
         );
     }
 }
+
+// Catches: Workspace cannot stat the macOS /var alias or read the platform
+// shell selector, so node package managers fail before their command starts.
+#[test]
+fn workspace_resolves_var_metadata_and_shell_selector_without_var_contents() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let scratch = base.join("scratch");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    let backend = SeatbeltBackend::prepare(
+        &policy,
+        &CanonPath::new(&scratch),
+        &derived_runtime_roots().unwrap(),
+    )
+    .unwrap();
+    let node = fs::canonicalize("/opt/homebrew/bin/node").unwrap();
+    let output = run(&backend, node.to_str().unwrap(), &["-e".as_ref(), "const fs=require('fs'); if(!fs.statSync('/var').isDirectory())process.exit(2); fs.readFileSync('/private/var/select/sh'); console.log('metadata and shell selector ok')".as_ref()]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"metadata and shell selector ok\n");
+    let listing = run(&backend, "/bin/ls", &["/private/var".as_ref()]);
+    assert!(
+        !listing.status.success(),
+        "var listing exposed: {listing:?}"
+    );
+}

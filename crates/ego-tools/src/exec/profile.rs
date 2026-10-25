@@ -90,6 +90,15 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
             "(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n",
         );
     }
+    if input.level == Confinement::Workspace {
+        // macOS /bin/sh consults this selector; Node package managers stat
+        // /var before choosing a temporary directory. Exact metadata and one
+        // selector link are runtime prerequisites, not access to /var data.
+        profile.push_str(concat!(
+            "(allow file-read-metadata (literal \"/var\") (literal \"/private/var\") (literal \"/private/var/select\"))\n",
+            "(allow file-read* (literal \"/private/var/select/sh\"))\n",
+        ));
+    }
     match input.level {
         Confinement::Adaptive => profile.push_str(&adaptive::render(input)?),
         Confinement::Off => profile.push_str("(allow process-exec*)\n(allow file*)\n"),
@@ -400,6 +409,8 @@ mod tests {
                 "(import \"system.sb\")\n",
                 "(allow process-fork)\n",
                 "(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n",
+                "(allow file-read-metadata (literal \"/var\") (literal \"/private/var\") (literal \"/private/var/select\"))\n",
+                "(allow file-read* (literal \"/private/var/select/sh\"))\n",
                 "(allow process-exec*\n",
                 "  (subpath \"/work\")\n",
                 ")\n",
