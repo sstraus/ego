@@ -473,6 +473,7 @@ struct SurfaceStatus {
     selected_mode: Option<Mode>,
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
+    inspections: Option<(Sender<HostCommand>, Arc<futures::task::AtomicWaker>)>,
     model_picker: Option<Arc<Mutex<ModelPicker>>>,
     session_picker_open: bool,
     /// Keys the picker has been sent and not yet applied. The editor parses a
@@ -578,6 +579,7 @@ impl Default for SurfaceStatus {
             selected_mode: None,
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
+            inspections: None,
             model_picker: None,
             session_picker_open: false,
             picker_keys: Vec::new(),
@@ -1373,6 +1375,8 @@ impl Seat {
         let (input_sender, input) = crossbeam::channel::unbounded();
         let (inspection_sender, inspections) = crossbeam::channel::unbounded();
         let inspection_waker = Arc::new(futures::task::AtomicWaker::new());
+        status.lock().expect("surface status lock").inspections =
+            Some((inspection_sender.clone(), Arc::clone(&inspection_waker)));
         let owner_inspection_waker = Arc::clone(&inspection_waker);
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
         let owner_break = Arc::clone(&break_signal);
