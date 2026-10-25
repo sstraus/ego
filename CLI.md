@@ -666,7 +666,11 @@ a served session anything about its workspace.
 
 Final retry semantics are owned above provider mappings. `--retry N` permits
 at most N additional attempts on the same resolved model after a `Transient`
-failure that emitted no text, reasoning, reasoning state, or tool call.
+failure that emitted no content. An attempt with only opaque reasoning state
+and parsed tools proven unrun may retry once per candidate generation, within
+that same allowance. Pending tool items close as not run before the retry.
+Visible text, visible reasoning, and provider content of unknown effect never
+retry. Explicit `--retry 0` also forbids opaque/unrun recovery.
 Each retry uses exponential backoff of 1, 2, 4 … seconds (at most 120),
 with up to 25% downward jitter, or the provider's `Retry-After` without jitter.
 `Retry-After` accepts delta seconds and HTTP-date; `retry-after-ms` takes precedence.
@@ -686,8 +690,8 @@ timeout; a recovery attempt also ends at its recovery deadline.
 Each repeatable `--fallback P/M` is an ordered
 candidate that is re-resolved from current facts and attempted only after
 capability and request-expressibility checks preserve tools, images, schemas,
-limits, and reasoning state. A possibly-sent attempt that showed output stops
-automatic retry, and any possibly-sent attempt stops fallback. Every attempt has a fresh ID, reservation, request digest, settlement,
+limits, and reasoning state. A possibly-sent attempt that showed visible or
+unknown-effect output stops automatic retry, and any possibly-sent attempt stops fallback. Every attempt has a fresh ID, reservation, request digest, settlement,
 usage, and cost; output totals fold them without hiding failed or charged work.
 See the accepted attempt-ownership ADR.
 

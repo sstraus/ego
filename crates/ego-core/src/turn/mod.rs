@@ -4828,6 +4828,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
         let mut candidate_conversation = walk.conversation.clone();
         let mut additional_attempts = 0_u32;
+        let mut unrun_retry_used = false;
 
         loop {
             if self
@@ -4946,7 +4947,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             self.last_generator = Some(Arc::clone(&profile.generator));
             let stream = profile.generator.generate(request, attempt);
             let cache_prefix = stream.cache_prefix().cloned();
-            let drained = self
+            let mut drained = self
                 .drain(
                     turn,
                     stream,
@@ -5013,15 +5014,21 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             )
             .then(|| ProviderFailure {
                 cause: cause.clone(),
-                effect_known: !drained.emitted_output || reported.is_some(),
+                effect_known: !drained.replay_unsafe || reported.is_some(),
             });
-            // maintainer decision 2026-10-05, amending the attempt-ownership
-            // ADR: a transient failure that showed nothing is retried even
-            // when it was possibly sent. Output already shown is never
-            // shown twice, so an attempt that emitted any is final.
+            // maintainer decision 2026-10-25: opaque reasoning and parsed calls
+            // have no local effect until ToolUse dispatch. Recover once, but
+            // never replay visible output or provider content of unknown effect.
             let retryable = stop == StopReason::Error
                 && drained.error_kind == Some(ErrorKind::Transient)
-                && !drained.emitted_output;
+                && !drained.replay_unsafe
+                && (!drained.unrun_output || !unrun_retry_used);
+            if retryable {
+                // Close before publishing/waiting for a retry, including when
+                // cancellation or an exhausted allowance prevents dispatch.
+                self.close_unstarted_siblings(turn, &drained.pending)?;
+                drained.pending.clear();
+            }
             match self
                 .retry_generation(
                     turn,
@@ -5032,7 +5039,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 )
                 .await?
             {
-                RetryProgress::Retry => continue,
+                RetryProgress::Retry => {
+                    unrun_retry_used |= drained.unrun_output;
+                    continue;
+                }
                 RetryProgress::Cancelled => {
                     return Ok(std::ops::ControlFlow::Break(Generated::Cancelled {
                         cause: self.cancel.cause().unwrap_or(CancelCause::User),
@@ -5911,7 +5921,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut stated_cost: Option<Money> = None;
         let mut accounting_booked = false;
         let mut private_tool_use = false;
-        let mut emitted_output = false;
+        let mut replay_unsafe = false;
+        let mut unrun_output = false;
         let mut provider_failure = None;
         let settlement_currency = self.settlement_currency;
 
@@ -5974,14 +5985,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 },
                 event => event,
             };
-            emitted_output |= matches!(
+            replay_unsafe |= matches!(
                 event,
                 AiEvent::ProviderContent { .. }
                     | AiEvent::TextDelta { .. }
                     | AiEvent::ReasoningDelta { .. }
-                    | AiEvent::ReasoningState(_)
-                    | AiEvent::ToolCall { .. }
             );
+            unrun_output |= matches!(event, AiEvent::ReasoningState(_) | AiEvent::ToolCall { .. });
             let appended = match event {
                 AiEvent::WebSearch { .. } | AiEvent::Citation { .. } => {
                     unreachable!("projected above")
@@ -6302,7 +6312,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             private_text: assembled,
             private_tool_use,
             accounting_booked,
-            emitted_output,
+            replay_unsafe,
+            unrun_output,
             provider_failure,
         }
     }
@@ -8123,10 +8134,12 @@ struct Drained {
     private_tool_use: bool,
     /// Whether this drain appended at least one charge for the attempt.
     accounting_booked: bool,
-    /// Whether the attempt emitted anything a reader can observe: text,
-    /// reasoning, or a tool call. A retry of an attempt that did would show
-    /// that output twice.
-    emitted_output: bool,
+    /// Visible output or provider content whose effects are not proven absent.
+    /// Neither is safe to replay, even if delivery is claimed definitely unsent.
+    replay_unsafe: bool,
+    /// Opaque reasoning or parsed tools, which drain never dispatches. Their
+    /// recovery allowance is one retry, within the existing budget and deadline.
+    unrun_output: bool,
     /// The last host-safe failure the provider itself reported, and its
     /// `Retry-After`, if it reported one.
     provider_failure: Option<(String, Option<Duration>)>,
