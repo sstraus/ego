@@ -121,7 +121,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 let (child, inventory) = session
                     .admit(request.name().clone(), spec, options)
                     .await
-                    .map_err(|error| invalid_candidate(error.to_string()))?;
+                    .map_err(candidate_error)?;
                 let bootstrap = McpCollapsedBootstrap::detect(&inventory.tools)
                     .map_err(|error| invalid_candidate(error.to_string()))?;
                 let factory = McpStdioOperationFactory::runtime_session(
@@ -231,7 +231,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                     {
                         McpCandidateError::CredentialRequired
                     } else {
-                        invalid_candidate(error.to_string())
+                        candidate_error(error)
                     }
                 })?;
                 if let Some((connection_id, effects)) = &acp_session {
@@ -359,5 +359,14 @@ fn cache_metadata(
 fn invalid_candidate(cause: impl Into<String>) -> McpCandidateError {
     McpCandidateError::Invalid {
         cause: cause.into(),
+    }
+}
+
+fn candidate_error(error: crate::McpError) -> McpCandidateError {
+    match error.denied_executable() {
+        Some(denial) => McpCandidateError::ExecutableDenied {
+            denial: denial.clone(),
+        },
+        None => invalid_candidate(error.to_string()),
     }
 }
