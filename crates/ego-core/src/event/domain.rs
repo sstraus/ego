@@ -232,7 +232,7 @@ pub struct ToolTiming {
 ///
 /// ```text
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
-/// SessionPaused | SessionPauseObserved | SessionResumed | GoalSet |
+/// SessionPaused | SessionPauseObserved | SessionResumed | SessionSelectionsSelected | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
 /// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
 /// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
