@@ -2,7 +2,7 @@
 mod support;
 use support::{FIXTURE_SESSION_ID, Places, Plan, Stub};
 
-// Catches: a configured default silently replaces the resumed session's recorded model.
+// Catches: an explicit model override replaces the saved model without a notice.
 #[test]
 fn resume_announces_a_model_change_from_the_stored_session() {
     let stub = Stub::start(Plan::default());
@@ -29,7 +29,13 @@ fn resume_announces_a_model_change_from_the_stored_session() {
     let resumed = places
         .ego(&stub)
         .subcommand("resume")
-        .args([FIXTURE_SESSION_ID, "--sandbox", "off"])
+        .args([
+            FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+        ])
         .run_pty("next");
     assert_eq!(resumed.code, Some(0), "{}", resumed.stdout);
     assert!(
@@ -99,7 +105,14 @@ fn resume_quiet_does_not_announce_a_model_change() {
     let resumed = places
         .ego(&stub)
         .subcommand("resume")
-        .args([FIXTURE_SESSION_ID, "--sandbox", "off", "--quiet"])
+        .args([
+            FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--quiet",
+        ])
         .run_pty("next");
     assert_eq!(resumed.code, Some(0), "{}", resumed.stdout);
     assert!(

@@ -75,10 +75,22 @@ impl Perimeter {
                         .adaptive_perimeter()
                         .into_iter()
                         .flat_map(|p| &p.writable)
-                        .map(|path| PerimeterRoot {
-                            path: path.as_path().to_path_buf(),
-                            access: RootAccess::ReadWrite,
-                            source: "derived".to_owned(),
+                        .map(|path| {
+                            let restriction = roots.iter().find(|root| {
+                                root.access() == RootAccess::Read
+                                    && path.is_or_under(root.path())
+                                    && (path == root.path()
+                                        || root.restricts_writes(confinement.workspace(), roots))
+                            });
+                            PerimeterRoot {
+                                path: path.as_path().to_path_buf(),
+                                access: restriction
+                                    .map_or(RootAccess::ReadWrite, ProfileRoot::access),
+                                source: restriction.map_or_else(
+                                    || "derived".to_owned(),
+                                    |_| origin(effective.roots_source),
+                                ),
+                            }
                         }),
                 )
                 .collect(),

@@ -122,16 +122,28 @@ fn history_search_indexes_conversation_not_tool_payload_and_caps_json() {
         let result = history.search(query).unwrap();
         assert!(result.len() <= 1024, "{} bytes", result.len());
         let hits: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(!hits.as_array().unwrap().is_empty(), "{query}: {result}");
-        for hit in hits.as_array().unwrap() {
+        assert!(
+            !hits["hits"].as_array().unwrap().is_empty(),
+            "{query}: {result}"
+        );
+        for hit in hits["hits"].as_array().unwrap() {
             assert!(hit["title"].is_string());
             assert_eq!(hit["updated"], "1970-01-01T00:00:01.000Z");
             assert!(hit["snippet"].is_string());
         }
     }
-    assert_eq!(history.search("toolneedle").unwrap(), "[]");
-    assert_eq!(history.search("deltaneedle").unwrap(), "[]");
-    assert_eq!(history.search(" \t ").unwrap(), "[]");
+    assert_eq!(
+        history.search("toolneedle").unwrap(),
+        r#"{"hits":[],"unreadable":[],"omitted_unreadable":0}"#
+    );
+    assert_eq!(
+        history.search("deltaneedle").unwrap(),
+        r#"{"hits":[],"unreadable":[],"omitted_unreadable":0}"#
+    );
+    assert_eq!(
+        history.search(" \t ").unwrap(),
+        r#"{"hits":[],"unreadable":[],"omitted_unreadable":0}"#
+    );
     assert!(history.search("\" : OR *").is_ok());
 }
 
@@ -192,13 +204,19 @@ fn history_refresh_and_open_use_current_durable_conversation() {
             }),
         )
         .unwrap();
-    assert_eq!(history.search("Old").unwrap(), "[]");
+    assert_eq!(
+        history.search("Old").unwrap(),
+        r#"{"hits":[],"unreadable":[],"omitted_unreadable":0}"#
+    );
     assert_eq!(history.matches("New").unwrap()[0].title, "New title");
     fixture
         .store
         .append(&id, &event(EventKind::SessionDeleted))
         .unwrap();
-    assert_eq!(history.search("acp trust").unwrap(), "[]");
+    assert_eq!(
+        history.search("acp trust").unwrap(),
+        r#"{"hits":[],"unreadable":[],"omitted_unreadable":0}"#
+    );
 }
 
 // Catches: per-query raw transcript scanning replaces indexed lookup at catalogue scale.

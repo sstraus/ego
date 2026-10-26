@@ -645,7 +645,10 @@ means something else.
 The builtins `history.search` (`{"query":"acp trust"}`) and `history.open`
 (`{"session":"<id>"}`) read prior conversations across the admitted session
 store's workspace roots. Search returns at most 1 KiB of JSON with session ids,
-titles, UTC updated dates and conversational snippets. Open returns at most
+titles, UTC updated dates and conversational snippets in `hits`. Its `unreadable`
+list names skipped session ids and read errors; `omitted_unreadable` counts warnings
+that do not fit the bound. Each skipped session is also logged. Unreadable logs
+are not decoded with an older schema or changed. Open returns at most
 8 KiB of user/assistant text, with an omission notice when bounded. Tool results
 and streamed deltas are excluded. `--tools` and `--no-tools` control their
 availability like the other builtins. SQLite FTS5 lives in a derived
@@ -1847,6 +1850,9 @@ Active queue, draft and interrupt state is added even when the template omits it
 The queue field reads `steer N · next N`: `steer` counts messages that steer the
 running turn; `next` counts messages queued for the next turn. Both counts are
 shown when either is nonzero. When both are zero, the field is omitted.
+Queue counts refresh when input is consumed, including during a running turn.
+The interrupt indicator disappears when the interrupted turn settles; input
+that still waits for delivery keeps its queue count, not an interrupt indicator.
 At a width too small for one critical value, that value remains whole.
 
 Variables: `model`, `effort`, `fast`, `mode`, `ctx.used`, `ctx.window`,

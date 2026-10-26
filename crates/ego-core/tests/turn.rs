@@ -12857,6 +12857,113 @@ mod turn {
         }
     }
 
+    // Catches: external skill resources fall back to default-root bytes or escape their root.
+    #[test]
+    fn model_skill_resource_uses_external_root_without_default_fallback() {
+        for (path, denied, expected) in [
+            ("README.md", false, Some("external resource bytes")),
+            ("README.md", true, None),
+            ("../outside.md", false, None),
+            ("/ws/outside.md", false, None),
+            ("missing.md", false, None),
+        ] {
+            let descriptor = forked_descriptor(true);
+            let catalogue = Arc::new(
+                ego_core::skill::SkillCatalogue::new(vec![
+                    ego_core::skill::SkillSpec::new(
+                        descriptor.clone(),
+                        b"Use the admitted resource".to_vec(),
+                    )
+                    .unwrap()
+                    .with_resource_root(CanonPath::new("/ws/maintained/forked")),
+                ])
+                .unwrap(),
+            );
+            let operation = ego_core::skill::AdmittedSkillOperation::invoke(&descriptor, "");
+            let fx = Fixture::new(vec![])
+                .with_rules(&["read(**)"], if denied { &["read(**)"] } else { &[] });
+            fx.fs
+                .file("/ws/maintained/forked/README.md", "external resource bytes");
+            fx.fs
+                .file("/ws/skills/forked/README.md", "wrong default-root bytes");
+            fx.fs.file("/ws/maintained/outside.md", "outside bytes");
+            fx.fs.file("/ws/outside.md", "outside bytes");
+            let generator = Arc::new(SkillResourceGenerator {
+                sent: AtomicBool::new(false),
+                path,
+            });
+            let evidence = SkillEvidence::new();
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::from_registry(
+                &[RegisteredTool::skill(catalogue)],
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
+                CanonPath::new("/ws"),
+            )
+            .with_skill_resource_roots(ego_core::skill::SkillResourceRoots::new(
+                "/ws".into(),
+                "/ws".into(),
+                "/ws".into(),
+            ));
+            let mut turn = TurnLoop::open(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model_for(&fx, &generator, &mut gate),
+                tools,
+            )
+            .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
+            block_on(turn.run_admitted_skill(operation)).unwrap();
+            let state = turn.state();
+            let call = state
+                .items
+                .values()
+                .find(|item| item.kind == ItemKind::ToolCall)
+                .expect("resource call answered");
+            assert_eq!(
+                call.ok,
+                Some(expected.is_some()),
+                "{path}, denied={denied}: {}",
+                tool_result_text(call)
+            );
+            let resources: Vec<_> = fx
+                .store
+                .events()
+                .into_iter()
+                .filter_map(|event| match event.kind {
+                    EventKind::SkillResourceAdmitted { content, .. } => Some(content),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(resources.len(), usize::from(expected.is_some()));
+            if path == "missing.md" {
+                assert!(
+                    tool_result_text(call).contains("/ws/maintained/forked"),
+                    "{}",
+                    tool_result_text(call)
+                );
+            }
+            if let Some(bytes) = expected {
+                assert_eq!(tool_result_text(call), bytes);
+                use ego_core::store::blob::BlobStore;
+                assert_eq!(
+                    evidence.blobs.read(&resources[0]).unwrap(),
+                    bytes.as_bytes()
+                );
+            }
+        }
+    }
+
     #[test]
     fn typed_user_skill_turn_uses_admitted_instruction_not_prompt_or_tool_call() {
         let location =

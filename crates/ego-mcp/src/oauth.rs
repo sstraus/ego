@@ -593,14 +593,30 @@ pub async fn login(
                 &effects,
             )
             .await?;
+            fn field_present<'de, D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<bool, D::Error> {
+                serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
+            }
+            fn requested_public_auth_method() -> String {
+                "none".to_owned()
+            }
             #[derive(Deserialize)]
             struct Registered {
                 client_id: String,
+                #[serde(default = "requested_public_auth_method")]
                 token_endpoint_auth_method: String,
+                #[serde(default, deserialize_with = "field_present")]
+                client_secret: bool,
                 redirect_uris: Vec<Url>,
             }
             let registered: Registered = decode_json_response(response).await?;
+            // Interoperability exception for publishwith.ai, not RFC compliance:
+            // RFC 7591 §2 defaults omission to client_secret_basic, unusable without
+            // a secret. Retain our requested public method only when no secret is
+            // returned; §3.2.1 still requires checking explicit metadata bindings.
             if registered.client_id.trim().is_empty()
+                || registered.client_secret
                 || registered.token_endpoint_auth_method != "none"
                 || registered.redirect_uris != [request.redirect_uri.clone()]
             {

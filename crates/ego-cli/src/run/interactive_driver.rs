@@ -972,6 +972,18 @@ impl EventSink for Signalling<'_> {
     }
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        // Ingress acknowledgements cover acceptance/retraction. Consumption
+        // and turn settlement happen here, before the next generation ends.
+        if matches!(
+            event,
+            PublicEvent::ItemCompleted {
+                kind: ego_core::public::ItemKind::UserMessage,
+                ..
+            } | PublicEvent::TurnCompleted { .. }
+        ) && let Some(seat) = self.seat
+        {
+            seat.refresh_queue(state);
+        }
         self.inner.publish(event, state);
         if !self.announce.quiet
             && let Some(seat) = self.seat

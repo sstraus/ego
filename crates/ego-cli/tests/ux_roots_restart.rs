@@ -22,10 +22,6 @@ fn roots_mutations_tell_the_user_to_exit_and_resume() {
             "{}",
             result.stderr
         );
-        assert!(
-            result.stderr.contains("exit and resume"),
-            "{}",
-            result.stderr
-        );
+        assert!(result.stderr.contains("/quit"), "{}", result.stderr);
     }
 }

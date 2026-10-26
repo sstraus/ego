@@ -5267,10 +5267,13 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     input.write_all(b"yes\r").expect("trust answer");
     input.flush().expect("trust flush");
     until_post_trust_prompt(&reader, &mut output, 0);
+    let turn_started = Instant::now();
     input.write_all(b"run slow tool\r").expect("submit turn");
     input.flush().expect("submit flush");
     until(&reader, &mut output, b"[d] details");
+    let held_since = Instant::now();
     thread::sleep(Duration::from_secs(5));
+    let held = held_since.elapsed();
     let allowed = output.len();
     input.write_all(b"y").expect("allow");
     input.flush().expect("allow flush");
@@ -5287,6 +5290,10 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     thread::sleep(Duration::from_millis(2200));
     drain(&reader, &mut output);
     let after_allow = normalized(&output[allowed..]);
+    // Startup and scheduler delay are active work, not modal wait. Bound the
+    // counter by observed wall time minus the hold, with one second for the
+    // display's whole-second boundary rather than assuming a fast launch.
+    let active_seconds = turn_started.elapsed().saturating_sub(held).as_secs() + 1;
     std::fs::write(&release, b"go").expect("release tool");
     until(&reader, &mut output, b"SLOW-TOOL-DONE");
     input.write_all(b"/quit\r").expect("quit");
@@ -5299,8 +5306,8 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
         .filter_map(|rest| rest.split('s').next()?.parse().ok())
         .collect();
     assert!(
-        !counted.is_empty() && counted.iter().all(|seconds| *seconds <= 4),
-        "the 5 s spent on the modal was counted: {counted:?} in {after_allow:?}"
+        !counted.is_empty() && counted.iter().all(|seconds| *seconds <= active_seconds),
+        "modal hold {held:?} was counted: {counted:?}, active wall-time bound {active_seconds}s in {after_allow:?}"
     );
 }
 

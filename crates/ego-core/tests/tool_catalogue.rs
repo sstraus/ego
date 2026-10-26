@@ -871,7 +871,7 @@ fn permission_recovery_guidance_reaches_the_stable_system_context() {
         "ego roots add",
         "roots=[]",
         "ego config unset roots",
-        "exit and resume",
+        "/quit",
         "/config perimeter",
         "ego config ls --effective",
         "ego doctor",

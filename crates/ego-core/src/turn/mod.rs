@@ -2286,35 +2286,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             if let Some(error) = drained.failure {
                 return Err(CompactionError::Store(error));
             }
-            if !drained.accounting_booked {
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::UsageUpdated {
-                        usage: Usage::IDENTITY,
-                        cost_delta: settled_cost(
-                            &profile.metering,
-                            quote.as_ref(),
-                            UsageReport::Missing,
-                            None,
-                            self.gate
-                                .snapshot()
-                                .map_err(|error| CompactionError::Internal(error.to_string()))?
-                                .currency(),
-                        ),
-                        attempt: Some(reference),
-                    },
-                )?;
-            }
-            self.journal.append(
+            self.record_generation_settlement(
                 turn,
-                None,
-                None,
-                EventKind::AttemptSettled {
-                    attempt: settlement.attempt,
-                    outcome: settlement.outcome,
-                },
+                profile,
+                reference,
+                &settlement,
+                drained.accounting_booked,
             )?;
             if drained.cancelled {
                 return Err(CompactionError::Cancelled(
@@ -5016,6 +4993,23 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 &settlement,
                 drained.accounting_booked,
             )?;
+            if let UsageReport::Reported(usage) = settlement.outcome.usage() {
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::ContextWindowUpdated {
+                        used_tokens: usage.total_tokens(),
+                        provenance: OccupancyProvenance::GenerationBoundary,
+                        // This profile and not the one the caller resolved
+                        // before the loop: the candidate walk above can end
+                        // on a fallback, and the occupancy below is that
+                        // model's, so the ceiling it is a fraction of has
+                        // to be that model's too.
+                        window: profile.capabilities.max_context_tokens,
+                    },
+                )?;
+            }
             if let Some(prefix) = cache_prefix.as_ref() {
                 let usage = match (settlement.outcome.stop(), settlement.outcome.usage()) {
                     (
@@ -5488,23 +5482,6 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 outcome: settlement.outcome,
             },
         )?;
-        if let UsageReport::Reported(usage) = settlement.outcome.usage() {
-            self.journal.append(
-                turn,
-                None,
-                None,
-                EventKind::ContextWindowUpdated {
-                    used_tokens: usage.total_tokens(),
-                    provenance: OccupancyProvenance::GenerationBoundary,
-                    // This profile and not the one the caller resolved
-                    // before the loop: the candidate walk above can end
-                    // on a fallback, and the occupancy below is that
-                    // model's, so the ceiling it is a fraction of has
-                    // to be that model's too.
-                    window: profile.capabilities.max_context_tokens,
-                },
-            )?;
-        }
         Ok(terminal)
     }
 

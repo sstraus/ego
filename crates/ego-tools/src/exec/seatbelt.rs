@@ -24,7 +24,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v7-path-metadata";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v8-derived-write-precedence";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -72,16 +72,7 @@ impl SeatbeltBackend {
             .map(|path| path.as_path().to_path_buf())
             .collect::<Vec<_>>();
         exec_paths.push(policy.workspace().as_path().to_path_buf());
-        let mut adaptive = policy.adaptive_perimeter().cloned();
-        if let Some(perimeter) = adaptive.as_mut() {
-            perimeter.controls.extend(
-                policy
-                    .roots()
-                    .iter()
-                    .filter(|root| root.access() == ego_core::permit::RootAccess::Read)
-                    .map(|root| root.path().clone()),
-            );
-        }
+        let adaptive = policy.adaptive_perimeter().cloned();
         let pnpm = if matches!(
             policy.level(),
             Confinement::Workspace | Confinement::Adaptive
@@ -221,6 +212,56 @@ impl SeatbeltBackend {
                 ));
             }
             profile.push_str(")\n");
+        }
+        if let Some(perimeter) = &base.adaptive {
+            // A broad read root does not erase a more-specific launch-derived
+            // write root. Nested explicit read restrictions still win, as do
+            // the credential and host-control floors rendered above.
+            for root in &base.read_only_roots {
+                let mut exceptions = Vec::new();
+                if !base.write_restrictions.contains(root) {
+                    exceptions.extend(
+                        perimeter
+                            .writable
+                            .iter()
+                            .map(|path| path.as_path())
+                            .chain(std::iter::once(base.workspace.as_path()))
+                            .chain(
+                                base.roots
+                                    .iter()
+                                    .filter(|grant| {
+                                        grant.access == ego_core::permit::SandboxAccess::Write
+                                    })
+                                    .map(|grant| grant.path.as_path()),
+                            )
+                            .filter(|path| {
+                                *path != root.as_path() && path.starts_with(root.as_path())
+                            }),
+                    );
+                }
+                let literal = profile::path_literal(root.as_path())
+                    .map_err(|error| ProcessError::Backend(error.to_string()))?;
+                if exceptions.is_empty() {
+                    profile.push_str(&format!("(deny file-write* (subpath {literal}))\n"));
+                } else {
+                    profile.push_str(&format!("(deny file-write* (require-all (subpath {literal}) (require-not (require-any\n"));
+                    for path in exceptions {
+                        profile.push_str(&format!(
+                            "  (subpath {})\n",
+                            profile::path_literal(path)
+                                .map_err(|error| ProcessError::Backend(error.to_string()))?
+                        ));
+                    }
+                    profile.push_str("))))\n");
+                }
+                for ancestor in root.as_path().ancestors() {
+                    profile.push_str(&format!(
+                        "(deny file-write-unlink (literal {}))\n",
+                        profile::path_literal(ancestor)
+                            .map_err(|error| ProcessError::Backend(error.to_string()))?
+                    ));
+                }
+            }
         }
         if base.level != Confinement::Off {
             // Explicit denies win over workspace, adaptive and later human grants.

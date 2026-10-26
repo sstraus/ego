@@ -152,8 +152,8 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     }
     /// Return terminal ingress ownership before re-entering rooted admission.
     fn restore_control(&self, _control: InteractiveControl) {}
-    /// Publish the coordinator's authoritative durable queue projection.
-    fn refresh_queue(&self, _queue: QueueStatus) {}
+    /// Publish live queue facts from the authoritative reduced session.
+    fn refresh_queue(&self, _state: &SessionState) {}
     /// Publish the coordinator-owned compaction guard to the interactive surface.
     fn set_compaction_availability(&self, _availability: repl::actions::Availability) {}
     /// Confirm a source-owned clean-session transition.
@@ -279,11 +279,6 @@ enum TurnStart {
 }
 
 impl Turns<'_> {
-    fn deadline_expired(&self) -> bool {
-        self.deadline
-            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-    }
-
     pub(super) async fn drive_with_images<'session: 'turn, 'turn>(
         &self,
         loop_: &mut TurnLoop<'session, 'turn>,
@@ -598,7 +593,12 @@ impl Turns<'_> {
                         stopped = true;
                     }
                     done = &mut running => {
-                        if self.deadline_expired() {
+                        // A provider can observe the shared deadline before
+                        // stop_signal is polled again. Only successful completion
+                        // is authoritative over that deadline.
+                        if !matches!(&done, Ok(outcome) if outcome.ok)
+                            && self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                        {
                             cancel.cancel(CancelCause::Timeout);
                             stopped = true;
                         }
@@ -607,7 +607,10 @@ impl Turns<'_> {
                 }
             }
         };
-        if stopped {
+        // The core appends TurnCompleted before its cleanup tail. A deadline
+        // observed in that tail cannot rewrite an authoritative completion.
+        // Still cancel pending work and bound cleanup by GRACE above.
+        if stopped && !matches!(&outcome, Some(Ok(outcome)) if outcome.ok) {
             return Err(cancelled_termination(cancel));
         }
         match outcome {
@@ -677,4 +680,96 @@ pub(super) fn last_assistant_message(state: &SessionState) -> String {
         .max_by_key(|item| item.seq)
         .map(|item| item.text.clone())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use ego_core::event::domain::ExitReason;
+
+    fn outcome(ok: bool, exit_reason: ExitReason) -> TurnOutcome {
+        TurnOutcome {
+            turn: TurnId::new(),
+            ok,
+            exit_reason,
+            denied: None,
+            skill: None,
+            provider_failure: None,
+            usage_error: None,
+        }
+    }
+
+    // Catches: a completed turn is rewritten as timeout when synchronous
+    // completion cleanup crosses the deadline before returning its outcome.
+    #[tokio::test]
+    async fn completed_turn_is_not_rewritten_by_post_completion_deadline() {
+        let turns = Turns {
+            schema: None,
+            retries: 0,
+            max_turns: None,
+            deadline: Some(Instant::now() + Duration::from_millis(20)),
+        };
+        let cancel = CancelToken::new();
+        let result = turns
+            .one_running(
+                async {
+                    let completed = outcome(true, ExitReason::Completed);
+                    // Models the synchronous journal/hook tail after TurnCompleted.
+                    std::thread::sleep(Duration::from_millis(40));
+                    Ok(completed)
+                },
+                &cancel,
+            )
+            .await;
+        assert!(result.unwrap().ok);
+        assert!(!cancel.is_cancelled(), "completion does not mint a timeout");
+    }
+
+    // Catches: the stop branch discards an already-completed outcome returned
+    // during cooperative cleanup, contradicting the durable successful turn.
+    #[tokio::test]
+    async fn completed_turn_survives_deadline_during_async_cleanup() {
+        let turns = Turns {
+            schema: None,
+            retries: 0,
+            max_turns: None,
+            deadline: Some(Instant::now() + Duration::from_millis(20)),
+        };
+        let cancel = CancelToken::new();
+        let result = turns
+            .one_running(
+                async {
+                    let completed = outcome(true, ExitReason::Completed);
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    Ok(completed)
+                },
+                &cancel,
+            )
+            .await;
+        assert!(result.unwrap().ok);
+    }
+
+    // Catches: completion precedence accidentally waives a real running-turn timeout.
+    #[tokio::test]
+    async fn running_turn_still_times_out() {
+        let turns = Turns {
+            schema: None,
+            retries: 0,
+            max_turns: None,
+            deadline: Some(Instant::now() + Duration::from_millis(20)),
+        };
+        let cancel = CancelToken::new();
+        let result = turns
+            .one_running(
+                async {
+                    while !cancel.is_cancelled() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    Ok(outcome(false, ExitReason::Cancelled(CancelCause::Timeout)))
+                },
+                &cancel,
+            )
+            .await;
+        assert!(matches!(result, Err(RunTermination::TimedOut)));
+    }
 }

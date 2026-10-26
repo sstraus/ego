@@ -1,4 +1,3 @@
-#[cfg(target_os = "macos")]
 use super::*;
 
 // Catches: CLI wires command approval but drops the sandbox seat, so a real
@@ -178,4 +177,131 @@ fn promoted_denial_has_no_terminal_authority(pending: bool) {
     assert!(!after.contains("Allow read "), "{after}");
     assert!(!after.contains("PROMOTED-READ-MUST-NOT-RUN"), "{after}");
     assert_eq!(stub.generations().len(), 3);
+}
+
+// Catches: an interactive shell exec refusal offers Read and then Write instead
+// of explaining the executable authority the user actually needs to change.
+#[test]
+fn interactive_shell_exec_refusal_shows_recovery_without_filesystem_grants() {
+    interactive_exec_refusal(false);
+}
+
+// Catches: bad-interpreter exit 126 returns silently without exec recovery in
+// the terminal, even though the command approval seat is interactive.
+#[test]
+fn interactive_interpreter_refusal_shows_recovery_without_filesystem_grants() {
+    interactive_exec_refusal(true);
+}
+
+fn interactive_exec_refusal(bad_interpreter: bool) {
+    let outside = tempfile::tempdir().unwrap();
+    let tools = outside.path().canonicalize().unwrap();
+    let program = tools.join("refused-program");
+    std::fs::copy("/bin/echo", &program).unwrap();
+    let places = support::Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        format!(
+            "roots=[{{path='{}',access='read'}}]\nexec_paths=[]\n",
+            tools.display()
+        ),
+    )
+    .unwrap();
+    // Replay Bash diagnostics recorded in usability round two, also retained
+    // in ego-tools/src/exec/denial_tests.rs. Only the temporary program path is
+    // substituted. This exercises real child stderr, not a mocked tool result;
+    // it does not claim a real Seatbelt or Linux interpreter-chain denial.
+    let diagnostic = if bad_interpreter {
+        "/bin/bash: %s: /usr/bin/env: bad interpreter: Operation not permitted\\n"
+    } else {
+        "/bin/bash: %s: Operation not permitted\\n"
+    };
+    let shell = format!("printf '{diagnostic}' \"$1\" >&2; exit 126");
+    let args = serde_json::json!({
+        "argv": ["/bin/sh", "-c", shell, "recorded-exec-refusal", program],
+        "timeout_ms": 5000,
+    })
+    .to_string();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("refused-exec", "exec", &args)),
+            Reply::Sse(text(TOOL_TURN_DONE)),
+        ],
+        ..Plan::default()
+    });
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--mode",
+        "default",
+        "--sandbox",
+        "workspace",
+    ]);
+    let mut session = modal_session_on(ego, stub);
+    session.press(b"run the recorded refusal\r");
+    session.wait("[d] details");
+    let approval = session.screen().join("\n");
+    assert!(approval.contains("Allow run /bin/sh"), "{approval}");
+    session.press(b"y");
+    let after_approval = session.mark;
+    // A broken implementation can stop at a path modal. Observe it and decline
+    // it before asserting, so the RED replay also shuts its real child down.
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    let offered_grant = loop {
+        let shown = normalized(&session.output[after_approval..]);
+        if shown.contains("for this session") {
+            break true;
+        }
+        if shown.contains(TOOL_TURN_DONE) {
+            break false;
+        }
+        let chunk = session
+            .reader
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("exec refusal must reach recovery or a path modal");
+        session.output.extend(chunk);
+    };
+    if offered_grant {
+        session.press(b"n");
+    }
+    session.wait(TOOL_TURN_DONE);
+    let transcript = normalized(&session.output[after_approval..]);
+    let (generations, _) = session.finish();
+    assert!(
+        !offered_grant,
+        "filesystem grant offered for executable: {transcript}"
+    );
+    let visible: String = transcript
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    for expected in [
+        "sandbox exec denied",
+        "exec_paths",
+        "read-only root",
+        "ego config edit",
+        "/quit",
+        "ego resume",
+        "--mode",
+        "--sandbox",
+        "--model",
+        program.to_str().unwrap(),
+        tools.to_str().unwrap(),
+    ] {
+        let expected_cells: String = expected.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(
+            visible.contains(&expected_cells),
+            "missing {expected:?}: {transcript}"
+        );
+    }
+    assert_eq!(generations.len(), 2, "one approval, no command retry");
+    let result = generations[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .unwrap();
+    assert!(result.contains("sandbox exec denied"), "{result}");
+    assert!(result.contains("No command was retried"), "{result}");
 }

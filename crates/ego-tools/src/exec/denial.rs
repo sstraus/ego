@@ -40,7 +40,29 @@ pub(super) fn analyze(
     }
     let stderr = stderr(result);
     let mut first = None;
-    for printed in stderr.lines().filter_map(printed_path) {
+    for line in stderr.lines() {
+        let Some(printed) = printed_path(line) else {
+            continue;
+        };
+        // Mode bits alone do not distinguish reading a script from launching
+        // it. Shell and launcher diagnostics identify execution refusals.
+        let launch_refusal = line.contains(": bad interpreter:")
+            || line.starts_with("sandbox-exec: execvp() of '")
+            || line.split_once(": ").is_some_and(|(program, _)| {
+                matches!(
+                    Path::new(program)
+                        .file_name()
+                        .and_then(|name| name.to_str()),
+                    Some("sh" | "bash" | "zsh" | "dash" | "fish")
+                )
+            })
+            || exec_target(spec).is_some_and(|target| target == Path::new(printed));
+        if launch_refusal && executable(Path::new(printed)) {
+            return Some(Denial {
+                printed: printed.to_owned(),
+                request: None,
+            });
+        }
         if floor_refusal(printed, confinement) {
             first.get_or_insert(printed);
             continue;
@@ -109,6 +131,15 @@ fn floor_refusal(printed: &str, policy: &RunConfinement) -> bool {
 /// permitted` both name the path between the last separator and the errno.
 fn printed_path(line: &str) -> Option<&str> {
     let line = line.trim_end();
+    if let Some((_, file)) = line.split_once(": can't open file '") {
+        return [
+            "': [Errno 1] Operation not permitted",
+            "': [Errno 13] Permission denied",
+        ]
+        .into_iter()
+        .find_map(|suffix| file.strip_suffix(suffix))
+        .filter(|path| path.starts_with('/'));
+    }
     let body = [
         ": Operation not permitted",
         ": Operation not permitted (os error 1)",
@@ -117,6 +148,20 @@ fn printed_path(line: &str) -> Option<&str> {
     ]
     .into_iter()
     .find_map(|suffix| line.strip_suffix(suffix))?;
+    if let Some(chain) = body.strip_suffix(": bad interpreter") {
+        // Bash prints shell: script: interpreter, or script: interpreter.
+        // Prefer the script over the system shell so read-root recovery names
+        // the authority that actually prevents launching this command.
+        let paths = chain
+            .split(": ")
+            .filter(|path| path.starts_with('/'))
+            .collect::<Vec<_>>();
+        return paths
+            .iter()
+            .copied()
+            .find(|path| !path.starts_with("/bin/") && !path.starts_with("/usr/bin/"))
+            .or_else(|| paths.last().copied());
+    }
     if let Some(program) = refused_program(body) {
         return Some(program);
     }
@@ -131,6 +176,25 @@ fn refused_program(body: &str) -> Option<&str> {
         .strip_prefix("sandbox-exec: execvp() of '")?
         .strip_suffix("' failed")?;
     program.starts_with('/').then_some(program)
+}
+
+fn executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    }
 }
 
 fn request_for(
@@ -163,6 +227,11 @@ fn request_for(
     } else {
         SandboxAccess::Read
     };
+    // A read allowance must never escalate into permission to overwrite an
+    // outside-workspace executable, even when stderr suggests a write.
+    if access == SandboxAccess::Write && executable(path.as_path()) {
+        return None;
+    }
     if granted.iter().any(|grant| grant.covers(&path, access)) {
         // Asked and allowed already: asking again cannot change the outcome.
         return None;
@@ -237,6 +306,20 @@ pub(super) enum Outcome {
 /// person reading the tool call.
 pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outcome) -> String {
     let level = confinement.level();
+    if denial.request.is_none() && executable(Path::new(&denial.printed)) {
+        let path = canonical(Path::new(&denial.printed)).map(|(path, _)| path);
+        let read_root = path.as_ref().and_then(|path| {
+            confinement.roots().iter().find(|root| {
+                root.access() == ego_core::permit::RootAccess::Read && path.is_or_under(root.path())
+            })
+        });
+        let restriction = read_root.map_or_else(String::new, |root| format!(
+            " The read-only root {} forbids execution; exec_paths cannot override it. Change or remove that read-only root in the operator configuration before retrying.", root.path()));
+        return format!(
+            "sandbox exec denied {} (confinement {level}); no read or write grant can authorize execution.{restriction} Add the program and required interpreter locations to exec_paths in the user configuration with `ego config edit`. Then /quit and run `ego resume <session-id> --mode <same-mode> --sandbox {level} --model <same-model>`; retain the session's --mode, --sandbox and --model selections. No command was retried.",
+            denial.printed
+        );
+    }
     match (&denial.request, outcome) {
         (None, _) if floor_refusal(&denial.printed, confinement) => format!(
             "{} was blocked by the sandbox; the Adaptive floor cannot be lifted by a sandbox grant; \

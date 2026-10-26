@@ -574,21 +574,25 @@ impl<'a> Tools<'a> {
         let logical = crate::event::skill::SkillSourceLocation::parse(path)
             .map_err(|error| error.to_string())?;
         let relative_root = invocation.resource_root();
-        let source_root = self
-            .skill_resource_roots
-            .as_ref()
-            .ok_or_else(|| "skill resource roots are unavailable".to_owned())?
-            .root(invocation.source_authority());
+        let source_root = if relative_root.is_absolute() {
+            relative_root
+        } else {
+            self.skill_resource_roots
+                .as_ref()
+                .ok_or_else(|| "skill resource roots are unavailable".to_owned())?
+                .root(invocation.source_authority())
+                .join(relative_root)
+        };
         let root = self
             .effects
             .fs
-            .canonicalize(&source_root.join(relative_root))
-            .map_err(|error| error.to_string())?;
+            .canonicalize(&source_root)
+            .map_err(|error| format!("skill resource root {}: {error}", source_root.display()))?;
         let target = self
             .effects
             .fs
             .canonicalize(&root.as_path().join(logical.as_str()))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("skill resource {logical} under {root}: {error}"))?;
         if !target.as_path().starts_with(root.as_path()) {
             return Err("skill resource resolves outside its admitted root".to_owned());
         }
@@ -624,7 +628,9 @@ impl<'a> Tools<'a> {
             std::sync::Arc::clone(&self.effects.one_hop),
             std::sync::Arc::clone(&self.effects.duplex),
         );
-        guarded.read(expected).map_err(|error| error.to_string())
+        guarded
+            .read(expected)
+            .map_err(|error| format!("skill resource {expected}: {error}"))
     }
 
     /// What the model is told it can call.

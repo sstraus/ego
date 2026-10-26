@@ -22,7 +22,7 @@ State is a **reduction over an append-only event log** (pi's reducer,
 
 ```
 SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested | SessionPaused |
-SessionPauseObserved | SessionResumed | GoalSet | GoalTransitioned |
+SessionPauseObserved | SessionResumed | SessionSelectionsSelected | GoalSet | GoalTransitioned |
 ContextRequested | ContextRequestConsumed | ContextCooldown |
 GoalAllowanceInherited | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
@@ -41,10 +41,12 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-67 variants in the current schema, and this list is exhaustive by contract.
+68 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-67, including the session-metadata, pause and goal, question, detached-exec,
+68, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, background-task, skill, and clean-session compaction lifecycles.
+`SessionSelectionsSelected` records the admitted model, mode and sandbox so
+resume retains those selections unless the user passes explicit new flags.
 `ExecutionObserved` records an admitted execution authority.
 `ExecutionMeasured` records a capability measurement as evidence only (§3.4).
 The enum and this list are compared by hand at each milestone close.

@@ -818,11 +818,9 @@ impl ExecObservation {
         let mut changes = Vec::new();
         if self.backend != old.backend {
             changes.push(format!(
-                "backend {}/{} -> {}/{}",
+                "backend measurement {} -> {}",
                 old.backend.name(),
-                old.backend.revision(),
-                self.backend.name(),
-                self.backend.revision()
+                self.backend.name()
             ));
         }
         if self.capabilities != old.capabilities {
@@ -831,19 +829,11 @@ impl ExecObservation {
                 old.capabilities, self.capabilities
             ));
         }
-        if self.policy_digest != old.policy_digest {
-            changes.push("policy digest".to_owned());
-        }
         match self.policy.as_ref().zip(old.policy.as_ref()) {
             Some((current, previous)) => changes.extend(current.changes_from(previous)),
             None => changes.push("historical roots/policy cannot be reconstructed".to_owned()),
         }
-        format!(
-            "Execution policy changed: {} ({} -> {}).",
-            changes.join(", "),
-            old.policy_digest,
-            self.policy_digest
-        )
+        format!("Execution policy changed: {}.", changes.join("; "))
     }
 
     pub const fn capabilities(&self) -> ExecCaps {

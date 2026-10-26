@@ -1124,6 +1124,137 @@ fn explicit_dcr_persists_client_identity_and_rejects_cross_issuer_registration()
 }
 
 #[test]
+fn dcr_omitted_auth_method_without_secret_completes_public_login() {
+    // Catches the live missing-field failure before authorization can start.
+    // Synthetic boundary response, not a captured registration credential body.
+    let http = OAuthHttp::with_responses([
+        McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
+        McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","registration_endpoint":"https://issuer.example.test/register","token_endpoint_auth_methods_supported":["none","client_secret_post"]}"#),
+        McpHttpResponse::json(201, br#"{"client_id":"public-client","redirect_uris":["http://127.0.0.1:9999/callback"]}"#),
+        McpHttpResponse::json(200, br#"{"access_token":"synthetic-access","token_type":"Bearer","scope":""}"#),
+    ]);
+    let credentials = Arc::new(RecordingCredentials::new());
+    let interaction = Arc::new(RecordingInteraction {
+        captured: Mutex::new(None),
+    });
+    let metadata =
+        McpClientMetadata::dynamic("http://127.0.0.1:9999/callback".parse().unwrap()).unwrap();
+    futures::executor::block_on(login(
+        login_request_with_metadata(metadata),
+        http.clone(),
+        interaction.clone(),
+        credentials.clone(),
+    ))
+    .expect("a requested public client with no returned secret can authorize");
+    let calls = http.calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    let requested: serde_json::Value = serde_json::from_slice(&calls[2].5).unwrap();
+    assert_eq!(requested["token_endpoint_auth_method"], "none");
+    let token_form: HashMap<_, _> = url::form_urlencoded::parse(&calls[3].5)
+        .into_owned()
+        .collect();
+    assert_eq!(token_form["client_id"], "public-client");
+    assert!(!token_form.contains_key("client_secret"));
+    let captured = interaction.captured.lock().unwrap();
+    assert!(
+        captured
+            .as_ref()
+            .unwrap()
+            .authorization_url()
+            .query_pairs()
+            .any(|(key, value)| key == "client_id" && value == "public-client")
+    );
+    assert_eq!(*credentials.puts.lock().unwrap(), 1);
+    let values = credentials.values.lock().unwrap();
+    let stored = values.values().next().unwrap();
+    let wire: serde_json::Value =
+        serde_json::from_slice(stored.strip_prefix(b"ego:mcp:token-bundle:v1\n").unwrap()).unwrap();
+    assert_eq!(wire["client_id"], "public-client");
+}
+
+#[test]
+fn dcr_confidential_or_mismatched_responses_never_authorize_or_store_credentials() {
+    // Catches a broad omission fallback that accepts confidential or rebound clients.
+    for (scenario, extra, client_id, redirect) in [
+        (
+            "omitted method with secret",
+            r#", "client_secret":"synthetic-secret""#,
+            "public-client",
+            "http://127.0.0.1:9999/callback",
+        ),
+        (
+            "explicit none with secret",
+            r#", "token_endpoint_auth_method":"none", "client_secret":"synthetic-secret""#,
+            "public-client",
+            "http://127.0.0.1:9999/callback",
+        ),
+        (
+            "explicit confidential method",
+            r#", "token_endpoint_auth_method":"client_secret_basic""#,
+            "public-client",
+            "http://127.0.0.1:9999/callback",
+        ),
+        (
+            "null secret field",
+            r#", "client_secret":null"#,
+            "public-client",
+            "http://127.0.0.1:9999/callback",
+        ),
+        (
+            "null method field",
+            r#", "token_endpoint_auth_method":null"#,
+            "public-client",
+            "http://127.0.0.1:9999/callback",
+        ),
+        (
+            "blank client identity",
+            "",
+            " ",
+            "http://127.0.0.1:9999/callback",
+        ),
+        (
+            "redirect mismatch",
+            "",
+            "public-client",
+            "http://127.0.0.1:9998/callback",
+        ),
+    ] {
+        let http = OAuthHttp::with_responses([
+            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
+            McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","registration_endpoint":"https://issuer.example.test/register"}"#),
+            McpHttpResponse::json(201, format!(r#"{{"client_id":"{client_id}","redirect_uris":["{redirect}"]{extra}}}"#)),
+        ]);
+        let credentials = Arc::new(RecordingCredentials::new());
+        let interaction = Arc::new(RecordingInteraction {
+            captured: Mutex::new(None),
+        });
+        let metadata =
+            McpClientMetadata::dynamic("http://127.0.0.1:9999/callback".parse().unwrap()).unwrap();
+        let result = futures::executor::block_on(login(
+            login_request_with_metadata(metadata),
+            http.clone(),
+            interaction.clone(),
+            credentials.clone(),
+        ));
+        assert!(result.is_err(), "{scenario} was accepted");
+        assert!(
+            interaction.captured.lock().unwrap().is_none(),
+            "{scenario} reached authorization"
+        );
+        assert_eq!(
+            http.calls.lock().unwrap().len(),
+            3,
+            "{scenario} reached token exchange"
+        );
+        assert_eq!(
+            *credentials.puts.lock().unwrap(),
+            0,
+            "{scenario} stored credentials"
+        );
+    }
+}
+
+#[test]
 fn dynamic_refresh_restores_registered_identity_without_repeating_registration() {
     let key = refresh_key("account-a");
     let credentials = Arc::new(RecordingCredentials::new());
