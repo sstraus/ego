@@ -21,6 +21,7 @@ use serde::Deserialize;
 pub struct ExecParams {
     pub argv: Vec<String>,
     pub cwd: Option<String>,
+    /// Process lifetime limit, not a yield delay. Omit or use null for no deadline.
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub background: bool,
@@ -46,7 +47,7 @@ impl TypedTool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Run one argv-native process: pass executable and arguments separately, with no implicit shell, pipes or redirects. Use cwd for its working directory and timeout_ms to bound execution. Set background=true for long work; returns a session-owned ID for exec_status or exec_cancel. Use read_tool_result with returned full-output references for truncated output"
+        "Run one argv-native process: pass executable and arguments separately, with no implicit shell, pipes or redirects. Use cwd for its working directory. timeout_ms limits the entire process lifetime (including background work), not how long to wait for a handle; omit or use null for no deadline. Set background=true for long work; returns a session-owned ID immediately for exec_status or exec_cancel, and completion wakes an idle interactive session. Use read_tool_result with returned full-output references for truncated output"
     }
 
     fn prepare_typed(

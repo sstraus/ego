@@ -1217,6 +1217,8 @@ enum Control {
 struct LiveSeat {
     input: Receiver<Line>,
     inspections: Receiver<HostCommand>,
+    background_ready: Receiver<()>,
+    background_wake: Sender<()>,
     inspection_waker: Arc<futures::task::AtomicWaker>,
     control: Sender<Control>,
     activated: AtomicBool,
@@ -1491,11 +1493,14 @@ impl Seat {
                 }
             })?;
 
+        let (background_wake, background_ready) = bounded(1);
         Ok((
             Self {
                 kind: SeatKind::Live(Box::new(LiveSeat {
                     input,
                     inspections,
+                    background_ready,
+                    background_wake,
                     inspection_waker,
                     control: seat_control,
                     activated: AtomicBool::new(false),
@@ -1527,6 +1532,7 @@ impl Seat {
                 let line = crossbeam::channel::select_biased! {
                     recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
                     recv(live.input) -> line => line.unwrap_or(Line::Ended),
+                    recv(live.background_ready) -> _ => Line::HostCommand(HostCommand::BackgroundExecSettled),
                 };
                 if matches!(
                     line,
@@ -2144,6 +2150,14 @@ impl crate::run::Reads for Seat {
 }
 
 impl crate::run::InteractiveSeat for Seat {
+    fn wake_background_exec(&self) {
+        if let SeatKind::Live(live) = &self.kind {
+            // One token covers every ready snapshot; no process task waits
+            // for the input owner, including while a generation is active.
+            let _ = live.background_wake.try_send(());
+        }
+    }
+
     fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
         #[cfg(test)]
         if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
