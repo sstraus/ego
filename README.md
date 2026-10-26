@@ -17,10 +17,59 @@ Use it when you want a coding agent in your terminal, a bounded agent step in a
 script, or an agent behind an ACP host. The terminal, pipeline, and host share
 the durable session machinery.
 
-## Five-minute start
+## Install
 
-You need Rust 1.95 or newer and a model you can access. From a source checkout,
-install into a directory you own (no published package or release is required):
+Published installation methods below become available after the first GitHub
+release and Homebrew tap setup. This checkout does not yet have a Git remote;
+these are publication instructions, not evidence that a release exists.
+
+### Homebrew (macOS and Linux)
+
+```sh
+brew install sstraus/tap/ego
+```
+
+### Direct download
+
+The release provides plain executables and individual SHA256 files:
+
+| Platform | Asset |
+| --- | --- |
+| macOS Apple Silicon | `ego-macos-arm64` |
+| macOS Intel | `ego-macos-x64` |
+| Linux x86_64 | `ego-linux-x64` |
+| Linux ARM64 | `ego-linux-arm64` |
+| Windows x86_64 | `ego-windows-x64.exe` |
+
+Linux binaries require GLIBC 2.35 or newer. Target-triple `.tar.gz` archives
+(`.zip` on Windows) remain available, together with `SHA256SUMS`.
+For example, on Apple Silicon, download and verify before installation:
+
+```sh
+asset=ego-macos-arm64
+base=https://github.com/sstraus/ego/releases/latest/download
+curl -fLO "$base/$asset"
+curl -fLO "$base/$asset.sha256"
+shasum -a 256 -c "$asset.sha256"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "$asset" "$HOME/.local/bin/ego"
+```
+
+On Linux use the matching asset and `sha256sum -c`. On Windows download
+`ego-windows-x64.exe` and its `.sha256`, compare with PowerShell
+`Get-FileHash -Algorithm SHA256`, then rename it to `ego.exe` in a directory on
+`PATH`. Add `~/.local/bin` to `PATH` on macOS/Linux if needed.
+
+### From source
+
+You need Rust 1.95 or newer, Python 3 for the local release helper, and a model
+you can access. From a source checkout, build and atomically install with
+`scripts/local-release.sh`; it installs to `~/.local/bin/ego` and does not stop
+existing sessions. On the development Mac, invoke it with the configured mbx
+shim on `PATH` and the build-slot wrapper. Do not override `CARGO_TARGET_DIR`.
+
+Alternatively, install into a checkout-local directory (no published package or
+release is required):
 
 ```sh
 cargo install --locked --path crates/ego-cli --root "$PWD/.ego-bin"
@@ -31,6 +80,8 @@ ego --help
 The source includes a patched Reedline dependency in `vendor/`; keep the checkout
 intact during installation. On this project's development Mac, Cargo must run
 through the configured mbx shim; see [building from source](docs/getting-started/README.md).
+
+## Five-minute start
 
 Choose a provider/model from `ego models`. For example, with an existing local
 Ollama installation:
