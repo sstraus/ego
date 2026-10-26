@@ -50,6 +50,8 @@ type TrackedExec<'a> = (
     DetachedExecId,
 );
 
+type BackgroundWake = Arc<dyn Fn() + Send + Sync>;
+
 type WidenedBackend = (Vec<SandboxGrant>, Vec<CanonPath>, Arc<dyn Backend>);
 
 /// Process state captured once and shared by the run's normal and duplex
@@ -63,6 +65,7 @@ pub(crate) struct RunProcessContext {
     capabilities: ExecCaps,
     background: Arc<Mutex<BTreeMap<DetachedExecId, BackgroundEntry>>>,
     background_changed: Arc<Condvar>,
+    background_waker: Arc<Mutex<Option<BackgroundWake>>>,
     foreground: Mutex<Option<DetachedExecId>>,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     /// The session desk that puts Adaptive write refusals to the judge.
@@ -137,6 +140,7 @@ impl RunProcessContext {
             capabilities,
             background: Arc::new(Mutex::new(BTreeMap::new())),
             background_changed: Arc::new(Condvar::new()),
+            background_waker: Arc::new(Mutex::new(None)),
             foreground: Mutex::new(None),
             sandbox_grants,
             residual: None,
@@ -148,6 +152,10 @@ impl RunProcessContext {
     pub(crate) fn with_residual_desk(mut self, desk: Option<Arc<ResidualWriteDesk>>) -> Self {
         self.residual = desk;
         self
+    }
+
+    pub(crate) fn set_background_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self.background_waker.lock().expect("background waker lock") = Some(wake);
     }
 
     pub(crate) async fn execute(&self, spec: &SpawnSpec) -> Result<ToolResult, ProcessError> {
@@ -201,6 +209,7 @@ impl RunProcessContext {
         let spec = spec.clone();
         let registry = Arc::clone(&self.background);
         let changed = Arc::clone(&self.background_changed);
+        let waker = Arc::clone(&self.background_waker);
         super::runtime_handle().spawn(async move {
             let result = context
                 .execute_inner(
@@ -211,6 +220,7 @@ impl RunProcessContext {
                     Some((&registry, id)),
                 )
                 .await;
+            let mut promoted = false;
             if let Ok(mut entries) = registry.lock()
                 && let Some(entry) = entries.get_mut(&id)
             {
@@ -219,7 +229,13 @@ impl RunProcessContext {
                 } else {
                     detached_outcome(result.clone())
                 });
+                promoted = entry.promoted;
                 changed.notify_all();
+            }
+            // Publish only after the outcome and output are observable, and
+            // never call host code under the registry lock.
+            if promoted {
+                wake_background(&waker);
             }
             if let Some(reply) = reply {
                 let _ = reply.send(result);
@@ -240,6 +256,11 @@ impl RunProcessContext {
             .get_mut(&id)
             .ok_or(ProcessError::UnknownBackground { id })?;
         entry.promoted = true;
+        let settled = entry.outcome.is_some();
+        drop(entries);
+        if settled {
+            wake_background(&self.background_waker);
+        }
         Ok(())
     }
 
@@ -632,6 +653,13 @@ impl RunProcessContext {
                     "duplex spawn task failed: {error}"
                 )))
             })?
+    }
+}
+
+fn wake_background(waker: &Mutex<Option<BackgroundWake>>) {
+    let wake = waker.lock().expect("background waker lock").clone();
+    if let Some(wake) = wake {
+        wake();
     }
 }
 

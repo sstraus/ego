@@ -614,19 +614,27 @@ fn detached_exec_timeout_and_launch_failure_keep_distinct_outcomes() {
         EnvPolicy::Inherited,
     )
     .unwrap();
+    // Catches: timeout/launch failures publish an outcome but never wake the host.
+    let (wake, ready) = std::sync::mpsc::channel();
+    run.ports.set_background_waker(Arc::new(move || {
+        wake.send(()).expect("host is listening");
+    }));
     let timed_id = ego_core::event::id::DetachedExecId::new();
     let failed_id = ego_core::event::id::DetachedExecId::new();
     block_on(run.ports.process().start_background(timed_id, &timed)).unwrap();
     block_on(run.ports.process().start_background(failed_id, &missing)).unwrap();
+    for _ in 0..2 {
+        ready
+            .recv_timeout(Duration::from_secs(5))
+            .expect("each settlement wakes the host");
+    }
     let settled = |id| {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(outcome) = run.ports.process().background_status(id).unwrap().outcome {
-                return outcome;
-            }
-            assert!(Instant::now() < deadline, "detached outcome did not settle");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        run.ports
+            .process()
+            .background_status(id)
+            .unwrap()
+            .outcome
+            .expect("the outcome is readable before the host wakes")
     };
     assert!(matches!(
         settled(timed_id),

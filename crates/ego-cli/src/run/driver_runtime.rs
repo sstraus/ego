@@ -567,6 +567,10 @@ pub(super) async fn drive_execution<S: EventSink>(
                         None,
                     )
                     .await?;
+                    let wake_seat = Arc::clone(&seat);
+                    session_hook_ports.set_background_waker(Arc::new(move || {
+                        wake_seat.wake_background_exec();
+                    }));
                     let human = seat
                         .has_human()
                         .then(|| SeatApprover { seat: seat.clone() });
@@ -2857,6 +2861,21 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
                 text,
                 images: Some(images),
             }))
+        }
+        repl::Line::HostCommand(repl::HostCommand::BackgroundExecSettled) => {
+            // A stale/coalesced wake must not buy another generation. The
+            // generation boundary settles every ready ID in the journal.
+            let ready = state.unsettled_detached_execs().into_iter().any(|id| {
+                session_hook_ports
+                    .process()
+                    .background_status(id)
+                    .is_ok_and(|snapshot| snapshot.outcome.is_some())
+            });
+            Ok(if ready {
+                CommandOutcome::Input(InteractiveTurnInput::Checkpoint)
+            } else {
+                CommandOutcome::Continue
+            })
         }
         repl::Line::HostCommand(repl::HostCommand::AdmitPrompt { .. }) => {
             unreachable!("native prompt admission is owned by the terminal")

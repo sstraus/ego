@@ -113,6 +113,7 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
         Reply::Sse(tool_call("regression_case", "exec", &arguments.to_string())),
         Reply::Sse(text(TOOL_TURN_DONE)),
         reply,
+        Reply::Sse(text("regression_case-SETTLED")),
     ]);
     session.press(b"start a long exec\r");
     session.wait("[d] details");
@@ -151,27 +152,35 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     gate.release();
     session.mark = mutation_start;
     session.wait("Saved model =");
-    drain_until_quiet(&session.reader, &mut session.output);
+    until_prompt_after_reply(
+        &session.reader,
+        &mut session.output,
+        b"regression_case-SETTLED",
+    );
     let receipts = normalized(&session.output[mutation_start..]);
     assert_eq!(receipts.matches("Saved model =").count(), 1, "{receipts}");
     assert!(!receipts.contains("Unchanged: model"), "{receipts}");
+    // The queued cancellation receipt precedes the config mutation. The later
+    // settlement announcement is not a second execution of the cancellation.
+    let cancellation = receipts.split("Saved model =").next().unwrap();
     assert_eq!(
-        receipts.matches("cancellation requested").count() + receipts.matches("cancelled").count(),
+        cancellation.matches("cancellation requested").count()
+            + cancellation.matches("cancelled").count(),
         1,
         "{receipts}"
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        session.press(format!("/tasks {id}\r").as_bytes());
-        drain_until_quiet(&session.reader, &mut session.output);
-        if normalized(&session.output[session.mark..]).contains("cancelled") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "cancel did not settle");
-    }
     assert!(!session.ego.workspace_path().join("survived").exists());
     let (generations, config) = session.finish();
-    assert_eq!(generations.len(), 3, "mutations must not start generations");
+    assert_eq!(
+        generations.len(),
+        4,
+        "one settlement continuation is required"
+    );
+    let history = generations.last().expect("settlement generation")["messages"].to_string();
+    assert!(
+        history.contains("cancelled") && history.contains("REGRESSION-MARKER-OUTPUT"),
+        "cancellation lost its outcome or output: {history}"
+    );
     let config: toml::Value = toml::from_str(&config).expect("saved config");
     assert_eq!(config["model"].as_str(), Some("ollama/deferred-model"));
 }

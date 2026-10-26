@@ -123,6 +123,8 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn next_inspection(&self) -> futures::future::BoxFuture<'_, repl::HostCommand> {
         Box::pin(futures::future::pending())
     }
+    /// Wake an idle read without replacing the composer draft.
+    fn wake_background_exec(&self) {}
     fn busy(&self) {}
     fn idle(&self) {}
     /// How long the current or last turn waited on a modal.
