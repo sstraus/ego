@@ -98,8 +98,9 @@ higher or lower layer supplies a value.
 | Key | Accepted value | Default / applicability |
 | --- | --- | --- |
 | `model` | Full `provider/model` string | No fixed model; interactive first-run selection, explicit/configured model in headless |
+| `max_output_tokens` | Positive integer | Optional generated-token limit per request; system limits cannot be relaxed by lower layers |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | Model-declared default; unknown requires explicit selection |
-| `mode` | `plan`, `default`, `auto`, `edits`, `yolo` | Trusted interactive with no configured mode uses `auto`; ordinary unresolved policy uses `default` |
+| `mode` | `plan`, `default`, `auto`, `accept-edits`, `yolo` (legacy input alias: `edits`) | Trusted interactive with no configured mode uses `auto`; ordinary unresolved policy uses `default` |
 | `sandbox` | `ro`, `workspace`, `adaptive`, `off` | `adaptive` when absent on macOS, `workspace` elsewhere; effective inspection reports the platform default reason; explicit selections retain their meaning, system ceilings bind, mode is independent |
 | `max_mode` | Same mode vocabulary | Absent = no system maximum; system-only, does not select a mode |
 | `roots` | Array of `{path="...", access="read"\|"read-write"}` | Under strict levels, absent declaration adds read-write `~/Gits` when present. Adaptive omits that implicit root; `[]` clears configured roots, while adaptive derived roots remain. System declarations cap additional roots |
@@ -108,7 +109,7 @@ higher or lower layer supplies a value.
 | `exec.env_allowlist` | Array of environment names | Empty; used only with `allowlist` |
 | `network` | `on`, `off` | `on`; explicit `--offline` cannot be cleared by this setting |
 | `orchestration.mode` | `observe`, `active` | `observe`; see [orchestration](../integrations/orchestration.md) |
-| `permissions.judge` | Full model slug or `none` | Absent uses the active main model; `none` disables advisory generation |
+| `permissions.judge` | Full model slug or `none` | Absent prefers a supplied same-provider review model, otherwise the active model; `none` disables advisory generation |
 | `permissions.allow` | Array of canonical predicates | Empty contribution |
 | `permissions.deny` | Array of canonical predicates | Empty contribution; system denies remain immutable |
 | `budget` | String such as `"20k"`, `"400k"`, or `"2.5$"` | No configured ceiling; system money/token limits clamp requests independently |
@@ -117,6 +118,9 @@ higher or lower layer supplies a value.
 | `profile.NAME` | Profile table | No selected profile without `--profile`/`EGO_PROFILE` |
 | `auth.PROVIDER` | Credential-command/identity-header table | No override |
 | `ui.statusline.template` | MiniJinja template string | Compact default; `{{ prompt }}` disables optional status |
+| `ui.statusline.providers.NAME` | `{argv=[...], timeout_ms=250}` | No commands by default; at most four, timeout 1–1000 ms |
+| `ui.keybindings` | Map of action names to key-chord arrays | User-only shortcut overrides; an empty array removes an action's shortcuts |
+| `ui.vim` | Boolean | False; user-only Vim composer preference, also selected by `--vim` |
 | `mcp.servers.NAME` | Complete tagged server entry (optional `enabled = false` detaches it from session start) or tombstone | No configured external server |
 | `mdkb_prompt_command` | Absolute path to the mdkb executable; user layer only. Enables bounded mdkb warmup, prompt recall, tool hints, and bounded inline model Stop episodes; returned context is user-role data and cannot grant authority. Command execution remains subject to run policy. | Disabled |
 | `hooks` | Ordered array of hook entries | Empty contribution; hooks combine across admitted sources |
@@ -158,9 +162,15 @@ state remains visible even if omitted. See [CLI section 6.5](../../CLI.mdregress
 for the variables, filters, limits and fallback diagnostics. The unreleased
 `segments` key is no longer accepted.
 
+Status provider commands run once per trusted native interactive prompt epoch,
+under the current execution policy and confinement, not while painting. A command
+that needs more authority is omitted without asking a model or human. Output must
+be one UTF-8 line, at most 1024 bytes, with no stderr or truncation. Failures are
+diagnostic notes. Source: [status providers](../../crates/ego-cli/src/status_provider.rs).
+
 ## Profiles and managed edits
 
-A profile accepts `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec`,
+A profile accepts `model`, `max_output_tokens`, `thinking`, `mode`, `sandbox`, `roots`, `exec`,
 `exec_paths`, `network`, `orchestration`, `permissions`, `budget`, and `mcp`.
 It does not accept base-only `bare`, `cache`, `max_mode`, `auth`, `ui`, or `hooks`.
 Only `profile.ci` accepts `session_dir` and `artifact_dir`, both absent by default.
@@ -176,8 +186,8 @@ The CLI managed key set is intentionally smaller than the full file schema:
 
 | Target | Keys accepted by `config set/get/unset` |
 | --- | --- |
-| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec_paths`, `budget`, `bare`, `permissions.judge`, `ui.statusline.template`, `exec.env`, `exec.env_allowlist`, `network`, `auth.PROVIDER.headers`, `auth.PROVIDER.credential_command` |
-| User profile | Same minus `bare`, `ui.statusline.template`, and both `auth.PROVIDER.*` keys |
+| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec_paths`, `budget`, `bare`, `permissions.judge`, `ui.statusline.template`, `ui.keybindings`, `ui.vim`, `exec.env`, `exec.env_allowlist`, `network`, `auth.PROVIDER.headers`, `auth.PROVIDER.credential_command` |
+| User profile | Same minus `bare`, all `ui.*` keys, and both `auth.PROVIDER.*` keys |
 | User `ci` profile | Profile keys plus `session_dir`, `artifact_dir` |
 
 Authentication edits replace the selected provider's complete headers map or

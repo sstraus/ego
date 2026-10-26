@@ -27,7 +27,7 @@ refresh can remain `not_checked` with the command/reason that would establish th
 | Denied tool despite an allow | Check every prepared operation, immutable denies, control-path rules, and origin of the allow |
 | `perimeter-probe-temp-overlap` | TMPDIR must be outside every granted root for the negative probe. Inspect roots; an explicit user `ego config set 'roots=[]'` selects workspace-only access when that is the intended authority |
 | Sandbox unavailable | Check host/backend evidence; do not claim confinement by changing the approval mode |
-| Read-only root beneath writable grant | Fix overlapping canonical roots; a backend cannot subtract the nested read access |
+| Read-only root beneath writable grant | Inspect backend evidence: Linux Landlock child grants cannot subtract writable ancestor authority; built-in tools retain the read-only restriction |
 | MCP fails or persisted session is quarantined | Inspect exact admitted declaration, authentication and retained failure; reload does not prove no prior effect |
 | Invalid skill/hook candidate | Inspect exact diagnostics; last-good catalogue remains active |
 | Schema exhaustion | Inspect final result/error and retry bound; exit 1 is intentional |
@@ -135,8 +135,7 @@ full slug explicitly when you need the original selection.
 
 Ego does not read the repository `.env`. Make `ANTHROPIC_API_KEY` available in
 ego's process environment through your secret-management workflow, or use the
-supported configured credential source. The missing-credential message suggests
-login but does not mention the environment alternative. Do not publish credentials.
+supported configured credential source. Follow the credential source named by the current diagnostic. Do not publish credentials.
 An available key is not proof of sufficient credit or model entitlement.
 
 ## `no capabilities are configured`
@@ -147,8 +146,9 @@ value, not catalogue availability. The E2E hit this with
 `openai-codex/gpt-6-luna`; do not use that slug as a working sentinel example.
 Select a model with supplied facts and credentials (check `ego models`), or add
 verified facts through the documented [model configuration](../reference/configuration.md).
-Do not invent capability values. Even with facts, the current judge sees argv
-hashes and lengths, not command text or task context; it can still escalate.
+Do not invent capability values. The judge receives bounded task context and action evidence; same-provider
+judges receive raw argv and cross-provider judges receive redacted structure.
+It can still escalate. See [judge action evidence](permissions.md#judge-action-evidence).
 
 ## `unable to access ~/.config/git/ignore: Operation not permitted`
 

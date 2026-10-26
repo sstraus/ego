@@ -1,13 +1,13 @@
 # CLI help from a verified binary
 
-Captured from `ego 0.1.2` on 2026-10-20. Binary SHA-256: `dd9408f9c016aa25078f8f98f9b5b3c66819cf4c5f16db16549cb7237bbaf2ee`.
+Captured from `ego 0.3.0` on 2026-10-26. Binary SHA-256: `ca69f37ef781731f617271d572b70b831be7f2875f06b48f784ab94bfd89ba2c`.
 
 This is a dated help-only snapshot, not a separate command specification. The [generated reference](cli.md) follows the source parser. For your installed binary, use `ego COMMAND SUBCOMMAND --help`.
 
 ## `ego --help`
 
 ```text
-ego 0.1.2 — an agent you run from a terminal.
+ego 0.3.0 — an agent you run from a terminal.
 
 Usage:
   ego [OPTIONS] [PROMPT]

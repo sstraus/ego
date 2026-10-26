@@ -4,6 +4,11 @@ Use εgo to work with a model in your current repository. You control the model,
 workspace trust, tool permission, and confinement. A model credential alone does
 not grant tools access to your machine.
 
+Release `0.3.0` is being prepared, not published. See the
+[release notes](../release-notes/0.3.0.md) and
+[installation overview](../../README.md#install) for the planned binary assets
+and checksum procedure. The source procedure below works without publication.
+
 ## Build and install from source
 
 The workspace requires Rust 1.95 or newer (`Cargo.toml`). Install from a complete

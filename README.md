@@ -158,12 +158,13 @@ permission mode does not remove a sandbox or an administrator's ceilings.
 
 ## Status and platforms
 
-This is an unreleased project; there is no stable release yet. The version is
+Release `0.3.0` is being prepared locally; it is not published. See the
+[release notes](docs/release-notes/0.3.0.md) for changes since `0.2.0`. The version is
 defined once in
 `[workspace.package]` in `Cargo.toml`; all workspace packages inherit it and are
-not published. Every landing to `master` increments the patch version by one
-(`0.0.1`). Run `ego --version` to identify an installed build. The command references
-describe this checkout, not a promise about a future release.
+not published. This release preparation selects `0.3.0`; normal landings increment
+the patch version by one (`0.0.1`). Run `ego --version` to identify an installed
+build. The command references describe this checkout, not a promise about a future release.
 
 Recorded SSE comments, raw PTY captures, and dated validation reports retain
 the version of the observed build. They are historical evidence, not version

@@ -67,8 +67,11 @@ silent fallback between backends. See [web search reference](../reference/tools.
 
 | Operation | Purpose |
 | --- | --- |
-| `AskQuestion` | Suspend for a typed human answer; headless emits a question and exits 3 |
-| `Skill` | Invoke admitted named instructions or read their admitted resources |
+| `ask_question` | Suspend for a typed human answer; headless emits a question and exits 3 |
+| `skill` | Invoke admitted named instructions or read their admitted resources |
+| `goal` | Set a model-authored session goal; cannot replace an active operator-owned goal |
+| `plan` | Replace durable ordered steps or update one step; this does not achieve the session goal |
+| `context` | Request a compact/clear transition after the current tool batch; clear needs operator opt-in and an active goal |
 | `task` | Run an isolated depth-one child with inherited tools, permission, sandbox, offline posture, and shared budget; the child cannot delegate |
 | `history.search`, `history.open` | Read bounded prior user/assistant conversation through the store-bound history port; exclude tool payloads |
 | `memory_lookup` | Coordinator-profile-only lookup of decision/problem/handoff MDKB entries; absence/refusal is explicit |
@@ -91,6 +94,13 @@ predicates but can lose invocation details the grammar cannot express; preview
 its omissions before persisting an allow. See [permissions](permissions.md).
 
 `task` accepts `name` and `prompt` and returns the bounded final child answer.
+With `background=true`, it starts a durable child and returns its ID immediately;
+parent-turn interruption does not cancel that child. Use `/tasks` to inspect or
+cancel it. Background calls require an explicit prompt and cannot select `agent`
+or `plan_step`. A foreground call can bind an existing durable `plan_step`.
+
+Background exec settlement wakes an idle interactive session to process the
+retained result; the model need not repeatedly request `exec_status` while waiting.
 `history.search` accepts `query`; `history.open` accepts a session UUID. History
 is read-only conversational access across workspace roots, not arbitrary paths
 or authority to execute a prior tool call. Native TUICommander orchestration is
