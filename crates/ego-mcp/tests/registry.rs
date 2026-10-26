@@ -1531,6 +1531,54 @@ fn config_three() -> ego_core::config::ResolvedMcpConfig {
         .mcp
 }
 
+// Catches: a refresh or a new invocation reuses stale server instructions from
+// the machine journal, or mutates an already admitted generation's instructions.
+#[tokio::test(flavor = "current_thread")]
+async fn refreshed_and_reopened_registries_read_new_instructions_without_mutating_old_captures() {
+    let admission = fixture_admission(vec![
+        Outcome::Candidate(candidate_saying(SERVER, Vec::new(), "first guidance")),
+        Outcome::Candidate(candidate_saying(SERVER, Vec::new(), "refreshed guidance")),
+        Outcome::Candidate(candidate_saying(SERVER, Vec::new(), "reopened guidance")),
+    ]);
+    let (registry, journal) = controller(Arc::clone(&admission));
+    let first = registry
+        .reconcile(refresh(RegistryTrigger::ConfigChanged))
+        .await
+        .expect("first admission");
+    let second = registry
+        .reconcile(refresh(RegistryTrigger::Reload))
+        .await
+        .expect("refreshed admission");
+    assert_eq!(first.capture().instructions()[0].text(), "first guidance");
+    assert_eq!(
+        second.capture().instructions()[0].text(),
+        "refreshed guidance"
+    );
+    assert_eq!(admission.requests().len(), 2);
+
+    // The CLI constructs another controller over the same machine journal for
+    // another invocation, even when it opens the same durable conversation.
+    let reopened = McpRegistryController::new(
+        journal as Arc<dyn McpRegistryJournal>,
+        Arc::clone(&admission) as Arc<dyn McpCandidateAdmission>,
+    )
+    .expect("reopened registry");
+    let third = reopened
+        .reconcile(refresh(RegistryTrigger::ConfigChanged))
+        .await
+        .expect("new invocation admission");
+    assert_eq!(
+        third.capture().instructions()[0].text(),
+        "reopened guidance"
+    );
+    assert_eq!(admission.requests().len(), 3);
+    assert_eq!(first.capture().instructions()[0].text(), "first guidance");
+    assert_eq!(
+        second.capture().instructions()[0].text(),
+        "refreshed guidance"
+    );
+}
+
 /// A server's `instructions` reach the capture, trimmed and bounded, in
 /// ascending server-name order — and a server that said nothing adds no entry.
 ///
