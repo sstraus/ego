@@ -8,10 +8,10 @@ use ego_core::skill::SkillCatalogue;
 use ego_core::turn::RegisteredTool;
 use serde_json::{Value, json};
 
-/// Catches a wire projection that drops the skill union's required discriminator.
+/// Catches a wire projection that drops the skill discriminator or restores a root union.
 /// This does not simulate how a gateway or a live model interprets that schema.
 #[test]
-fn routed_skill_schema_keeps_required_kind_in_both_union_branches() {
+fn routed_skill_schema_keeps_required_kind_and_flat_object() {
     let descriptor =
         RegisteredTool::skill(Arc::new(SkillCatalogue::new(Vec::new()).unwrap())).descriptor();
     for model in ["anthropic/claude-haiku-4.5", "openai/gpt-6-luna"] {
@@ -30,19 +30,15 @@ fn routed_skill_schema_keeps_required_kind_in_both_union_branches() {
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         let function = &body["tools"][0]["function"];
         assert_eq!(function["name"], "skill");
-        let branches = function["parameters"]["oneOf"].as_array().unwrap();
-        assert_eq!(branches.len(), 2);
-        for (index, (kind, required)) in [
-            ("invoke", json!(["kind", "name", "arguments"])),
-            ("read_resource", json!(["kind", "invocation", "path"])),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert_eq!(branches[index]["type"], "object");
-            assert_eq!(branches[index]["required"], required);
-            assert_eq!(branches[index]["properties"]["kind"]["const"], kind);
-            assert_eq!(branches[index]["additionalProperties"], false);
-        }
+        let schema = &function["parameters"];
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["kind"]));
+        assert_eq!(schema["properties"]["kind"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!(["invoke", "read_resource"])
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema.get("oneOf").is_none());
     }
 }
