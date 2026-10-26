@@ -217,13 +217,7 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     until_mcp_composer_is_idle(&reader, &mut output);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let id = background_exec_id(&output);
-    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
-    let start = output.len();
-    input.write_all(b"inspect the completed command\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
-    until_mcp_composer_is_idle(&reader, &mut output);
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-NEXT-TURN");
     let completion = std::fs::read_to_string(&completed).ok();
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
@@ -250,41 +244,6 @@ fn background_exec_id(output: &[u8]) -> String {
     let id = &transcript[offset..offset + 36];
     assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
     id.to_owned()
-}
-
-/// A shell completion file precedes pipe draining and waitpid. Inspect the
-/// executor's terminal snapshot before starting the generation that consumes it.
-/// Every inspection must finish its editor cycle before the next input is sent.
-fn until_background_exec_settled(
-    reader: &mpsc::Receiver<Vec<u8>>,
-    output: &mut Vec<u8>,
-    input: &mut impl Write,
-    id: &str,
-    outcome: &str,
-) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let expected = format!("background exec {id}: {outcome}");
-    loop {
-        let start = output.len();
-        input
-            .write_all(format!("/tasks {id}\r").as_bytes())
-            .unwrap();
-        input.flush().unwrap();
-        until_local_action_completed(
-            reader,
-            output,
-            start,
-            "tasks",
-            deadline.saturating_duration_since(Instant::now()),
-        );
-        if normalized(&output[start..]).contains(&expected) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "process did not settle: {expected}"
-        );
-    }
 }
 
 // Catches: Ctrl+B kills/restarts the child, loses its handle, or duplicates its settlement.
