@@ -192,14 +192,14 @@ impl RegisteredTool {
                     "required": ["kind"],
                     "properties": {
                         "kind": { "type": "string", "enum": ["invoke", "read_resource"] },
-                        "name": { "type": "string", "description": "Required for invoke; omit for read_resource." },
-                        "arguments": { "type": "string", "description": "Required for invoke; omit for read_resource." },
+                        "name": { "type": "string", "description": "Required for invoke; omit or use an empty string for read_resource." },
+                        "arguments": { "type": "string", "description": "Optional for invoke; defaults to an empty string. Omit or use an empty string for read_resource." },
                         "bare": {
                             "type": "boolean",
-                            "description": "For invoke only. Run without the workspace posture of this session: no project configuration, no project hooks. Omit to inherit it."
+                            "description": "For invoke only. Run without the workspace posture of this session: no project configuration, no project hooks. Omit to inherit it. For read_resource, omit or use false."
                         },
-                        "invocation": { "type": "string", "description": "Required for read_resource; omit for invoke." },
-                        "path": { "type": "string", "description": "Required for read_resource; omit for invoke." }
+                        "invocation": { "type": "string", "description": "Required for read_resource; omit or use an empty string for invoke." },
+                        "path": { "type": "string", "description": "Required for read_resource; omit or use an empty string for invoke." }
                     }
                 }),
             },
