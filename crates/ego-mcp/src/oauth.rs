@@ -1230,6 +1230,10 @@ impl McpOAuthSession {
         })
     }
 
+    pub(crate) fn credential_key(&self) -> &CredentialKey {
+        &self.key
+    }
+
     pub(crate) fn credential_required(&self) -> bool {
         self.credential_required
             .load(std::sync::atomic::Ordering::Acquire)

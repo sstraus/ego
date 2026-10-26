@@ -2916,3 +2916,103 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
     }
     causes
 }
+
+// Catches: OAuth publication requires static headers, or capture identity omits
+// the issuer/account binding and can resolve authority for another credential.
+#[tokio::test(flavor = "current_thread")]
+async fn oauth_publication_hashes_bound_identity_without_reading_rotating_tokens() {
+    use ego_core::credentials::{
+        CredentialKey, CredentialRemoval, CredentialStore, CredentialStoreError, CredentialTarget,
+        SecretMaterial,
+    };
+    struct NoCredentialRead;
+    impl CredentialStore for NoCredentialRead {
+        fn get(&self, _: &CredentialKey) -> Result<Option<SecretMaterial>, CredentialStoreError> {
+            panic!("capture must not read a token")
+        }
+        fn put(&self, _: &CredentialKey, _: SecretMaterial) -> Result<(), CredentialStoreError> {
+            panic!("capture must not write a token")
+        }
+        fn delete(&self, _: &CredentialKey) -> Result<CredentialRemoval, CredentialStoreError> {
+            panic!("capture must not delete a token")
+        }
+    }
+    let admission = fixture_admission(
+        (0..4)
+            .map(|_| {
+                Outcome::Candidate(candidate(
+                    SERVER,
+                    vec![CountingTool::new(
+                        "alpha_tool",
+                        Arc::new(AtomicUsize::new(0)),
+                    )],
+                ))
+            })
+            .collect(),
+    );
+    let (registry, _) = controller(admission);
+    let http = ego_core::config::McpHttpConfig::new(
+        "https://mcp.example.test/mcp".parse::<url::Url>().unwrap(),
+        McpHttpAuth::Oauth,
+        false,
+    )
+    .unwrap();
+    let mut fingerprints = Vec::new();
+    for (issuer, account) in [
+        ("https://issuer.example.test/", None),
+        ("https://issuer.example.test/", None),
+        ("https://issuer.example.test/", Some("other-account")),
+        ("https://other.example.test/", None),
+    ] {
+        let key = CredentialKey::new(
+            issuer.into(),
+            CredentialTarget::ProtectedResource(http.url.to_string()),
+            account.map(str::to_owned),
+        )
+        .unwrap();
+        let session = Arc::new(
+            ego_mcp::McpOAuthSession::new(
+                SERVER.parse().unwrap(),
+                http.clone(),
+                key,
+                Arc::new(NoCredentialRead),
+            )
+            .unwrap(),
+        );
+        let live = Arc::new(
+            McpServerAdmission::new(
+                SERVER.parse().unwrap(),
+                McpServerConfig::Http(http.clone()),
+                McpTransportMaterial::oauth(session),
+            )
+            .unwrap(),
+        );
+        let publication = registry
+            .reconcile(
+                McpRegistryRefresh::new(
+                    vec![McpRegistryCandidate::ready(
+                        live,
+                        McpConfigProvenance::Layer {
+                            source: Source::User,
+                        },
+                    )],
+                    RegistryTrigger::AuthorizationSucceeded,
+                    RegistryScope::All,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("OAuth server must publish without static header material");
+        assert_eq!(publication.admitted_tools(), ["alpha_tool"]);
+        fingerprints.push(publication.capture().stable_fingerprint().to_owned());
+    }
+    assert_eq!(
+        fingerprints[0], fingerprints[1],
+        "same binding survives a new OAuth session"
+    );
+    assert_ne!(
+        fingerprints[0], fingerprints[2],
+        "account changes authority"
+    );
+    assert_ne!(fingerprints[0], fingerprints[3], "issuer changes authority");
+}
