@@ -78,11 +78,13 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
         }
     }
 
+    // Inherited sandbox identity admits worker cleanup, not unrelated host PIDs.
     let mut profile = String::from(
         "(version 1)\n\
          (deny default)\n\
          (import \"system.sb\")\n\
-         (allow process-fork)\n",
+         (allow process-fork)\n\
+         (allow signal (target same-sandbox))\n",
     );
 
     if matches!(input.level, Confinement::Workspace | Confinement::Adaptive) {
@@ -400,6 +402,70 @@ mod tests {
         }
     }
 
+    // Catches: sandboxed parents cannot terminate their own workers with SIGTERM.
+    #[test]
+    fn confined_process_can_signal_descendants_but_not_outside_processes() {
+        use std::process::{Command, Stdio};
+
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().canonicalize().unwrap();
+        let perimeter = adaptive_metadata_input(&workspace);
+        let runtime = [Path::new("/bin"), Path::new("/usr"), Path::new("/System")];
+        let mut outside = Command::new("/bin/sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut failures = Vec::new();
+        for level in [
+            Confinement::Adaptive,
+            Confinement::Workspace,
+            Confinement::Ro,
+        ] {
+            let profile = render(&ProfileInput {
+                adaptive: Some(&perimeter),
+                workspace: &workspace,
+                private_scratch: &workspace,
+                runtime_roots: &runtime,
+                exec_paths: &[workspace.as_path()],
+                ..input(level)
+            })
+            .unwrap();
+            // Child and grandchild both terminate themselves after two seconds if
+            // signalling is denied, so the regression cannot leak worker processes.
+            for script in [
+                "/bin/sleep 2 & child=$!; kill -TERM \"$child\"; result=$?; wait \"$child\" 2>/dev/null; exit \"$result\"",
+                "/bin/bash -c '/bin/sleep 2 & echo $!; wait 2>/dev/null' | { read child; kill -TERM \"$child\"; }",
+            ] {
+                let output = Command::new("/usr/bin/sandbox-exec")
+                    .current_dir(&workspace)
+                    .args(["-p", &profile, "/bin/bash", "-c", script])
+                    .output()
+                    .unwrap();
+                if !output.status.success() || !output.stderr.is_empty() {
+                    failures.push(format!("{level:?} descendant: {output:?}"));
+                }
+            }
+            // The outside process is test-owned, never a process from the host.
+            let output = Command::new("/usr/bin/sandbox-exec")
+                .current_dir(&workspace)
+                .args(["-p", &profile, "/bin/bash", "-c"])
+                .arg(format!("kill -TERM {}", outside.id()))
+                .output()
+                .unwrap();
+            if output.status.success()
+                || !String::from_utf8_lossy(&output.stderr).contains("Operation not permitted")
+                || outside.try_wait().unwrap().is_some()
+            {
+                failures.push(format!("{level:?} outside: {output:?}"));
+            }
+        }
+        let _ = outside.kill();
+        outside.wait().unwrap();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     #[test]
     fn workspace_grants_read_and_existence_on_both_writable_roots() {
         assert_eq!(
@@ -409,6 +475,7 @@ mod tests {
                 "(deny default)\n",
                 "(import \"system.sb\")\n",
                 "(allow process-fork)\n",
+                "(allow signal (target same-sandbox))\n",
                 "(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n",
                 "(allow file-read-metadata (literal \"/var\") (literal \"/private/var\") (literal \"/private/var/select\"))\n",
                 "(allow file-read* (literal \"/private/var/select/sh\"))\n",
