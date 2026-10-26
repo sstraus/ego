@@ -96,12 +96,19 @@ fn promoted_denial_has_no_terminal_authority(pending: bool) {
             "promotion-fixture", path], "timeout_ms": 10000})
     }
     .to_string();
+    // regression case/654: a child denied after the turn ended settles later and starts
+    // one automatic continuation. A pending question retires the denial inside
+    // the turn, so the foreground turn consumes that outcome and no wake follows.
+    let mut completions = vec![
+        Reply::Sse(tool_call("promoted-read", "exec", &args)),
+        Reply::Sse(text("PROMOTION-TURN-DONE")),
+    ];
+    if !pending {
+        completions.push(Reply::Sse(text("SETTLEMENT-CONTINUATION-DONE")));
+    }
+    completions.push(Reply::Sse(text("NEXT-FOREGROUND-USABLE")));
     let stub = Stub::start(Plan {
-        completions: vec![
-            Reply::Sse(tool_call("promoted-read", "exec", &args)),
-            Reply::Sse(text("PROMOTION-TURN-DONE")),
-            Reply::Sse(text("NEXT-FOREGROUND-USABLE")),
-        ],
+        completions,
         ..Plan::default()
     });
     let places = support::Places::new();
@@ -147,6 +154,13 @@ fn promoted_denial_has_no_terminal_authority(pending: bool) {
     let id = &transcript[offset..offset + 36];
     if !pending {
         std::fs::write(ego.workspace_path().join("release"), "release").unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            promotion,
+            "SETTLEMENT-CONTINUATION-DONE",
+        );
+        until_prompt_from(&reader, &mut output, promotion);
     }
     // Inspect until the task settles; the real denied child must not be retried.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -176,7 +190,18 @@ fn promoted_denial_has_no_terminal_authority(pending: bool) {
     let after = normalized(&output[promotion..]);
     assert!(!after.contains("Allow read "), "{after}");
     assert!(!after.contains("PROMOTED-READ-MUST-NOT-RUN"), "{after}");
-    assert_eq!(stub.generations().len(), 3);
+    let requests = stub.generations();
+    assert_eq!(requests.len(), if pending { 3 } else { 4 });
+    if !pending {
+        let settled =
+            |request: &serde_json::Value| request.to_string().matches("exited code 1").count();
+        assert_eq!(settled(&requests[2]), 1, "{}", requests[2]);
+        assert_eq!(
+            settled(&requests[3]),
+            1,
+            "settlement delivered more than once"
+        );
+    }
 }
 
 // Catches: an interactive shell exec refusal offers Read and then Write instead
