@@ -112,6 +112,19 @@ fn ordinary_disk_name_is_not_an_openai_secret() {
     assert!(!text.contains("secret:openai"), "{text}");
 }
 
+// Catches: JSON-quoted authorization values in task text disclose credentials to the judge.
+#[test]
+fn quoted_authorization_value_in_task_does_not_reach_judge() {
+    let context = JudgeTaskContext {
+        task: r#"Inspect {"Authorization": "Bearer quoted.secret"} safely"#.into(),
+        ..Default::default()
+    };
+    let text = request_with_context(&["pwd".into()], &context);
+    assert!(!text.contains("quoted.secret"), "credential leaked: {text}");
+    assert!(text.contains("Inspect"), "{text}");
+    assert!(text.contains("safely"), "{text}");
+}
+
 // Catches: fixing the helper without applying it to task/reason/root disclosure.
 #[test]
 fn authorization_credentials_in_task_context_do_not_reach_judge() {
