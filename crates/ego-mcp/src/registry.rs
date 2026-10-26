@@ -1492,12 +1492,8 @@ fn failure_message(failure: McpFailure) -> &'static str {
         McpFailure::Authority => "server authority was rejected",
         McpFailure::Transport => "server transport is unavailable",
         McpFailure::Protocol => "server protocol failed",
-        McpFailure::Authorization => {
-            "authorization is required; run ego mcp login NAME with an explicit registration strategy"
-        }
-        McpFailure::Credential => {
-            "server credential is unavailable; run ego mcp login NAME with an explicit registration strategy"
-        }
+        McpFailure::Authorization => "authorization is required; run '/mcp login NAME'",
+        McpFailure::Credential => "server credential is unavailable; run '/mcp login NAME'",
         McpFailure::Cancelled => "server admission was cancelled",
     }
 }

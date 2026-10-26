@@ -26,6 +26,9 @@ mod image_refusal;
 mod live_width;
 #[path = "live_surface_pty/mcp_inventory.rs"]
 mod mcp_inventory;
+#[cfg(unix)]
+#[path = "live_surface_pty/mcp_login.rs"]
+mod mcp_login;
 #[path = "live_surface_pty/metadata_refusal.rs"]
 mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
@@ -2460,6 +2463,15 @@ impl PtySession {
         cols: u16,
         screen: Option<(u16, u16)>,
     ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
+        Self::start_command(ego.pty_command(), rows, cols, screen)
+    }
+
+    fn start_command(
+        command: portable_pty::CommandBuilder,
+        rows: u16,
+        cols: u16,
+        screen: Option<(u16, u16)>,
+    ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows,
@@ -2468,7 +2480,7 @@ impl PtySession {
                 pixel_height: 0,
             })
             .expect("pty");
-        let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+        let child = pair.slave.spawn_command(command).expect("spawn");
         let (input, responder, writer_join) =
             writer_owner(pair.master.take_writer().expect("writer"));
         let (reader, reader_join) = stream_with_screen(

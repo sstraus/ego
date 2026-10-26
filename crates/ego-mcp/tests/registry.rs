@@ -745,6 +745,12 @@ async fn new_invalid_server_exposes_no_tool_and_typed_auth_is_sanitized() {
         auth_server.diagnostic().expect("auth diagnostic").failure(),
         McpFailure::Authorization
     );
+    // Catches: the authorization notice sends a REPL user out to the shell or
+    // leaves a placeholder instead of the configured server name.
+    assert_eq!(
+        auth_server.diagnostic().unwrap().message(),
+        "authorization is required; run '/mcp login alpha'"
+    );
     let events = journal.events();
     assert!(events.iter().any(|event| matches!(event,
         McpRegistryEvent::AuthorizationRequired { server, issuer, protected_resource, scopes, request_correlation }
@@ -1088,7 +1094,11 @@ async fn rejected_materialization_candidate_does_not_abort_valid_admission() {
     );
     let errors = status.mcp_errors();
     assert_eq!(errors.len(), 1);
-    assert!(errors[0].contains("beta"));
+    // Catches: missing credentials still demand a guessed CLI strategy.
+    assert_eq!(
+        errors[0],
+        "MCP server `beta`: server credential is unavailable; run '/mcp login beta'"
+    );
     assert!(!errors[0].contains("access_token"));
     assert!(!errors[0].contains("client_secret"));
 }

@@ -48,8 +48,7 @@ pub enum ActionId {
 
 pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
 pub(crate) const GOAL_GRAMMAR: &str = "usage: /goal [show|set TEXT|achieve|block REASON]";
-pub(crate) const MCP_GRAMMAR: &str =
-    "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
+pub(crate) const MCP_GRAMMAR: &str = "usage: /mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
