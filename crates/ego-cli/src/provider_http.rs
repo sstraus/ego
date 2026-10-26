@@ -359,7 +359,7 @@ impl McpProcessScope {
                 MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
                 MCP_DEFAULT_OPERATION_TIMEOUT,
             )
-            .map_err(|error| format!("MCP registry authority could not be opened: {error}"))?,
+            .map_err(|error| format!("the MCP server registry could not be opened: {error}"))?,
         );
         Ok(Self {
             _effects: effects,

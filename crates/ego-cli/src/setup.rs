@@ -102,7 +102,7 @@ pub(crate) async fn observed_selection_host(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis());
     let mut rendered = format!(
-        "Setup target: {target}\nCaptured session authority is unchanged.\nDiagnostic timestamp: {timestamp} UTC milliseconds; policy digest: {policy_digest}\nTarget mode: {:?}; sandbox: {:?}; network: {:?}; roots source: {:?}; profile: {:?}\n",
+        "Setup target: {target}\nThis session keeps its current permissions.\nDiagnostic timestamp: {timestamp} UTC milliseconds; policy digest: {policy_digest}\nTarget mode: {:?}; sandbox: {:?}; network: {:?}; roots source: {:?}; profile: {:?}\n",
         effective.mode,
         effective.sandbox,
         effective.network,
@@ -110,7 +110,7 @@ pub(crate) async fn observed_selection_host(
         effective.active_profile
     );
     if confirmation.is_none() {
-        rendered.push_str("Report only; no human apply authority.\n");
+        rendered.push_str("Report only; changes cannot be applied without confirmation.\n");
     }
     rendered.push_str(&interpretation);
     if selected_probes.is_none() {

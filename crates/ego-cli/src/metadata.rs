@@ -259,10 +259,10 @@ fn emit_publication_warning(
 fn publication_warning(publication: Option<&LifecyclePublication>) -> Option<String> {
     match publication {
         Some(LifecyclePublication::PublishedWithProjectionWarning { diagnostic }) => Some(format!(
-            "metadata is visible, but its manifest projection failed: {diagnostic}"
+            "session details changed, but the saved session list could not be updated: {diagnostic}"
         )),
         Some(LifecyclePublication::PublishedDurabilityUncertain { diagnostic }) => Some(format!(
-            "metadata is visible, but its durability is uncertain: {diagnostic}"
+            "session details changed, but saving them to disk could not be confirmed: {diagnostic}"
         )),
         Some(LifecyclePublication::NotPublished { .. })
         | Some(LifecyclePublication::Published)

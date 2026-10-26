@@ -263,7 +263,7 @@ impl fmt::Display for AuthError {
             }
             Self::ReloginRequired { provider, cause } => write!(
                 f,
-                "{provider} login expired; run `ego auth login {provider}`: {cause}"
+                "{provider} login expired ({cause}); sign in again with 'ego auth login {provider}'"
             ),
             Self::Temporary {
                 provider,
@@ -619,7 +619,7 @@ pub async fn execute(
                 // listing that arrives as eight unlabelled words reads as a
                 // command that did nothing.
                 crate::output::note(
-                    "these providers log in with `ego auth login PROVIDER`; a \
+                    "these providers log in with 'ego auth login PROVIDER'; a \
                      provider that reads an API key from the environment is not \
                      among them and needs no login",
                 );

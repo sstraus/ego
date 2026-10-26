@@ -350,7 +350,7 @@ impl InitProposal {
         if !self.link_exists {
             create_link(&self.root.join("CLAUDE.md")).map_err(|_| "CLAUDE.md symlink failed; AGENTS.md is preserved; inspect partial initialization")?;
         }
-        Ok("Project instructions initialized. Use /refresh to request ordinary trust admission in a new prompt epoch.".into())
+        Ok("Project instructions created. Load them with '/refresh'; ego will ask for trust if needed.".into())
     }
 }
 

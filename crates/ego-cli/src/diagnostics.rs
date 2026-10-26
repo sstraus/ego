@@ -103,7 +103,7 @@ pub fn plan(log: Option<&str>, file: Option<&str>, paints: bool) -> Result<Plan,
                 return Err(format!(
                     "{LOG_FILE} must be an absolute path, and {raw} is not. A \
                      relative path resolves against the working directory of \
-                     whatever started this process, which for `ego acp` is the \
+                     whatever started this process, which for 'ego acp' is the \
                      host's and not yours"
                 ));
             }
@@ -130,7 +130,7 @@ pub fn plan(log: Option<&str>, file: Option<&str>, paints: bool) -> Result<Plan,
             "{LOG} is set for an interactive session, which paints its own \
              prompt: writing diagnostics to the same terminal would corrupt \
              it. Set {LOG_FILE} to an absolute path to collect them, or run \
-             the command headlessly with `ego run`"
+             the command headlessly with 'ego run'"
         )),
     }
 }

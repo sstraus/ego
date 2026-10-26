@@ -31,7 +31,7 @@ fn execute_inner(args: &HooksArgs, out: &Stdout) -> Result<(), RunTermination> {
     let catalogue = HookCatalogue::admit_typed(&layers, &[], Trust::Untrusted)
         .map_err(|error| usage(UsageError(error.to_string())))?;
     let rendered = render(&catalogue, args.json).map_err(|error| RunTermination::Failed {
-        message: format!("the hook catalogue could not be rendered: {error}"),
+        message: format!("the hook list could not be displayed: {error}"),
     })?;
     // An empty text listing has no rows, so it has nothing to put on stdout;
     // the explanation belongs on the diagnostic channel. `--json` already

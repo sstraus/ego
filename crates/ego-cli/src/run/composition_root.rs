@@ -239,7 +239,8 @@ impl CliPrepared {
             .map_err(|message| usage(UsageError(message.to_owned())))?;
         if args.profile.as_deref() == Some("ci") {
             return Err(RunTermination::UsageError {
-                message: "profile ci available only through ego run or ego resume".to_owned(),
+                message: "profile 'ci' is available only through 'ego run' or 'ego resume'"
+                    .to_owned(),
             });
         }
         let root = request.root.as_path().to_path_buf();
@@ -622,7 +623,7 @@ fn settle_run_artifact(
             ArtifactPublication::PublishedDurably => {}
             ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => {
                 return Err(RunExecutorError::new(format!(
-                    "run artifact is visible but its durability is uncertain: {diagnostic}"
+                    "the run artifact is available, but saving it to disk could not be confirmed: {diagnostic}"
                 )));
             }
         }
@@ -783,7 +784,7 @@ pub(super) async fn select_startup_model(
     };
     if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } = publication {
         diagnostics.note(&format!(
-            "model defaults are authoritative with a durability warning: {diagnostic}"
+            "model defaults have changed, but saving them to disk could not be confirmed: {diagnostic}"
         ));
     }
     if automatic {
@@ -998,7 +999,7 @@ pub(super) fn note_refused_mcp(
 ) {
     for (name, error) in refused {
         diagnostics.note(&format!(
-            "MCP server `{name}` not attached: {error}. Inspect with ego mcp ls."
+            "MCP server '{name}' was not connected: {error}. Inspect with 'ego mcp ls'."
         ));
     }
 }

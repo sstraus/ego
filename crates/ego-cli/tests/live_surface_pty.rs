@@ -343,7 +343,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     );
 }
 
-// Catches: settlement inside the launching turn is never announced, or is announced again.
+// Catches: settlement is lost/duplicated or the user notice leaks model-only output handles.
 #[test]
 fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     let arguments = serde_json::json!({
@@ -430,6 +430,22 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     assert!(
         !next_output.contains("exited code 0"),
         "settlement announced twice: {next_output}"
+    );
+    assert!(
+        launch_history.contains("[read_tool_result "),
+        "model continuation lost the full-output handle: {launch_history}"
+    );
+    assert!(
+        !launch_output.contains("[read_tool_result "),
+        "user notice leaked a model-only output handle: {launch_output}"
+    );
+    assert!(
+        !launch_output.contains("stdout tail (") && !launch_output.contains("stderr tail ("),
+        "user notice exposed model tail headings: {launch_output}"
+    );
+    assert!(
+        launch_output.contains("REGRESSION-MARKER"),
+        "user notice lost the useful command output: {launch_output}"
     );
 }
 
@@ -1209,7 +1225,7 @@ fn successor_accepts_next_turn(action: &str) {
             &reader,
             &mut output,
             start,
-            "fix the error and retry, or use /quit",
+            "correct the error before trying again",
         );
         let start = output.len();
         until_prompt_from(&reader, &mut output, start);
@@ -1223,7 +1239,7 @@ fn successor_accepts_next_turn(action: &str) {
         );
         assert_eq!(
             shown
-                .matches("fix the error and retry, or use /quit")
+                .matches("correct the error before trying again")
                 .count(),
             1
         );
@@ -5811,7 +5827,10 @@ fn regression_case_terminal(provider_refuses: bool) {
     drain(&reader, &mut output);
     assert!(status.success(), "interactive exit: {status:?}");
     let after_quit = normalized(&output[quit_start..]);
-    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        after_quit.contains("To resume: 'ego resume"),
+        "{after_quit}"
+    );
     assert!(
         !after_quit.contains("the provider returned HTTP 400"),
         "{after_quit}"
@@ -6542,7 +6561,7 @@ fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
     let after_quit = output_after_quit(Some("hello"));
     assert!(
         after_quit.contains(&format!(
-            "To resume: ego resume {}",
+            "To resume: 'ego resume {}'",
             support::FIXTURE_SESSION_ID
         )),
         "no resume hint at exit: {after_quit:?}"
@@ -8838,7 +8857,10 @@ fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
     drain(&reader, &mut output);
     assert!(status.success(), "interactive exit: {status:?}");
     let after_quit = normalized(&output[quit_start..]);
-    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        after_quit.contains("To resume: 'ego resume"),
+        "{after_quit}"
+    );
     assert!(
         !after_quit.contains("the provider returned HTTP 400"),
         "{after_quit}"
@@ -9579,7 +9601,7 @@ fn replay_recorded_compaction_failure(new_prompt: bool) {
     input.write_all(b"finish this task\r").unwrap();
     input.flush().unwrap();
     if new_prompt {
-        until_notice_prose(&reader, &mut output, start, "Use /compact to retry");
+        until_notice_prose(&reader, &mut output, start, "Retry with '/compact'");
         until_prompt_from(&reader, &mut output, start);
         assert_eq!(stub.generations().len(), 2, "finite retries exhausted");
         input.write_all(b"REGRESSION-MARKER\r").unwrap();
@@ -9714,10 +9736,10 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
         );
         // An empty composer can repaint between rows of the failure notice.
         // Wait for its complete actionable text before inspecting it.
-        until_notice_prose(&reader, &mut output, failed_at, "Use /compact to retry");
+        until_notice_prose(&reader, &mut output, failed_at, "Retry with '/compact'");
         let shown = support::notice_prose(&normalized(&output));
         assert!(shown.contains("HTTP response body failed"), "{shown}");
-        assert!(shown.contains("Use /compact to retry"), "{shown}");
+        assert!(shown.contains("Retry with '/compact'"), "{shown}");
         assert!(!shown.contains("session stopped"), "{shown}");
         assert_eq!(
             stub.generations().len(),
@@ -9938,7 +9960,7 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
         .collect();
     assert_eq!(delivered.len(), 1, "wake must be delivered exactly once");
     assert!(!delivered[0].to_string().contains("REGRESSION-MARKER"));
-    assert!(!normalized(&output).contains("new source work became pending"));
+    assert!(!normalized(&output).contains("more work arrived"));
 }
 
 // Catches: closing prompt admission also rejects Ctrl-C for an active checkpoint.
@@ -10206,7 +10228,7 @@ fn typed_clear_reports_its_scope() {
     }
     for capture in captures {
         assert!(
-            capture.contains("Composer cleared; transcript, context and history unchanged"),
+            capture.contains("Draft cleared; conversation and history unchanged"),
             "{capture}"
         );
         assert!(

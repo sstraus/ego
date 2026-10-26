@@ -222,7 +222,7 @@ fn publish(
     store
         .mutate(mutation)
         .map_err(|error| RunTermination::Failed {
-            message: format!("user MCP configuration was not published: {error}"),
+            message: format!("MCP configuration could not be saved: {error}"),
         })
 }
 
@@ -308,9 +308,18 @@ async fn remove(
     )
     .await?;
     let consequence = match removal {
-        Removal::Entry => format!("removed user entry; {}", effective_text(&after, name)),
-        Removal::Tombstone => format!("removed user tombstone; {}", reveal_text(&after, name)),
-        Removal::SystemMask => format!("masked system entry; {}", effective_text(&after, name)),
+        Removal::Entry => format!(
+            "removed from user configuration; {}",
+            effective_text(&after, name)
+        ),
+        Removal::Tombstone => format!(
+            "removed the user-level block; {}",
+            reveal_text(&after, name)
+        ),
+        Removal::SystemMask => format!(
+            "blocked the system-configured server; {}",
+            effective_text(&after, name)
+        ),
     };
     out.line(&format!(
         "{}; {consequence}; {}",
@@ -359,7 +368,7 @@ fn removal_mutation(
         } => {
             if matches!(removal, Removal::Tombstone) {
                 return Err(usage(UsageError(format!(
-                    "MCP server `{name}` is not configured; the system layer contains a tombstone"
+                    "MCP server '{name}' is blocked by the system configuration"
                 ))));
             }
             let expected_user_entry = config.user_entry(&UserConfigTarget::Base, name).cloned();
@@ -398,7 +407,7 @@ fn delete_user_entry(
             .cloned()
             .ok_or_else(|| RunTermination::Failed {
                 message: format!(
-                    "resolved user MCP server `{name}` is absent from its provenance target"
+                    "MCP server '{name}' is missing from the user configuration that defined it"
                 ),
             })?;
     Ok((
@@ -416,7 +425,7 @@ fn resolve_after_publication(
 ) -> Result<McpManagementConfig, RunTermination> {
     config::mcp_management().map_err(|error| RunTermination::Failed {
         message: format!(
-            "{} but the resulting MCP authority could not be resolved: {}",
+            "{} but the updated MCP configuration could not be loaded: {}",
             publication_text(publication),
             error
         ),
@@ -425,10 +434,12 @@ fn resolve_after_publication(
 
 fn publication_text(publication: &UserConfigPublication) -> String {
     match publication {
-        UserConfigPublication::NotPublished => "unchanged; not published".to_string(),
-        UserConfigPublication::PublishedDurably => "published durably".to_string(),
+        UserConfigPublication::NotPublished => "unchanged; nothing was saved".to_string(),
+        UserConfigPublication::PublishedDurably => "saved to disk".to_string(),
         UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
-            format!("published with durability uncertain: {diagnostic}")
+            format!(
+                "configuration changed, but saving it to disk could not be confirmed: {diagnostic}"
+            )
         }
     }
 }
@@ -453,7 +464,7 @@ fn reveal_text(config: &McpManagementConfig, name: &McpServerName) -> String {
         Some(ResolvedMcpEntry::Tombstone { provenance }) => {
             format!("still masked by {}", provenance_text(provenance))
         }
-        None => "no lower entry was revealed".to_string(),
+        None => "no other configuration defines this server".to_string(),
     }
 }
 
@@ -490,7 +501,7 @@ async fn reconcile(
 
 fn render_status(status: &McpRegistryStatus, out: &Stdout) {
     if status.servers().is_empty() {
-        out.line("no MCP servers are admitted");
+        out.line("no MCP servers are connected");
     } else {
         for server in status.servers() {
             out.line(&format!(
@@ -541,7 +552,7 @@ async fn list(
         // No rows, so nothing belongs on stdout; the explanation is a
         // diagnostic, exactly as it is for every other empty listing.
         out.note(&empty_listing(
-            "no MCP servers are configured or admitted",
+            "no MCP servers are configured or connected",
             "ego mcp add",
         ));
     } else {

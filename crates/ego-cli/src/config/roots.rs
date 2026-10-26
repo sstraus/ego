@@ -72,7 +72,7 @@ pub(super) fn receipt(
     ));
     if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } = result.publication {
         output::note(&format!(
-            "Root was saved, but durability could not be confirmed: {diagnostic}"
+            "Root settings changed, but saving them to disk could not be confirmed: {diagnostic}"
         ));
     }
     Ok(())

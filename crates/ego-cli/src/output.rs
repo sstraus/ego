@@ -465,7 +465,7 @@ fn write_note(mut err: impl Write, message: &str, width: Option<usize>, raw: boo
 /// and `rules ls` have their empty text output fixed by their ADRs, and a
 /// prose line on stdout would corrupt every reader of the tab-separated shape.
 pub fn empty_listing(missing: &str, add_with: &str) -> String {
-    format!("{missing}; add the first with `{add_with}`")
+    format!("{missing}; see '{add_with} --help' to add an entry")
 }
 
 /// The live view of a run: one `PublicEvent` per line, as it happens.
@@ -941,7 +941,8 @@ impl EventSink for TextSink<'_> {
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
-                    self.out.note(&format!("{error}. Inspect with ego mcp ls."));
+                    self.out
+                        .note(&format!("{error}. Inspect with 'ego mcp ls'."));
                 }
             }
             // `AgentMessage` and not "either message kind": stdout is the

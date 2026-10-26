@@ -124,7 +124,7 @@ pub(crate) fn resolve_selected(
                         && let Err(error) = store.migrate_legacy(&key, surface.clone(), remembered)
                     {
                         diagnostics.note(&format!(
-                            "the old workspace trust record could not be migrated ({error})"
+                            "the saved workspace trust record could not be updated ({error})"
                         ));
                     }
                     return remembered;
@@ -162,7 +162,7 @@ pub(crate) fn resolve_selected(
         answer
     };
     if executable_surface_selected(root, selected) != surface {
-        diagnostics.note("the workspace executable surface changed while trust was being answered; this answer was not applied");
+        diagnostics.note("workspace commands changed while you were answering the trust question; trust was not granted");
         return Trust::Untrusted;
     }
     if let Some(store) = &store

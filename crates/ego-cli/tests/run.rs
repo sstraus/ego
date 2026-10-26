@@ -2153,7 +2153,7 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
     assert_eq!(finished.stdout.trim(), "I read it.");
     assert_eq!(
         finished.stderr,
-        "εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter\nεgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem access\n"
+        "εgo: ~/Gits does not exist; file access is limited to the workspace\nεgo: sandbox is off; commands can access any file your user account can access\n"
     );
 }
 

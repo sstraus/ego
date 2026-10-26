@@ -81,7 +81,7 @@ pub fn export(args: &ExportArgs, out: &Stdout) -> RunTermination {
                 Ok(AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic }) => {
                     RunTermination::Failed {
                         message: format!(
-                            "the export file is visible but its durability is uncertain: {diagnostic}"
+                            "the export file is available, but saving it to disk could not be confirmed: {diagnostic}"
                         ),
                     }
                 }
@@ -293,7 +293,7 @@ pub(super) fn finalize_ci_bundle(
         .and_then(|publication| match publication {
             ArtifactPublication::PublishedDurably => Ok(()),
             ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => Err(format!(
-                "the sanitized run bundle is visible but its durability is uncertain: {diagnostic}"
+                "the sanitized run bundle is available, but saving it to disk could not be confirmed: {diagnostic}"
             )),
         });
     let Err(message) = publication else {
@@ -512,7 +512,7 @@ pub async fn compact(
             }
             if let Some(diagnostic) = receipt.publication.diagnostic() {
                 Stderr.note(&format!(
-                    "compaction target {} is authoritative with a durability warning: {diagnostic}",
+                    "compacted session {} is available, but saving it to disk could not be confirmed: {diagnostic}",
                     receipt.target
                 ));
             }
@@ -569,7 +569,7 @@ fn render_fork_result(
     match publication {
         LifecyclePublication::PublishedWithProjectionWarning { diagnostic }
         | LifecyclePublication::PublishedDurabilityUncertain { diagnostic } => out.note(&format!(
-            "fork target {target} is authoritative with a durability warning: {diagnostic}"
+            "forked session {target} is available, but saving it to disk could not be confirmed: {diagnostic}"
         )),
         LifecyclePublication::Published | LifecyclePublication::NotPublished { .. } => {}
     }
@@ -658,7 +658,7 @@ fn tabulate(out: &Stdout, metas: &[SessionMeta], root: &Path, all: bool) {
             "no sessions in this store".to_string()
         } else {
             format!(
-                "no session belongs to {}; `ego ls --all` lists every one",
+                "no session belongs to {}; list other workspaces with 'ego ls --all'",
                 root.display()
             )
         });

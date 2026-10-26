@@ -220,8 +220,8 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
     let StartupDecision::Headless(error) = zero else {
         panic!("zero providers must refuse headless startup")
     };
-    assert!(error.to_string().contains("--model <provider/model>"));
-    assert!(error.to_string().contains("config set model"));
+    assert!(error.to_string().contains("'--model PROVIDER/MODEL'"));
+    assert!(error.to_string().contains("choose one with"));
 
     let one_snapshot = snapshot(vec![entry(
         "openai/gpt-5.6-sol",

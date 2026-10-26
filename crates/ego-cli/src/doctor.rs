@@ -580,7 +580,7 @@ impl HealthProbe for Mcp {
                     HealthItemId::about("mcp.server", name.to_string()),
                     HealthStatus::NotChecked,
                     "mcp.server",
-                    "configured; liveness is not probed because admission starts the server"
+                    "configured; connection not checked because that would start the server"
                         .to_owned(),
                     "the resolved configuration",
                     roots,

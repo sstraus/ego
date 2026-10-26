@@ -647,7 +647,7 @@ fn kimi_refresh_without_credential_returns_an_unavailable_snapshot_without_trans
                 "availability": {
                     "status": "unavailable",
                     "cause": "missing_credential",
-                    "message": "no stored subscription credential: run `ego auth login kimi-coding`"
+                    "message": "not signed in to the subscription; sign in with 'ego auth login kimi-coding'"
                 }
             }
         ])

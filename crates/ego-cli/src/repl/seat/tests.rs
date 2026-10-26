@@ -1058,7 +1058,7 @@ fn regression_case_surface_effect_maps_idle_and_refuses_busy() {
                 .notice
                 .as_deref()
                 .unwrap_or_default()
-                .contains("unavailable while a turn is running")
+                .contains("cannot change the session name or goal during a reply")
         );
     }
 }

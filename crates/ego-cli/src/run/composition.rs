@@ -655,7 +655,7 @@ pub(super) fn ci_invocation(
     }
     if !matches!(driver, Driver::Once) {
         return Err(UsageError(
-            "profile `ci` is available only through ego run or ego resume".to_owned(),
+            "profile 'ci' is available only through 'ego run' or 'ego resume'".to_owned(),
         ));
     }
     if args.instructions.is_none() {
@@ -1499,7 +1499,7 @@ pub(super) async fn generation_preflight_inner(
                             .expect("a human interactive status was checked above")
                             .seat
                             .set_notice(format!(
-                                "model defaults are authoritative with a durability warning: {diagnostic}"
+                                "model defaults have changed, but saving them to disk could not be confirmed: {diagnostic}"
                             ));
                     }
                     thinking = Some(request.thinking());
@@ -1559,7 +1559,8 @@ pub(super) async fn generation_preflight_inner(
                     .as_ref()
                     .map(Arc::clone)
                     .ok_or_else(|| RunTermination::Failed {
-                        message: "interactive MCP registry authority is unavailable".to_owned(),
+                        message: "the MCP server registry is unavailable in this session"
+                            .to_owned(),
                     })?,
                 native_tools.to_vec(),
             )

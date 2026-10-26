@@ -1055,7 +1055,9 @@ fn into_mcp_args(
                     ));
                 }
                 let raw_url = add.http.ok_or_else(|| {
-                    UsageError("ego mcp add requires exactly one transport".to_string())
+                    UsageError(
+                        "'ego mcp add' requires exactly one of '--http' or '--stdio'".to_string(),
+                    )
                 })?;
                 let url = raw_url
                     .parse::<McpHttpUrl>()
@@ -1121,7 +1123,7 @@ fn into_mcp_args(
 fn reject_mcp_separator(separator_tail: Option<Vec<String>>) -> Result<(), UsageError> {
     if separator_tail.is_some() {
         Err(UsageError(
-            "literal `--` and trailing arguments apply only to `ego mcp add --stdio`".to_string(),
+            "'--' and trailing arguments apply only to 'ego mcp add --stdio'".to_string(),
         ))
     } else {
         Ok(())
@@ -1677,7 +1679,7 @@ fn into_rm_invocation(parsed: RmCommand) -> Result<Invocation, UsageError> {
     let source = SessionId::from_str(&parsed.source)
         .map_err(|error| UsageError(format!("invalid session id: {error}")))?;
     if source.uuid().is_nil() {
-        return Err(UsageError("session id must not be nil".into()));
+        return Err(UsageError("the session ID cannot be all zeros".into()));
     }
     Ok(Invocation::Rm(Box::new(RmArgs {
         source,
@@ -1725,7 +1727,8 @@ fn into_export_invocation(parsed: ExportCommand) -> Result<Invocation, UsageErro
         .map_err(|error| UsageError(format!("`{}` is not a session id: {error}", parsed.source)))?;
     if parsed.format == ExportFormat::Jsonl && parsed.file.is_some() {
         return Err(UsageError(
-            "ego export --format jsonl cannot be combined with --file".to_owned(),
+            "'ego export --format jsonl' cannot write to '--file'; redirect stdout instead"
+                .to_owned(),
         ));
     }
     if (parsed.follow || parsed.after.is_some()) && parsed.format != ExportFormat::Transcript {
@@ -1773,17 +1776,23 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
         } => {
             let target = config_target(profile)?;
             if sets.len() + unsets.len() == 0 || sets.len() + unsets.len() > 64 {
-                return Err(UsageError("managed batch requires 1..64 operations".into()));
+                return Err(UsageError(
+                    "a configuration batch must contain between 1 and 64 changes".into(),
+                ));
             }
             let mut changes = Vec::new();
             let mut keys = std::collections::HashSet::new();
             for assignment in sets {
-                let (key, raw) = assignment
-                    .split_once('=')
-                    .ok_or_else(|| UsageError("batch set requires KEY=TOML_VALUE".into()))?;
+                let (key, raw) = assignment.split_once('=').ok_or_else(|| {
+                    UsageError(
+                        "a batch set needs a key and value in the form 'KEY=TOML_VALUE'".into(),
+                    )
+                })?;
                 let key = managed_config_key(&target, key)?;
                 if !keys.insert(key.to_string()) {
-                    return Err(UsageError("duplicate batch key".into()));
+                    return Err(UsageError(
+                        "the same configuration key appears more than once in the batch".into(),
+                    ));
                 }
                 let value = ManagedConfigValue::parse(key.clone(), raw).map_err(|_| {
                     UsageError(format!("invalid TOML value or type for config key `{key}`"))
@@ -1798,7 +1807,9 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
             for key in unsets {
                 let key = managed_config_key(&target, &key)?;
                 if !keys.insert(key.to_string()) {
-                    return Err(UsageError("duplicate batch key".into()));
+                    return Err(UsageError(
+                        "the same configuration key appears more than once in the batch".into(),
+                    ));
                 }
                 changes.push(ego_core::config::UserConfigMutation::ManagedUnset {
                     target: target.clone(),
@@ -1822,7 +1833,8 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
             let target = config_target(profile)?;
             let Some((key, raw_value)) = assignment.split_once('=') else {
                 return Err(UsageError(
-                    "ego config set requires exactly one KEY=TOML_VALUE assignment".to_owned(),
+                    "'ego config set' requires one assignment in the form 'KEY=TOML_VALUE'"
+                        .to_owned(),
                 ));
             };
             let key = managed_config_key(&target, key)?;

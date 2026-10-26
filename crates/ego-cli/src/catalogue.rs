@@ -73,8 +73,7 @@ pub fn resolve(
             .map(|meta| meta.id)
             .ok_or_else(|| {
                 UsageError(format!(
-                    "no session belongs to {} yet: run `ego run` here first, or \
-                     name a session id",
+                    "no session belongs to {} yet; list other workspaces with 'ego ls --all'",
                     root.display()
                 ))
             });
@@ -89,8 +88,7 @@ pub fn resolve(
     // The bare id is the thing they can pass back to `ego resume`.
     let Some(meta) = metas.into_iter().find(|meta| meta.id == wanted) else {
         return Err(UsageError(format!(
-            "no session {wanted} in this store: `ego ls --all` lists the ones \
-             there are"
+            "no session {wanted} was found in this store; list saved sessions with 'ego ls --all'"
         )));
     };
 

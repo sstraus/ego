@@ -401,16 +401,16 @@ fn provider_unavailable(
     use ego_ai::catalogue::ModelAvailabilityCause;
     let remedy = match cause {
         ModelAvailabilityCause::MissingCredential => {
-            format!("not signed in\nRun `ego auth login {provider}`")
+            format!("not signed in\nSign in with 'ego auth login {provider}'")
         }
         ModelAvailabilityCause::SourceUnreachable => {
             format!(
-                "cannot reach provider; check its connection, then run `ego models --provider {provider} --refresh`"
+                "cannot reach provider; retry with 'ego models --provider {provider} --refresh'"
             )
         }
         ModelAvailabilityCause::SourceMalformed | ModelAvailabilityCause::IncompleteFacts => {
             format!(
-                "model details missing or invalid; run `ego models --provider {provider} --refresh`"
+                "model details are missing or invalid; refresh them with 'ego models --provider {provider} --refresh'"
             )
         }
         ModelAvailabilityCause::MappingUnavailable => {

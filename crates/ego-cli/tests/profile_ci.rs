@@ -654,7 +654,7 @@ fn ci_preflight_rejects_conversational_invocation_before_seat_or_effects() {
         &finished,
         &fixture.session_root,
         &fixture.artifact_root,
-        r#"profile `ci` is available only through ego run or ego resume"#,
+        r#"profile 'ci' is available only through 'ego run' or 'ego resume'"#,
     );
 }
 
