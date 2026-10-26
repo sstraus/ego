@@ -678,7 +678,12 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
         Producer::Main,
         Default::default(),
     ));
-    let first = catalogue("explain", DIGEST_A);
+    // Catches: a resumed invocation loses its original external resource root.
+    let first = SkillCatalogue::new(vec![
+        spec("explain", DIGEST_A, true, true)
+            .with_resource_root(ego_core::permit::CanonPath::new("/external/explain")),
+    ])
+    .unwrap();
     let invocation = SkillInvocation::admit(
         &first,
         SkillOperation::Invoke {
@@ -723,6 +728,10 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
     assert!(invocation.rendered_ref().is_some());
     assert_eq!(blobs.committed.lock().unwrap().len(), 2);
     let admission = invocation.admission_blob(&blobs).unwrap();
+    assert_eq!(
+        serde_json::to_value(&admission).unwrap()["resource_root"],
+        "/external/explain"
+    );
     assert!(serde_json::to_vec(&admission).unwrap().len() <= 64 * 1024);
     assert!(
         serde_json::to_vec(&admission)

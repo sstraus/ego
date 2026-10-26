@@ -907,6 +907,19 @@ mod regression_case {
                 .descriptor("linked")
                 .expect("user symlink admitted");
             assert_eq!(skill.source(), SkillSourceAuthority::User);
+            // Catches: discovery drops the external symlink target before invocation.
+            let resource_root = skill
+                .resource_root()
+                .expect("discovery-bound resource root");
+            assert_eq!(
+                resource_root.as_path(),
+                fs::canonicalize(source.parent().unwrap()).unwrap()
+            );
+            fs::write(source.parent().unwrap().join("README.md"), "external guide").unwrap();
+            assert_eq!(
+                fs::read_to_string(resource_root.as_path().join("README.md")).unwrap(),
+                "external guide"
+            );
             assert_eq!(
                 skill
                     .render(&ego_core::skill::SkillOperation::Invoke {
