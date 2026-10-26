@@ -64,3 +64,21 @@ date, and SHA-256, and refuses to write if the executable changes during capture
 
 README is the product entry point, not the complete command manual. Keep its
 version/status, first-run examples, and links consistent with these guides.
+
+## Prepare release documentation
+
+The workspace version is in `[workspace.package]` in `Cargo.toml`. Workspace
+packages inherit it. Let Cargo refresh their lockfile versions; do not edit
+`Cargo.lock` by hand. A release preparation can select a new minor version;
+`0.3.0` is the current local preparation, not a publication claim.
+
+Write notes in `release-notes/VERSION.md`, grouped by user-visible features,
+fixes, and breaking changes. Include story IDs and verify the changes against
+Git history and source. Keep dated captures and external dependency versions
+unchanged; they are evidence, not release declarations. Add the notes to
+`SUMMARY.md` and link them from README.
+
+The tag workflow reads that exact notes file and refuses a missing or empty file.
+A documentation build does not authorize a tag, push, release, tap update, or
+installed-binary replacement. Follow the authorization gates in
+[the release-flow report](internals/649-release-flow.md#publication-steps-require-maintainer-authorization).

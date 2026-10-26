@@ -122,16 +122,12 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           cat dist/*.sha256 > dist/SHA256SUMS
-          # The CHANGELOG section of this version: `## [X.Y.Z]` or `## X.Y.Z`.
-          # An empty section stops the release instead of publishing blank notes.
-          awk -v v="$VERSION" '
-            /^## / { if (found) exit; if ($2 == v || $2 == "[" v "]") { found = 1 } next }
-            found
-          ' CHANGELOG.md > notes.md
-          if ! grep -q '[^[:space:]]' notes.md; then
-            echo "CHANGELOG.md has no section for $VERSION"
+          NOTES="docs/release-notes/$VERSION.md"
+          if [ ! -f "$NOTES" ] || ! grep -q '[^[:space:]]' "$NOTES"; then
+            echo "$NOTES is missing or empty"
             exit 1
           fi
+          cp "$NOTES" notes.md
 
       - name: Generate Homebrew formula
         if: ${{ !contains(github.ref_name, '-') }}

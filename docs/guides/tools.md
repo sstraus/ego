@@ -91,6 +91,13 @@ predicates but can lose invocation details the grammar cannot express; preview
 its omissions before persisting an allow. See [permissions](permissions.md).
 
 `task` accepts `name` and `prompt` and returns the bounded final child answer.
+With `background=true`, it starts a durable child and returns its ID immediately;
+parent-turn interruption does not cancel that child. Use `/tasks` to inspect or
+cancel it. Background calls require an explicit prompt and cannot select `agent`
+or `plan_step`. A foreground call can bind an existing durable `plan_step`.
+
+Background exec settlement wakes an idle interactive session to process the
+retained result; the model need not repeatedly request `exec_status` while waiting.
 `history.search` accepts `query`; `history.open` accepts a session UUID. History
 is read-only conversational access across workspace roots, not arbitrary paths
 or authority to execute a prior tool call. Native TUICommander orchestration is

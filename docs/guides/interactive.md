@@ -31,8 +31,8 @@ a pasted control command.
 `/clear` clears composer/menu state and confirms that transcript, context, and
 durable history are unchanged. `/expand` pages the
 retained last-tool output. `/export` prints to this transcript, not a file, and
-reports its disclosure and format. The default remains a sanitized JSON evidence
-bundle in a markdown fence; export serialization is unchanged. `/refresh` applies current instructions through a
+reports its disclosure and format. The default is sanitized Markdown containing a fenced JSON evidence bundle;
+explicit `json` selects the JSON bytes without that wrapper. `/refresh` applies current instructions through a
 new prompt epoch when source work is idle.
 
 `/name [show|set TEXT|clear]` reads or changes display metadata.
@@ -70,6 +70,26 @@ Enter/Escape until answered and preserve the underlying draft/queue.
 Use the shortcuts shown by this binary's `/help`; terminal Meta/function key
 support differs across platforms.
 
+## Keyboard preferences
+
+The default composer uses Emacs editing. Start `ego --vim` or save
+`ego config set 'ui.vim=true'` for Vim editing. `--vim` overrides a saved false
+value; headless runs and prompted resumes refuse this terminal-only flag.
+Keyboard preferences come from the user file, not project configuration or
+session policy.
+
+Override action shortcuts by saving a map, for example:
+
+```sh
+ego config set 'ui.keybindings={model=["Ctrl+P","F2"],expand=[]}'
+```
+
+An empty array removes that action's shortcuts. `ego config unset ui.keybindings`
+restores defaults. Read the current binary's `/help` for active shortcuts.
+Invalid chords and conflicting action shortcuts are refused. Source:
+[keyboard preferences](../../crates/ego-cli/src/config.rs) and
+[action registry](../../crates/ego-cli/src/repl/actions.rs).
+
 ## Image drafts
 
 Ctrl+V reads the OS pasteboard. An image adds a removable chip to the unsent
@@ -99,7 +119,11 @@ and uses its deterministic inventory. Esc cancels without configuration writes.
 
 ## MCP servers
 
-`/mcp` lists configured servers with their live state. `/mcp toggle NAME` turns
+`/mcp` lists configured servers with their live state. `/mcp login NAME` opens
+the configured HTTP server's OAuth flow and reconnects it after successful login,
+without leaving the session. Escape cancels the pending login. See
+[MCP login](../integrations/mcp.md#remote-oauth-login) for registration choices
+and the remaining live-verification boundary. `/mcp toggle NAME` turns
 one server off or on for this session without changing its configuration.
 `/mcp add NAME --stdio -- COMMAND ARG...` and `/mcp add NAME --http URL` use
 the same typed configuration transaction as `ego mcp add`. Quote arguments
@@ -122,6 +146,9 @@ status disabled. The old `segments` configuration key is not supported.
 The `●` after the Git branch means there are local changes, untracked files, or
 conflicts; it is not an activity indicator. An approximate subscription cost is
 an API-equivalent estimate, not a charge to the subscription account.
+
+Running child agents have their own cyan activity rows, separate from the main
+working row. A settled child no longer appears as running.
 
 Successful cache hits do not print a notice on every generation. A warning can
 appear when a provider previously reported reuse for the same marked input but

@@ -42,4 +42,5 @@
 
 - [Architecture overview](architecture.md)
 - [Open-source licenses](THIRD_PARTY_LICENSES.md)
+- [Release notes: 0.3.0](release-notes/0.3.0.md)
 - [Build and maintain the guide](maintaining.md)

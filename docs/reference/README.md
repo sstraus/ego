@@ -18,7 +18,7 @@ name does not prove a provider credential or confinement backend is available.
 | `ego usage` | Report context, tokens, roles, and monetary state |
 | `ego models` | Inspect model facts, source, freshness, and availability |
 | `ego auth login\|logout\|status` | Manage a provider's subscription credential |
-| `ego config get\|set\|unset\|ls\|edit` | Manage user configuration; `ls --effective` observes the current untrusted perimeter |
+| `ego config get\|set\|unset\|ls\|edit\|capabilities\|snapshot\|batch` | Manage user configuration; `ls --effective` observes the current untrusted perimeter |
 | `ego roots add\|rm\|ls` | Manage user/profile extra roots |
 | `ego rules ls\|allow\|deny\|revoke\|remember\|explain` | Inspect and manage permission predicates |
 | `ego mcp add\|rm\|ls\|login\|reload` | Configure and reconcile external MCP servers |
@@ -39,8 +39,9 @@ these accept `--name show|set=TEXT|clear` and
 
 ## Flags and defaults
 
-The [generated reference](cli.md) lists all top-level subcommand flags. Nested
-management flags are authoritative in `ego COMMAND SUBCOMMAND --help`;
+The [generated reference](cli.md) lists visible commands, including nested
+management commands, and their flags.
+Installed-binary flags are authoritative in `ego COMMAND SUBCOMMAND --help`;
 [the fresh-build help snapshot](help.md) includes their help. [CLI.md](../../CLI.md) describes
 output contracts and design; some examples there predate this checkout.
 
@@ -50,7 +51,7 @@ output contracts and design; some examples there predate this checkout.
 | Authority | `--mode`, `--plan`, `--yolo`, `--sandbox`, `--allow`, `--deny` | See [permissions](../guides/permissions.md); denies and system ceilings remain binding |
 | Inputs | `--file`, `--var`, `--instructions`, `--bare` | File and argv prompt conflict; vars require a file; bare and explicit instructions conflict |
 | Tools | `--tools`, `--no-tools`, `--mcp` | Built-ins plus admitted extensions; selectors restrict rather than grant |
-| Limits | `--budget`, `--max-turns`, `--timeout` | No invocation cap unless configured; system budget can clamp it |
+| Limits | `--budget`, `--max-output-tokens`, `--max-turns`, `--timeout` | No invocation cap unless configured; system budget can clamp it |
 | Resilience | `--retry`, repeatable `--fallback` | Delivery-safe failures only; no blind repeat of an uncertain effect |
 | Validation | `--schema`, `--schema-retries` | Inline or `@file` JSON Schema; exhausted mismatches are task failure |
 | State | `--session`, `--session-id`, `--session-dir`, `--artifact-dir` | Durable sessions; `--ephemeral` is explicitly refused |
