@@ -16,7 +16,7 @@ use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
 use std::io::IsTerminal;
 
-fn main() -> std::process::ExitCode {
+pub(crate) fn main() -> std::process::ExitCode {
     // Behavioural network probes are hidden child modes, not CLI commands.
     // Dispatch them before clap or any provider/configuration work.
     #[cfg(any(target_os = "linux", target_os = "macos"))]

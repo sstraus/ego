@@ -52,6 +52,15 @@ async fn execute_inner(
 }
 
 async fn login(action: &McpAction, out: &Stdout) -> Result<(), RunTermination> {
+    login_inner(action, &|line| out.line(line), None, None).await
+}
+
+async fn login_inner(
+    action: &McpAction,
+    output: &(dyn Fn(&str) + Send + Sync),
+    session: Option<(&crate::repl::Seat, &dyn Diagnostics)>,
+    configured_server: Option<&McpServerConfig>,
+) -> Result<(), RunTermination> {
     let McpAction::Login {
         name,
         client_id,
@@ -68,18 +77,22 @@ async fn login(action: &McpAction, out: &Stdout) -> Result<(), RunTermination> {
     let client_id = client_id.as_deref();
     let cimd = cimd.as_deref();
     let failed = |error: String| RunTermination::Failed { message: error };
-    let configuration = management_config()?;
-    let Some(server) = configuration.effective.mcp.configured(name) else {
-        return Err(usage(UsageError(format!(
-            "MCP server `{name}` is not configured"
-        ))));
+    let server = if let Some(server) = configured_server {
+        server.clone()
+    } else {
+        management_config()?
+            .effective
+            .mcp
+            .configured(name)
+            .cloned()
+            .ok_or_else(|| usage(UsageError(format!("MCP server `{name}` is not configured"))))?
     };
     let McpServerConfig::Http(http) = server else {
         return Err(usage(UsageError(
             "MCP login requires an HTTP server".into(),
         )));
     };
-    if client_id.is_none() && cimd.is_none() && !*dcr {
+    if session.is_none() && client_id.is_none() && cimd.is_none() && !*dcr {
         return Err(usage(UsageError(
             "select --client-id ID, --cimd URL, or --dcr".into(),
         )));
@@ -98,8 +111,10 @@ async fn login(action: &McpAction, out: &Stdout) -> Result<(), RunTermination> {
             "ego",
             redirect.clone(),
         )
-    } else {
+    } else if *dcr {
         ego_mcp::McpClientMetadata::dynamic(redirect.clone())
+    } else {
+        ego_mcp::McpClientMetadata::interactive(redirect.clone())
     }
     .map_err(|error| failed(error.to_string()))?;
     let scope = crate::provider_http::CommandHttpScope::online(ego_core::turn::CancelToken::new())
@@ -158,29 +173,157 @@ async fn login(action: &McpAction, out: &Stdout) -> Result<(), RunTermination> {
         .await
         .map_err(|_| failed("MCP OAuth refresh timed out".into()))?
         .map_err(|error| failed(error.to_string()))?;
-        out.line(&format!("MCP server `{name}` credential refreshed"));
+        output(&format!("MCP server `{name}` credential refreshed"));
         return Ok(());
     }
     let request =
         ego_mcp::McpLoginRequest::new(name.clone(), http.clone(), redirect, metadata, deadline)
             .map_err(|error| failed(error.to_string()))?;
-    out.line(
+    output(
         "Authorize using the URL below; for SSH, forward the displayed callback port to this host.",
     );
+    let interaction: Arc<dyn ego_mcp::McpOAuthInteraction + '_> = match session {
+        Some((seat, diagnostics)) => Arc::new(SessionOAuthInteraction {
+            interaction,
+            seat,
+            diagnostics,
+        }),
+        None => Arc::new(interaction),
+    };
     let result = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        ego_mcp::login(request, effects, Arc::new(interaction), credentials),
+        ego_mcp::login(request, effects, interaction, credentials),
     )
     .await
     .map_err(|_| failed("MCP OAuth login timed out".into()))?
     .map_err(|error| failed(error.to_string()))?;
     ego_tools::mcp::persist_oauth_locator(&root, name, result.credential_key())
         .map_err(|error| failed(error.to_string()))?;
-    out.line(&format!(
+    output(&format!(
         "MCP server `{name}` authorized for {}",
         result.resource()
     ));
     Ok(())
+}
+
+struct SessionOAuthInteraction<'a> {
+    interaction: ego_tools::mcp::LoopbackOAuthInteraction,
+    seat: &'a crate::repl::Seat,
+    diagnostics: &'a dyn Diagnostics,
+}
+
+impl ego_mcp::McpOAuthInteraction for SessionOAuthInteraction<'_> {
+    fn select_client<'a>(
+        &'a self,
+        options: ego_mcp::McpRegistrationOptions,
+        redirect_uri: url::Url,
+    ) -> ego_mcp::McpFuture<'a, Result<ego_mcp::McpClientMetadata, ego_mcp::McpError>> {
+        Box::pin(async move {
+            use ego_core::question::{
+                QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
+            };
+            if options.dynamic && !options.cimd {
+                return ego_mcp::McpClientMetadata::dynamic(redirect_uri);
+            }
+            let mut choices = Vec::new();
+            if options.dynamic {
+                choices.push(QuestionOption::new(
+                    "dcr",
+                    "Register a public client automatically (DCR)",
+                ));
+            }
+            if options.cimd {
+                choices.push(QuestionOption::new(
+                    "cimd",
+                    "Use a published HTTPS client metadata URL (CIMD)",
+                ));
+            }
+            choices.push(QuestionOption::new(
+                "registered",
+                "Use an operator-issued public client ID",
+            ));
+            let cancelled =
+                || ego_mcp::McpError::new(McpFailure::Cancelled, "MCP OAuth login cancelled");
+            let selection = self.seat.select_host(QuestionRequest::new(
+                "Choose how to identify this OAuth public client. Esc cancels; a failed strategy is never retried with another strategy.",
+                QuestionMode::Single, choices, false,
+            )).await;
+            let QuestionOutcome::Answered(QuestionAnswer::Single(strategy)) = selection else {
+                return Err(cancelled());
+            };
+            if strategy == "dcr" && options.dynamic {
+                return ego_mcp::McpClientMetadata::dynamic(redirect_uri);
+            }
+            let prompt = match strategy.as_str() {
+                "cimd" if options.cimd => "Published HTTPS client metadata URL:",
+                "registered" => "Operator-issued public client ID:",
+                _ => return Err(cancelled()),
+            };
+            let answer = self
+                .seat
+                .select_host(QuestionRequest::new(
+                    prompt,
+                    QuestionMode::FreeText,
+                    Vec::new(),
+                    true,
+                ))
+                .await;
+            let QuestionOutcome::Answered(QuestionAnswer::FreeText(value)) = answer else {
+                return Err(cancelled());
+            };
+            if strategy == "registered" {
+                ego_mcp::McpClientMetadata::registered(value.trim().to_owned(), redirect_uri)
+            } else {
+                let url = value.trim().parse().map_err(|_| {
+                    ego_mcp::McpError::new(McpFailure::InvalidValue, "invalid CIMD URL")
+                })?;
+                ego_mcp::McpClientMetadata::new(url, "ego", redirect_uri)
+            }
+        })
+    }
+
+    fn authorize<'a>(
+        &'a self,
+        interaction: ego_mcp::McpAuthorizationInteraction,
+    ) -> ego_mcp::McpFuture<'a, Result<ego_mcp::McpOAuthCallback, ego_mcp::McpError>> {
+        Box::pin(async move {
+            if interaction.redirect_uri() != self.interaction.redirect_uri() {
+                return Err(ego_mcp::McpError::new(
+                    McpFailure::Authorization,
+                    "OAuth interaction redirect mismatch",
+                ));
+            }
+            // Authorization URLs are human output only, never model messages.
+            self.diagnostics.note(&format!(
+                "Authorize: {}\nCallback: {}",
+                interaction.authorization_url(),
+                interaction.redirect_uri()
+            ));
+            let Some(command) = crate::repl::Seat::authorization_browser_command(
+                interaction.authorization_url().as_str(),
+            ) else {
+                return Err(ego_mcp::McpError::new(
+                    McpFailure::Authorization,
+                    "invalid OAuth authorization URL",
+                ));
+            };
+            let mut browser = tokio::process::Command::from(command);
+            browser.kill_on_drop(true);
+            // A browser launcher may wait until the page closes. Read the
+            // callback concurrently; cancellation/deadline also reaps our launcher.
+            let callback = self.interaction.receive_callback();
+            tokio::pin!(callback);
+            tokio::select! {
+                result = &mut callback => result,
+                opened = browser.status() => {
+                    if !opened.is_ok_and(|status| status.success()) {
+                        self.diagnostics.note("The browser could not be opened; copy the authorization URL into a browser.");
+                    }
+                    callback.await
+                }
+            }
+        })
+    }
 }
 
 async fn reload(
@@ -864,6 +1007,7 @@ pub(crate) fn session_inventory<'a>(
     if rows.len() == 1 {
         rows[0] = "mcp: no configured servers".to_owned();
     }
+    rows.push("/mcp login NAME — authorize and reconnect a server".to_owned());
     rows.push("/mcp toggle NAME — turn a server on/off for this session".to_owned());
     rows.push("/mcp add NAME --http URL | /mcp add NAME --stdio -- COMMAND ...".to_owned());
     rows.join("\n")
@@ -885,6 +1029,8 @@ pub(crate) async fn session_command(
     controller: &Arc<McpRegistryController>,
     configured: &mut Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>,
     disabled: &mut std::collections::BTreeSet<McpServerName>,
+    seat: Option<&crate::repl::Seat>,
+    diagnostics: &dyn Diagnostics,
 ) -> Result<String, RunTermination> {
     if arguments.is_empty() {
         return Ok(session_inventory(
@@ -894,7 +1040,44 @@ pub(crate) async fn session_command(
                 .map(|(name, _, _)| (name, disabled.contains(name))),
         ));
     }
-    let (name, candidates, turning_off) = if let Some(raw) = arguments.strip_prefix("toggle ") {
+    let (name, candidates, turning_off) = if let Some(raw) = arguments.strip_prefix("login ") {
+        let name = raw
+            .trim()
+            .parse::<McpServerName>()
+            .map_err(|_| usage(UsageError(crate::repl::actions::MCP_GRAMMAR.into())))?;
+        let entry = configured
+            .iter()
+            .find(|(candidate, _, _)| *candidate == name)
+            .cloned()
+            .ok_or_else(|| usage(UsageError(format!("MCP server `{name}` is not configured"))))?;
+        let action = McpAction::Login {
+            name: name.clone(),
+            client_id: None,
+            cimd: None,
+            dcr: false,
+            callback_port: 0,
+            refresh: false,
+            issuer: None,
+            account: None,
+        };
+        let seat = seat.ok_or_else(|| {
+            usage(UsageError(
+                "MCP login requires an interactive terminal".into(),
+            ))
+        })?;
+        let mut cancellation = seat.setup_cancellation();
+        let output = |line: &str| diagnostics.note(line);
+        tokio::select! {
+            result = login_inner(&action, &output, Some((seat, diagnostics)), Some(&entry.1)) => result?,
+            _ = cancellation.cancelled() => return Err(RunTermination::Failed { message: "MCP OAuth login cancelled".into() }),
+        }
+
+        (
+            name,
+            ego_tools::mcp::materialize_admissions(vec![entry]),
+            false,
+        )
+    } else if let Some(raw) = arguments.strip_prefix("toggle ") {
         let name = raw
             .trim()
             .parse::<McpServerName>()

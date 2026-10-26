@@ -188,7 +188,7 @@ pub(super) fn answer_control(
     };
     let control = match control {
         Control::SelectSetup { request, reply } => {
-            let outcome = if phase.get() == EditPhase::Busy {
+            let outcome = if reply.is_canceled() || phase.get() == EditPhase::Busy {
                 QuestionOutcome::Unavailable
             } else {
                 let after = phase.get();
@@ -2181,8 +2181,13 @@ fn launch_elicitation_url(url: &str) -> bool {
     }) {
         return opened;
     }
+    authorization_browser_command(url)
+        .is_some_and(|mut command| command.status().is_ok_and(|status| status.success()))
+}
+
+pub(super) fn authorization_browser_command(url: &str) -> Option<std::process::Command> {
     if ego_core::question::validate_url(url).is_err() {
-        return false;
+        return None;
     }
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
@@ -2198,9 +2203,8 @@ fn launch_elicitation_url(url: &str) -> bool {
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .stderr(std::process::Stdio::null());
+    Some(command)
 }
 
 fn host_now_ms() -> u64 {

@@ -1579,3 +1579,74 @@ fn raw_skill_arguments_do_not_reject_natural_language_apostrophes() {
         );
     }
 }
+
+#[test]
+fn resource_operation_ignores_only_inert_invoke_fields() {
+    // Catches: flat-schema invoke defaults reject valid resource reads or change authority.
+    let invocation = SkillInvocationId::new();
+    let expected = SkillOperation::ReadResource {
+        invocation,
+        path: "refs/data.txt".into(),
+    };
+    for defaults in [json!({}), json!({"name":"", "arguments":"", "bare":false})] {
+        let mut wire = json!({
+            "kind":"read_resource", "invocation":invocation, "path":"refs/data.txt",
+        });
+        wire.as_object_mut()
+            .unwrap()
+            .extend(defaults.as_object().unwrap().clone());
+        assert_eq!(
+            serde_json::from_value::<SkillOperation>(wire).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn skill_operation_rejects_nondefault_foreign_fields_in_both_directions() {
+    // Catches: tolerating sibling defaults silently discards a meaningful wrong-kind request.
+    let invocation = SkillInvocationId::new();
+    for (kind, field, value) in [
+        ("invoke", "invocation", json!(invocation)),
+        ("invoke", "path", json!("refs/data.txt")),
+        ("read_resource", "name", json!("explain")),
+        ("read_resource", "arguments", json!("x")),
+        ("read_resource", "bare", json!(true)),
+    ] {
+        let mut wire = match kind {
+            "invoke" => json!({"kind":kind,"name":"explain","arguments":""}),
+            _ => json!({"kind":kind,"invocation":invocation,"path":"refs/data.txt"}),
+        };
+        wire[field] = value;
+        let error = serde_json::from_value::<SkillOperation>(wire)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "field `{field}` does not belong to skill kind `{kind}`"
+            )),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn skill_operation_keeps_required_resource_fields_and_field_types_closed() {
+    // Catches: default tolerance admits missing resource authority, nulls, or mistyped fields.
+    let invocation = SkillInvocationId::new();
+    for wire in [
+        json!({"kind":"read_resource","path":"refs/data.txt"}),
+        json!({"kind":"read_resource","invocation":invocation}),
+        json!({"kind":"read_resource","invocation":"","path":"refs/data.txt"}),
+        json!({"kind":"invoke","name":"explain","arguments":null}),
+        json!({"kind":"invoke","name":"explain","path":null}),
+        json!({"kind":"invoke","name":"explain","invocation":false}),
+        json!({"kind":"read_resource","invocation":invocation,"path":"refs/data.txt","bare":"false"}),
+        json!({"kind":"read_resource","invocation":invocation,"path":"refs/data.txt","extra":""}),
+    ] {
+        assert!(
+            serde_json::from_value::<SkillOperation>(wire.clone()).is_err(),
+            "{wire}"
+        );
+    }
+}

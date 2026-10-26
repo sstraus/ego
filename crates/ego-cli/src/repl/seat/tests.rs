@@ -1434,7 +1434,7 @@ fn slash_help_shows_name_goal_and_mcp_grammar() {
     for grammar in [
         "/name [show|set TEXT|clear]",
         "/goal [show|set TEXT|achieve|block REASON]",
-        "/mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
+        "/mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
     ] {
         assert!(help.contains(grammar), "missing {grammar}: {help}");
         assert!(

@@ -1175,7 +1175,7 @@ enum Control {
     },
     SelectSetup {
         request: QuestionRequest,
-        reply: Sender<QuestionOutcome>,
+        reply: oneshot::Sender<QuestionOutcome>,
     },
     ConfirmSetup {
         text: String,
@@ -2070,15 +2070,44 @@ impl Seat {
         SetupCancellation { receiver, status }
     }
 
+    pub(crate) fn authorization_browser_command(url: &str) -> Option<std::process::Command> {
+        question::authorization_browser_command(url)
+    }
+
     /// Transient host selection: no model tool question or durable event.
     pub(crate) fn select_setup(&self, request: QuestionRequest) -> QuestionOutcome {
-        if !self.terminal {
+        futures::executor::block_on(self.select_host(request))
+    }
+
+    /// Transient host selection that can be dropped on cancellation or deadline.
+    pub(crate) async fn select_host(&self, request: QuestionRequest) -> QuestionOutcome {
+        let SeatKind::Live(live) = &self.kind else {
+            return QuestionOutcome::Unavailable;
+        };
+        struct PendingModal<'a> {
+            live: &'a LiveSeat,
+            active: bool,
+        }
+        impl Drop for PendingModal<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    self.live.wake_owner();
+                }
+            }
+        }
+        let (reply, answer) = oneshot::channel();
+        if live
+            .control
+            .send(Control::SelectSetup { request, reply })
+            .is_err()
+        {
             return QuestionOutcome::Unavailable;
         }
-        self.request(
-            |reply| Control::SelectSetup { request, reply },
-            QuestionOutcome::Unavailable,
-        )
+        let mut pending = PendingModal { live, active: true };
+        live.wake_owner();
+        let outcome = answer.await.unwrap_or(QuestionOutcome::Unavailable);
+        pending.active = false;
+        outcome
     }
 
     pub(crate) fn confirm_setup(&self, text: String) -> Confirmation {

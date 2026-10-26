@@ -3015,9 +3015,15 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
         repl::Line::HostCommand(repl::HostCommand::Mcp(arguments)) => {
             {
                 let controller = mcp_registry;
-                let result =
-                    crate::mcp::session_command(&arguments, controller, session_mcp, disabled_mcp)
-                        .await;
+                let result = crate::mcp::session_command(
+                    &arguments,
+                    controller,
+                    session_mcp,
+                    disabled_mcp,
+                    status.as_ref().map(|status| status.seat.as_ref()),
+                    diagnostics,
+                )
+                .await;
                 if let Some(status) = status.as_ref() {
                     status.seat.set_mcp_session_servers(
                         session_mcp

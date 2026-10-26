@@ -70,7 +70,19 @@ inspect their recorded failure rather than repeatedly rebuilding untrusted state
 ## Remote OAuth login
 
 OAuth login, persistence, runtime attachment, and refresh are implemented.
-Choose exactly one explicit public-client registration strategy for an existing
+In an interactive session, use `/mcp login NAME`. Ego opens the browser and
+shows a copyable authorization URL without leaving the REPL. After successful
+login, it reconnects that server so its tools are available in the same session.
+The command does not change persistent server configuration.
+
+The REPL selects DCR when it is the only eligible strategy advertised by the
+issuer. When other strategies are available, an inline selector asks for the
+strategy and, when needed, an operator-issued public client ID or a published
+HTTPS CIMD URL. Escape or Ctrl-C cancels the selection. A failed strategy is
+never retried with another strategy. During browser authorization, Ctrl-C
+cancels the pending login; the callback and HTTP effects retain their deadline.
+
+From a shell, choose exactly one explicit public-client registration strategy for an existing
 HTTP server configured with `auth = "oauth"`:
 
 ```sh

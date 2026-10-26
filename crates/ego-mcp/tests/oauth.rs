@@ -1461,3 +1461,122 @@ fn public_contracts_preserve_resource_path_and_explicit_public_client_policy() {
         );
     }
 }
+
+struct SelectingInteraction {
+    chosen: Mutex<Option<McpClientMetadata>>,
+    selections: Mutex<Vec<ego_mcp::McpRegistrationOptions>>,
+    authorization: RecordingInteraction,
+}
+
+impl McpOAuthInteraction for SelectingInteraction {
+    fn select_client<'a>(
+        &'a self,
+        options: ego_mcp::McpRegistrationOptions,
+        _redirect: url::Url,
+    ) -> McpFuture<'a, Result<McpClientMetadata, McpError>> {
+        self.selections.lock().unwrap().push(options);
+        let chosen = self
+            .chosen
+            .lock()
+            .unwrap()
+            .take()
+            .expect("one initial choice");
+        Box::pin(async move { Ok(chosen) })
+    }
+
+    fn authorize<'a>(
+        &'a self,
+        interaction: McpAuthorizationInteraction,
+    ) -> McpFuture<'a, Result<McpOAuthCallback, McpError>> {
+        self.authorization.authorize(interaction)
+    }
+}
+
+fn selecting_interaction(chosen: McpClientMetadata) -> Arc<SelectingInteraction> {
+    Arc::new(SelectingInteraction {
+        chosen: Mutex::new(Some(chosen)),
+        selections: Mutex::new(Vec::new()),
+        authorization: RecordingInteraction {
+            captured: Mutex::new(None),
+        },
+    })
+}
+
+// Catches: interactive selection starts a second OAuth flow or silently uses
+// DCR instead of the operator-selected registered public client identity.
+#[test]
+fn interactive_login_uses_one_selected_identity_without_rediscovery_or_registration() {
+    let responses = refresh_discovery_responses(
+        r#"{"access_token":"selected-access","token_type":"Bearer","scope":"tools:read tools:execute"}"#,
+    );
+    let http = OAuthHttp::with_responses(responses);
+    let redirect = "http://127.0.0.1:9999/callback"
+        .parse::<url::Url>()
+        .unwrap();
+    let interaction = selecting_interaction(
+        McpClientMetadata::registered("operator-client".into(), redirect.clone()).unwrap(),
+    );
+    let credentials = Arc::new(RecordingCredentials::new());
+    let request = login_request_with_metadata(McpClientMetadata::interactive(redirect).unwrap());
+    futures::executor::block_on(login(
+        request,
+        http.clone(),
+        interaction.clone(),
+        credentials.clone(),
+    ))
+    .unwrap();
+    let choices = interaction.selections.lock().unwrap();
+    assert_eq!(choices.len(), 1);
+    assert!(choices[0].cimd);
+    assert!(!choices[0].dynamic);
+    let calls = http.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[2].4, "/token");
+    assert!(String::from_utf8_lossy(&calls[2].5).contains("client_id=operator-client"));
+    assert_eq!(*credentials.puts.lock().unwrap(), 1);
+}
+
+// Catches: a host choice bypasses callback/CIMD binding or recursively asks
+// for selection again, then silently falls back to available DCR.
+#[test]
+fn invalid_interactive_choices_fail_before_authorization_without_fallback() {
+    let redirect = "http://127.0.0.1:9999/callback"
+        .parse::<url::Url>()
+        .unwrap();
+    for chosen in [
+        McpClientMetadata::registered(
+            "operator".into(),
+            "http://127.0.0.1:8888/callback".parse().unwrap(),
+        )
+        .unwrap(),
+        McpClientMetadata::new(
+            "https://client.example.test/metadata".parse().unwrap(),
+            "ego",
+            redirect.clone(),
+        )
+        .unwrap(),
+        McpClientMetadata::interactive(redirect.clone()).unwrap(),
+    ] {
+        let http = OAuthHttp::with_responses([
+            McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
+            McpHttpResponse::json(200, br#"{"issuer":"https://issuer.example.test","authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","registration_endpoint":"https://issuer.example.test/register","token_endpoint_auth_methods_supported":["none"]}"#),
+        ]);
+        let interaction = selecting_interaction(chosen);
+        let credentials = Arc::new(RecordingCredentials::new());
+        let request =
+            login_request_with_metadata(McpClientMetadata::interactive(redirect.clone()).unwrap());
+        assert!(
+            futures::executor::block_on(login(
+                request,
+                http.clone(),
+                interaction.clone(),
+                credentials.clone()
+            ))
+            .is_err()
+        );
+        assert_eq!(interaction.selections.lock().unwrap().len(), 1);
+        assert!(interaction.authorization.captured.lock().unwrap().is_none());
+        assert_eq!(http.calls.lock().unwrap().len(), 2);
+        assert_eq!(*credentials.puts.lock().unwrap(), 0);
+    }
+}

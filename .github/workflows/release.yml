@@ -3,9 +3,8 @@
 #
 # Modelled on TUICommander's `release.yml` (the `remote-daemon` matrix): one
 # matrix, one `cargo build --release --target`, no reusable-workflow layers.
-# Unlike TUICommander nothing is signed or notarized and no secret is read;
-# ego has no signing identity yet. The only credential is the job-scoped
-# GITHUB_TOKEN the release job uses to publish.
+# Nothing is signed or notarized. Publishing uses GITHUB_TOKEN; stable tags
+# also dispatch to the shared Homebrew tap with HOMEBREW_TAP_TOKEN.
 #
 # NOT YET RUNNING. This repository has no remote (see ci.yml). Validate with
 # actionlint; the first real run is the first real proof.
@@ -41,16 +40,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS Intel is omitted on purpose: TUICommander does not ship it
-          # either, and macos-latest is arm64.
           - platform: macos-latest
             target: aarch64-apple-darwin
+            name: macos-arm64
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x64
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - platform: ubuntu-22.04
+            name: linux-x64
+          - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            name: linux-arm64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            name: windows-x64
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -64,15 +68,6 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match workspace.package.version $VERSION in Cargo.toml"
             exit 1
           fi
-
-      - name: Install cross-compilation tools (aarch64 Linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
 
       - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@stable
@@ -89,41 +84,20 @@ jobs:
           CARGO_PROFILE_RELEASE_STRIP: 'true'
         run: cargo build --release --locked -p ego-cli --bin ego --target ${{ matrix.target }}
 
-      # One directory per target, holding the binary and the README, archived
-      # as ego-<target>.tar.gz (zip on Windows) with a matching .sha256 whose
-      # path is relative, so `sha256sum -c` works where the files are
-      # downloaded. The release job concatenates the .sha256 files.
+      - name: Check Linux GLIBC compatibility
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: scripts/check-glibc.sh target/${{ matrix.target }}/release/ego 2.35
+
+      # Keep the original target-triple archives alongside TUIC-style binaries.
       - name: Package
         shell: bash
-        run: |
-          set -euo pipefail
-          TARGET='${{ matrix.target }}'
-          DIR="ego-$TARGET"
-          EXE=ego
-          if [ "$RUNNER_OS" = "Windows" ]; then EXE=ego.exe; fi
-          mkdir "$DIR"
-          cp "target/$TARGET/release/$EXE" README.md "$DIR/"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            ARCHIVE="$DIR.zip"
-            7z a -tzip "$ARCHIVE" "$DIR" > /dev/null
-          else
-            ARCHIVE="$DIR.tar.gz"
-            tar -czf "$ARCHIVE" "$DIR"
-          fi
-          if command -v sha256sum > /dev/null; then
-            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
-          else
-            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
-          fi
-          cat "$ARCHIVE.sha256"
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+        run: scripts/package-release.sh '${{ matrix.target }}' '${{ matrix.name }}'
 
       - uses: actions/upload-artifact@v4
         with:
           name: ego-${{ matrix.target }}
           path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sha256
+            dist/*
           if-no-files-found: error
 
   release:
@@ -159,6 +133,12 @@ jobs:
             exit 1
           fi
 
+      - name: Generate Homebrew formula
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: scripts/homebrew-formula.sh "$GITHUB_REF_NAME" "$RELEASE_REPOSITORY" dist > dist/ego.rb
+
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -170,4 +150,14 @@ jobs:
           gh release create "$GITHUB_REF_NAME" $FLAGS \
             --title "ego $GITHUB_REF_NAME" \
             --notes-file notes.md \
-            dist/*.tar.gz dist/*.zip dist/SHA256SUMS
+            dist/*
+
+      - name: Update Homebrew tap
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh api repos/sstraus/homebrew-tap/dispatches \
+            -f event_type=release-published \
+            -f 'client_payload[repo]=ego' \
+            -f "client_payload[version]=$GITHUB_REF_NAME"

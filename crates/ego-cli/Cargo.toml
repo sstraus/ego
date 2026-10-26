@@ -1,5 +1,6 @@
 [package]
 name = "ego-cli"
+default-run = "ego"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +12,16 @@ publish.workspace = true
 [[bin]]
 name = "ego"
 path = "src/main.rs"
+
+# Test-only process composition. Release builds cannot install its backend.
+[[bin]]
+name = "ego-oauth-pty-fixture"
+path = "tests/fixtures/oauth_pty_main.rs"
+required-features = ["test-support"]
+test = false
+
+[features]
+test-support = ["ego-tools/test-support"]
 
 [dependencies]
 minijinja.workspace = true
@@ -104,6 +115,7 @@ tempfile = "3.27.0"
 png = "0.18.1"
 
 [dev-dependencies]
+ego-cli = { path = ".", features = ["test-support"] }
 # A test that stands in for the transport has to build an `HttpResponse`, whose
 # body is a stream of `bytes::Bytes` — the type `ego-ai` chose so a chunk can be
 # handed on without being copied. Dev-only: nothing in this crate's own code
