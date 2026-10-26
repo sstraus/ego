@@ -384,6 +384,18 @@ impl Menu for ActionMenu {
     }
 }
 
+fn live_queue(state: &SessionState) -> QueueStatus {
+    let mut queue = state.queue_status();
+    // Expedited delivery remains durable after cancellation. It is not an
+    // interruption still in flight once its originating turn has settled.
+    queue.interrupt_pending &= state
+        .unacknowledged_prompts()
+        .into_iter()
+        .find(|prompt| Some(prompt.id()) == state.expedited_through())
+        .is_some_and(|prompt| !state.has_turn_completed(prompt.turn()));
+    queue
+}
+
 fn rebuild_snapshot(
     status: &mut SurfaceStatus,
     state: &SessionState,
@@ -2233,9 +2245,13 @@ impl crate::run::InteractiveSeat for Seat {
         }))
     }
 
-    fn refresh_queue(&self, queue: QueueStatus) {
+    fn refresh_queue(&self, state: &SessionState) {
         if let SeatKind::Live(live) = &self.kind {
+            let queue = live_queue(state);
             let mut status = live.status.lock().expect("surface status lock");
+            if status.queue == queue {
+                return;
+            }
             status.queue = queue;
             if let Some(snapshot) = status.snapshot.as_mut() {
                 snapshot.set_queue(queue);

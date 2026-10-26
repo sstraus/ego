@@ -2296,7 +2296,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         .await;
     drop(compaction);
     *state = session_hooks.state.state();
-    seat.refresh_queue(control.status());
+    seat.refresh_queue(state);
     if !state.unacknowledged_prompts().is_empty()
         || state.pending_question().is_some()
         || !state.live_attempts.is_empty()
@@ -4121,7 +4121,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         *refresh_prompt = false;
     }
     refresh_turn_status(status, policy_selection, selection, state, diagnostics);
-    seat.refresh_queue(control.status());
+    seat.refresh_queue(state);
     let Some((termination, result)) = driven else {
         return Ok((false, perimeter));
     };

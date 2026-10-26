@@ -123,6 +123,79 @@ fn up_with_nonempty_first_line_withdraws_queued_prompt() {
     );
 }
 
+// Catches: the ingress acknowledgement remains painted after the expedited
+// FIFO has been consumed, throughout the next still-running generation.
+#[test]
+fn esc_interrupt_status_clears_during_the_next_generation() {
+    let (initial, first_gate) = gated_paced_line("regression_case-FIRST");
+    let (next, next_gate) = gated_paced_line("regression_case-NEXT");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, next],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# interruption status fixture\n");
+    let (session, mut input, reader) = start(&ego);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\rinitial\r").unwrap();
+    input.flush().unwrap();
+    until(&reader, &mut output, b"regression_case-FIRST");
+    let queued = output.len();
+    input.write_all(b"deliver this next\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(
+        &reader,
+        &mut output,
+        queued,
+        "Messages to be submitted after next tool call",
+    );
+    let interrupted = output.len();
+    input.write_all(b"\x1b").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, interrupted, "interrupt pending");
+    first_gate.release();
+    until(&reader, &mut output, b"regression_case-NEXT");
+    drain_until_quiet(&reader, &mut output);
+    let visible = screen_rows(&output, 24, 100).join("\n");
+    let consumed = journal(&ego);
+    // Release and reap before asserting, including on the pre-fix failure.
+    let finished = output.len();
+    next_gate.release();
+    until_prompt_from(&reader, &mut output, finished);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert!(
+        consumed.contains("PromptDeliveryExpedited"),
+        "Esc expedited the FIFO"
+    );
+    assert_eq!(
+        consumed.matches("queued_prompt").count(),
+        1,
+        "one consumed queued input"
+    );
+    assert!(
+        visible.contains("Working"),
+        "second generation is still live: {visible}"
+    );
+    assert!(
+        !visible.contains("interrupt=yes"),
+        "settled interruption stayed visible: {visible}"
+    );
+    assert!(
+        !visible.contains("steer 0 · next 1"),
+        "consumed queue stayed visible: {visible}"
+    );
+}
+
 // Catches: blank-composer rejection eats Ctrl+Enter instead of expediting
 // prompts already durably queued.
 #[test]
