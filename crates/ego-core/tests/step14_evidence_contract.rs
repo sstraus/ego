@@ -464,7 +464,7 @@ fn failed_structured_result_survives_turn_reduction_and_history_roundtrip() {
 #[test]
 fn failed_structured_result_public_projection_stays_text_only_with_current_version() {
     assert_eq!(CODEC_VERSION, 12);
-    assert_eq!(PUBLIC_EVENT_VERSION, 15);
+    assert_eq!(PUBLIC_EVENT_VERSION, 16);
     let item = ItemId::new();
     let completed = event(
         Some(item),

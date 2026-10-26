@@ -39,6 +39,7 @@ use crate::state::Usage;
 /// provider retry status. Version 13 adds the optional CLI goal outcome report.
 /// Version 14 adds the live provider retry dispatch transition.
 /// Version 15 adds authoritative durable plan operations.
+/// Version 16 adds transient child activity, keyed by its parent task item.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -46,7 +47,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 15;
+pub const PUBLIC_EVENT_VERSION: u32 = 16;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -252,6 +253,15 @@ pub enum PublicEvent {
         /// without a consumer having to compare a length.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         instructions: Vec<InstructionDescriptor>,
+    },
+    /// Transient child activity on the existing parent publication stream.
+    /// Keyed by the parent task item, never a child transcript or usage delta.
+    /// `output_tokens` is the child's provider-reported cumulative output.
+    ChildProgress {
+        turn: TurnId,
+        item: ItemId,
+        activity: String,
+        output_tokens: u64,
     },
     /// A turn began.
     TurnStarted { turn: TurnId },

@@ -1048,3 +1048,25 @@ mod public_golden {
         );
     }
 }
+
+/// Catches: child progress changes its wire shape or leaks child transcript text.
+#[test]
+fn child_progress_is_transient_attributable_and_not_a_usage_delta() {
+    let turn: TurnId =
+        serde_json::from_value(serde_json::json!("00000000-0000-0000-0000-000000000002")).unwrap();
+    let item: ItemId =
+        serde_json::from_value(serde_json::json!("00000000-0000-0000-0000-000000000003")).unwrap();
+    let event = PublicEvent::ChildProgress {
+        turn,
+        item,
+        activity: "Thinking".into(),
+        output_tokens: 51200,
+    };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({
+            "type":"child_progress", "turn":"00000000-0000-0000-0000-000000000002",
+            "item":"00000000-0000-0000-0000-000000000003", "activity":"Thinking", "output_tokens":51200
+        })
+    );
+}

@@ -829,7 +829,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 15,
+  "v": 16,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -908,6 +908,16 @@ pause has neither.
   mode survives, jsonl survives as an event.
 - The schema is versioned in the header and published; same schema as the
   session file and the ACP projection — learn it once.
+
+The live `child_progress` event carries the parent task `turn` and `item`, the
+current `activity`, and the child's provider-reported cumulative `output_tokens`.
+It uses the same serialized publication as nested task tool rows. It does not
+append a child transcript or change parent usage accounting. Interactive seats
+show one cyan row per running in-turn task, with a clipped name and right-aligned
+elapsed time and received tokens. Counts update when the provider reports usage;
+zero before the first report is not a streaming token estimate. No-color seats
+show the same child text without SGR. Task completion, failure, or cancellation
+removes its row. Durable background tasks retain their existing `/tasks` view.
 
 ### 4.3 Exit codes
 
