@@ -966,7 +966,7 @@ impl fmt::Display for ResolveError {
             ResolveError::MissingCredential(missing) => write!(f, "{missing}"),
             ResolveError::RejectedCredential { provider, status } => write!(
                 f,
-                "provider `{provider}` rejected its credential with HTTP {status}; run `ego auth login {provider}`"
+                "provider '{provider}' rejected your login (HTTP {status}); sign in again with 'ego auth login {provider}'"
             ),
             ResolveError::NotInstalled { model, installed } => write!(
                 f,

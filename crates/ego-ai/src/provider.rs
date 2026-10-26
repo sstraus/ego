@@ -295,11 +295,15 @@ pub struct MissingCredential {
 impl fmt::Display for MissingCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.var.starts_with("ego auth login ") {
-            return write!(f, "no stored subscription credential: run `{}`", self.var);
+            return write!(
+                f,
+                "not signed in to the subscription; sign in with '{}'",
+                self.var
+            );
         }
         write!(
             f,
-            "no credential in {}: set it to the provider's API key",
+            "no API key in {}; set this environment variable to the provider's API key",
             self.var
         )
     }
