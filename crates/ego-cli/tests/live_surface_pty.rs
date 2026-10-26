@@ -3631,7 +3631,9 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
             Reply::Sse(tool_call(
                 "local-path-exec",
                 "exec",
-                r#"{"argv":["wiz-run","stories-cli.js","list"],"cwd":null,"timeout_ms":1000}"#,
+                // The first exec of a freshly written script can exceed 1s under suite
+                // load; this test asserts PATH resolution, not exec latency.
+                r#"{"argv":["wiz-run","stories-cli.js","list"],"cwd":null,"timeout_ms":30000}"#,
             )),
             Reply::Sse(text("LOCAL-PATH-EXEC-DONE")),
         ],
@@ -6424,10 +6426,11 @@ fn fork_after_a_turn() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
-    until_notice_prose(
+    until_screen_prose(
         &reader,
         &mut output,
-        fork_start,
+        ROWS,
+        COLS,
         &format!("ego resume {}", support::FIXTURE_SESSION_ID),
     );
     drain_until_quiet(&reader, &mut output);
@@ -6534,10 +6537,11 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
-    until_notice_prose(
+    until_screen_prose(
         &reader,
         &mut output,
-        fork_start,
+        ROWS,
+        COLS,
         &format!("ego resume {}", support::FIXTURE_SESSION_ID),
     );
     drain_until_quiet(&reader, &mut output);
