@@ -178,6 +178,82 @@ fn the_command_line_quotes_what_a_person_could_misread() {
     assert_eq!(command_line(&spec), "/bin/sh -c 'echo hi there' ''");
 }
 
+// Catches: Python's quoted file and errno prefix hide an external script read
+// from the existing session-grant flow. Diagnostic recorded from Xcode Python
+// under real macOS sandbox-exec on 2026-10-26; only the fixture path varies.
+#[test]
+fn python_script_read_denial_reaches_the_existing_grant_flow() {
+    use ego_core::permit::{
+        CanonPath, Confinement, RunConfinement, SandboxAccess, StreamProvenance, ToolContentBlock,
+        ToolOutputEncoding, ToolOutputProvenance, ToolResult,
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let script = base.join("refused script.py");
+    std::fs::write(&script, "print('REGRESSION-MARKER-READ')\n").unwrap();
+    let python = "/Applications/Xcode.app/Contents/Developer/usr/bin/python3";
+    let text = format!(
+        "{python}: can't open file '{}': [Errno 1] Operation not permitted\n",
+        script.display()
+    );
+    let spec = SpawnSpec::new(
+        vec![python.into(), script.clone().into_os_string()],
+        Some(CanonPath::new(&workspace)),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    let result = ToolResult::new(vec![ToolContentBlock {
+        text,
+        provenance: ToolOutputProvenance::Process {
+            stream: StreamProvenance::Stderr,
+            encoding: ToolOutputEncoding::Utf8,
+            truncated: false,
+            omitted_bytes: 0,
+        },
+        full_output: None,
+    }]);
+    let denied = super::analyze(&spec, &result, &policy, &[])
+        .expect("Python script refusal must reach sandbox grant handling");
+    let request = denied.request.as_ref().expect("exact script read request");
+    assert_eq!(request.path, CanonPath::new(&script));
+    assert_eq!(request.access, SandboxAccess::Read);
+    let note = super::note(&denied, &policy, super::Outcome::NobodyToAsk);
+    assert!(note.contains("no one was available"), "{note}");
+    assert!(note.contains(script.to_str().unwrap()), "{note}");
+}
+
+// Catches: Python ENOENT, relative or malformed diagnostics become grants,
+// or an actual EACCES diagnostic is missed. EPERM/EACCES/ENOENT forms were
+// recorded from Xcode Python on 2026-10-26; the remaining inputs are adversarial.
+#[test]
+fn python_denial_parser_rejects_non_authority_diagnostics() {
+    let prefix = "/Applications/Xcode.app/Contents/Developer/usr/bin/python3: can't open file '";
+    for (body, expected) in [
+        (
+            "/outside/refused script.py': [Errno 13] Permission denied",
+            Some("/outside/refused script.py"),
+        ),
+        (
+            "/outside/refused script.py': [Errno 2] No such file or directory",
+            None,
+        ),
+        ("relative.py': [Errno 1] Operation not permitted", None),
+        (
+            "/outside/refused script.py': [Errno 1] Operation not permitted ignored",
+            None,
+        ),
+        ("/outside/refused script.py': Operation not permitted", None),
+    ] {
+        let line = format!("{prefix}{body}");
+        assert_eq!(printed_path(&line), expected, "{line}");
+    }
+}
+
 // Catches: the parser drifts from the v3 evaluation set, so a recorded
 // refusal line stops yielding its path or a prose/ENOENT/relative line starts
 // to yield one.

@@ -131,6 +131,15 @@ fn floor_refusal(printed: &str, policy: &RunConfinement) -> bool {
 /// permitted` both name the path between the last separator and the errno.
 fn printed_path(line: &str) -> Option<&str> {
     let line = line.trim_end();
+    if let Some((_, file)) = line.split_once(": can't open file '") {
+        return [
+            "': [Errno 1] Operation not permitted",
+            "': [Errno 13] Permission denied",
+        ]
+        .into_iter()
+        .find_map(|suffix| file.strip_suffix(suffix))
+        .filter(|path| path.starts_with('/'));
+    }
     let body = [
         ": Operation not permitted",
         ": Operation not permitted (os error 1)",
