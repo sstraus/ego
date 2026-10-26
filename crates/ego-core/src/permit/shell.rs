@@ -953,16 +953,16 @@ pub fn redact_text(text: &str) -> String {
     let mut redact_next = false;
     text.split_whitespace()
         .map(|word| {
-            if redact_next {
-                redact_next = false;
-                return "<secret:context-value>".into();
-            }
+            // A scheme is another marker, not the credential after the header.
             if matches!(
                 word.to_ascii_lowercase().as_str(),
-                "bearer" | "authorization:"
+                "bearer" | "basic" | "authorization:"
             ) {
                 redact_next = true;
                 return "<header:authorization>".into();
+            }
+            if std::mem::take(&mut redact_next) {
+                return "<secret:context-value>".into();
             }
             structural_word(word, false)
         })
@@ -998,6 +998,33 @@ mod tests {
         assert!(result.skeleton.contains("curl"));
         assert!(result.skeleton.contains("api.example.com"));
         assert!(!result.read_only);
+    }
+    #[test]
+    fn authorization_scheme_does_not_consume_redaction_before_credential() {
+        // Catches a scheme being consumed as the value, exposing the real credential.
+        let mut failures = Vec::new();
+        for prefix in [
+            "Authorization: Bearer",
+            "Authorization: Basic",
+            "authorization: bearer",
+            "AUTHORIZATION: BASIC",
+            "Bearer",
+            "Basic",
+            "Authorization:",
+            "Authorization: Bearer Bearer",
+        ] {
+            for secret in ["short", "abc=", "abc.def", "abc-def", "abc.def-ghi=="] {
+                let input = format!("before {prefix} {secret} after");
+                let output = redact_text(&input);
+                if output.contains(secret)
+                    || !output.starts_with("before ")
+                    || !output.ends_with(" after")
+                {
+                    failures.push(format!("{input:?} -> {output:?}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
     fn heredoc_secret_body_is_not_disclosed_as_command_structure() {

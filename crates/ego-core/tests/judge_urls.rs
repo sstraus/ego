@@ -111,3 +111,20 @@ fn ordinary_disk_name_is_not_an_openai_secret() {
     assert!(text.contains("disk-1"), "{text}");
     assert!(!text.contains("secret:openai"), "{text}");
 }
+
+// Catches: fixing the helper without applying it to task/reason/root disclosure.
+#[test]
+fn authorization_credentials_in_task_context_do_not_reach_judge() {
+    let context = JudgeTaskContext {
+        task: "Inspect Authorization: Bearer task.secret== safely".into(),
+        agent_reason: "Check authorization: Basic reason-secret= safely".into(),
+        roots: vec!["Authorization: Bearer root.secret- safely".into()],
+        ..Default::default()
+    };
+    let text = request_with_context(&["pwd".into()], &context);
+    for secret in ["task.secret==", "reason-secret=", "root.secret-"] {
+        assert!(!text.contains(secret), "{text}");
+    }
+    assert!(text.contains("Inspect"), "{text}");
+    assert!(text.contains("safely"), "{text}");
+}
