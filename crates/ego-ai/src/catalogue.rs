@@ -938,11 +938,10 @@ impl fmt::Display for ResolveError {
             ),
             ResolveError::LivePromotionPending { provider, mapping } => write!(
                 f,
-                "`{provider}` is not selectable yet: its `{mapping}` mapping has never been \
-                 recorded against a live model, and conformance check five needs an \
-                 operator's own key to make. Run `EGO_SMOKE={provider} EGO_SMOKE_RECORD=1 \
-                 cargo test -p ego-cli --test smoke -- --ignored` with that key set to \
-                 establish it"
+                "provider '{provider}' cannot be selected because its '{mapping}' mapping \
+                 has not been verified against a live model; run \
+                 'EGO_SMOKE={provider} EGO_SMOKE_RECORD=1 cargo test -p ego-cli --test smoke -- --ignored' \
+                 with your provider key set to verify it"
             ),
             ResolveError::HostedModelNotConfigured { slug } => write!(
                 f,

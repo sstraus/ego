@@ -129,8 +129,7 @@ pub fn plan(log: Option<&str>, file: Option<&str>, paints: bool) -> Result<Plan,
         (true, None) => Err(format!(
             "{LOG} is set for an interactive session, which paints its own \
              prompt: writing diagnostics to the same terminal would corrupt \
-             it. Set {LOG_FILE} to an absolute path to collect them, or run \
-             the command headlessly with 'ego run'"
+             it. Set {LOG_FILE} to an absolute path to collect them"
         )),
     }
 }

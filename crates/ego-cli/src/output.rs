@@ -706,13 +706,9 @@ impl<'a> TextSink<'a> {
             if let Some(reason) = &goal.check_stop
                 && prior.is_none_or(|prior| prior.check_stop.as_ref() != Some(reason))
             {
-                let next = if goal.state == GoalState::Blocked {
-                    "Next: /goal show; after resolving the blocker, /goal set TEXT starts a new goal. /goal achieve and /goal block require an active goal"
-                } else {
-                    "Next: /goal show, /goal achieve, /goal block"
-                };
+                let next = "Inspect the goal with '/goal show'.";
                 receipts.push(format!(
-                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. {next}; --goal-turns N sets the allowance when checks first start.",
+                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. {next}",
                     goal.objective, goal.continuation_turns,
                     goal.blocker_reason.as_deref().unwrap_or("none recorded")
                 ));
@@ -990,8 +986,7 @@ impl EventSink for TextSink<'_> {
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
-                    self.out
-                        .note(&format!("{error}. Inspect with 'ego mcp ls'."));
+                    self.out.note(error);
                 }
             }
             // `AgentMessage` and not "either message kind": stdout is the

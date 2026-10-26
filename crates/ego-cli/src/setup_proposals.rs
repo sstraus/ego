@@ -961,7 +961,7 @@ mod tests {
                 assert!(report.contains("fixed (policy-only)"), "{report}");
             } else {
                 assert!(!home.parent().unwrap().exists());
-                assert!(report.contains("declined/cancelled"));
+                assert_eq!(report, "Setup cancelled; no configuration was changed.\n");
             }
         }
     }
@@ -1247,7 +1247,7 @@ mod tests {
             false
         })
         .unwrap();
-        assert!(report.contains("declined"));
+        assert_eq!(report, "Setup cancelled; no configuration was changed.\n");
         assert_eq!(std::fs::read_to_string(&program).unwrap(), "task evidence");
     }
 
@@ -1665,7 +1665,7 @@ mod tests {
             false
         })
         .unwrap();
-        assert!(report.contains("declined/cancelled"));
+        assert_eq!(report, "Setup cancelled; no configuration was changed.\n");
         assert_eq!(
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
             "roots=[]\n"

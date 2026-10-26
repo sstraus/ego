@@ -263,7 +263,7 @@ fn acp_admission_error_names_why_the_host_resource_list_was_refused() {
     );
     let answer = mcp.until(&mut host, opened);
     let data = answer["error"]["data"].as_str().unwrap_or_default();
-    assert!(data.contains("`tuicommander`"), "{answer}");
+    assert!(data.contains("MCP server 'tuicommander'"), "{answer}");
     assert!(
         data.contains("server configuration is invalid"),
         "the refusal omitted its fixed MCP failure message: {answer}"

@@ -3043,7 +3043,7 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
                 .map(|tool| tool.descriptor().name.to_string())
                 .collect::<Vec<_>>();
             diagnostics.note(&format!(
-                "tools: {} admitted; /tools details for the full list",
+                "tools: {} available; inspect the full list with '/tools details'",
                 tools.len()
             ));
             if details {
@@ -3155,9 +3155,8 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
                 Ok(system) => {
                     config.system = system;
                     *refresh_prompt = true;
-                    diagnostics.note(
-                        "instructions refreshed; the next generation opens a new prompt epoch",
-                    );
+                    diagnostics
+                        .note("instructions refreshed; they will apply to the next model request");
                 }
                 Err(error) => {
                     diagnostics.note(&format!("instructions were not refreshed: {error}"))

@@ -98,7 +98,7 @@ pub fn resolve(
     if meta.workspace_root != root {
         return Err(UsageError(format!(
             "session {wanted} belongs to {}, and this is {}: resuming it here \
-             would run its history against a different tree. Use `-C {}`",
+             would run its history against a different tree. Use '-C {}'",
             meta.workspace_root.display(),
             root.display(),
             meta.workspace_root.display()

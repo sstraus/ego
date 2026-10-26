@@ -207,7 +207,9 @@ fn sandbox_pick_after_stdio_admission_is_refused_but_free_without_servers() {
     let refused = pick(&mut host, &session, "ro");
     assert!(refused["error"].is_object(), "{refused}");
     assert!(
-        refused.to_string().contains("MCP servers already run"),
+        refused
+            .to_string()
+            .contains("MCP servers already use the 'workspace' sandbox"),
         "refused for another reason than the admitted pin: {refused}"
     );
     host.finish();

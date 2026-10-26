@@ -89,7 +89,7 @@ fn report_discarded_in(
             Ok(_) => diagnostics.note(&format!(
                 "the {source} configuration at {} is not applied in the bare posture; \
                  any model or sandbox settings in that file have no effect. \
-                 Use the user configuration or --sandbox for confinement",
+                 Edit the user configuration with 'ego config edit' to change these settings",
                 path.display(),
             )),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1415,8 +1415,8 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     for entry in &args.set {
         let (key, value) = entry.split_once('=').ok_or_else(|| {
             UsageError(format!(
-                "`-c {entry}` is not a config override: write it as `-c key=value`, \
-                 with the value in TOML — `-c 'model=\"ollama/qwen3\"'`"
+                "invalid configuration override '{entry}'; use a TOML assignment, \
+                 for example '-c model=\"ollama/qwen3\"'"
             ))
         })?;
         toml.push_str(&format!("{key} = {value}\n"));

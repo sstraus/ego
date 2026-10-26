@@ -22,9 +22,10 @@ pub async fn execute(args: &OrchestratorArgs, out: &Stdout) -> RunTermination {
 
 async fn inspect(args: &OrchestratorArgs) -> Result<Brief, String> {
     if std::env::var_os("TUIC_SOCKET").is_none_or(|socket| socket.is_empty()) {
-        return Err("ego orchestrator brief requires TUIC_SOCKET".to_owned());
+        return Err("'ego orchestrator brief' cannot connect; set TUIC_SOCKET to the TUICommander socket path".to_owned());
     }
-    let home = std::env::var_os("HOME").ok_or("ego orchestrator brief requires HOME")?;
+    let home = std::env::var_os("HOME")
+        .ok_or("'ego orchestrator brief' needs a home directory; set HOME")?;
     let filter = Filter {
         root: args
             .root

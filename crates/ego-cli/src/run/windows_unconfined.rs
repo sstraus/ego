@@ -89,7 +89,7 @@ pub(super) fn admit(
         Admission::ProceedOff | Admission::Preserve => Ok(None),
         Admission::RequireExplicitOff => Err(crate::cli::UsageError(
             "Windows direct execution is unconfined; pass the explicit CLI flag \
-             `--sandbox off` to proceed"
+             '--sandbox off' to proceed"
                 .to_owned(),
         )),
         Admission::RequireAcknowledgement => {
@@ -102,7 +102,7 @@ pub(super) fn admit(
             } else {
                 Err(crate::cli::UsageError(
                     "Windows execution is unconfined and was not acknowledged; \
-                     use `--sandbox off` only when that is acceptable"
+                     use '--sandbox off' only when that is acceptable"
                         .to_owned(),
                 ))
             }

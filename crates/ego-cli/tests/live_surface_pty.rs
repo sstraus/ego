@@ -6227,7 +6227,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("tools", Some("tools:")),
         ("expand", Some("no tool call to expand yet")),
         ("skills", None),
-        ("hooks", Some("no hooks are admitted")),
+        ("hooks", Some("no hooks are configured and enabled")),
         ("retry", Some("no provider retry wait is active")),
         ("version", Some(concat!("ego ", env!("CARGO_PKG_VERSION")))),
     ] {
@@ -6586,7 +6586,7 @@ fn assert_doctor_summary(output: &[u8]) {
     let prose = support::notice_prose(&normalized(output));
     for marker in [
         "doctor: not_checked",
-        "/doctor details for evidence and remediation",
+        "inspect the results with '/doctor details'",
         "configuration: ok",
         "credentials: not_checked",
         "session_store: ok",
@@ -10271,7 +10271,7 @@ fn followup_tools_default_has_no_per_tool_notices() {
             &reader,
             &mut output,
             start,
-            "/tools details for the full list",
+            "inspect the full list with '/tools details'",
         );
         until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
         drain_until_quiet(&reader, &mut output);
@@ -10289,7 +10289,7 @@ fn followup_tools_default_has_no_per_tool_notices() {
             "only the summary notice is allowed: {visible}"
         );
         assert!(
-            notices[0].contains("/tools details for the full list"),
+            notices[0].contains("inspect the full list with '/tools details'"),
             "{visible}"
         );
         assert!(stub.generations().is_empty());

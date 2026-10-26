@@ -2015,8 +2015,7 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     ] {
         if given {
             return Err(UsageError(format!(
-                "{flag} and `resume` both name a session, and they disagree: \
-                 drop {flag}, or use `run` if you meant to start one"
+                "{flag} cannot be combined with 'ego resume'; remove {flag} to resume the session"
             )));
         }
     }
@@ -2087,14 +2086,13 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
 
     if flags.file.is_some() && prompt.is_some() {
         return Err(UsageError(
-            "an argv prompt and an agent file are competing instruction inputs: \
-             drop the prompt to use --file, or drop --file to use the argv prompt"
+            "a prompt argument cannot be combined with '--file'; remove the prompt argument to use the file"
                 .to_string(),
         ));
     }
     if flags.file.is_none() && !flags.vars.is_empty() {
         return Err(UsageError(
-            "--var applies only to an agent file: add --file FILE or drop --var".to_string(),
+            "'--var' requires an agent file; remove '--var' if no file is selected".to_string(),
         ));
     }
     let agent_file = flags
@@ -2199,9 +2197,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
 fn reject_ephemeral(ephemeral: bool) -> Result<(), UsageError> {
     if ephemeral {
         return Err(UsageError(
-            "--ephemeral is not a supported session mode: use the durable default, \
-             --session NAME, or --session-id ID"
-                .to_string(),
+            "'--ephemeral' is not supported; remove it to use a saved session".to_string(),
         ));
     }
     Ok(())

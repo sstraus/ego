@@ -998,8 +998,6 @@ pub(super) fn note_refused_mcp(
     refused: &[(McpServerName, UsageError)],
 ) {
     for (name, error) in refused {
-        diagnostics.note(&format!(
-            "MCP server '{name}' was not connected: {error}. Inspect with 'ego mcp ls'."
-        ));
+        diagnostics.note(&format!("MCP server '{name}' was not connected: {error}"));
     }
 }

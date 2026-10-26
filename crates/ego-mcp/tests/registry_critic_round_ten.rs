@@ -177,14 +177,14 @@ async fn private_log_failure_preserves_failure_evidence_and_hides_the_cause() {
         .expect("optional private logging cannot suppress failure evidence");
     assert_eq!(
         registry.status().mcp_errors(),
-        ["MCP server `alpha`: server configuration is invalid"]
+        ["MCP server 'alpha': server configuration is invalid; inspect with 'ego mcp ls'"]
     );
     assert!(journal.private.lock().expect("private").is_empty());
     let recorded = journal.events.lock().expect("events");
     assert!(recorded.iter().any(|event| matches!(
         event,
         McpRegistryEvent::RefreshFailed { cause, .. }
-            if cause == "server configuration is invalid"
+            if cause == "server configuration is invalid; inspect with 'ego mcp ls'"
     )));
     assert!(
         recorded
@@ -233,7 +233,7 @@ async fn workspace_mcp_denial_reports_exact_exec_path_without_raw_cause() {
     assert_eq!(
         errors,
         [
-            "MCP server `alpha`: sandbox denies execution of /operator/tools/mcp-server; add this exact canonical path to exec_paths in ego config edit, then exit and resume"
+            "MCP server 'alpha': sandbox denies execution of /operator/tools/mcp-server; add this exact canonical path to exec_paths with 'ego config edit'. Saved changes apply after resuming the session"
         ]
     );
     assert!(journal.private.lock().unwrap().is_empty());

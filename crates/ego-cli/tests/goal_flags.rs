@@ -422,10 +422,7 @@ fn goal_visibility_headless_quiet_keeps_receipts_on_stderr() {
         "Goal turn 1 of 1: artifact missing headless 527",
         "Goal stopped: Verify headless artifact 527",
         "turns 1/1",
-        "/goal show",
-        "/goal achieve",
-        "/goal block",
-        "--goal-turns",
+        "Inspect the goal with '/goal show'.",
     ] {
         assert_eq!(
             finished.stderr.matches(receipt).count(),

@@ -1486,19 +1486,25 @@ fn failed_publication_status(
 
 fn failure_message(failure: McpFailure) -> &'static str {
     match failure {
-        McpFailure::Absent => "server is unavailable",
-        McpFailure::InvalidValue => "server configuration is invalid",
-        McpFailure::InvalidResponse => "server returned an invalid response",
-        McpFailure::Authority => "server access was blocked by the current policy",
-        McpFailure::Transport => "could not connect to the server",
-        McpFailure::Protocol => "communication with the server failed",
+        McpFailure::Absent => "server is unavailable; inspect with 'ego mcp ls'",
+        McpFailure::InvalidValue => "server configuration is invalid; inspect with 'ego mcp ls'",
+        McpFailure::InvalidResponse => {
+            "server returned an invalid response; inspect with 'ego mcp ls'"
+        }
+        McpFailure::Authority => {
+            "server access was blocked by the current policy; inspect with 'ego mcp ls'"
+        }
+        McpFailure::Transport => "could not connect to the server; inspect with 'ego mcp ls'",
+        McpFailure::Protocol => "communication with the server failed; inspect with 'ego mcp ls'",
         McpFailure::Authorization => {
             "authorization is required; run ego mcp login NAME with an explicit registration strategy"
         }
         McpFailure::Credential => {
             "server credential is unavailable; run ego mcp login NAME with an explicit registration strategy"
         }
-        McpFailure::Cancelled => "connecting to the server was cancelled",
+        McpFailure::Cancelled => {
+            "connecting to the server was cancelled; inspect with 'ego mcp ls'"
+        }
     }
 }
 

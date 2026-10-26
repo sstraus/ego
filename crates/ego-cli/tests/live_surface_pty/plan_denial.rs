@@ -55,7 +55,7 @@ fn plan_denial_explains_the_stopped_turn_without_running_the_effect() {
             "the receipt must identify the denied tool and mode: {shown}"
         );
         assert!(
-            prose.contains("/mode") && prose.contains("resubmit"),
+            prose.contains("Choose a mode") && prose.contains("'/mode'"),
             "the receipt has no actionable next step: {shown}"
         );
         assert!(

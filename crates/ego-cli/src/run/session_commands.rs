@@ -690,7 +690,8 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
         if !args.yes {
             if !std::io::stdin().is_terminal() {
                 return Err(
-                    "deletion requires confirmation; pass --yes for non-interactive use".to_owned(),
+                    "deletion needs confirmation; pass '--yes' to confirm non-interactively"
+                        .to_owned(),
                 );
             }
             eprint!("Delete session {}? [y/N] ", args.source);

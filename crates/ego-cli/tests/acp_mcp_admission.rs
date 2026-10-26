@@ -51,7 +51,7 @@ fn repeated_failed_acp_load_does_not_restart_the_same_stdio_server_immediately()
         assert!(
             refusal["error"]["data"]
                 .as_str()
-                .is_some_and(|message| message.contains("`failing`")),
+                .is_some_and(|message| message.contains("MCP server 'failing'")),
             "the refusal must name the server that failed: {refusal}"
         );
     }
