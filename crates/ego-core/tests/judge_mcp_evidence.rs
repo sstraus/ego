@@ -130,3 +130,21 @@ fn mcp_percent_encoded_json_body_does_not_disclose_password_to_judge() {
         "percent-encoded JSON credential leaked to judge: {text}"
     );
 }
+
+// Catches: free-form MCP strings bypass the shared credential context redactor.
+#[test]
+fn authorization_credentials_in_mcp_prose_do_not_reach_judge() {
+    let call = mcp_call(json!({
+        "message": "Inspect Authorization: Bearer mcp.secret-== safely",
+        "body": r#"{"message":"authorization: Basic encoded-secret.== safely"}"#
+    }));
+    let text = serde_json::to_string(
+        &support::judge_request(&call, &JudgeTaskContext::default()).messages,
+    )
+    .unwrap();
+    for secret in ["mcp.secret-==", "encoded-secret.=="] {
+        assert!(!text.contains(secret), "{text}");
+    }
+    assert!(text.contains("Inspect"), "{text}");
+    assert!(text.contains("safely"), "{text}");
+}

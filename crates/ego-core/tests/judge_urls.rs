@@ -111,3 +111,49 @@ fn ordinary_disk_name_is_not_an_openai_secret() {
     assert!(text.contains("disk-1"), "{text}");
     assert!(!text.contains("secret:openai"), "{text}");
 }
+
+// Catches: JSON-quoted authorization values in task text disclose credentials to the judge.
+#[test]
+fn quoted_authorization_value_in_task_does_not_reach_judge() {
+    let context = JudgeTaskContext {
+        task: r#"Inspect {"Authorization": "Bearer quoted.secret"} safely"#.into(),
+        ..Default::default()
+    };
+    let text = request_with_context(&["pwd".into()], &context);
+    assert!(!text.contains("quoted.secret"), "credential leaked: {text}");
+    assert!(text.contains("Inspect"), "{text}");
+    assert!(text.contains("safely"), "{text}");
+}
+
+// Catches: fixing the helper without applying it to task/reason/root disclosure.
+#[test]
+fn authorization_credentials_in_task_context_do_not_reach_judge() {
+    let context = JudgeTaskContext {
+        task: "Inspect Authorization: Bearer task.secret== safely".into(),
+        agent_reason: "Check authorization: Basic reason-secret= safely".into(),
+        roots: vec!["Authorization: Bearer root.secret- safely".into()],
+        ..Default::default()
+    };
+    let text = request_with_context(&["pwd".into()], &context);
+    for secret in ["task.secret==", "reason-secret=", "root.secret-"] {
+        assert!(!text.contains(secret), "{text}");
+    }
+    assert!(text.contains("Inspect"), "{text}");
+    assert!(text.contains("safely"), "{text}");
+}
+
+// Catches: JSON escape backslashes prevent authorization markers from hiding credentials.
+#[test]
+fn escaped_authorization_value_in_task_does_not_reach_judge() {
+    let context = JudgeTaskContext {
+        task: r#"Inspect {\"Authorization\": \"Bearer escaped.secret\"} safely"#.into(),
+        ..Default::default()
+    };
+    let text = request_with_context(&["pwd".into()], &context);
+    assert!(
+        !text.contains("escaped.secret"),
+        "credential leaked: {text}"
+    );
+    assert!(text.contains("Inspect"), "{text}");
+    assert!(text.contains("safely"), "{text}");
+}
