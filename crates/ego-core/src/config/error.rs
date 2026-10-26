@@ -27,7 +27,10 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "invalid config in {source} layer: {message}")
             }
             ConfigError::UnknownProfile { name } => {
-                write!(f, "unknown profile `{name}`: no eligible layer defines it")
+                write!(
+                    f,
+                    "profile '{name}' is not defined in the configuration used by this session"
+                )
             }
         }
     }
