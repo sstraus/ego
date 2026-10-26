@@ -68,14 +68,11 @@ pub const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 
 /// The API base an address variable names, or the default.
 ///
-/// `OLLAMA_HOST` is conventionally a bare `host:port` and `OPENAI_BASE_URL`
-/// and `ANTHROPIC_BASE_URL` are conventionally base URLs without the path; all
-/// spellings are accepted for all three, and anything else is refused rather
-/// than half-parsed into a request to somewhere unintended. The path is always
-/// set, so a variable that already carries one and a variable that does not
-/// resolve to the same address.
+/// `OLLAMA_HOST` accepts a bare `host:port`; all three overrides also accept
+/// URLs. Ollama and OpenAI use `/v1/`. Anthropic preserves a gateway prefix
+/// and appends `/v1/` only when that suffix is absent.
 ///
-/// It sets `/v1/` and not `/v1/chat/completions`: a row carries a base and the
+/// It sets a versioned base, not a request endpoint: a row carries a base and the
 /// mapping joins its own path onto it
 /// (`ARCHITECTURE.md`
 /// §2). Both variables name a *server*, which is what a base is, so this is
@@ -94,7 +91,17 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
         endpoint: given.to_string(),
         message: format!("{var} is not an address: {err}"),
     })?;
-    url.set_path("/v1/");
+    if var == ANTHROPIC_BASE_URL {
+        let prefix = url.path().trim_end_matches('/');
+        let path = if prefix.ends_with("/v1") {
+            format!("{prefix}/")
+        } else {
+            format!("{prefix}/v1/")
+        };
+        url.set_path(&path);
+    } else {
+        url.set_path("/v1/");
+    }
     Ok(url)
 }
 
@@ -1004,6 +1011,78 @@ mod tests {
                 .resolve_reasoning_effort(Some(ThinkingLevel::Medium))
                 .is_err()
         );
+    }
+
+    // Catches: gateway prefixes are erased, or an existing /v1 suffix is duplicated.
+    #[test]
+    fn anthropic_base_override_keeps_gateway_prefix_without_duplicating_v1() {
+        const EXPECTED: &str = "EGO_REGRESSION_EXPECTED_MESSAGES_URL";
+        if let Ok(expected) = std::env::var(EXPECTED) {
+            let row = rows(&Default::default())
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id() == "anthropic")
+                .unwrap();
+            assert_eq!(row.base().join("messages").unwrap().as_str(), expected);
+            return;
+        }
+        let mut failures = Vec::new();
+        for (given, expected) in [
+            (None, "https://api.anthropic.com/v1/messages"),
+            (
+                Some("https://gateway.example"),
+                "https://gateway.example/v1/messages",
+            ),
+            (
+                Some("https://gateway.example/"),
+                "https://gateway.example/v1/messages",
+            ),
+            (
+                Some("gateway.example:8080"),
+                "http://gateway.example:8080/v1/messages",
+            ),
+            (
+                Some("https://gateway.example/api"),
+                "https://gateway.example/api/v1/messages",
+            ),
+            (
+                Some("https://gateway.example/api/"),
+                "https://gateway.example/api/v1/messages",
+            ),
+            (
+                Some("https://gateway.example/api/v1"),
+                "https://gateway.example/api/v1/messages",
+            ),
+            (
+                Some("https://gateway.example/api/v1/"),
+                "https://gateway.example/api/v1/messages",
+            ),
+            (
+                Some("https://gateway.example/team/api"),
+                "https://gateway.example/team/api/v1/messages",
+            ),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "model::tests::anthropic_base_override_keeps_gateway_prefix_without_duplicating_v1",
+                "--nocapture",
+            ]).env(EXPECTED, expected);
+            if let Some(given) = given {
+                command.env(ANTHROPIC_BASE_URL, given);
+            } else {
+                command.env_remove(ANTHROPIC_BASE_URL);
+            }
+            let output = command.output().unwrap();
+            if !output.status.success() {
+                failures.push(format!(
+                    "{given:?}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     fn selectable() -> Vec<String> {
