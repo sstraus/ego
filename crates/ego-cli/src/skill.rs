@@ -768,6 +768,9 @@ fn load_skill(
     };
     let mut spec = SkillSpec::new(descriptor, body.as_bytes().to_vec())
         .map_err(|error| error.to_string())?
+        .with_resource_root(ego_core::permit::CanonPath::new(
+            path.parent().expect("canonical skill file has a parent"),
+        ))
         .with_model_selection(model, effort)
         .with_disallowed_tools(disallowed_tools)
         .with_arguments(arguments)

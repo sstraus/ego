@@ -155,8 +155,7 @@ impl SkillResourceRoots {
     }
 }
 
-/// One fully admitted skill. It contains typed policy, never YAML nodes or an
-/// absolute host path.
+/// One fully admitted skill, with typed policy and its discovery-bound resource root.
 #[derive(Clone)]
 pub struct SkillSpec {
     descriptor: SkillDescriptorEvidence,
@@ -180,6 +179,7 @@ pub struct SkillSpec {
     resource_paths: Vec<String>,
     arguments: Vec<String>,
     metadata: BTreeMap<String, String>,
+    resource_root: Option<CanonPath>,
 }
 
 impl fmt::Debug for SkillSpec {
@@ -217,7 +217,19 @@ impl SkillSpec {
             resource_paths: Vec::new(),
             arguments: Vec::new(),
             metadata: BTreeMap::new(),
+            resource_root: None,
         })
+    }
+
+    /// Bind resources to the canonical directory admitted by discovery.
+    pub fn with_resource_root(mut self, root: CanonPath) -> Self {
+        self.resource_root = Some(root);
+        self
+    }
+
+    /// The canonical resource directory captured by discovery, if filesystem-backed.
+    pub fn resource_root(&self) -> Option<&CanonPath> {
+        self.resource_root.as_ref()
     }
 
     pub fn descriptor(&self) -> &SkillDescriptorEvidence {
@@ -675,6 +687,7 @@ pub struct SkillInvocationAdmission {
     bare: bool,
     hooks: Vec<AdmittedSkillHook>,
     resource_paths: Vec<String>,
+    resource_root: Option<CanonPath>,
 }
 
 #[derive(Deserialize)]
@@ -694,6 +707,8 @@ struct DecodedSkillInvocationAdmission {
     bare: bool,
     hooks: Vec<AdmittedSkillHook>,
     resource_paths: Vec<String>,
+    #[serde(default)]
+    resource_root: Option<CanonPath>,
 }
 
 impl<'de> Deserialize<'de> for SkillInvocationAdmission {
@@ -716,6 +731,7 @@ impl<'de> Deserialize<'de> for SkillInvocationAdmission {
             bare: decoded.bare,
             hooks: decoded.hooks,
             resource_paths: decoded.resource_paths,
+            resource_root: decoded.resource_root,
         };
         encode_admission(&admission)
             .map(|_| admission)
@@ -1208,6 +1224,9 @@ impl SkillInvocation {
         )
     }
     pub(crate) fn resource_root(&self) -> std::path::PathBuf {
+        if let Some(root) = &self.admission.resource_root {
+            return root.as_path().to_path_buf();
+        }
         let location = std::path::Path::new(self.admission.descriptor.location.as_str());
         location
             .parent()
@@ -1313,6 +1332,11 @@ impl SkillInvocation {
         }
         let logical = SkillSourceLocation::parse(logical)
             .map_err(|error| SkillError::new(error.to_string()))?;
+        let authority_root = self
+            .admission
+            .resource_root
+            .as_ref()
+            .unwrap_or(authority_root);
         let canonical_root = resolver
             .canonicalize(authority_root.as_path())
             .map_err(|error| SkillError::new(error.to_string()))?;
@@ -1405,6 +1429,7 @@ fn invocation_admission(
         bare: spec.bare || requested_bare,
         hooks,
         resource_paths: spec.resource_paths.clone(),
+        resource_root: spec.resource_root.clone(),
     })
 }
 
