@@ -1850,6 +1850,9 @@ Active queue, draft and interrupt state is added even when the template omits it
 The queue field reads `steer N · next N`: `steer` counts messages that steer the
 running turn; `next` counts messages queued for the next turn. Both counts are
 shown when either is nonzero. When both are zero, the field is omitted.
+Queue counts refresh when input is consumed, including during a running turn.
+The interrupt indicator disappears when the interrupted turn settles; input
+that still waits for delivery keeps its queue count, not an interrupt indicator.
 At a width too small for one critical value, that value remains whole.
 
 Variables: `model`, `effort`, `fast`, `mode`, `ctx.used`, `ctx.window`,

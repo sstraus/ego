@@ -201,6 +201,88 @@ fn the_plain_permission_vocabulary_matches_the_immediate_keys() {
     }
 }
 
+// Catches: completed cancellation is confused with durable expedited delivery,
+// either retaining interrupt=yes or hiding input that is still queued.
+#[test]
+fn settled_interrupt_hides_only_interrupt_until_queued_input_is_consumed() {
+    use super::super::status::{StatusLine, StatusSegmentName};
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+    use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, TurnId};
+    use ego_core::event::time::Timestamp;
+
+    let turn = TurnId::new();
+    let queued = QueuedPromptId::new();
+    let mut seq = Seq::default();
+    let mut state = SessionState::default();
+    let mut apply = |kind| {
+        state.apply(&DomainEvent {
+            env: Envelope {
+                seq: seq.next(),
+                id: EventId::new(),
+                turn,
+                item: Some(ItemId::new()),
+                parent: None,
+                ts: Timestamp::from_millis(1_787_206_085_352),
+                producer: Producer::Main,
+            },
+            kind,
+        });
+        let snapshot = SurfaceSnapshot::from_state(
+            SessionId::new(),
+            &state,
+            SelectionFacts::new(
+                ego_core::config::ModelRef("provider/model".into()),
+                ego_core::generator::types::ThinkingLevel::Medium,
+                Mode::Default,
+            ),
+            SeatFacts::new(live_queue(&state), 0, "/workspace", Trust::Trusted),
+            None,
+        );
+        StatusLine::render(
+            &snapshot,
+            &[StatusSegmentName::Queue, StatusSegmentName::Interrupt],
+            100,
+        )
+        .text()
+        .to_owned()
+    };
+    apply(EventKind::UserPrompt {
+        audio: Vec::new(),
+        text: "initial".into(),
+        images: Vec::new(),
+        queued_prompt: None,
+    });
+    assert_eq!(
+        apply(EventKind::PromptQueued {
+            audio: Vec::new(),
+            id: queued,
+            text: "next".into(),
+            images: Vec::new(),
+        }),
+        "steer 1 · next 0"
+    );
+    assert_eq!(
+        apply(EventKind::PromptDeliveryExpedited { through: queued }),
+        "steer 1 · next 0 · interrupt=yes"
+    );
+    assert_eq!(
+        apply(EventKind::TurnCompleted {
+            ok: false,
+            exit_reason: ExitReason::Cancelled(ego_core::event::domain::CancelCause::User),
+        }),
+        "steer 0 · next 1"
+    );
+    assert_eq!(
+        apply(EventKind::UserPrompt {
+            audio: Vec::new(),
+            text: "next".into(),
+            images: Vec::new(),
+            queued_prompt: Some(queued),
+        }),
+        ""
+    );
+}
+
 #[test]
 fn long_queue_status_uses_the_unsliced_indicator_path() {
     let status = Arc::new(Mutex::new(SurfaceStatus {
