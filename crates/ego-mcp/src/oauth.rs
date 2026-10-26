@@ -1649,6 +1649,25 @@ mod runtime_tests {
         );
     }
     #[tokio::test]
+    async fn runtime_credential_failure_names_repl_login_instead_of_shell_strategy() {
+        // Catches: an expired or missing credential still sends a running REPL
+        // user to the shell to guess a registration strategy.
+        for missing in [false, true] {
+            let (session, store, http) = setup(Some(0), refresh_responses(400));
+            if missing {
+                store.0.lock().unwrap().clear();
+            }
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            let error = session.headers(Some(http), deadline).await.err().unwrap();
+            assert_eq!(error.failure(), McpFailure::Credential);
+            assert_eq!(
+                error.to_string(),
+                "MCP credential unavailable or revoked; run '/mcp login linear'"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn missing_and_revoked_credentials_offer_login_without_overwriting_store() {
         // Catches publishing failed refresh output or hiding the recovery command.
         let (session, store, http) = setup(Some(0), refresh_responses(400));
