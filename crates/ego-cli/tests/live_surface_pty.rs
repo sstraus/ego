@@ -345,13 +345,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let id = background_exec_id(&output);
-    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
-    let start = output.len();
-    input.write_all(b"inspect the completed command\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
-    until_mcp_composer_is_idle(&reader, &mut output);
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-NEXT-TURN");
     let completion = std::fs::read_to_string(&completed).ok();
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
@@ -9214,7 +9208,11 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
         "argv": ["/bin/sh", "-c", "printf ready > ready; printf REGRESSION-MARKER-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
         "timeout_ms": 15000
     });
-    let mut session = modal_session(("exec", &arguments.to_string()));
+    let mut session = modal_session_with(vec![
+        Reply::Sse(tool_call("call-0", "exec", &arguments.to_string())),
+        Reply::Sse(text(TOOL_TURN_DONE)),
+        Reply::Sse(text("REGRESSION-MARKER-SETTLED")),
+    ]);
     session.press(b"start a long exec\r");
     session.wait("[d] details");
     session.press(b"y");
@@ -9239,22 +9237,24 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     );
     session.press(format!("/tasks cancel {id}\r").as_bytes());
     session.wait("background exec ");
-    until_local_action_completed(
+    until_prompt_after_reply(
         &session.reader,
         &mut session.output,
-        session.mark,
-        "tasks",
-        PROGRESS_DEADLINE,
-    );
-    until_background_exec_settled(
-        &session.reader,
-        &mut session.output,
-        &mut session.input,
-        &id,
-        "cancelled",
+        b"REGRESSION-MARKER-SETTLED",
     );
     assert!(!session.ego.workspace_path().join("survived").exists());
-    session.finish();
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 3, "unexpected settlement continuation");
+    let history = generations.last().expect("settlement generation")["messages"].to_string();
+    assert!(
+        history.contains("cancelled") && history.contains("REGRESSION-MARKER-OUTPUT"),
+        "cancellation lost its outcome or output: {history}"
+    );
+    assert_eq!(
+        history.matches("stdout tail (").count(),
+        1,
+        "settlement duplicated in model history: {history}"
+    );
 }
 
 const SESSION_MCP_SERVER: &str = r#"
