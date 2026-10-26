@@ -147,8 +147,9 @@ The `●` after the Git branch means there are local changes, untracked files, o
 conflicts; it is not an activity indicator. An approximate subscription cost is
 an API-equivalent estimate, not a charge to the subscription account.
 
-Running child agents have their own cyan activity rows, separate from the main
-working row. A settled child no longer appears as running.
+Running in-turn tasks and named subagents have their own cyan activity rows,
+separate from the main working row. A settled child no longer appears as running.
+Durable background tasks remain visible through `/tasks`.
 
 Successful cache hits do not print a notice on every generation. A warning can
 appear when a provider previously reported reuse for the same marked input but
