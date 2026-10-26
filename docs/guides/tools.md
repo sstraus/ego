@@ -67,8 +67,11 @@ silent fallback between backends. See [web search reference](../reference/tools.
 
 | Operation | Purpose |
 | --- | --- |
-| `AskQuestion` | Suspend for a typed human answer; headless emits a question and exits 3 |
-| `Skill` | Invoke admitted named instructions or read their admitted resources |
+| `ask_question` | Suspend for a typed human answer; headless emits a question and exits 3 |
+| `skill` | Invoke admitted named instructions or read their admitted resources |
+| `goal` | Set a model-authored session goal; cannot replace an active operator-owned goal |
+| `plan` | Replace durable ordered steps or update one step; this does not achieve the session goal |
+| `context` | Request a compact/clear transition after the current tool batch; clear needs operator opt-in and an active goal |
 | `task` | Run an isolated depth-one child with inherited tools, permission, sandbox, offline posture, and shared budget; the child cannot delegate |
 | `history.search`, `history.open` | Read bounded prior user/assistant conversation through the store-bound history port; exclude tool payloads |
 | `memory_lookup` | Coordinator-profile-only lookup of decision/problem/handoff MDKB entries; absence/refusal is explicit |
