@@ -639,12 +639,12 @@ fn every_row_of_the_input_precedence_table_lands_somewhere() {
         prompt::assemble(None, Stdin::Ambient, &Piped(Some("just this"))).expect("a prompt"),
         "just this"
     );
-    // Neither: refused, saying all three ways to supply one.
+    // Neither: refused, naming one way to supply a prompt.
     let refusal = prompt::assemble(None, Stdin::Ambient, &Piped(None))
         .expect_err("nothing to ask")
         .to_string();
     assert!(
-        refusal.contains("argument") && refusal.contains("stdin"),
+        refusal.contains("no prompt was supplied; pass your prompt as an argument"),
         "{refusal}"
     );
 }
@@ -798,7 +798,10 @@ fn the_session_flags_and_resume_cannot_both_name_a_session() {
     for flag in ["--session", "--session-id"] {
         let refusal = refused(["resume", "hi", flag, SOME_ID]);
         assert!(refusal.contains(flag), "{refusal}");
-        assert!(refusal.contains("both name a session"), "{refusal}");
+        assert!(
+            refusal.contains("cannot be combined with 'ego resume'"),
+            "{refusal}"
+        );
     }
     let refusal = refused(["resume", "hi", "--ephemeral"]);
     assert!(refusal.contains("--ephemeral"), "{refusal}");

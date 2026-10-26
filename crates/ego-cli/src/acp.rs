@@ -503,9 +503,9 @@ impl AdmissionAttempt {
     ) -> Result<Self, McpSessionAdmissionError> {
         loop {
             let reservation = {
-                let mut retries = state
-                    .lock()
-                    .map_err(|_| safe_mcp_error("ACP MCP admission state could not be read"))?;
+                let mut retries = state.lock().map_err(|_| {
+                    safe_mcp_error("the ACP MCP connection state could not be read")
+                })?;
                 if !retries.contains_key(&key) && retries.len() >= MAX_FAILED_ADMISSIONS {
                     let evict = retries
                         .iter()
@@ -514,7 +514,7 @@ impl AdmissionAttempt {
                         .map(|(key, _)| *key);
                     let Some(evict) = evict else {
                         return Err(safe_mcp_error(
-                            "too many MCP admissions are in progress; retry later",
+                            "too many MCP connections are starting; try again after one finishes",
                         ));
                     };
                     retries.remove(&evict);
@@ -549,7 +549,7 @@ impl AdmissionAttempt {
                         break;
                     }
                     active.changed().await.map_err(|_| {
-                        safe_mcp_error("the concurrent MCP admission ended without a result")
+                        safe_mcp_error("the MCP connection attempt ended without a result")
                     })?;
                 },
                 AdmissionReservation::Start(completion) => {
@@ -572,7 +572,7 @@ impl AdmissionAttempt {
     fn record(&self, result: Result<(), McpSessionAdmissionError>) {
         let Ok(mut retries) = self.state.lock() else {
             let _ = self.completion.send(Some(Err(safe_mcp_error(
-                "ACP MCP admission state could not be read",
+                "the ACP MCP connection state could not be read",
             ))));
             return;
         };
@@ -590,7 +590,7 @@ impl AdmissionAttempt {
             tracing::warn!(
                 attempt = retry.failures,
                 retry_after_seconds = backoff.as_secs(),
-                "ACP MCP admission failed; delaying another attempt for the same server selection"
+                "the ACP MCP connection failed; waiting before retrying the same servers"
             );
         }
         drop(retries);
@@ -601,7 +601,9 @@ impl AdmissionAttempt {
 impl Drop for AdmissionAttempt {
     fn drop(&mut self) {
         if !self.finished {
-            self.record(Err(safe_mcp_error("ACP MCP admission was interrupted")));
+            self.record(Err(safe_mcp_error(
+                "the ACP MCP connection attempt was interrupted",
+            )));
         }
     }
 }

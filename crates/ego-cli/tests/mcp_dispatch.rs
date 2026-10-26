@@ -25,7 +25,7 @@ fn add_and_remove_use_atomic_comment_preserving_publication_and_do_not_claim_adm
         .run();
     assert_eq!(added.code, Some(0), "stderr: {}", added.stderr);
     assert!(
-        added.stdout.contains("published"),
+        added.stdout.contains("saved to disk"),
         "stdout: {}",
         added.stdout
     );
@@ -50,7 +50,7 @@ fn add_and_remove_use_atomic_comment_preserving_publication_and_do_not_claim_adm
         .run();
     assert_eq!(removed.code, Some(0), "stderr: {}", removed.stderr);
     assert!(
-        removed.stdout.contains("published"),
+        removed.stdout.contains("saved to disk"),
         "stdout: {}",
         removed.stdout
     );

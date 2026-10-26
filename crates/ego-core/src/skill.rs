@@ -31,7 +31,11 @@ const MAX_ADMISSION_BYTES: usize = 64 * 1024;
 /// skill boundary; admitted invocation metadata is deliberately not part of
 /// the wire representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    try_from = "DecodedSkillOperation"
+)]
 pub enum SkillOperation {
     Invoke {
         name: String,
@@ -52,6 +56,85 @@ pub enum SkillOperation {
         invocation: SkillInvocationId,
         path: String,
     },
+}
+
+// The flat provider schema exposes both variants. Decode their typed fields once,
+// accepting only inert defaults for fields owned by the other kind.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DecodedSkillOperation {
+    Invoke {
+        name: String,
+        #[serde(default)]
+        arguments: String,
+        #[serde(default)]
+        bare: bool,
+        #[serde(default)]
+        invocation: String,
+        #[serde(default)]
+        path: String,
+    },
+    ReadResource {
+        invocation: SkillInvocationId,
+        path: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        arguments: String,
+        #[serde(default)]
+        bare: bool,
+    },
+}
+
+impl TryFrom<DecodedSkillOperation> for SkillOperation {
+    type Error = String;
+
+    fn try_from(decoded: DecodedSkillOperation) -> Result<Self, Self::Error> {
+        let (operation, kind, foreign, bare) = match decoded {
+            DecodedSkillOperation::Invoke {
+                name,
+                arguments,
+                bare,
+                invocation,
+                path,
+            } => (
+                Self::Invoke {
+                    name,
+                    arguments,
+                    bare,
+                },
+                "invoke",
+                [("invocation", invocation), ("path", path)],
+                false,
+            ),
+            DecodedSkillOperation::ReadResource {
+                invocation,
+                path,
+                name,
+                arguments,
+                bare,
+            } => (
+                Self::ReadResource { invocation, path },
+                "read_resource",
+                [("name", name), ("arguments", arguments)],
+                bare,
+            ),
+        };
+        for (field, value) in foreign {
+            if !value.is_empty() {
+                return Err(format!(
+                    "field `{field}` does not belong to skill kind `{kind}`; omit it or use an empty string"
+                ));
+            }
+        }
+        if bare {
+            return Err(
+                "field `bare` does not belong to skill kind `read_resource`; omit it or use false"
+                    .into(),
+            );
+        }
+        Ok(operation)
+    }
 }
 
 impl SkillOperation {

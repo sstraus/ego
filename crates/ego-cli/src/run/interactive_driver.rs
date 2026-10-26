@@ -496,7 +496,7 @@ pub(super) async fn interactive_process(
     config::capture_profile(&mut args);
     if args.profile.as_deref() == Some("ci") {
         return Ended::refused(RunTermination::UsageError {
-            message: "profile `ci` is available only through ego run or ego resume".to_owned(),
+            message: "profile 'ci' is available only through 'ego run' or 'ego resume'".to_owned(),
         });
     }
     // A machine-readable stream has no reader here. `--output json` is a
@@ -506,9 +506,8 @@ pub(super) async fn interactive_process(
     if args.output != Output::Text {
         return Ended::refused(RunTermination::UsageError {
             message: format!(
-                "`--output {}` has no meaning for an interactive session: it is \
-                 one document at completion, and a conversation does not have \
-                 one. Use `ego run --output {}` for a headless one-shot",
+                "'--output {}' is not supported in an interactive session; \
+                 use 'ego run --output {}' for a single non-interactive reply",
                 args.output, args.output
             ),
         });
@@ -686,7 +685,7 @@ pub(super) async fn interactive_through(
     ));
     // An empty session leaves nothing on disk for `ego resume` to open.
     if !ended.state.turns.is_empty() {
-        output.note(&format!("To resume: ego resume {}", ended.session));
+        output.note(&format!("To resume: 'ego resume {}'", ended.session));
     }
     announce.closing(&ended.termination);
     ended

@@ -457,7 +457,7 @@ mod permit {
         for op in [OpName::Read, OpName::List, OpName::Search] {
             let text = outside(op).to_string();
             assert!(
-                text.contains("ego roots add --access read '/sibling/a b.md'")
+                text.contains("'ego roots add --access read '/sibling/a b.md''")
                     && text.contains("resume"),
                 "{op}: {text}"
             );

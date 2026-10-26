@@ -293,7 +293,7 @@ pub(crate) async fn build_startup_catalogue_snapshot(
     let unavailable = |row: &ProviderRow| {
         mapping_unavailability(row).or_else(|| {
             (!credential_present(&row.credential, environment, observed)).then(|| {
-                missing_credential(format!("no credential is configured for provider `{}`; run `ego auth login {}` for setup instructions", row.id(), row.id()))
+                missing_credential(format!("provider '{}' is not signed in; see 'ego auth login {}' for setup instructions", row.id(), row.id()))
             })
         })
     };
@@ -388,7 +388,7 @@ pub(crate) async fn build_startup_catalogue_snapshot(
                 freshness: FactFreshness::Current,
                 availability: observed_unavailability.unwrap_or_else(|| ModelAvailability::Unavailable {
                     cause: ModelAvailabilityCause::IncompleteFacts,
-                    message: format!("provider `{}` has no observed model inventory; run `ego models --provider {} --refresh` to populate it", row.id(), row.id()),
+                    message: format!("provider '{}' has no saved model list; fetch it with 'ego models --provider {} --refresh'", row.id(), row.id()),
                 }),
             });
         }

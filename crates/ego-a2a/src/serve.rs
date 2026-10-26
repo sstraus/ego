@@ -99,9 +99,8 @@ pub async fn serve_on(
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "{admitted} is reachable by any process on this machine and will \
-                 not serve without a credential: set {} , or bind a local \
-                 endpoint, which the operating system authenticates instead",
+                "{admitted} is reachable by any process on this machine; \
+                 set {} to a secret shared only with trusted callers before starting the server",
                 crate::auth::TOKEN_VAR
             ),
         ));

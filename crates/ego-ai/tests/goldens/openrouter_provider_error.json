@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Rate limit exceeded",
+    "metadata": {
+      "error_type": "rate_limit_exceeded",
+      "provider_code": "rate_limited"
+    }
+  }
+}

@@ -646,3 +646,144 @@ fn background_task_budget_stop_is_delivered_as_failure_data() {
         assert!(delivered.contains("Child ended: Budget"), "{delivered}");
     });
 }
+
+#[derive(Debug)]
+struct IdleExecSeat {
+    first: std::sync::atomic::AtomicBool,
+    wake: crossbeam::channel::Receiver<repl::Line>,
+    sender: crossbeam::channel::Sender<repl::Line>,
+}
+
+impl Reads for IdleExecSeat {
+    fn read(&self) -> repl::Line {
+        if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return repl::Line::Submitted("start background work".into());
+        }
+        self.wake
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap_or(repl::Line::Ended)
+    }
+}
+
+impl InteractiveSeat for IdleExecSeat {
+    fn wake_background_exec(&self) {
+        // Catches: a duplicate/stale notification buys a second continuation.
+        for _ in 0..2 {
+            let _ = self.sender.try_send(repl::Line::HostCommand(
+                repl::HostCommand::BackgroundExecSettled,
+            ));
+        }
+    }
+    fn has_human(&self) -> bool {
+        false
+    }
+    fn read_startup_model(
+        &self,
+        _: Arc<Mutex<ModelPicker>>,
+        _: Option<String>,
+    ) -> crate::model_picker::PickerOutcome {
+        panic!("explicit model must not open picker")
+    }
+    fn trust(&self, _: &Path, _: &str) -> Trust {
+        Trust::Trusted
+    }
+    fn permission(&self, _: &PermissionRequest) -> PermissionDecision {
+        PermissionDecision::Deny
+    }
+}
+
+// Catches: process settlement stays invisible while the input owner waits for a user.
+#[test]
+#[cfg(unix)]
+fn idle_background_exec_settlement_starts_one_continuation() {
+    let Ok(case) = std::env::var(CHILD) else {
+        for (case, command, timeout, expected) in [
+            (
+                "exec-success",
+                "sleep 1.2; printf WAKE-RESULT",
+                None,
+                "WAKE-RESULT",
+            ),
+            (
+                "exec-failure",
+                "sleep 0.2; printf FAILED-RESULT; exit 7",
+                None,
+                "exited code 7",
+            ),
+            (
+                "exec-timeout",
+                "sleep 10",
+                Some(100),
+                "timed out after 100 ms",
+            ),
+        ] {
+            let stub = child_case(
+                "idle_background_exec_settlement_starts_one_continuation",
+                case,
+                Plan {
+                    completions: vec![
+                        Reply::Sse(tool_call(
+                            "exec-launch",
+                            "exec",
+                            &serde_json::json!({"argv":["/bin/sh", "-c", command],
+                                "background":true, "timeout_ms":timeout})
+                            .to_string(),
+                        )),
+                        Reply::Sse(text("waiting for background work")),
+                        Reply::Sse(text("background outcome received")),
+                    ],
+                    ..Plan::default()
+                },
+            );
+            let requests = stub.generations();
+            assert_eq!(
+                requests.len(),
+                3,
+                "{case}: one automatic continuation, no extra input"
+            );
+            let continuation = requests[2].to_string();
+            assert!(continuation.contains(expected), "{case}: {continuation}");
+        }
+        return;
+    };
+    runtime().block_on(async {
+        let (sender, wake) = crossbeam::channel::bounded(2);
+        let seat = Arc::new(IdleExecSeat {
+            first: std::sync::atomic::AtomicBool::new(true),
+            wake,
+            sender,
+        });
+        let mut arguments = args("anthropic/fixture-vision");
+        arguments.mode = Some(ego_core::config::Mode::Yolo);
+        let ended = execute(
+            arguments,
+            |_| &NullSink,
+            CancelToken::new(),
+            None,
+            RunHost {
+                driver: Driver::Interactive {
+                    seat,
+                    between: &|| {},
+                },
+                elicitor: None,
+                status: None,
+                diagnostics: &Stderr,
+                text_output: None,
+                evidence: Arc::new(EvidenceAdmissionService::new()),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{case}: driver refused: {error:?}"));
+        assert_eq!(ended.termination.exit_code(), 0);
+        assert_eq!(ended.state.detached_execs.len(), 1);
+        assert!(
+            ended.state.detached_execs.values().all(Option::is_some),
+            "{case}: the idle session never consumed its process outcome"
+        );
+        assert_eq!(
+            ended.state.turns.len(),
+            2,
+            "one launch turn and one continuation"
+        );
+    });
+}

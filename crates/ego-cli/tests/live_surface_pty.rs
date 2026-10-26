@@ -26,6 +26,9 @@ mod image_refusal;
 mod live_width;
 #[path = "live_surface_pty/mcp_inventory.rs"]
 mod mcp_inventory;
+#[cfg(unix)]
+#[path = "live_surface_pty/mcp_login.rs"]
+mod mcp_login;
 #[path = "live_surface_pty/metadata_refusal.rs"]
 mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
@@ -217,13 +220,7 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     until_mcp_composer_is_idle(&reader, &mut output);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let id = background_exec_id(&output);
-    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
-    let start = output.len();
-    input.write_all(b"inspect the completed command\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
-    until_mcp_composer_is_idle(&reader, &mut output);
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-NEXT-TURN");
     let completion = std::fs::read_to_string(&completed).ok();
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
@@ -250,41 +247,6 @@ fn background_exec_id(output: &[u8]) -> String {
     let id = &transcript[offset..offset + 36];
     assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
     id.to_owned()
-}
-
-/// A shell completion file precedes pipe draining and waitpid. Inspect the
-/// executor's terminal snapshot before starting the generation that consumes it.
-/// Every inspection must finish its editor cycle before the next input is sent.
-fn until_background_exec_settled(
-    reader: &mpsc::Receiver<Vec<u8>>,
-    output: &mut Vec<u8>,
-    input: &mut impl Write,
-    id: &str,
-    outcome: &str,
-) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let expected = format!("background exec {id}: {outcome}");
-    loop {
-        let start = output.len();
-        input
-            .write_all(format!("/tasks {id}\r").as_bytes())
-            .unwrap();
-        input.flush().unwrap();
-        until_local_action_completed(
-            reader,
-            output,
-            start,
-            "tasks",
-            deadline.saturating_duration_since(Instant::now()),
-        );
-        if normalized(&output[start..]).contains(&expected) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "process did not settle: {expected}"
-        );
-    }
 }
 
 // Catches: Ctrl+B kills/restarts the child, loses its handle, or duplicates its settlement.
@@ -345,13 +307,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    let id = background_exec_id(&output);
-    until_background_exec_settled(&reader, &mut output, &mut input, &id, "exited code 0");
-    let start = output.len();
-    input.write_all(b"inspect the completed command\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "DETACHED-NEXT-TURN");
-    until_mcp_composer_is_idle(&reader, &mut output);
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-NEXT-TURN");
     let completion = std::fs::read_to_string(&completed).ok();
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
@@ -390,7 +346,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     );
 }
 
-// Catches: settlement inside the launching turn is never announced, or is announced again.
+// Catches: settlement is lost/duplicated or the user notice leaks model-only output handles.
 #[test]
 fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     let arguments = serde_json::json!({
@@ -477,6 +433,22 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     assert!(
         !next_output.contains("exited code 0"),
         "settlement announced twice: {next_output}"
+    );
+    assert!(
+        launch_history.contains("[read_tool_result "),
+        "model continuation lost the full-output handle: {launch_history}"
+    );
+    assert!(
+        !launch_output.contains("[read_tool_result "),
+        "user notice leaked a model-only output handle: {launch_output}"
+    );
+    assert!(
+        !launch_output.contains("stdout tail (") && !launch_output.contains("stderr tail ("),
+        "user notice exposed model tail headings: {launch_output}"
+    );
+    assert!(
+        launch_output.contains("REGRESSION-MARKER"),
+        "user notice lost the useful command output: {launch_output}"
     );
 }
 
@@ -1256,7 +1228,7 @@ fn successor_accepts_next_turn(action: &str) {
             &reader,
             &mut output,
             start,
-            "fix the error and retry, or use /quit",
+            "correct the error before trying again",
         );
         let start = output.len();
         until_prompt_from(&reader, &mut output, start);
@@ -1270,7 +1242,7 @@ fn successor_accepts_next_turn(action: &str) {
         );
         assert_eq!(
             shown
-                .matches("fix the error and retry, or use /quit")
+                .matches("correct the error before trying again")
                 .count(),
             1
         );
@@ -2507,6 +2479,15 @@ impl PtySession {
         cols: u16,
         screen: Option<(u16, u16)>,
     ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
+        Self::start_command(ego.pty_command(), rows, cols, screen)
+    }
+
+    fn start_command(
+        command: portable_pty::CommandBuilder,
+        rows: u16,
+        cols: u16,
+        screen: Option<(u16, u16)>,
+    ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows,
@@ -2515,7 +2496,7 @@ impl PtySession {
                 pixel_height: 0,
             })
             .expect("pty");
-        let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+        let child = pair.slave.spawn_command(command).expect("spawn");
         let (input, responder, writer_join) =
             writer_owner(pair.master.take_writer().expect("writer"));
         let (reader, reader_join) = stream_with_screen(
@@ -3650,7 +3631,9 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
             Reply::Sse(tool_call(
                 "local-path-exec",
                 "exec",
-                r#"{"argv":["wiz-run","stories-cli.js","list"],"cwd":null,"timeout_ms":1000}"#,
+                // The first exec of a freshly written script can exceed 1s under suite
+                // load; this test asserts PATH resolution, not exec latency.
+                r#"{"argv":["wiz-run","stories-cli.js","list"],"cwd":null,"timeout_ms":30000}"#,
             )),
             Reply::Sse(text("LOCAL-PATH-EXEC-DONE")),
         ],
@@ -5858,7 +5841,10 @@ fn regression_case_terminal(provider_refuses: bool) {
     drain(&reader, &mut output);
     assert!(status.success(), "interactive exit: {status:?}");
     let after_quit = normalized(&output[quit_start..]);
-    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        after_quit.contains("To resume: 'ego resume"),
+        "{after_quit}"
+    );
     assert!(
         !after_quit.contains("the provider returned HTTP 400"),
         "{after_quit}"
@@ -6255,7 +6241,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("tools", Some("tools:")),
         ("expand", Some("no tool call to expand yet")),
         ("skills", None),
-        ("hooks", Some("no hooks are admitted")),
+        ("hooks", Some("no hooks are configured and enabled")),
         ("retry", Some("no provider retry wait is active")),
         ("version", Some(concat!("ego ", env!("CARGO_PKG_VERSION")))),
     ] {
@@ -6440,10 +6426,11 @@ fn fork_after_a_turn() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
-    until_notice_prose(
+    until_screen_prose(
         &reader,
         &mut output,
-        fork_start,
+        ROWS,
+        COLS,
         &format!("ego resume {}", support::FIXTURE_SESSION_ID),
     );
     drain_until_quiet(&reader, &mut output);
@@ -6550,10 +6537,11 @@ fn status_row_after_forking_a_session_with_a_context_reading() -> String {
     input.write_all(b"/fork\r").expect("fork");
     input.flush().expect("fork flush");
     until_normalized(&reader, &mut output, fork_start, "forked session");
-    until_notice_prose(
+    until_screen_prose(
         &reader,
         &mut output,
-        fork_start,
+        ROWS,
+        COLS,
         &format!("ego resume {}", support::FIXTURE_SESSION_ID),
     );
     drain_until_quiet(&reader, &mut output);
@@ -6589,7 +6577,7 @@ fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
     let after_quit = output_after_quit(Some("hello"));
     assert!(
         after_quit.contains(&format!(
-            "To resume: ego resume {}",
+            "To resume: 'ego resume {}'",
             support::FIXTURE_SESSION_ID
         )),
         "no resume hint at exit: {after_quit:?}"
@@ -6614,7 +6602,7 @@ fn assert_doctor_summary(output: &[u8]) {
     let prose = support::notice_prose(&normalized(output));
     for marker in [
         "doctor: not_checked",
-        "/doctor details for evidence and remediation",
+        "inspect the results with '/doctor details'",
         "configuration: ok",
         "credentials: not_checked",
         "session_store: ok",
@@ -8885,7 +8873,10 @@ fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
     drain(&reader, &mut output);
     assert!(status.success(), "interactive exit: {status:?}");
     let after_quit = normalized(&output[quit_start..]);
-    assert!(after_quit.contains("To resume: ego resume"), "{after_quit}");
+    assert!(
+        after_quit.contains("To resume: 'ego resume"),
+        "{after_quit}"
+    );
     assert!(
         !after_quit.contains("the provider returned HTTP 400"),
         "{after_quit}"
@@ -9214,7 +9205,11 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
         "argv": ["/bin/sh", "-c", "printf ready > ready; printf REGRESSION-MARKER-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
         "timeout_ms": 15000
     });
-    let mut session = modal_session(("exec", &arguments.to_string()));
+    let mut session = modal_session_with(vec![
+        Reply::Sse(tool_call("call-0", "exec", &arguments.to_string())),
+        Reply::Sse(text(TOOL_TURN_DONE)),
+        Reply::Sse(text("REGRESSION-MARKER-SETTLED")),
+    ]);
     session.press(b"start a long exec\r");
     session.wait("[d] details");
     session.press(b"y");
@@ -9239,22 +9234,24 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     );
     session.press(format!("/tasks cancel {id}\r").as_bytes());
     session.wait("background exec ");
-    until_local_action_completed(
+    until_prompt_after_reply(
         &session.reader,
         &mut session.output,
-        session.mark,
-        "tasks",
-        PROGRESS_DEADLINE,
-    );
-    until_background_exec_settled(
-        &session.reader,
-        &mut session.output,
-        &mut session.input,
-        &id,
-        "cancelled",
+        b"REGRESSION-MARKER-SETTLED",
     );
     assert!(!session.ego.workspace_path().join("survived").exists());
-    session.finish();
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 3, "unexpected settlement continuation");
+    let history = generations.last().expect("settlement generation")["messages"].to_string();
+    assert!(
+        history.contains("cancelled") && history.contains("REGRESSION-MARKER-OUTPUT"),
+        "cancellation lost its outcome or output: {history}"
+    );
+    assert_eq!(
+        history.matches("stdout tail (").count(),
+        1,
+        "settlement duplicated in model history: {history}"
+    );
 }
 
 const SESSION_MCP_SERVER: &str = r#"
@@ -9620,7 +9617,7 @@ fn replay_recorded_compaction_failure(new_prompt: bool) {
     input.write_all(b"finish this task\r").unwrap();
     input.flush().unwrap();
     if new_prompt {
-        until_notice_prose(&reader, &mut output, start, "Use /compact to retry");
+        until_notice_prose(&reader, &mut output, start, "Retry with '/compact'");
         until_prompt_from(&reader, &mut output, start);
         assert_eq!(stub.generations().len(), 2, "finite retries exhausted");
         input.write_all(b"REGRESSION-MARKER\r").unwrap();
@@ -9755,10 +9752,10 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
         );
         // An empty composer can repaint between rows of the failure notice.
         // Wait for its complete actionable text before inspecting it.
-        until_notice_prose(&reader, &mut output, failed_at, "Use /compact to retry");
+        until_notice_prose(&reader, &mut output, failed_at, "Retry with '/compact'");
         let shown = support::notice_prose(&normalized(&output));
         assert!(shown.contains("HTTP response body failed"), "{shown}");
-        assert!(shown.contains("Use /compact to retry"), "{shown}");
+        assert!(shown.contains("Retry with '/compact'"), "{shown}");
         assert!(!shown.contains("session stopped"), "{shown}");
         assert_eq!(
             stub.generations().len(),
@@ -9979,7 +9976,7 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
         .collect();
     assert_eq!(delivered.len(), 1, "wake must be delivered exactly once");
     assert!(!delivered[0].to_string().contains("REGRESSION-MARKER"));
-    assert!(!normalized(&output).contains("new source work became pending"));
+    assert!(!normalized(&output).contains("more work arrived"));
 }
 
 // Catches: closing prompt admission also rejects Ctrl-C for an active checkpoint.
@@ -10247,7 +10244,7 @@ fn typed_clear_reports_its_scope() {
     }
     for capture in captures {
         assert!(
-            capture.contains("Composer cleared; transcript, context and history unchanged"),
+            capture.contains("Draft cleared; conversation and history unchanged"),
             "{capture}"
         );
         assert!(
@@ -10290,7 +10287,7 @@ fn followup_tools_default_has_no_per_tool_notices() {
             &reader,
             &mut output,
             start,
-            "/tools details for the full list",
+            "inspect the full list with '/tools details'",
         );
         until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
         drain_until_quiet(&reader, &mut output);
@@ -10308,7 +10305,7 @@ fn followup_tools_default_has_no_per_tool_notices() {
             "only the summary notice is allowed: {visible}"
         );
         assert!(
-            notices[0].contains("/tools details for the full list"),
+            notices[0].contains("inspect the full list with '/tools details'"),
             "{visible}"
         );
         assert!(stub.generations().is_empty());

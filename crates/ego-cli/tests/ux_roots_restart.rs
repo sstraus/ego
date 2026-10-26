@@ -18,10 +18,16 @@ fn roots_mutations_tell_the_user_to_exit_and_resume() {
         assert!(
             result
                 .stderr
-                .contains("Running sessions keep their current permissions"),
+                .contains("Saved roots apply when a session starts or resumes"),
             "{}",
             result.stderr
         );
-        assert!(result.stderr.contains("/quit"), "{}", result.stderr);
+        assert!(
+            result
+                .stderr
+                .contains("running sessions keep their current file access"),
+            "{}",
+            result.stderr
+        );
     }
 }

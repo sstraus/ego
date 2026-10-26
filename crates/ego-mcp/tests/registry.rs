@@ -702,7 +702,7 @@ async fn new_invalid_server_exposes_no_tool_and_typed_auth_is_sanitized() {
     );
     assert_eq!(
         errors,
-        ["MCP server `alpha`: server configuration is invalid"]
+        ["MCP server 'alpha': server configuration is invalid; inspect with 'ego mcp ls'"]
     );
     admission.push(Outcome::AuthorizationRequired {
         issuer: "https://issuer.example".to_owned(),
@@ -744,6 +744,12 @@ async fn new_invalid_server_exposes_no_tool_and_typed_auth_is_sanitized() {
     assert_eq!(
         auth_server.diagnostic().expect("auth diagnostic").failure(),
         McpFailure::Authorization
+    );
+    // Catches: the authorization notice sends a REPL user out to the shell or
+    // leaves a placeholder instead of the configured server name.
+    assert_eq!(
+        auth_server.diagnostic().unwrap().message(),
+        "authorization is required; run '/mcp login alpha'"
     );
     let events = journal.events();
     assert!(events.iter().any(|event| matches!(event,
@@ -1022,7 +1028,7 @@ async fn status_servers_are_canonicalized_by_name_across_mixed_outcomes() {
     assert!(errors.iter().all(|error| !error.contains("zeta-value")));
     assert_eq!(
         errors,
-        ["MCP server `zeta`: server configuration is invalid"]
+        ["MCP server 'zeta': server configuration is invalid; inspect with 'ego mcp ls'"]
     );
 }
 
@@ -1088,7 +1094,11 @@ async fn rejected_materialization_candidate_does_not_abort_valid_admission() {
     );
     let errors = status.mcp_errors();
     assert_eq!(errors.len(), 1);
-    assert!(errors[0].contains("beta"));
+    // Catches: missing credentials still demand a guessed CLI strategy.
+    assert_eq!(
+        errors[0],
+        "MCP server 'beta': server credential is unavailable; run '/mcp login beta'"
+    );
     assert!(!errors[0].contains("access_token"));
     assert!(!errors[0].contains("client_secret"));
 }
@@ -1752,8 +1762,9 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
         let status = registry.status();
         let server = status.servers().first().expect("status");
         let diagnostic = server.diagnostic().expect("diagnostic");
-        if status.mcp_errors() != ["MCP server `alpha`: server configuration is invalid"]
-            || diagnostic.message() != "server configuration is invalid"
+        if status.mcp_errors()
+            != ["MCP server 'alpha': server configuration is invalid; inspect with 'ego mcp ls'"]
+            || diagnostic.message() != "server configuration is invalid; inspect with 'ego mcp ls'"
             || diagnostic.failure() != McpFailure::InvalidValue
         {
             // Report the corpus index, never echo the raw cause into test diagnostics.
@@ -1761,7 +1772,10 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
         }
         for event in journal.events() {
             if let McpRegistryEvent::RefreshFailed { cause, .. } = event {
-                assert_eq!(cause, "server configuration is invalid");
+                assert_eq!(
+                    cause,
+                    "server configuration is invalid; inspect with 'ego mcp ls'"
+                );
             }
         }
     }
@@ -1788,7 +1802,7 @@ async fn private_log_failure_still_journals_refresh_failed_and_keeps_fixed_statu
         .expect("best-effort private log");
     assert_eq!(
         registry.status().mcp_errors(),
-        ["MCP server `alpha`: server configuration is invalid"]
+        ["MCP server 'alpha': server configuration is invalid; inspect with 'ego mcp ls'"]
     );
     assert!(
         journal
@@ -1806,7 +1820,10 @@ async fn private_log_failure_still_journals_refresh_failed_and_keeps_fixed_statu
             _ => None,
         })
         .collect();
-    assert_eq!(failed, ["server configuration is invalid"]);
+    assert_eq!(
+        failed,
+        ["server configuration is invalid; inspect with 'ego mcp ls'"]
+    );
     assert!(
         events
             .iter()
@@ -2953,4 +2970,104 @@ fn legacy_masker_causes() -> Vec<(String, String)> {
         capture(r#"{"name":"x-api-key","schema":{"value":"public"},"value":"LEAK"}"#);
     }
     causes
+}
+
+// Catches: OAuth publication requires static headers, or capture identity omits
+// the issuer/account binding and can resolve authority for another credential.
+#[tokio::test(flavor = "current_thread")]
+async fn oauth_publication_hashes_bound_identity_without_reading_rotating_tokens() {
+    use ego_core::credentials::{
+        CredentialKey, CredentialRemoval, CredentialStore, CredentialStoreError, CredentialTarget,
+        SecretMaterial,
+    };
+    struct NoCredentialRead;
+    impl CredentialStore for NoCredentialRead {
+        fn get(&self, _: &CredentialKey) -> Result<Option<SecretMaterial>, CredentialStoreError> {
+            panic!("capture must not read a token")
+        }
+        fn put(&self, _: &CredentialKey, _: SecretMaterial) -> Result<(), CredentialStoreError> {
+            panic!("capture must not write a token")
+        }
+        fn delete(&self, _: &CredentialKey) -> Result<CredentialRemoval, CredentialStoreError> {
+            panic!("capture must not delete a token")
+        }
+    }
+    let admission = fixture_admission(
+        (0..4)
+            .map(|_| {
+                Outcome::Candidate(candidate(
+                    SERVER,
+                    vec![CountingTool::new(
+                        "alpha_tool",
+                        Arc::new(AtomicUsize::new(0)),
+                    )],
+                ))
+            })
+            .collect(),
+    );
+    let (registry, _) = controller(admission);
+    let http = ego_core::config::McpHttpConfig::new(
+        "https://mcp.example.test/mcp".parse::<url::Url>().unwrap(),
+        McpHttpAuth::Oauth,
+        false,
+    )
+    .unwrap();
+    let mut fingerprints = Vec::new();
+    for (issuer, account) in [
+        ("https://issuer.example.test/", None),
+        ("https://issuer.example.test/", None),
+        ("https://issuer.example.test/", Some("other-account")),
+        ("https://other.example.test/", None),
+    ] {
+        let key = CredentialKey::new(
+            issuer.into(),
+            CredentialTarget::ProtectedResource(http.url.to_string()),
+            account.map(str::to_owned),
+        )
+        .unwrap();
+        let session = Arc::new(
+            ego_mcp::McpOAuthSession::new(
+                SERVER.parse().unwrap(),
+                http.clone(),
+                key,
+                Arc::new(NoCredentialRead),
+            )
+            .unwrap(),
+        );
+        let live = Arc::new(
+            McpServerAdmission::new(
+                SERVER.parse().unwrap(),
+                McpServerConfig::Http(http.clone()),
+                McpTransportMaterial::oauth(session),
+            )
+            .unwrap(),
+        );
+        let publication = registry
+            .reconcile(
+                McpRegistryRefresh::new(
+                    vec![McpRegistryCandidate::ready(
+                        live,
+                        McpConfigProvenance::Layer {
+                            source: Source::User,
+                        },
+                    )],
+                    RegistryTrigger::AuthorizationSucceeded,
+                    RegistryScope::All,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("OAuth server must publish without static header material");
+        assert_eq!(publication.admitted_tools(), ["alpha_tool"]);
+        fingerprints.push(publication.capture().stable_fingerprint().to_owned());
+    }
+    assert_eq!(
+        fingerprints[0], fingerprints[1],
+        "same binding survives a new OAuth session"
+    );
+    assert_ne!(
+        fingerprints[0], fingerprints[2],
+        "account changes authority"
+    );
+    assert_ne!(fingerprints[0], fingerprints[3], "issuer changes authority");
 }

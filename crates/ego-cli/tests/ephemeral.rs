@@ -24,10 +24,10 @@ fn refusal<const N: usize>(args: [&str; N]) -> String {
 }
 
 fn assert_refusal_message(message: &str) {
-    assert!(message.contains("--ephemeral"), "{message}");
-    assert!(message.contains("durable default"), "{message}");
-    assert!(message.contains("--session"), "{message}");
-    assert!(message.contains("--session-id"), "{message}");
+    assert!(
+        message.contains("'--ephemeral' is not supported; remove it to use a saved session"),
+        "{message}"
+    );
 }
 
 #[test]

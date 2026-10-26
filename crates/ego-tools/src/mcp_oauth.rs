@@ -34,6 +34,10 @@ impl LoopbackOAuthInteraction {
         })
     }
 
+    pub async fn receive_callback(&self) -> Result<McpOAuthCallback, McpError> {
+        read_callback(&self.listener, &self.redirect, self.deadline).await
+    }
+
     pub fn redirect_uri(&self) -> &Url {
         &self.redirect
     }
@@ -51,7 +55,7 @@ impl McpOAuthInteraction for LoopbackOAuthInteraction {
             // This URL is intended for the human, not model or diagnostic logs.
             println!("Authorize: {}", interaction.authorization_url());
             println!("Callback: {}", self.redirect);
-            read_callback(&self.listener, &self.redirect, self.deadline).await
+            self.receive_callback().await
         })
     }
 }
@@ -186,7 +190,7 @@ fn locator_path(
 fn locator_error() -> ego_mcp::McpError {
     ego_mcp::McpError::new(
         ego_mcp::McpFailure::Credential,
-        "MCP OAuth locator unavailable; run ego mcp login NAME",
+        "saved MCP login details could not be loaded; inspect the servers with 'ego mcp ls'",
     )
 }
 

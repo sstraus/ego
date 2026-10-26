@@ -1301,7 +1301,7 @@ impl McpRegistryStatus {
             .iter()
             .filter_map(|server| {
                 server.diagnostic.as_ref().map(|diagnostic| {
-                    format!("MCP server `{}`: {}", server.name, diagnostic.message)
+                    format!("MCP server '{}': {}", server.name, diagnostic.message)
                 })
             })
             .collect()
@@ -1486,19 +1486,21 @@ fn failed_publication_status(
 
 fn failure_message(failure: McpFailure) -> &'static str {
     match failure {
-        McpFailure::Absent => "server is unavailable",
-        McpFailure::InvalidValue => "server configuration is invalid",
-        McpFailure::InvalidResponse => "server returned an invalid response",
-        McpFailure::Authority => "server authority was rejected",
-        McpFailure::Transport => "server transport is unavailable",
-        McpFailure::Protocol => "server protocol failed",
-        McpFailure::Authorization => {
-            "authorization is required; run ego mcp login NAME with an explicit registration strategy"
+        McpFailure::Absent => "server is unavailable; inspect with 'ego mcp ls'",
+        McpFailure::InvalidValue => "server configuration is invalid; inspect with 'ego mcp ls'",
+        McpFailure::InvalidResponse => {
+            "server returned an invalid response; inspect with 'ego mcp ls'"
         }
-        McpFailure::Credential => {
-            "server credential is unavailable; run ego mcp login NAME with an explicit registration strategy"
+        McpFailure::Authority => {
+            "server access was blocked by the current policy; inspect with 'ego mcp ls'"
         }
-        McpFailure::Cancelled => "server admission was cancelled",
+        McpFailure::Transport => "could not connect to the server; inspect with 'ego mcp ls'",
+        McpFailure::Protocol => "communication with the server failed; inspect with 'ego mcp ls'",
+        McpFailure::Authorization => "authorization is required; run '/mcp login NAME'",
+        McpFailure::Credential => "server credential is unavailable; run '/mcp login NAME'",
+        McpFailure::Cancelled => {
+            "connecting to the server was cancelled; inspect with 'ego mcp ls'"
+        }
     }
 }
 
@@ -2455,15 +2457,24 @@ impl StableCaptureHasher {
                     "allow-insecure-loopback",
                     &[u8::from(config.allow_insecure_loopback)],
                 );
-                let headers = admission.http_headers().ok_or_else(|| {
-                    McpRegistryError::InvalidCandidate(
-                        "admitted MCP HTTP server has no HTTP material".to_owned(),
-                    )
-                })?;
-                self.count("header-count", headers.len());
-                for header in headers {
-                    self.field("header-name", header.name().as_bytes());
-                    self.field("header-value", header.value().expose_secret_bytes());
+                if let Some(session) = admission.oauth_session() {
+                    // OAuth authority is the issuer/resource/account binding,
+                    // not a rotating Bearer header or a second static-header path.
+                    self.field(
+                        "oauth-credential",
+                        &session.credential_key().canonical_bytes(),
+                    );
+                } else {
+                    let headers = admission.http_headers().ok_or_else(|| {
+                        McpRegistryError::InvalidCandidate(
+                            "admitted MCP HTTP server has no HTTP material".to_owned(),
+                        )
+                    })?;
+                    self.count("header-count", headers.len());
+                    for header in headers {
+                        self.field("header-name", header.name().as_bytes());
+                        self.field("header-value", header.value().expose_secret_bytes());
+                    }
                 }
             }
             McpServerConfig::Acp { server_id } => {

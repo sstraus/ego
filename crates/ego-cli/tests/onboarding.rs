@@ -46,8 +46,8 @@ fn assert_headless_refusal_without_config(result: &support::Finished, providers:
         "refusal must name the exact CLI remedy: {text}"
     );
     assert!(
-        text.contains("config set model"),
-        "refusal must name the exact persistent remedy: {text}"
+        text.contains("choose one with"),
+        "refusal must explain how to select the model: {text}"
     );
     for provider in providers {
         assert!(

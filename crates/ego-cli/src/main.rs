@@ -16,7 +16,7 @@ use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
 use std::io::IsTerminal;
 
-fn main() -> std::process::ExitCode {
+pub(crate) fn main() -> std::process::ExitCode {
     // Behavioural network probes are hidden child modes, not CLI commands.
     // Dispatch them before clap or any provider/configuration work.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -65,7 +65,7 @@ async fn ordinary_main() -> std::process::ExitCode {
         Ok(Invocation::Interactive(args)) if args.profile.as_deref() == Some("ci")
     ) {
         invocation = Err(cli::UsageError(
-            "profile `ci` is available only through ego run or ego resume".to_owned(),
+            "profile 'ci' is available only through 'ego run' or 'ego resume'".to_owned(),
         ));
     }
     // Before any run work, so a malformed `EGO_LOG` is a usage error rather

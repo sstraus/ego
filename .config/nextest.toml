@@ -5,6 +5,14 @@
 filter = 'binary(live_surface_pty) & test(help_latency::)'
 threads-required = 'num-test-threads'
 
+# This cancellation test waits at most 10 s for a real probe to start. Its
+# cold executable hash and probe launches must not compete with the suite's
+# process-heavy tests; contention can consume the window before the script runs.
+# Reserve the budget, not a longer timeout: cancellation assertions stay intact.
+[[profile.default.overrides]]
+filter = 'test(=run::executor::regression_case_tests::cancelled_readmission_does_not_complete_measurement)'
+threads-required = 'num-test-threads'
+
 [test-groups]
 # The real macOS general pasteboard is one machine-wide resource. nextest
 # runs each test as its own process, so an in-process lock cannot serialize

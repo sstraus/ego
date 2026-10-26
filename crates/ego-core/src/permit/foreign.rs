@@ -1342,12 +1342,12 @@ impl fmt::Display for ExecutableDenial {
         match self {
             Self::OutsidePerimeter { path } => write!(
                 f,
-                "sandbox denies execution of {}; add this exact canonical path to exec_paths in ego config edit, then /quit and ego resume <session-id>",
+                "sandbox denies execution of {}; add this exact canonical path to exec_paths with 'ego config edit'. Saved changes apply after resuming the session",
                 word(path)
             ),
             Self::ReadOnlyRoot { path, root } => write!(
                 f,
-                "sandbox denies execution of {} inside read-only root {}; change or remove its read-only restriction in ego config edit, then /quit and ego resume <session-id>",
+                "sandbox denies execution of {} inside read-only root {}; change or remove its read-only restriction with 'ego config edit'. Saved changes apply after resuming the session",
                 word(path),
                 word(root)
             ),

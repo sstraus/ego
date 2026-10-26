@@ -326,9 +326,9 @@ fn readable_discards_extended_working_repaints_but_keeps_real_answers() {
 fn redact_session_id_replaces_only_the_id_after_the_resume_hint() {
     assert_eq!(
         redact_session_id(
-            "εgo: To resume: ego resume 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\nid 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\n"
+            "εgo: To resume: 'ego resume 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293'\nid 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\n"
         ),
-        "εgo: To resume: ego resume <session>\nid 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\n"
+        "εgo: To resume: 'ego resume <session>'\nid 0198c7f4-9c1f-7a2b-8c3d-4e5f60718293\n"
     );
 }
 

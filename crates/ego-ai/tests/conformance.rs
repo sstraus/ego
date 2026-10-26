@@ -351,11 +351,9 @@ async fn check_3_a_refusal_is_three_events_and_repeats_the_provider() {
 /// path would have made this check silently unfalsifiable for xAI — it would
 /// panic on the fixture, or worse, be quietly relaxed until it passed.
 ///
-/// That the mapping needs no such knowledge is the actual finding. It parses
-/// the family's envelope and **relays a body it could not parse verbatim**, so
-/// xAI's sentence reaches the `AiEvent::Error` inside the raw JSON and check 3
-/// passes. A decode *difference* that the fallback already covers is not a
-/// decode *failure*, and only a failure would cost xAI its membership.
+/// The mapping recognizes nested and flat typed error messages, without
+/// relaying their surrounding bodies. This independent fixture path verifies
+/// that the provider's diagnostic sentence survives that projection.
 fn provider_message(profile: &Profile, body: &str) -> String {
     let document: serde_json::Value = serde_json::from_str(body).expect("an error fixture is JSON");
     let mut at = &document;

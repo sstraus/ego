@@ -158,7 +158,7 @@ pub(crate) fn decide_missing_model(
         return StartupDecision::Pick(
             snapshot,
             Some(UsageError(format!(
-                "startup default `{default}` does not belong to sole usable provider `{provider}`; change `{provider}` under `[default_model]` in models.toml or choose an available row"
+                "default model '{default}' does not belong to the available provider '{provider}'; choose an available model below"
             ))),
         );
     }
@@ -166,7 +166,7 @@ pub(crate) fn decide_missing_model(
         return StartupDecision::Pick(
             snapshot,
             Some(UsageError(format!(
-                "startup default `{default}` for sole usable provider `{provider}` cannot be selected: {error}; change `{provider}` under `[default_model]` in models.toml or choose an available row"
+                "default model '{default}' for provider '{provider}' cannot be selected: {error}; choose an available model below"
             ))),
         );
     }
@@ -176,7 +176,7 @@ pub(crate) fn decide_missing_model(
 
 fn missing_default(provider: &str) -> UsageError {
     UsageError(format!(
-        "sole usable provider `{provider}` has no startup default; add `{provider} = \"{provider}/model\"` under `[default_model]` in models.toml or choose an available row"
+        "provider '{provider}' has no startup default; choose an available model below"
     ))
 }
 
@@ -198,10 +198,10 @@ fn headless_refusal(
         .iter()
         .filter_map(|provider| defaults.get(provider))
         .filter(|slug| available_entry(snapshot, &slug.to_string()).is_ok())
-        .map(|slug| format!("`--model {slug}` or `ego config set model='\"{slug}\"'`"))
+        .map(|slug| format!("'--model {slug}'"))
         .collect::<Vec<_>>();
     let remedy = if exact.is_empty() {
-        "`--model <provider/model>` or `ego config set model='\"<provider/model>\"'`".to_owned()
+        "'--model PROVIDER/MODEL'".to_owned()
     } else {
         exact.join("; ")
     };

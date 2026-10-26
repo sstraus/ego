@@ -185,33 +185,22 @@ impl RegisteredTool {
                             .collect()
                     )
                 ),
+                // SkillOperation remains the closed admission contract for each kind.
                 parameters: serde_json::json!({
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["kind", "name", "arguments"],
-                            "properties": {
-                                "kind": { "const": "invoke" },
-                                "name": { "type": "string" },
-                                "arguments": { "type": "string" },
-                                "bare": {
-                                    "type": "boolean",
-                                    "description": "Run this invocation without the workspace posture of this session: no project configuration, no project hooks. Omit to let the subagent inherit what you are subject to."
-                                }
-                            }
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["invoke", "read_resource"] },
+                        "name": { "type": "string", "description": "Required for invoke; omit or use an empty string for read_resource." },
+                        "arguments": { "type": "string", "description": "Optional for invoke; defaults to an empty string. Omit or use an empty string for read_resource." },
+                        "bare": {
+                            "type": "boolean",
+                            "description": "For invoke only. Run without the workspace posture of this session: no project configuration, no project hooks. Omit to inherit it. For read_resource, omit or use false."
                         },
-                        {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["kind", "invocation", "path"],
-                            "properties": {
-                                "kind": { "const": "read_resource" },
-                                "invocation": { "type": "string" },
-                                "path": { "type": "string" }
-                            }
-                        }
-                    ]
+                        "invocation": { "type": "string", "description": "Required for read_resource; omit or use an empty string for invoke." },
+                        "path": { "type": "string", "description": "Required for read_resource; omit or use an empty string for invoke." }
+                    }
                 }),
             },
         }

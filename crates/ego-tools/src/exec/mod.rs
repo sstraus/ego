@@ -712,6 +712,12 @@ impl RunEffectPorts {
         }
     }
 
+    /// Wake the interactive host after a session-owned exec settles.
+    /// The host reads authoritative snapshots and may coalesce these signals.
+    pub fn set_background_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.process.context.set_background_waker(wake);
+    }
+
     pub fn process_handle(&self) -> Arc<dyn ProcessExecutor> {
         Arc::clone(&self.process) as Arc<dyn ProcessExecutor>
     }

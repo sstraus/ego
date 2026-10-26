@@ -90,9 +90,8 @@ pub struct Profile {
     ///
     /// This is deliberately in the *test* table and not on the row. A feature
     /// bit on a row that a decoder consults is the per-provider branch under a
-    /// new name, and §9 forbids it — the mapping keeps one behaviour for both
-    /// shapes, relaying a body it could not parse verbatim, and that is exactly
-    /// why xAI passes a check written around OpenAI's envelope.
+    /// new name, and §9 forbids it. The mapping recognizes both typed shapes
+    /// and keeps only their diagnostic fields, not the surrounding body.
     pub error_message_at: &'static [&'static str],
     /// The reasoning level this provider's canonical request asks for.
     ///

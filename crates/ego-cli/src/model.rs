@@ -221,9 +221,7 @@ pub(crate) fn reasoning_default_notice(
         && requested.is_none()
         && matches!(&capabilities.reasoning_efforts, ReasoningEffortSupport::Only(levels)
             if levels.len() == 1 && levels.contains(&ThinkingLevel::Off)))
-    .then_some(
-        "This OpenRouter model has no stated non-off reasoning support; using reasoning off.",
-    )
+    .then_some("OpenRouter does not list reasoning support for this model; reasoning is off.")
 }
 
 /// Use the least effort the resolved judge explicitly supports.
@@ -974,7 +972,7 @@ mod tests {
         assert!(
             reasoning_default_notice(&identity, &capabilities, None)
                 .unwrap()
-                .contains("reasoning off")
+                .contains("reasoning is off")
         );
         assert!(
             reasoning_default_notice(&identity, &capabilities, Some(ThinkingLevel::Low)).is_none()

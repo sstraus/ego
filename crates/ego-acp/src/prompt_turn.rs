@@ -115,7 +115,7 @@ where
                             sessions.refuse(&id, correlation.generation);
                             return responder.respond_with_error(Error::new(
                                 SESSION_HELD,
-                                "the session is held; continue it with `_ego/resume`",
+                                "the session is paused; continue it with '_ego/resume'",
                             ));
                         }
                         Ok(_) => {}

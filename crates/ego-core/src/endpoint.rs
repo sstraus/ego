@@ -163,15 +163,13 @@ impl fmt::Display for Refusal {
         match self {
             Self::NotLoopback { address } => write!(
                 f,
-                "{address} is reachable from outside this machine, and ego will \
-                 not serve there unless you say so: pass `--allow-public-bind` \
-                 if that is what you meant, or bind to a local endpoint, or to \
-                 127.0.0.1 or ::1"
+                "{address} is reachable from outside this machine; pass \
+                 '--allow-public-bind' only if you intend to allow remote connections"
             ),
             Self::UnnamedLocal => write!(
                 f,
-                "a local endpoint needs a name: pass the socket path, or on \
-                 Windows the pipe name, to `--listen`"
+                "the local endpoint has no name; set '--listen' to a socket path \
+                 (a pipe name on Windows)"
             ),
         }
     }
@@ -244,7 +242,10 @@ mod tests {
             );
             let rendered = refusal.to_string();
             assert!(rendered.contains("--allow-public-bind"), "{rendered}");
-            assert!(rendered.contains("127.0.0.1"), "{rendered}");
+            assert!(
+                rendered.contains("only if you intend to allow remote connections"),
+                "{rendered}"
+            );
         }
     }
 

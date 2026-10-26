@@ -1127,7 +1127,7 @@ impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
             };
             let already_settled = state.subagents.iter().any(|event| matches!(event, ego_core::state::SubagentEvent::Settled { invocation, .. } if *invocation == task.invocation));
             if !already_settled && self.task_policy.as_ref() != Some(&authority.policy) {
-                return Err("background task policy differs from the session epoch; start a new session to inherit the changed authority".to_owned());
+                return Err("background task settings differ from this session; start a new session to use the changed settings".to_owned());
             }
             if !state.background_tasks.contains_key(&task.invocation) {
                 journal

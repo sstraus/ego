@@ -107,10 +107,7 @@ fn goal_visibility_exhaustion_names_objective_condition_and_actions() {
         "Goal stopped: Verify artifact 527",
         "turns 1/1",
         "artifact missing 527",
-        "/goal show",
-        "/goal achieve",
-        "/goal block",
-        "--goal-turns",
+        "Inspect the goal with '/goal show'.",
     ] {
         assert!(output.contains(expected), "missing {expected}: {output}");
     }
@@ -155,7 +152,7 @@ fn goal_visibility_needs_operator_blocks_without_spending_allowance() {
     let start = output.len();
     input.write_all(b"verify the account\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "active goal");
+    until_normalized(&reader, &mut output, start, "Inspect the goal with");
     drain_until_quiet(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
@@ -198,10 +195,7 @@ fn goal_visibility_needs_operator_blocks_without_spending_allowance() {
         "needs operator",
         "Operator must approve account login",
         "turns 0/20",
-        "/goal set TEXT",
-        "require an active goal",
-        "/goal show",
-        "/goal achieve",
+        "Inspect the goal with '/goal show'.",
     ] {
         assert!(
             transcript.contains(expected),

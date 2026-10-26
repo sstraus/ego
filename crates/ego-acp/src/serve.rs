@@ -1262,8 +1262,8 @@ impl Sessions {
         })?;
         if registered.busy || registered.run.is_some() {
             return Err(refused_params(
-                "this session has already started preparing a run: pick the sandbox \
-                 before the first prompt, or start a new session",
+                "this session has already started preparing a run; start a new \
+                 session to choose a different sandbox",
             ));
         }
         if let (Some(pinned), SessionControlChange::Sandbox(pick)) = (
@@ -1275,8 +1275,8 @@ impl Sessions {
         ) && pinned != *pick
         {
             return Err(refused_params(format!(
-                "this session's MCP servers already run under the `{pinned}` sandbox: \
-                 pick the sandbox when the session is created, or start a new session"
+                "this session's MCP servers already use the '{pinned}' sandbox; \
+                 start a new session to choose a different sandbox"
             )));
         }
         // Keep the registration lock until the synchronous pick has landed.
@@ -1662,11 +1662,11 @@ async fn admit_mcp(
     match admitter.admit(servers, connection, context).await {
         Ok(Some(admission)) if supplied => Ok(Some(admission)),
         Ok(Some(_)) => Err(McpSessionAdmissionError::new(
-            "an empty ACP MCP selection unexpectedly produced live authority",
+            "MCP servers were connected even though none were selected",
         )),
         Ok(None) if !supplied => Ok(None),
         Ok(None) => Err(McpSessionAdmissionError::new(
-            "the supplied MCP servers did not produce live session authority",
+            "the selected MCP servers could not be connected to this session",
         )),
         Err(error) => Err(error),
     }
@@ -2887,7 +2887,7 @@ fn lifecycle_error(error: &LifecycleError) -> Error {
         LifecycleError::EffectUncertain => {
             return Error::new(
                 ErrorCode::InternalError.into(),
-                "the session's last run has an uncertain effect; close it with `session/close` and start a new chat with `session/new`",
+                "the last run may have changed something before it stopped; close this session with 'session/close'",
             );
         }
         // ego failed. Not the caller's parameters, and not something a retry

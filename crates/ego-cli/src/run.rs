@@ -200,7 +200,7 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
         | RunTermination::ContextOverflow { message } => message.clone(),
         RunTermination::Failed { message } => message.clone(),
         RunTermination::QuestionRequired { question } => format!(
-            "stopped: human input required — answer with `ego resume --answer {}=JSON`",
+            "stopped: your answer is needed — respond with 'ego resume --answer {}=JSON'",
             question.as_ref().id
         ),
         // Two sentences, because one of them was about to be false. "Nobody

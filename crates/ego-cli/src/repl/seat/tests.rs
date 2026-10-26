@@ -813,10 +813,13 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
     let (seat_control, _seat_control_receiver) = bounded(CHANNEL_CAPACITY);
     let (_ingress, coordinator) = interactive_control();
     let registry = Arc::new(ActionRegistry::final_surface());
+    let (background_wake, background_ready) = bounded(1);
     let seat = Seat {
         kind: SeatKind::Live(Box::new(LiveSeat {
             input,
             inspections,
+            background_ready,
+            background_wake,
             inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
             control: seat_control,
             activated: AtomicBool::new(false),
@@ -837,6 +840,14 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
 
     assert_eq!(seat.read(), Line::Submitted("initial".to_string()));
     assert_eq!(phase.get(), EditPhase::Busy);
+    // Catches: the production seat ignores process wakes or blocks a producer
+    // when several processes finish before the coordinator reads.
+    seat.wake_background_exec();
+    seat.wake_background_exec();
+    assert_eq!(
+        seat.read(),
+        Line::HostCommand(HostCommand::BackgroundExecSettled)
+    );
     if let SeatKind::Live(live) = &seat.kind {
         let status = live.status.lock().expect("surface status lock");
         status.reply_started.store(true, Ordering::Release);
@@ -859,10 +870,13 @@ fn pending_inspections_are_answered_before_a_queued_session_switch() {
     let (control, _control_receiver) = bounded(CHANNEL_CAPACITY);
     let (_ingress, coordinator) = interactive_control();
     let registry = Arc::new(ActionRegistry::final_surface());
+    let (background_wake, background_ready) = bounded(1);
     let seat = Seat {
         kind: SeatKind::Live(Box::new(LiveSeat {
             input,
             inspections,
+            background_ready,
+            background_wake,
             inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
             control,
             activated: AtomicBool::new(false),
@@ -1044,7 +1058,7 @@ fn regression_case_surface_effect_maps_idle_and_refuses_busy() {
                 .notice
                 .as_deref()
                 .unwrap_or_default()
-                .contains("unavailable while a turn is running")
+                .contains("cannot change the session name or goal during a reply")
         );
     }
 }
@@ -1420,7 +1434,7 @@ fn slash_help_shows_name_goal_and_mcp_grammar() {
     for grammar in [
         "/name [show|set TEXT|clear]",
         "/goal [show|set TEXT|achieve|block REASON]",
-        "/mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
+        "/mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
     ] {
         assert!(help.contains(grammar), "missing {grammar}: {help}");
         assert!(

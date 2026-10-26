@@ -771,7 +771,7 @@ fn every_selectable_subscription_row_names_login_when_all_sources_are_missing() 
         assert!(
             error
                 .to_string()
-                .contains(&format!("`ego auth login {}`", row.id()))
+                .contains(&format!("'ego auth login {}'", row.id()))
         );
     }
 }

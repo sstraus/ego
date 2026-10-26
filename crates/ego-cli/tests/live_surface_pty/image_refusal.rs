@@ -51,7 +51,8 @@ fn busy_image_paste_keeps_attachments_with_the_submitted_draft() {
     while Instant::now() < deadline {
         let rendered = normalized(&output[paste_start..]);
         if rendered.contains("[image: queued-image.png]")
-            || rendered.contains("image paste is unavailable while source work is pending")
+            || rendered
+                .contains("cannot paste an image while work is pending; wait for it to finish")
         {
             break;
         }
@@ -343,7 +344,7 @@ fn saved_image_draft_survives_clearing_a_different_draft() {
     );
     input.write_all(b"yes\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "Composer cleared");
+    until_normalized(&reader, &mut output, start, "Draft cleared");
     drain_until_quiet(&reader, &mut output);
     let start = output.len();
     input.write_all(b"\x13").unwrap();

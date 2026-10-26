@@ -640,8 +640,8 @@ impl fmt::Display for PolicyDenied {
                 if self.is_unreachable_read() && !Ruleset::is_credential_path(path) {
                     write!(
                         f,
-                        "; ask the user to run `ego roots add --access read '{path}'` \
-                         and to resume the session"
+                        "; ask the user to run 'ego roots add --access read '{path}''. \
+                         Saved changes apply when you resume the session"
                     )?;
                 }
                 Ok(())

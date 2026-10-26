@@ -448,10 +448,10 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         // v1 has no word that distinguishes "over" from "waiting", and the
         // only useful thing to say is the one call that continues it.
         RunTermination::Paused => {
-            Err("the turn stopped at a pause boundary; continue it with `_ego/resume`".to_string())
+            Err("the turn is paused; continue it with '_ego/resume'".to_string())
         }
         RunTermination::QuestionRequired { question } => Err(format!(
-            "question {} still requires an answer; resume it with `ego resume --answer {}=JSON`",
+            "question {} still needs an answer; respond with 'ego resume --answer {}=JSON'",
             question.as_ref().id,
             question.as_ref().id
         )),

@@ -759,7 +759,7 @@ async fn protocol_ci_profile_is_refused_before_session_or_provider_effects() {
     };
     assert_eq!(
         message,
-        "profile ci available only through ego run or ego resume"
+        "profile 'ci' is available only through 'ego run' or 'ego resume'"
     );
     assert!(
         !session_root.exists(),
@@ -3572,7 +3572,7 @@ async fn background_task_changed_parent_policy_is_not_replaced_with_stale_author
     .snapshot()
     .digest();
     let error = fixture.owner.launch_task(request).await.unwrap_err();
-    assert!(error.contains("policy differs"), "{error}");
+    assert!(error.contains("settings differ"), "{error}");
     assert!(fixture.owner.tasks.lock().unwrap().is_empty());
     assert!(fixture.events().await.iter().all(|event| !matches!(
         event.kind,

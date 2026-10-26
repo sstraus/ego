@@ -401,16 +401,16 @@ fn provider_unavailable(
     use ego_ai::catalogue::ModelAvailabilityCause;
     let remedy = match cause {
         ModelAvailabilityCause::MissingCredential => {
-            format!("not signed in\nRun `ego auth login {provider}`")
+            format!("not signed in\nSign in with 'ego auth login {provider}'")
         }
         ModelAvailabilityCause::SourceUnreachable => {
             format!(
-                "cannot reach provider; check its connection, then run `ego models --provider {provider} --refresh`"
+                "cannot reach provider; retry with 'ego models --provider {provider} --refresh'"
             )
         }
         ModelAvailabilityCause::SourceMalformed | ModelAvailabilityCause::IncompleteFacts => {
             format!(
-                "model details missing or invalid; run `ego models --provider {provider} --refresh`"
+                "model details are missing or invalid; refresh them with 'ego models --provider {provider} --refresh'"
             )
         }
         ModelAvailabilityCause::MappingUnavailable => {
@@ -670,10 +670,13 @@ mod tests {
         let (control, _control_receiver) = bounded(CHANNEL_CAPACITY);
         let (_ingress, coordinator) = interactive_control();
         let registry = Arc::new(ActionRegistry::final_surface());
+        let (background_wake, background_ready) = bounded(1);
         let seat = Seat {
             kind: SeatKind::Live(Box::new(LiveSeat {
                 input,
                 inspections,
+                background_ready,
+                background_wake,
                 inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
                 control,
                 activated: AtomicBool::new(false),

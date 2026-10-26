@@ -55,8 +55,7 @@ impl Perimeter {
         warnings.extend_from_slice(confinement.admission_warnings());
         if confinement.level() == crate::permit::Confinement::Off {
             warnings.push(
-                "open-perimeter: sandbox is off; exec children have unrestricted filesystem access"
-                    .into(),
+                "sandbox is off; commands can access any file your user account can access".into(),
             );
         }
         Self {

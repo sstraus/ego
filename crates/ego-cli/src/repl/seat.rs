@@ -1175,7 +1175,7 @@ enum Control {
     },
     SelectSetup {
         request: QuestionRequest,
-        reply: Sender<QuestionOutcome>,
+        reply: oneshot::Sender<QuestionOutcome>,
     },
     ConfirmSetup {
         text: String,
@@ -1217,6 +1217,8 @@ enum Control {
 struct LiveSeat {
     input: Receiver<Line>,
     inspections: Receiver<HostCommand>,
+    background_ready: Receiver<()>,
+    background_wake: Sender<()>,
     inspection_waker: Arc<futures::task::AtomicWaker>,
     control: Sender<Control>,
     activated: AtomicBool,
@@ -1491,11 +1493,14 @@ impl Seat {
                 }
             })?;
 
+        let (background_wake, background_ready) = bounded(1);
         Ok((
             Self {
                 kind: SeatKind::Live(Box::new(LiveSeat {
                     input,
                     inspections,
+                    background_ready,
+                    background_wake,
                     inspection_waker,
                     control: seat_control,
                     activated: AtomicBool::new(false),
@@ -1527,6 +1532,7 @@ impl Seat {
                 let line = crossbeam::channel::select_biased! {
                     recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
                     recv(live.input) -> line => line.unwrap_or(Line::Ended),
+                    recv(live.background_ready) -> _ => Line::HostCommand(HostCommand::BackgroundExecSettled),
                 };
                 if matches!(
                     line,
@@ -2064,15 +2070,44 @@ impl Seat {
         SetupCancellation { receiver, status }
     }
 
+    pub(crate) fn authorization_browser_command(url: &str) -> Option<std::process::Command> {
+        question::authorization_browser_command(url)
+    }
+
     /// Transient host selection: no model tool question or durable event.
     pub(crate) fn select_setup(&self, request: QuestionRequest) -> QuestionOutcome {
-        if !self.terminal {
+        futures::executor::block_on(self.select_host(request))
+    }
+
+    /// Transient host selection that can be dropped on cancellation or deadline.
+    pub(crate) async fn select_host(&self, request: QuestionRequest) -> QuestionOutcome {
+        let SeatKind::Live(live) = &self.kind else {
+            return QuestionOutcome::Unavailable;
+        };
+        struct PendingModal<'a> {
+            live: &'a LiveSeat,
+            active: bool,
+        }
+        impl Drop for PendingModal<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    self.live.wake_owner();
+                }
+            }
+        }
+        let (reply, answer) = oneshot::channel();
+        if live
+            .control
+            .send(Control::SelectSetup { request, reply })
+            .is_err()
+        {
             return QuestionOutcome::Unavailable;
         }
-        self.request(
-            |reply| Control::SelectSetup { request, reply },
-            QuestionOutcome::Unavailable,
-        )
+        let mut pending = PendingModal { live, active: true };
+        live.wake_owner();
+        let outcome = answer.await.unwrap_or(QuestionOutcome::Unavailable);
+        pending.active = false;
+        outcome
     }
 
     pub(crate) fn confirm_setup(&self, text: String) -> Confirmation {
@@ -2144,6 +2179,14 @@ impl crate::run::Reads for Seat {
 }
 
 impl crate::run::InteractiveSeat for Seat {
+    fn wake_background_exec(&self) {
+        if let SeatKind::Live(live) = &self.kind {
+            // One token covers every ready snapshot; no process task waits
+            // for the input owner, including while a generation is active.
+            let _ = live.background_wake.try_send(());
+        }
+    }
+
     fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
         #[cfg(test)]
         if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
@@ -2790,7 +2833,7 @@ fn wait_image_reply(
                 if matches!(control, Control::Shutdown) { return None; }
                 if !answer_control(editor, phase, surface, controls, pending_control, control) { return None; }
             }
-            recv(answer) -> reply => return Some(reply.unwrap_or_else(|_| Err("image admission was cancelled; the draft was retained".to_owned()))),
+            recv(answer) -> reply => return Some(reply.unwrap_or_else(|_| Err("adding the image was cancelled; your draft was kept".to_owned()))),
             recv(signals) -> sequence => {
                 let Ok(sequence) = sequence else { return None; };
                 let mut out = std::io::stdout().lock();

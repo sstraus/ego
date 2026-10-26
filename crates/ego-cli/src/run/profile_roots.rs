@@ -89,12 +89,12 @@ pub(crate) fn clamp(
                         access: ego_core::permit::RootAccess::Read,
                     });
                     effective.profile_warnings.push(format!(
-                        "root {} exceeds profile write ceiling; using read",
+                        "write access to {} is blocked by the profile; read access only",
                         root.path.display()
                     ));
                 } else {
                     effective.profile_warnings.push(format!(
-                        "root {} exceeds profile ceiling; dropped",
+                        "file access to {} is blocked by the profile; path skipped",
                         root.path.display()
                     ));
                 }
@@ -116,7 +116,7 @@ pub(crate) fn clamp(
             Ok(()) => kept.push(path.clone()),
             Err(ego_core::permit::RootsError::OutsideCeiling { .. }) => {
                 effective.profile_warnings.push(format!(
-                    "exec root {} exceeds profile ceiling; dropped",
+                    "exec file access to {} is blocked by the profile; path skipped",
                     path.display()
                 ))
             }
@@ -144,15 +144,12 @@ pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec
                 access: ego_core::permit::RootAccess::ReadWrite,
             }];
         } else {
-            warnings.push(
-                "default-root-missing: ~/Gits is absent; using workspace-only perimeter".into(),
-            );
+            warnings.push("~/Gits does not exist; file access is limited to the workspace".into());
         }
     }
     if effective.sandbox == Some(ego_core::permit::Confinement::Off) {
         warnings.push(
-            "open-perimeter: sandbox is off; exec children have unrestricted filesystem access"
-                .into(),
+            "sandbox is off; commands can access any file your user account can access".into(),
         );
     }
     warnings
@@ -196,7 +193,7 @@ mod tests {
         assert!(
             defaults(&mut missing, &home)
                 .iter()
-                .any(|warning| warning.contains("open-perimeter"))
+                .any(|warning| warning.contains("sandbox is off"))
         );
     }
 }

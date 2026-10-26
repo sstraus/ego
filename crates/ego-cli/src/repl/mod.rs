@@ -77,6 +77,8 @@ pub enum HostCommand {
     Mcp(String),
     McpContext(actions::McpContextCommand),
     Background,
+    /// A process outcome is ready; not human-authored input.
+    BackgroundExecSettled,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
     BusySubmit,

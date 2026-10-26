@@ -48,8 +48,7 @@ pub enum ActionId {
 
 pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
 pub(crate) const GOAL_GRAMMAR: &str = "usage: /goal [show|set TEXT|achieve|block REASON]";
-pub(crate) const MCP_GRAMMAR: &str =
-    "usage: /mcp [toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
+pub(crate) const MCP_GRAMMAR: &str = "usage: /mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
@@ -541,11 +540,11 @@ impl ActionRegistry {
             )
             .unavailable("the interactive permission controller"),
             enabled(Mcp, "mcp", MCP_GRAMMAR),
-            enabled(Sessions, "sessions", "Browse durable sessions")
+            enabled(Sessions, "sessions", "Browse saved sessions")
                 .alias("history")
                 .alias("resume")
                 .alias("continue"),
-            enabled(Fork, "fork", "Fork a durable session"),
+            enabled(Fork, "fork", "Create a copy of this session"),
             enabled(Compact, "compact", "Compact the active context")
                 .unavailable("the compaction service"),
             enabled(Clear, "clear", "Clear composer and menu state"),
@@ -569,7 +568,7 @@ impl ActionRegistry {
                 "refresh",
                 "Apply current instructions in a new prompt epoch",
             ),
-            enabled(New, "new", "Create a durable session"),
+            enabled(New, "new", "Start a new saved session"),
             enabled(Name, "name", NAME_GRAMMAR),
             enabled(Goal, "goal", GOAL_GRAMMAR),
             enabled(
@@ -711,7 +710,9 @@ impl ActionRegistry {
                 .iter()
                 .find(|action| action.name == name)
                 .ok_or_else(|| {
-                    format!("unknown keybinding action `{name}`; use a canonical /help action name")
+                    format!(
+                        "unknown keybinding action '{name}'; choose an action listed in '/help'"
+                    )
                 })?;
             let id = action.id;
             let shortcuts = keys
@@ -1053,14 +1054,14 @@ impl ActionRegistry {
             || self.availability(ActionId::Skills) != Availability::Enabled
         {
             return Dispatch::Refused {
-                reason: "the skill catalogue is unavailable",
+                reason: "the skill list is unavailable",
             };
         }
         let capture = match self.skill_capture() {
             Ok(Some(capture)) => capture,
             Ok(None) | Err(_) => {
                 return Dispatch::Refused {
-                    reason: "the skill catalogue is unavailable",
+                    reason: "the skill list is unavailable",
                 };
             }
         };
@@ -1182,7 +1183,7 @@ impl ActionRegistry {
             Dispatch::Mcp(raw_arguments.trim().to_owned())
         } else {
             Dispatch::Refused {
-                reason: "this interactive action takes no arguments; use /help for local syntax",
+                reason: "this command takes no arguments; see '/help' for syntax",
             }
         })
     }
@@ -1205,7 +1206,7 @@ impl ActionRegistry {
             .collect::<Vec<_>>()
             .join(", ");
         Dispatch::UnknownSlash(format!(
-            "Unknown slash command. Nearest commands: {suggestions}. Use /help for syntax; add a leading space to send literal text that starts with /."
+            "Unknown slash command. Similar commands: {suggestions}. See '/help' for syntax."
         ))
     }
 

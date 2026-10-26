@@ -77,7 +77,7 @@ pub(crate) fn observed_session_view(
         text_with_width(&snapshot, width)
     } else {
         let mut rows = vec![format!(
-            "doctor: {} — /doctor details for evidence and remediation",
+            "doctor: {} — inspect the results with '/doctor details'",
             status_word(snapshot.status())
         )];
         for report in &snapshot.sections {
@@ -313,7 +313,7 @@ impl HealthProbe for Configuration {
                 "the system and user config.toml",
                 roots,
             )?
-            .remediation(HealthDetail::fixed("ego config edit")),
+            .remediation(HealthDetail::fixed("Run 'ego config edit'")),
         };
         Ok(vec![item])
     }
@@ -360,7 +360,7 @@ impl HealthProbe for Credentials {
                         "the credential store",
                         roots,
                     )?
-                    .remediation(HealthDetail::fixed("ego auth status")),
+                    .remediation(HealthDetail::fixed("Run 'ego auth status'")),
                 ]);
             }
         };
@@ -372,7 +372,9 @@ impl HealthProbe for Credentials {
                     HealthDetail::fixed("no provider credentials are stored"),
                     HealthDetail::fixed("the credential store"),
                 )
-                .remediation(HealthDetail::fixed("ego auth login PROVIDER")),
+                .remediation(HealthDetail::fixed(
+                    "List sign-in providers with 'ego auth login'",
+                )),
             ]);
         }
         let now = std::time::SystemTime::now()
@@ -407,7 +409,7 @@ impl HealthProbe for Credentials {
                     "the credential store",
                     roots,
                 )
-                .map(|item| item.remediation(HealthDetail::fixed("ego auth status")))
+                .map(|item| item.remediation(HealthDetail::fixed("Run 'ego auth status'")))
             })
             .collect()
     }
@@ -461,7 +463,7 @@ impl HealthProbe for SessionStore {
                 "the session store",
                 roots,
             )?
-            .remediation(HealthDetail::fixed("ego ls --all")),
+            .remediation(HealthDetail::fixed("Run 'ego ls --all'")),
         };
         Ok(vec![item])
     }
@@ -507,7 +509,7 @@ impl HealthProbe for Sandbox<'_> {
                 HealthDetail::fixed("the execution backend"),
             )
             .remediation(HealthDetail::fixed(
-                "run any command under --sandbox to have the backend measured",
+                "Run a command with '--sandbox' to check the sandbox backend",
             )),
         ])
     }
@@ -535,7 +537,7 @@ impl HealthProbe for Catalogue {
                 ),
                 HealthDetail::fixed("the model catalogue"),
             )
-            .remediation(HealthDetail::fixed("ego models")),
+            .remediation(HealthDetail::fixed("Run 'ego models'")),
         ])
     }
 }
@@ -580,12 +582,12 @@ impl HealthProbe for Mcp {
                     HealthItemId::about("mcp.server", name.to_string()),
                     HealthStatus::NotChecked,
                     "mcp.server",
-                    "configured; liveness is not probed because admission starts the server"
+                    "configured; connection not checked because that would start the server"
                         .to_owned(),
                     "the resolved configuration",
                     roots,
                 )
-                .map(|item| item.remediation(HealthDetail::fixed("ego mcp ls")))
+                .map(|item| item.remediation(HealthDetail::fixed("Run 'ego mcp ls'")))
             })
             .collect()
     }
@@ -678,7 +680,7 @@ impl HealthProbe for Skills {
                     "the skill catalogue",
                     roots,
                 )?
-                .remediation(HealthDetail::fixed("ego run /skills")),
+                .remediation(HealthDetail::fixed("Run 'ego run /skills'")),
             );
         }
         Ok(items)
@@ -723,7 +725,7 @@ impl HealthProbe for Hooks {
                 "the admitted hook catalogue",
                 roots,
             )?
-            .remediation(HealthDetail::fixed("ego hooks ls")),
+            .remediation(HealthDetail::fixed("Run 'ego hooks ls'")),
         };
         Ok(vec![item])
     }

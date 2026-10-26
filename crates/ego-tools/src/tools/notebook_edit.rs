@@ -24,12 +24,35 @@ static SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
     jsonschema::validator_for(&schema).expect("recorded Jupyter schema is valid")
 });
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize)]
 pub struct NotebookEditParams {
     /// Existing nbformat 4.5 notebook, absolute or relative to the working directory.
     pub path: String,
     #[serde(flatten)]
     pub edit: NotebookCellEdit,
+}
+
+// Keep the provider-facing object flat. Serde still validates NotebookCellEdit
+// before preparation, including variant-required fields and unknown fields.
+impl JsonSchema for NotebookEditParams {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NotebookEditParams".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "edit_mode"],
+            "properties": {
+                "path": { "type": "string", "description": "Existing nbformat 4.5 notebook, absolute or relative to the working directory." },
+                "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"] },
+                "cell_id": { "type": ["string", "null"], "description": "Required string for replace and delete. For insert, identifies the preceding cell; null or omitted inserts at the start." },
+                "new_source": { "type": "string", "description": "Required for replace and insert; omit for delete." },
+                "cell_type": { "type": "string", "enum": ["code", "markdown"], "description": "Required for insert; omit for replace and delete." }
+            }
+        })
+    }
 }
 
 pub struct NotebookEditTool;

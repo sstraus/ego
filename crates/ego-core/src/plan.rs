@@ -79,15 +79,21 @@ pub(crate) fn descriptor() -> crate::generator::types::ToolDescriptor {
     crate::generator::types::ToolDescriptor {
         name: "plan".into(),
         description: "Replace the durable ordered plan or update one step status. Keep IDs stable across replacements. Completed steps cannot be reopened by a step update; explicitly replace the plan to revise completed work. An empty replacement clears the plan. This does not change or achieve the session goal. Link task.plan_step to an existing ID for child progress.".into(),
-        parameters: serde_json::json!({"oneOf":[
-            {"type":"object","additionalProperties":false,"required":["operation","steps"],"properties":{
-                "operation":{"const":"replace"},"steps":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","text","status"],"properties":{
-                    "id":{"type":"string","minLength":1,"maxLength":80},"text":{"type":"string","minLength":1},"status":{"enum":["pending","in_progress","completed","blocked"]}
-                }}}
-            }},
-            {"type":"object","additionalProperties":false,"required":["operation","id","status"],"properties":{
-                "operation":{"const":"step"},"id":{"type":"string"},"status":{"enum":["pending","in_progress","completed","blocked"]}
-            }}
-        ]}),
+        // Model-facing fields stay flat; PlanUpdate validates the selected variant.
+        parameters: serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["operation"],
+            "properties":{
+                "operation":{"type":"string","enum":["replace","step"]},
+                "steps":{"type":"array","description":"Required for replace; omit for step.","items":{
+                    "type":"object","additionalProperties":false,"required":["id","text","status"],"properties":{
+                        "id":{"type":"string","minLength":1,"maxLength":80},
+                        "text":{"type":"string","minLength":1},
+                        "status":{"enum":["pending","in_progress","completed","blocked"]}
+                    }
+                }},
+                "id":{"type":"string","description":"Required for step; omit for replace."},
+                "status":{"enum":["pending","in_progress","completed","blocked"],"description":"Required for step; omit for replace."}
+            }
+        }),
     }
 }
