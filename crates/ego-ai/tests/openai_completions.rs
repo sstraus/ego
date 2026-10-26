@@ -1109,6 +1109,54 @@ async fn openrouter_diagnostic_fields_are_redacted_and_bounded() {
     }
 }
 
+/// Catches ordinary provider error codes being erased as high-entropy secrets.
+#[tokio::test]
+async fn openrouter_validation_codes_are_not_mistaken_for_credentials() {
+    let body = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"provider_name":"Azure","error_type":"invalid_request_error","provider_code":"invalid_function_parameters","raw":{"error":{"message":"Invalid schema at tools.0.function.parameters.properties"}}}}}"#;
+    let events: Vec<_> = decode(responding(400, body), None).collect().await;
+    let diagnostics: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AiEvent::Error { message, .. } => Some(message),
+            AiEvent::ProviderFailure { cause, .. } => Some(cause),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for diagnostic in diagnostics {
+        assert!(
+            diagnostic.contains("provider code invalid_function_parameters"),
+            "ordinary validation code was erased: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("tools.0.function.parameters.properties"),
+            "rejected schema field was erased: {diagnostic}"
+        );
+    }
+}
+
+/// Catches JSON-quoted Bearer context leaving the credential in upstream prose.
+#[tokio::test]
+async fn openrouter_quoted_bearer_credentials_do_not_reach_diagnostics() {
+    let body = r#"{"error":{"message":"Provider returned error","metadata":{"raw":{"error":{"message":"Invalid header: {\"Authorization\": \"Bearer synthetic-private-token\"}"}}}}}"#;
+    let events: Vec<_> = decode(responding(400, body), None).collect().await;
+    let diagnostics: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AiEvent::Error { message, .. } => Some(message),
+            AiEvent::ProviderFailure { cause, .. } => Some(cause),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 2);
+    for diagnostic in diagnostics {
+        assert!(
+            !diagnostic.contains("synthetic-private-token"),
+            "quoted bearer credential leaked: {diagnostic}"
+        );
+    }
+}
+
 /// regression case. OpenRouter wraps an upstream failure as a generic
 /// "Provider returned error" and puts the upstream's name and body in
 /// `error.metadata`. Keep the name for attribution and omit the raw body,
