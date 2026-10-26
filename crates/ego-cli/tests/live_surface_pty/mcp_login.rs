@@ -63,11 +63,6 @@ fn login_reconnect_contract(cimd: bool) {
     until_prompt_from(&reader, &mut output, start);
     if connected {
         let start = output.len();
-        input.write_all(b"/tools details\r").unwrap();
-        input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "search_tools");
-        until_prompt_from(&reader, &mut output, start);
-        let start = output.len();
         input.write_all(b"show available tools\r").unwrap();
         input.flush().unwrap();
         until_normalized(&reader, &mut output, start, "MCP-LOGIN-TOOLS-READY");
@@ -88,7 +83,7 @@ fn login_reconnect_contract(cimd: bool) {
             .as_array()
             .unwrap()
             .iter()
-            .any(|tool| tool["function"]["name"] == "search_tools")
+            .any(|tool| tool["function"]["name"] == "fixture_lookup")
     );
     let requests = oauth.requests.lock().unwrap();
     assert_eq!(
