@@ -546,31 +546,7 @@ fn error_text(text: &str, limit: usize) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    let mut redact_next = false;
-    text.split_whitespace()
-        .map(|word| {
-            // Keep consuming context markers before consuming their value:
-            // Authorization: Bearer <token> contains two markers, not a token
-            // named Bearer followed by harmless prose.
-            if word.eq_ignore_ascii_case("authorization:") || word.eq_ignore_ascii_case("bearer") {
-                redact_next = true;
-                return "<header:authorization>".to_string();
-            }
-            if std::mem::take(&mut redact_next) {
-                return "<secret:context-value>".to_string();
-            }
-            let redacted = ego_core::permit::shell::redact_atom(word);
-            // Diagnostic identifiers and schema paths are not shell operands.
-            // Preserve them when the shell's entropy heuristic alone matches;
-            // known credential formats and authorization context stay redacted.
-            if redacted == "<secret:high-entropy>" {
-                word.to_string()
-            } else {
-                redacted
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    ego_core::permit::shell::redact_credentials(&text)
         .chars()
         .take(limit)
         .collect()
