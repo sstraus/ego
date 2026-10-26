@@ -291,15 +291,16 @@ fn interactive_exec_refusal(bad_interpreter: bool) {
     }
     session.wait(TOOL_TURN_DONE);
     let transcript = normalized(&session.output[after_approval..]);
+    let session_output = session.output.clone();
     let (generations, _) = session.finish();
     assert!(
         !offered_grant,
         "filesystem grant offered for executable: {transcript}"
     );
-    let visible: String = transcript
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect();
+    // Read the retained terminal rows: the working spinner redraws between the
+    // notice's wrapped rows in the byte stream and splits phrases there.
+    let retained = support::terminal_transcript(&session_output, MODAL_ROWS, MODAL_COLS);
+    let visible: String = retained.chars().filter(|ch| !ch.is_whitespace()).collect();
     for expected in [
         "sandbox exec denied",
         "exec_paths",
@@ -316,7 +317,7 @@ fn interactive_exec_refusal(bad_interpreter: bool) {
         let expected_cells: String = expected.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(
             visible.contains(&expected_cells),
-            "missing {expected:?}: {transcript}"
+            "missing {expected:?}: {retained}"
         );
     }
     assert_eq!(generations.len(), 2, "one approval, no command retry");
