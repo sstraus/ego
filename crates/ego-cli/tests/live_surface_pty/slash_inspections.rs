@@ -171,7 +171,11 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     );
     assert!(!session.ego.workspace_path().join("survived").exists());
     let (generations, config) = session.finish();
-    assert_eq!(generations.len(), 4, "one settlement continuation is required");
+    assert_eq!(
+        generations.len(),
+        4,
+        "one settlement continuation is required"
+    );
     let history = generations.last().expect("settlement generation")["messages"].to_string();
     assert!(
         history.contains("cancelled") && history.contains("REGRESSION-MARKER-OUTPUT"),
