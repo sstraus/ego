@@ -1191,7 +1191,7 @@ impl McpOAuthSession {
         McpError::new(
             McpFailure::Credential,
             format!(
-                "MCP credential unavailable or revoked; run ego mcp login {} with an explicit registration strategy",
+                "saved MCP login is missing or no longer valid; see 'ego mcp login {} --help' to sign in again",
                 self.server
             ),
         )
