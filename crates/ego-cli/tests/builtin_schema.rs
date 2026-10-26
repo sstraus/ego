@@ -136,8 +136,8 @@ fn flat_builtin_schemas_do_not_weaken_variant_admission() {
         ),
         (
             "skill",
-            json!({"kind":"invoke","name":"schema-check"}),
-            "missing field `arguments`",
+            json!({"kind":"invoke","arguments":""}),
+            "missing field `name`",
         ),
         (
             "skill",
@@ -147,7 +147,7 @@ fn flat_builtin_schemas_do_not_weaken_variant_admission() {
         (
             "skill",
             json!({"kind":"invoke","name":"schema-check","arguments":"","path":"SKILL.md"}),
-            "unknown field `path`",
+            "field `path` does not belong to skill kind `invoke`",
         ),
     ];
     for (name, arguments, expected) in cases {
@@ -189,4 +189,59 @@ fn flat_builtin_schemas_do_not_weaken_variant_admission() {
             "{name} {arguments}: {response}"
         );
     }
+}
+
+#[test]
+fn recorded_flat_skill_calls_admit_instructions_with_empty_arguments() {
+    // Catches: schema-advertised empty sibling fields or omitted arguments reject invoke.
+    use support::{Reply, text, tool_call};
+
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/652-recorded-skill-calls.json")).unwrap();
+    let mut failures = Vec::new();
+    for fixture in fixtures.as_array().unwrap() {
+        let arguments = &fixture["payload"];
+        let stub = Stub::start(Plan {
+            completions: vec![
+                Reply::Sse(tool_call("recorded-skill", "skill", &arguments.to_string())),
+                Reply::Sse(text("done")),
+            ],
+            ..Plan::default()
+        });
+        let ego = Ego::against(&stub);
+        ego.home_file(
+            "skills/amber-check/SKILL.md",
+            "---\nname: amber-check\ndescription: Recorded call fixture\n---\nRECORDED-SKILL-BODY [$ARGUMENTS]\n",
+        );
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--mode",
+                "yolo",
+            ])
+            .arg("Replay the recorded skill call")
+            .run();
+        assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+        let requests = stub.generations();
+        let admitted = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["content"].as_str().is_some_and(|content| {
+                    content.contains("Admitted skill instruction")
+                        && content.contains("RECORDED-SKILL-BODY []")
+                })
+            });
+        if !admitted {
+            failures.push(format!("{arguments}: {}", requests[1]["messages"]));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "recorded calls not admitted: {failures:#?}"
+    );
 }
