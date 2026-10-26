@@ -139,7 +139,7 @@ pub(crate) async fn observed_selection_host(
             Some(ids) => Some(ids),
             None => {
                 rendered.push_str(
-                    "Setup declined/cancelled during item selection; no configuration writes.\n",
+                    "Setup cancelled during item selection; no configuration was changed.\n",
                 );
                 return Ok(rendered);
             }
