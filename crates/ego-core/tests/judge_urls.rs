@@ -141,3 +141,19 @@ fn authorization_credentials_in_task_context_do_not_reach_judge() {
     assert!(text.contains("Inspect"), "{text}");
     assert!(text.contains("safely"), "{text}");
 }
+
+// Catches: JSON escape backslashes prevent authorization markers from hiding credentials.
+#[test]
+fn escaped_authorization_value_in_task_does_not_reach_judge() {
+    let context = JudgeTaskContext {
+        task: r#"Inspect {\"Authorization\": \"Bearer escaped.secret\"} safely"#.into(),
+        ..Default::default()
+    };
+    let text = request_with_context(&["pwd".into()], &context);
+    assert!(
+        !text.contains("escaped.secret"),
+        "credential leaked: {text}"
+    );
+    assert!(text.contains("Inspect"), "{text}");
+    assert!(text.contains("safely"), "{text}");
+}

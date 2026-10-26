@@ -965,7 +965,7 @@ pub fn redact_credentials(text: &str) -> String {
     text.split_whitespace()
         .map(|word| {
             // Quotes and JSON delimiters can surround a marker in pasted prose.
-            let marker = word.trim_matches(['\'', '"', '{', '}', '[', ']', ',', ':']);
+            let marker = word.trim_matches(['\\', '\'', '"', '{', '}', '[', ']', ',', ':']);
             if marker.eq_ignore_ascii_case("bearer")
                 || marker.eq_ignore_ascii_case("basic")
                 || (marker.eq_ignore_ascii_case("authorization") && word.contains(':'))
