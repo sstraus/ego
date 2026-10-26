@@ -1254,7 +1254,7 @@ impl McpOAuthSession {
         McpError::new(
             McpFailure::Credential,
             format!(
-                "MCP credential unavailable or revoked; run ego mcp login {} with an explicit registration strategy",
+                "MCP credential unavailable or revoked; run '/mcp login {}'",
                 self.server
             ),
         )
@@ -1680,7 +1680,7 @@ mod runtime_tests {
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("ego mcp login linear")
+                .contains("run '/mcp login linear'")
         );
         assert!(session.credential_required());
         assert_eq!(*store.0.lock().unwrap(), original);
@@ -1692,7 +1692,7 @@ mod runtime_tests {
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("ego mcp login linear")
+                .contains("run '/mcp login linear'")
         );
     }
 }
