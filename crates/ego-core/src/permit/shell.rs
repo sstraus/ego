@@ -887,40 +887,14 @@ pub fn redact_atom(word: &str) -> String {
     if let Some(projected) = project_url(word) {
         return projected;
     }
-    if word.contains("-----BEGIN") {
-        return "<secret:pem>".into();
-    }
-    let prefixes = [
-        ("sk-ant-", "anthropic"),
-        ("sk-", "openai"),
-        ("github_pat_", "github_pat"),
-        ("ghp_", "github"),
-        ("gho_", "github"),
-        ("AKIA", "aws"),
-        ("xoxb-", "slack"),
-        ("xoxp-", "slack"),
-        ("xoxa-", "slack"),
-        ("glpat-", "gitlab"),
-        ("AIza", "google"),
-    ];
-    if let Some((_, kind)) = prefixes.iter().find(|(prefix, _)| {
-        word.match_indices(prefix).any(|(index, _)| {
-            index == 0
-                || word[..index].chars().next_back().is_some_and(|before| {
-                    !before.is_ascii_alphanumeric() && before != '_' && before != '-'
-                })
-        })
-    }) {
-        return format!("<secret:{kind}>");
+    if let Some(secret) = known_credential(word) {
+        return secret;
     }
     if word.to_ascii_lowercase().contains("authorization:") {
         return "<header:authorization>".into();
     }
     if word.contains('@') && !word.contains('/') {
         return "<email>".into();
-    }
-    if word.starts_with("eyJ") && word.split('.').count() == 3 {
-        return "<secret:jwt>".into();
     }
     let phone_digits = word.chars().filter(char::is_ascii_digit).count();
     if phone_digits >= 10
@@ -948,24 +922,71 @@ pub fn redact_atom(word: &str) -> String {
     bounded(word.replace("$HOME", "~"))
 }
 
-/// Redact context tokens without treating narrative prose as shell instructions.
-pub fn redact_text(text: &str) -> String {
+// Known credential formats are shared by shell projections and diagnostic prose.
+fn known_credential(word: &str) -> Option<String> {
+    if word.contains("-----BEGIN") {
+        return Some("<secret:pem>".into());
+    }
+    let prefixes = [
+        ("sk-ant-", "anthropic"),
+        ("sk-", "openai"),
+        ("github_pat_", "github_pat"),
+        ("ghp_", "github"),
+        ("gho_", "github"),
+        ("AKIA", "aws"),
+        ("xoxb-", "slack"),
+        ("xoxp-", "slack"),
+        ("xoxa-", "slack"),
+        ("glpat-", "gitlab"),
+        ("AIza", "google"),
+    ];
+    if let Some((_, kind)) = prefixes.iter().find(|(prefix, _)| {
+        word.match_indices(prefix).any(|(index, _)| {
+            index == 0
+                || word[..index].chars().next_back().is_some_and(|before| {
+                    !before.is_ascii_alphanumeric() && before != '_' && before != '-'
+                })
+        })
+    }) {
+        return Some(format!("<secret:{kind}>"));
+    }
+    let unquoted = word.trim_matches(['\'', '"', '{', '}', '[', ']', ',', ':']);
+    if unquoted.starts_with("eyJ") && unquoted.split('.').count() == 3 {
+        return Some("<secret:jwt>".into());
+    }
+    None
+}
+
+/// Redact credential markers and known credential formats in narrative text.
+/// Whitespace is normalized; diagnostic identifiers, assignments, URLs and
+/// unrecognized high-entropy words otherwise remain unchanged.
+pub fn redact_credentials(text: &str) -> String {
     let mut redact_next = false;
     text.split_whitespace()
         .map(|word| {
-            // A scheme is another marker, not the credential after the header.
-            if matches!(
-                word.to_ascii_lowercase().as_str(),
-                "bearer" | "basic" | "authorization:"
-            ) {
+            // Quotes and JSON delimiters can surround a marker in pasted prose.
+            let marker = word.trim_matches(['\'', '"', '{', '}', '[', ']', ',', ':']);
+            if marker.eq_ignore_ascii_case("bearer")
+                || marker.eq_ignore_ascii_case("basic")
+                || (marker.eq_ignore_ascii_case("authorization") && word.contains(':'))
+            {
                 redact_next = true;
                 return "<header:authorization>".into();
             }
             if std::mem::take(&mut redact_next) {
                 return "<secret:context-value>".into();
             }
-            structural_word(word, false)
+            known_credential(word).unwrap_or_else(|| word.to_owned())
         })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Apply shell evidence policy after shared narrative credential redaction.
+pub fn redact_text(text: &str) -> String {
+    redact_credentials(text)
+        .split_whitespace()
+        .map(|word| structural_word(word, false))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1025,6 +1046,48 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn credential_only_policy_preserves_diagnostic_identifiers_and_assignments() {
+        // Catches accidental reuse of shell assignment/entropy/URL policy in diagnostics.
+        let text = "invalid_function_parameters tools.0.function.parameters.properties param=value abcDEF0123456789zyxWVUT9876543210 https://example.com/schema";
+        assert_eq!(redact_credentials(text), text);
+        assert_ne!(redact_text(text), text);
+    }
+    #[test]
+    fn credential_only_policy_handles_quoted_markers_and_known_keys() {
+        // Catches quoted markers or standalone known key formats bypassing diagnostic redaction.
+        for input in [
+            r#"before "Authorization: Bearer quoted.secret-==" after"#,
+            "before 'Bearer quoted.secret-==' after",
+            r#"before {"Authorization": "Basic quoted.secret-=="} after"#,
+            "before 'authorization:' 'bearer' quoted.secret-== after",
+            "before sk-ant-private after",
+            "before sk-private after",
+            "before github_pat_private after",
+            "before ghp_private after",
+            "before gho_private after",
+            "before AKIAprivate after",
+            "before xoxb-private after",
+            "before xoxp-private after",
+            "before xoxa-private after",
+            "before glpat-private after",
+            "before AIzaprivate after",
+            "before eyJprivate.abc.def after",
+        ] {
+            let output = redact_credentials(input);
+            assert!(
+                !output.contains("private") && !output.contains("quoted.secret"),
+                "{input}: {output}"
+            );
+            assert!(
+                output.starts_with("before ") && output.ends_with(" after"),
+                "{input}: {output}"
+            );
+        }
+        assert_eq!(redact_credentials(""), "");
+        assert_eq!(redact_credentials("Bearer"), "<header:authorization>");
+        assert_eq!(redact_credentials("ordinary prose"), "ordinary prose");
     }
     #[test]
     fn heredoc_secret_body_is_not_disclosed_as_command_structure() {
