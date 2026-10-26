@@ -1284,6 +1284,7 @@ dependencies = [
  "ego-a2a",
  "ego-acp",
  "ego-ai",
+ "ego-cli",
  "ego-core",
  "ego-listen",
  "ego-mcp",

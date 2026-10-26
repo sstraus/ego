@@ -1492,12 +1492,8 @@ fn failure_message(failure: McpFailure) -> &'static str {
         McpFailure::Authority => "server authority was rejected",
         McpFailure::Transport => "server transport is unavailable",
         McpFailure::Protocol => "server protocol failed",
-        McpFailure::Authorization => {
-            "authorization is required; run ego mcp login NAME with an explicit registration strategy"
-        }
-        McpFailure::Credential => {
-            "server credential is unavailable; run ego mcp login NAME with an explicit registration strategy"
-        }
+        McpFailure::Authorization => "authorization is required; run '/mcp login NAME'",
+        McpFailure::Credential => "server credential is unavailable; run '/mcp login NAME'",
         McpFailure::Cancelled => "server admission was cancelled",
     }
 }
@@ -2455,15 +2451,24 @@ impl StableCaptureHasher {
                     "allow-insecure-loopback",
                     &[u8::from(config.allow_insecure_loopback)],
                 );
-                let headers = admission.http_headers().ok_or_else(|| {
-                    McpRegistryError::InvalidCandidate(
-                        "admitted MCP HTTP server has no HTTP material".to_owned(),
-                    )
-                })?;
-                self.count("header-count", headers.len());
-                for header in headers {
-                    self.field("header-name", header.name().as_bytes());
-                    self.field("header-value", header.value().expose_secret_bytes());
+                if let Some(session) = admission.oauth_session() {
+                    // OAuth authority is the issuer/resource/account binding,
+                    // not a rotating Bearer header or a second static-header path.
+                    self.field(
+                        "oauth-credential",
+                        &session.credential_key().canonical_bytes(),
+                    );
+                } else {
+                    let headers = admission.http_headers().ok_or_else(|| {
+                        McpRegistryError::InvalidCandidate(
+                            "admitted MCP HTTP server has no HTTP material".to_owned(),
+                        )
+                    })?;
+                    self.count("header-count", headers.len());
+                    for header in headers {
+                        self.field("header-name", header.name().as_bytes());
+                        self.field("header-value", header.value().expose_secret_bytes());
+                    }
                 }
             }
             McpServerConfig::Acp { server_id } => {

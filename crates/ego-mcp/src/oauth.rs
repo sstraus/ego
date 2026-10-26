@@ -18,6 +18,7 @@ enum Registration {
     Cimd,
     Registered,
     Dynamic,
+    Interactive,
 }
 
 pub struct McpClientMetadata {
@@ -81,6 +82,18 @@ impl McpClientMetadata {
         Ok(Self {
             client_id: None,
             registration: Registration::Dynamic,
+            client_name: "ego".into(),
+            redirect_uri,
+        })
+    }
+
+    /// Defer the initial choice to a human host after issuer discovery.
+    /// This does not permit fallback after the host selects a strategy.
+    pub fn interactive(redirect_uri: Url) -> Result<Self, McpError> {
+        validate_redirect_uri(&redirect_uri)?;
+        Ok(Self {
+            client_id: None,
+            registration: Registration::Interactive,
             client_name: "ego".into(),
             redirect_uri,
         })
@@ -208,7 +221,28 @@ impl McpOAuthCallback {
     }
 }
 
+/// Validated issuer capabilities, not a registration or credential authority.
+#[derive(Clone, Copy, Debug)]
+pub struct McpRegistrationOptions {
+    pub dynamic: bool,
+    pub cimd: bool,
+}
+
 pub trait McpOAuthInteraction: Send + Sync {
+    /// Explicit CLI clients never call this host-only initial selection.
+    fn select_client<'a>(
+        &'a self,
+        _options: McpRegistrationOptions,
+        _redirect_uri: Url,
+    ) -> McpFuture<'a, Result<McpClientMetadata, McpError>> {
+        Box::pin(async {
+            Err(McpError::new(
+                McpFailure::Authorization,
+                "OAuth client selection requires an interactive host",
+            ))
+        })
+    }
+
     fn authorize<'a>(
         &'a self,
         interaction: McpAuthorizationInteraction,
@@ -535,10 +569,10 @@ async fn discover_oauth(
     })
 }
 
-pub async fn login(
-    request: McpLoginRequest,
+pub async fn login<'a>(
+    mut request: McpLoginRequest,
     effects: Arc<dyn McpHttpEffects>,
-    interaction: Arc<dyn McpOAuthInteraction>,
+    interaction: Arc<dyn McpOAuthInteraction + 'a>,
     credentials: Arc<dyn CredentialStore>,
 ) -> Result<McpLoginResult, McpError> {
     let discovery =
@@ -552,6 +586,31 @@ pub async fn login(
     } = discovery;
 
     validate_public_client(&metadata)?;
+    if matches!(
+        request.client_metadata.registration,
+        Registration::Interactive
+    ) {
+        request.client_metadata = interaction
+            .select_client(
+                McpRegistrationOptions {
+                    dynamic: metadata.registration_endpoint.is_some(),
+                    cimd: metadata.client_id_metadata_document_supported,
+                },
+                request.redirect_uri.clone(),
+            )
+            .await?;
+        if request.client_metadata.redirect_uri != request.redirect_uri
+            || matches!(
+                request.client_metadata.registration,
+                Registration::Interactive
+            )
+        {
+            return Err(McpError::new(
+                McpFailure::Authorization,
+                "invalid interactive OAuth client selection",
+            ));
+        }
+    }
     let client_id = match &request.client_metadata.registration {
         Registration::Cimd if !metadata.client_id_metadata_document_supported => {
             return Err(McpError::new(
@@ -1171,6 +1230,10 @@ impl McpOAuthSession {
         })
     }
 
+    pub(crate) fn credential_key(&self) -> &CredentialKey {
+        &self.key
+    }
+
     pub(crate) fn credential_required(&self) -> bool {
         self.credential_required
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1191,7 +1254,7 @@ impl McpOAuthSession {
         McpError::new(
             McpFailure::Credential,
             format!(
-                "MCP credential unavailable or revoked; run ego mcp login {} with an explicit registration strategy",
+                "MCP credential unavailable or revoked; run '/mcp login {}'",
                 self.server
             ),
         )
@@ -1586,6 +1649,25 @@ mod runtime_tests {
         );
     }
     #[tokio::test]
+    async fn runtime_credential_failure_names_repl_login_instead_of_shell_strategy() {
+        // Catches: an expired or missing credential still sends a running REPL
+        // user to the shell to guess a registration strategy.
+        for missing in [false, true] {
+            let (session, store, http) = setup(Some(0), refresh_responses(400));
+            if missing {
+                store.0.lock().unwrap().clear();
+            }
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            let error = session.headers(Some(http), deadline).await.err().unwrap();
+            assert_eq!(error.failure(), McpFailure::Credential);
+            assert_eq!(
+                error.to_string(),
+                "MCP credential unavailable or revoked; run '/mcp login linear'"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn missing_and_revoked_credentials_offer_login_without_overwriting_store() {
         // Catches publishing failed refresh output or hiding the recovery command.
         let (session, store, http) = setup(Some(0), refresh_responses(400));
@@ -1598,7 +1680,7 @@ mod runtime_tests {
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("ego mcp login linear")
+                .contains("run '/mcp login linear'")
         );
         assert!(session.credential_required());
         assert_eq!(*store.0.lock().unwrap(), original);
@@ -1610,7 +1692,7 @@ mod runtime_tests {
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("ego mcp login linear")
+                .contains("run '/mcp login linear'")
         );
     }
 }

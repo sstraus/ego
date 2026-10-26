@@ -74,12 +74,29 @@ pub trait CredentialBackend: Send + Sync {
     fn delete(&self, service: &str, user: &str) -> Result<bool, CredentialBackendError>;
 }
 
+// This programmatic override is absent from release builds, even with all
+// features. Only a dedicated test process installs it before CLI composition.
+#[cfg(all(feature = "test-support", debug_assertions))]
+static TEST_CREDENTIAL_BACKEND: std::sync::OnceLock<Arc<dyn CredentialBackend>> =
+    std::sync::OnceLock::new();
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub fn install_test_credential_backend(
+    backend: Arc<dyn CredentialBackend>,
+) -> Result<(), Arc<dyn CredentialBackend>> {
+    TEST_CREDENTIAL_BACKEND.set(backend)
+}
+
 /// Platform-selected `keyring` v1 binary-secret backend.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeKeyringBackend;
 
 impl CredentialBackend for NativeKeyringBackend {
     fn get(&self, service: &str, user: &str) -> Result<Option<Vec<u8>>, CredentialBackendError> {
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        if let Some(backend) = TEST_CREDENTIAL_BACKEND.get() {
+            return backend.get(service, user);
+        }
         let entry = keyring::Entry::new(service, user).map_err(map_keyring_error)?;
         match entry.get_secret() {
             Ok(secret) => Ok(Some(secret)),
@@ -94,6 +111,10 @@ impl CredentialBackend for NativeKeyringBackend {
         user: &str,
         mut value: Vec<u8>,
     ) -> Result<(), CredentialBackendError> {
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        if let Some(backend) = TEST_CREDENTIAL_BACKEND.get() {
+            return backend.put(service, user, value);
+        }
         let result = match keyring::Entry::new(service, user) {
             Ok(entry) => entry.set_secret(&value),
             Err(error) => Err(error),
@@ -103,6 +124,10 @@ impl CredentialBackend for NativeKeyringBackend {
     }
 
     fn delete(&self, service: &str, user: &str) -> Result<bool, CredentialBackendError> {
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        if let Some(backend) = TEST_CREDENTIAL_BACKEND.get() {
+            return backend.delete(service, user);
+        }
         let entry = keyring::Entry::new(service, user).map_err(map_keyring_error)?;
         match entry.delete_credential() {
             Ok(()) => Ok(true),

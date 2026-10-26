@@ -44,8 +44,8 @@ pub use http::{McpHttpBody, McpHttpResponse};
 pub use oauth::{
     McpAuthorizationInteraction, McpClientMetadata, McpCredentialBundle, McpLoginRequest,
     McpLoginResult, McpOAuthCallback, McpOAuthInteraction, McpOAuthRefreshLease,
-    McpOAuthRefreshLock, McpOAuthSession, McpPkceContext, McpPkceMethod, McpTokenRefreshRequest,
-    McpTokenRefreshResult, login, refresh_token,
+    McpOAuthRefreshLock, McpOAuthSession, McpPkceContext, McpPkceMethod, McpRegistrationOptions,
+    McpTokenRefreshRequest, McpTokenRefreshResult, login, refresh_token,
 };
 pub use operation::{
     McpCaptureResolver, McpContinuationOwner, McpForeignQuestionPort, McpHttpOperationFactory,
