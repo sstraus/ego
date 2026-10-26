@@ -188,7 +188,7 @@ pub(super) fn answer_control(
     };
     let control = match control {
         Control::SelectSetup { request, reply } => {
-            let outcome = if reply.is_closed() || phase.get() == EditPhase::Busy {
+            let outcome = if reply.is_canceled() || phase.get() == EditPhase::Busy {
                 QuestionOutcome::Unavailable
             } else {
                 let after = phase.get();
