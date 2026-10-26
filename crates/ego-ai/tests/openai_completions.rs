@@ -963,11 +963,10 @@ async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
         vec![
             AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
             AiEvent::Error {
-                message: "the provider returned HTTP 418: not json at all".to_string(),
+                message: "the provider returned HTTP 418".to_string(),
                 kind: ErrorKind::Unclassified,
             },
-            // A body that is no envelope stays in the operator's message and
-            // out of the host-safe cause.
+            // An unrecognized body stays out of both diagnostic consumers.
             AiEvent::ProviderFailure {
                 cause: "the provider returned HTTP 418".to_string(),
                 retry_after: None,
@@ -975,6 +974,139 @@ async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
             AiEvent::Stop(StopReason::Error),
         ]
     );
+}
+
+/// Catches dropped typed diagnostics in the journal Error and host failure.
+/// Fixture copied from the Provider errors example (2026-10-26):
+/// https://openrouter.ai/docs/api_reference/errors-and-debugging.md
+/// This is a documentation recording, not a paid live-response capture.
+#[tokio::test]
+async fn openrouter_typed_error_details_reach_both_error_consumers() {
+    let body = include_str!("goldens/openrouter_provider_error.json");
+    let events: Vec<AiEvent> = decode(responding(429, body), None).collect().await;
+    let expected = "the provider returned HTTP 429: Rate limit exceeded (code 429; type rate_limit_exceeded; provider code rate_limited)";
+    assert!(
+        events.iter().any(|event| matches!(event,
+            AiEvent::Error { message, kind: ErrorKind::Transient } if message == expected
+        )),
+        "journal diagnostic: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event,
+            AiEvent::ProviderFailure { cause, .. } if cause == expected
+        )),
+        "host diagnostic: {events:?}"
+    );
+}
+
+/// Catches copying raw payloads instead of selecting the upstream error.message.
+/// Synthetic adversarial variants of the documented metadata.raw field and
+/// Anthropic typed error envelope from the same OpenRouter documentation.
+#[tokio::test]
+async fn openrouter_upstream_message_excludes_request_and_credential_siblings() {
+    let upstream = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "tools.0.input_schema: expected object",
+            "request": {"messages": ["PRIVATE_PROMPT"]},
+            "headers": {"Authorization": "Bearer PRIVATE_TOKEN"}
+        },
+        "request": {"messages": ["PRIVATE_PROMPT"]}
+    });
+    for raw in [upstream.clone(), serde_json::json!(upstream.to_string())] {
+        let body = serde_json::json!({"error": {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {
+                "provider_name": "Azure",
+                "error_type": "invalid_request",
+                "provider_code": "invalid_request_error",
+                "flagged_input": "PRIVATE_PROMPT",
+                "raw": raw
+            }
+        }})
+        .to_string();
+        let events: Vec<_> = decode(responding(400, Box::leak(body.into_boxed_str())), None)
+            .collect()
+            .await;
+        let diagnostics: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AiEvent::Error { message, .. } => Some(message),
+                AiEvent::ProviderFailure { cause, .. } => Some(cause),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(diagnostics.len(), 2);
+        for diagnostic in diagnostics {
+            assert_eq!(
+                diagnostic,
+                "the provider returned HTTP 400: Provider returned error (code 400; upstream Azure; type invalid_request; provider code invalid_request_error; upstream message: tools.0.input_schema: expected object)"
+            );
+        }
+    }
+}
+
+/// Catches optional metadata turning a typed error into a raw-body fallback,
+/// and opaque raw text or a malformed envelope leaking into the journal.
+#[tokio::test]
+async fn openrouter_malformed_details_never_fall_back_to_publishing_bodies() {
+    for body in [
+        r#"{"error":{"message":"Invalid request","code":{},"metadata":{"error_type":[],"provider_name":{},"provider_code":{},"raw":"PRIVATE_PROMPT"}},"request":"PRIVATE_PROMPT"}"#,
+        r#"{"error":{"message":"Invalid request","metadata":42},"request":"PRIVATE_PROMPT"}"#,
+        r#"{"error":{"message":"Invalid request","metadata":{"raw":"{malformed PRIVATE_PROMPT"}}}"#,
+        r#"{"error":{"message":{"request":"PRIVATE_PROMPT"}}}"#,
+        "<html>PRIVATE_PROMPT</html>",
+    ] {
+        let events: Vec<_> = decode(responding(400, body), None).collect().await;
+        for event in events {
+            let diagnostic = match event {
+                AiEvent::Error { message, .. } => message,
+                AiEvent::ProviderFailure { cause, .. } => cause,
+                _ => continue,
+            };
+            assert!(!diagnostic.contains("PRIVATE_PROMPT"), "{diagnostic}");
+            assert!(
+                diagnostic == "the provider returned HTTP 400: Invalid request"
+                    || diagnostic == "the provider returned HTTP 400",
+                "{diagnostic}"
+            );
+        }
+    }
+}
+
+/// Catches terminal injection, bearer/key disclosure and unbounded error fields.
+#[tokio::test]
+async fn openrouter_diagnostic_fields_are_redacted_and_bounded() {
+    let long = "é".repeat(2000);
+    let body = serde_json::json!({"error": {
+        "message": format!("bad sk-or-v1-synthetic Authorization: Bearer synthetic-token\n{long}"),
+        "metadata": {
+            "provider_name": "Azure\r\n",
+            "error_type": long,
+            "provider_code": "invalid_request",
+            "raw": {"error": {"message": "invalid schema\u{1b}\nBearer upstream-token"}}
+        }
+    }})
+    .to_string();
+    let events: Vec<_> = decode(responding(400, Box::leak(body.into_boxed_str())), None)
+        .collect()
+        .await;
+    for event in events {
+        let diagnostic = match event {
+            AiEvent::Error { message, .. } => message,
+            AiEvent::ProviderFailure { cause, .. } => cause,
+            _ => continue,
+        };
+        for secret in ["sk-or-v1-synthetic", "synthetic-token", "upstream-token"] {
+            assert!(!diagnostic.contains(secret), "{diagnostic}");
+        }
+        assert!(!diagnostic.chars().any(char::is_control));
+        assert!(diagnostic.contains("upstream Azure"));
+        assert!(diagnostic.contains("invalid schema"));
+        assert!(diagnostic.chars().count() < 1400, "unbounded diagnostic");
+    }
 }
 
 /// regression case. OpenRouter wraps an upstream failure as a generic

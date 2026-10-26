@@ -130,7 +130,8 @@ async fn an_error_status_carries_its_retry_after_and_never_relays_a_raw_body() {
     assert_eq!(
         causes(&typed),
         [(
-            "the provider returned HTTP 429: Rate limit reached".to_owned(),
+            "the provider returned HTTP 429: Rate limit reached (code rate_limit_exceeded)"
+                .to_owned(),
             Some(Duration::from_secs(7))
         )]
     );
@@ -144,11 +145,11 @@ async fn an_error_status_carries_its_retry_after_and_never_relays_a_raw_body() {
         "a non-envelope body must not reach the host cause"
     );
     assert!(
-        raw.iter().any(|event| matches!(
+        !raw.iter().any(|event| matches!(
             event,
             AiEvent::Error { message, .. } if message.contains("secret-session-cookie")
         )),
-        "the operator log keeps the body: {raw:?}"
+        "the journal must not keep an untyped body: {raw:?}"
     );
 
     let unreadable = vec![

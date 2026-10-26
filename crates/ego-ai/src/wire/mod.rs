@@ -511,28 +511,112 @@ const MAX_ERROR_BODY: usize = 64 * 1024;
 /// `{"error": {"message": …}}` — the envelope OpenAI defined, which
 /// OpenRouter copied and which Anthropic's typed error body also satisfies.
 ///
-/// The parse is a *best effort* and the fallback is what makes this shared
-/// rather than per-provider: a body that does not fit is relayed verbatim, so
-/// xAI's flat shape and a proxy's HTML both still reach the operator. There is
-/// nothing here to branch on and no provider id to branch with.
+/// Only typed diagnostic fields cross this boundary. An unrecognized body
+/// stays private: gateways can return request bodies or credentials in it.
 #[derive(Debug, Deserialize)]
 struct ErrorEnvelope {
     error: ErrorBody,
 }
 
+/// xAI and Ollama also publish a flat, typed error string. Recognize that
+/// message without falling back to copying its surrounding response body.
 #[derive(Debug, Deserialize)]
-struct ErrorBody {
-    message: String,
-    /// OpenRouter wraps an upstream failure as a generic message and names the
-    /// upstream here so a 400 can be attributed without exposing its raw body.
+struct FlatErrorEnvelope {
+    error: String,
     #[serde(default)]
-    metadata: Option<ErrorMetadata>,
+    code: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct ErrorMetadata {
+struct ErrorBody {
+    message: String,
+    // Optional fields are inspected separately so an unknown field shape cannot
+    // discard an otherwise useful typed message.
     #[serde(default)]
-    provider_name: Option<String>,
+    code: serde_json::Value,
+    #[serde(default)]
+    metadata: serde_json::Value,
+}
+
+/// Provider-controlled prose is bounded and cannot inject terminal controls.
+/// Reuse the existing narrative redactor before truncating, so a bearer token
+/// at the boundary is not cut into an unrecognizable credential.
+fn error_text(text: &str, limit: usize) -> String {
+    let text: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut redact_next = false;
+    text.split_whitespace()
+        .map(|word| {
+            // Keep consuming context markers before consuming their value:
+            // Authorization: Bearer <token> contains two markers, not a token
+            // named Bearer followed by harmless prose.
+            if word.eq_ignore_ascii_case("authorization:") || word.eq_ignore_ascii_case("bearer") {
+                redact_next = true;
+                return "<header:authorization>".to_string();
+            }
+            if std::mem::take(&mut redact_next) {
+                return "<secret:context-value>".to_string();
+            }
+            ego_core::permit::shell::redact_text(word)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+fn error_code(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(error_text(text, 64)),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+impl ErrorBody {
+    fn diagnostic(&self, status: u16) -> String {
+        let mut details = Vec::new();
+        if let Some(code) = error_code(&self.code) {
+            details.push(format!("code {code}"));
+        }
+        for (key, label) in [
+            ("provider_name", "upstream"),
+            ("error_type", "type"),
+            ("provider_code", "provider code"),
+        ] {
+            if let Some(text) = self.metadata.get(key).and_then(error_code) {
+                details.push(format!("{label} {text}"));
+            }
+        }
+        // OpenRouter's raw payload is NOT an excerpt. Parse only a typed
+        // upstream error.message, ignoring headers, prompts, request bodies,
+        // and every other sibling. Opaque text and malformed JSON stay private.
+        let raw = self.metadata.get("raw");
+        let parsed = raw
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+        if let Some(message) = parsed
+            .as_ref()
+            .or(raw)
+            .and_then(|raw| raw.get("error"))
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+        {
+            details.push(format!("upstream message: {}", error_text(message, 512)));
+        }
+        let base = format!(
+            "the provider returned HTTP {status}: {}",
+            error_text(&self.message, 512)
+        );
+        if details.is_empty() {
+            base
+        } else {
+            format!("{base} ({})", details.join("; "))
+        }
+    }
 }
 
 /// What a `401` or `403` is told to consider, once ego stopped impersonating.
@@ -575,34 +659,26 @@ pub(crate) async fn read_error_body(
     // envelope's typed message, never a body that parsed as no envelope.
     let (said, cause) = match serde_json::from_str::<ErrorEnvelope>(&text) {
         Ok(envelope) => {
-            let base = format!(
-                "the provider returned HTTP {status}: {}",
-                envelope.error.message
-            );
-            let name = envelope
-                .error
-                .metadata
-                .and_then(|metadata| metadata.provider_name)
-                .map(|name| {
-                    name.chars()
-                        .filter(|c| !c.is_control())
-                        .take(64)
-                        .collect::<String>()
-                });
-            let cause = match &name {
-                Some(name) => format!("{base} (upstream {name})"),
-                None => base.clone(),
-            };
+            let cause = envelope.error.diagnostic(status);
             (cause.clone(), cause)
         }
         Err(_) if text.trim().is_empty() => {
             let said = format!("the provider returned HTTP {status} with an empty body");
             (said.clone(), said)
         }
-        Err(_) => (
-            format!("the provider returned HTTP {status}: {}", text.trim()),
-            format!("the provider returned HTTP {status}"),
-        ),
+        Err(_) => {
+            let cause = serde_json::from_str::<FlatErrorEnvelope>(&text)
+                .map(|flat| {
+                    ErrorBody {
+                        message: flat.error,
+                        code: flat.code,
+                        metadata: serde_json::Value::Null,
+                    }
+                    .diagnostic(status)
+                })
+                .unwrap_or_else(|_| format!("the provider returned HTTP {status}"));
+            (cause.clone(), cause)
+        }
     };
     // `402` is deliberately not here. It is the third member of the `Refused`
     // class and it means an empty wallet, which no header fixes.
