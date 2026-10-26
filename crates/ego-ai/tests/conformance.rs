@@ -322,19 +322,13 @@ async fn check_3_a_refusal_is_three_events_and_repeats_the_provider() {
                 .unwrap_or_else(|| {
                     panic!("{} reported no error for {name}: {events:?}", profile.id)
                 });
-            // Provider prose survives, except for sensitive-looking values.
-            // This fixture's long model slug triggers the narrative redactor;
-            // keep an independent literal oracle for its sanitized sentence.
+            // What the provider said, not a sentence this build invented. The
+            // fixture's own prose is the only thing that can prove it was
+            // carried rather than replaced.
             let said = provider_message(profile, &body);
-            let expected =
-                if said == "No endpoints found for this-vendor/this-model-does-not-exist." {
-                    "No endpoints found for <secret:high-entropy>"
-                } else {
-                    &said
-                };
             assert!(
-                message.contains(expected),
-                "{} dropped what the provider said for {name}: {message:?} does not contain {expected:?}",
+                message.contains(&said),
+                "{} dropped what the provider said for {name}: {message:?} does not contain {said:?}",
                 profile.id
             );
             assert_eq!(

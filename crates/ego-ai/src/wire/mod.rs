@@ -559,7 +559,15 @@ fn error_text(text: &str, limit: usize) -> String {
             if std::mem::take(&mut redact_next) {
                 return "<secret:context-value>".to_string();
             }
-            ego_core::permit::shell::redact_text(word)
+            let redacted = ego_core::permit::shell::redact_atom(word);
+            // Diagnostic identifiers and schema paths are not shell operands.
+            // Preserve them when the shell's entropy heuristic alone matches;
+            // known credential formats and authorization context stay redacted.
+            if redacted == "<secret:high-entropy>" {
+                word.to_string()
+            } else {
+                redacted
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")
