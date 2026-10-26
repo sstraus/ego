@@ -77,7 +77,7 @@ fn setup_nested_cli_inherits_config_floor_and_reports_only() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        output.contains("Report only; no human apply authority"),
+        output.contains("Report only; changes cannot be applied without confirmation"),
         "{output}"
     );
     let overwrite = format!("printf forged > '{}'", home.join("config.toml").display());

@@ -186,7 +186,7 @@ impl AcpSessionControls {
             } else {
                 Err(ControlError::Refused {
                     control: "profile",
-                    why: "session profile policy changed after admission; start a new session"
+                    why: "profile settings changed after this session started; start a new session to use them"
                         .into(),
                 })
             };

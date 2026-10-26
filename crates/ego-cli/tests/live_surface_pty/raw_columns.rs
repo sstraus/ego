@@ -51,7 +51,7 @@ fn raw_terminal_startup_resume_and_exit_keep_column_zero() {
         concat!("ego ", env!("CARGO_PKG_VERSION")),
         "Resume model changed",
         "unsent drafts discarded",
-        "To resume: ego resume",
+        "To resume: 'ego resume",
     ] {
         assert_eq!(
             column_of(&lines, needle),

@@ -452,7 +452,10 @@ async fn a_loopback_endpoint_refuses_to_start_without_a_credential() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     let rendered = error.to_string();
     assert!(rendered.contains("EGO_A2A_TOKEN"), "{rendered}");
-    assert!(rendered.contains("local endpoint"), "{rendered}");
+    assert!(
+        rendered.contains("shared only with trusted callers"),
+        "{rendered}"
+    );
 }
 
 #[tokio::test]

@@ -27,7 +27,7 @@ fn interactive_start_reports_a_configured_mcp_server_that_cannot_start() {
         result.stdout
     );
     assert_eq!(
-        result.stdout.matches("MCP server `missing`").count(),
+        result.stdout.matches("MCP server 'missing'").count(),
         1,
         "{}",
         result.stdout

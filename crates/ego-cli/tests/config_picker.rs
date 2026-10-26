@@ -631,7 +631,7 @@ fn thinking_refuses_closed_with_typed_unavailable_diagnostic() {
             },
         ),
         LocalActionOutcome::Refused {
-            reason: "the current model has no selectable reasoning authority",
+            reason: "reasoning settings are not available for the current model",
         }
     );
     assert!(!picker.is_open());

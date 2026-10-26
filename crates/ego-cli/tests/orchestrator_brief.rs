@@ -60,5 +60,8 @@ fn brief_refuses_missing_socket_instead_of_falling_back_to_a_model() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires TUIC_SOCKET"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("set TUIC_SOCKET to the TUICommander socket path")
+    );
 }

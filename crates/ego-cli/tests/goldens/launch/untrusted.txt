@@ -6,9 +6,8 @@ Yes: load project instructions, configuration, skills, hooks and MCP server
 declarations.
 No: continue without project files.
 Trust project files in <workspace>? [y/N] no
-εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
-εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem
-access
+εgo: ~/Gits does not exist; file access is limited to the workspace
+εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
@@ -16,13 +15,12 @@ Ctrl+Enter steers · Ctrl+S draft · Option+P models · Shift+Tab mode · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts discarded; 0 prompts waiting to run.
-εgo: To resume: ego resume <session>
+εgo: To resume: 'ego resume <session>'
 
 # untrusted: next launch
 εgo: ego <version>
-εgo: default-root-missing: ~/Gits is absent; using workspace-only perimeter
-εgo: open-perimeter: sandbox is off; exec children have unrestricted filesystem
-access
+εgo: ~/Gits does not exist; file access is limited to the workspace
+εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3
 mode default (default) · sandbox off (flags)
 Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
@@ -30,4 +28,4 @@ Ctrl+Enter steers · Ctrl+S draft · Option+P models · Shift+Tab mode · /help
 hello
 a launch transcript
 εgo: 0 unsent drafts discarded; 0 prompts waiting to run.
-εgo: To resume: ego resume <session>
+εgo: To resume: 'ego resume <session>'

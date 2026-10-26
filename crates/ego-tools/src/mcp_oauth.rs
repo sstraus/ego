@@ -190,7 +190,7 @@ fn locator_path(
 fn locator_error() -> ego_mcp::McpError {
     ego_mcp::McpError::new(
         ego_mcp::McpFailure::Credential,
-        "MCP OAuth locator unavailable; run ego mcp login NAME",
+        "saved MCP login details could not be loaded; inspect the servers with 'ego mcp ls'",
     )
 }
 

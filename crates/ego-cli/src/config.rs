@@ -89,7 +89,7 @@ fn report_discarded_in(
             Ok(_) => diagnostics.note(&format!(
                 "the {source} configuration at {} is not applied in the bare posture; \
                  any model or sandbox settings in that file have no effect. \
-                 Use the user configuration or --sandbox for confinement",
+                 Edit the user configuration with 'ego config edit' to change these settings",
                 path.display(),
             )),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -229,7 +229,7 @@ async fn execute_inner(
                 // becoming a row no reader of this format expects.
                 out.note(&empty_listing(
                     "no user configuration values are set",
-                    "ego config set KEY=VALUE",
+                    "ego config set",
                 ));
             } else {
                 for (key, value) in values {
@@ -255,7 +255,7 @@ async fn execute_inner(
                 .map_err(store_failure)?;
             roots::receipt(result, out)?;
             output::note(
-                "Running sessions keep their current permissions; /quit, then ego resume <session-id> to apply saved roots.",
+                "Saved roots apply when a session starts or resumes; running sessions keep their current file access.",
             );
         }
         ConfigAction::Set { target, key, value } => {
@@ -310,7 +310,7 @@ where
                     "config edit was cancelled, but candidate cleanup failed at {}: {cleanup}",
                     candidate_path.display()
                 ),
-                None => "config edit was cancelled; its candidate was removed".to_owned(),
+                None => "configuration edit cancelled; the temporary copy was removed".to_owned(),
             };
             output::note(&message);
             return Err(crate::run::cancelled_termination(cancel));
@@ -320,7 +320,7 @@ where
                 "{error}; candidate cleanup failed at {}: {cleanup}",
                 candidate_path.display()
             ),
-            None => format!("{error}; config editor candidate was removed"),
+            None => format!("{error}; the temporary configuration copy was removed"),
         };
         return Err(RunTermination::Failed { message });
     }
@@ -329,10 +329,10 @@ where
         let cleanup = store.discard_edit(edit).err();
         output::note(&match cleanup {
             Some(error) => format!(
-                "config edit was cancelled, but candidate cleanup failed at {}: {error}",
+                "configuration edit cancelled, but the temporary copy could not be removed at {}: {error}",
                 candidate_path.display()
             ),
-            None => "config edit was cancelled; its candidate was removed".to_owned(),
+            None => "configuration edit cancelled; the temporary copy was removed".to_owned(),
         });
         return Err(crate::run::cancelled_termination(cancel));
     }
@@ -341,7 +341,7 @@ where
         .publish_edit(edit)
         .map_err(|error| RunTermination::Failed {
             message: format!(
-                "user config edit was not published: {error}; recovery candidate remains at {}",
+                "configuration edit could not be saved: {error}; a recovery copy remains at {}",
                 candidate_path.display()
             ),
         })?;
@@ -350,7 +350,7 @@ where
         UserConfigPublication::PublishedDurably => "published_durably",
         UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
             output::note(&format!(
-                "config was published but durability is uncertain: {diagnostic}; recovery candidate remains at {}",
+                "configuration changed, but saving it to disk could not be confirmed: {diagnostic}; a recovery copy remains at {}",
                 candidate_path.display()
             ));
             "published_durability_uncertain"
@@ -358,7 +358,7 @@ where
     };
     if let Some(warning) = result.candidate_cleanup_warning {
         output::note(&format!(
-            "{warning}; recovery candidate remains at {}",
+            "{warning}; a recovery copy remains at {}",
             candidate_path.display()
         ));
     }
@@ -380,7 +380,7 @@ fn editor_argv() -> Result<Vec<OsString>, RunTermination> {
             Some(command) => ("EDITOR", command),
             None => {
                 return Err(RunTermination::UsageError {
-                    message: "ego config edit needs a nonempty VISUAL or EDITOR command".to_owned(),
+                    message: "no editor is configured; set VISUAL or EDITOR before running 'ego config edit'".to_owned(),
                 });
             }
         },
@@ -620,8 +620,9 @@ fn receipt_text(
         UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => Some(diagnostic),
         UserConfigPublication::NotPublished | UserConfigPublication::PublishedDurably => None,
     };
-    let warning = warning
-        .map(|warning| format!("config was published but durability is uncertain: {warning}"));
+    let warning = warning.map(|warning| {
+        format!("configuration changed, but saving it to disk could not be confirmed: {warning}")
+    });
     Ok((receipt, warning))
 }
 
@@ -723,7 +724,7 @@ pub(crate) fn rule_management(
 ) -> Result<RuleManagementConfig, UsageError> {
     let user_path = ego_home()
         .ok_or_else(|| {
-            UsageError("ego rules needs EGO_HOME or HOME for user configuration".into())
+            UsageError("'ego rules' needs a configuration directory; set EGO_HOME or HOME".into())
         })?
         .join("config.toml");
     let mut found = Vec::new();
@@ -790,7 +791,9 @@ impl McpManagementConfig {
 /// precedence implementation while retaining the exact user layer for CAS.
 pub(crate) fn mcp_management() -> Result<McpManagementConfig, UsageError> {
     let user_path = ego_home()
-        .ok_or_else(|| UsageError("ego mcp needs EGO_HOME or HOME for user configuration".into()))?
+        .ok_or_else(|| {
+            UsageError("'ego mcp' needs a configuration directory; set EGO_HOME or HOME".into())
+        })?
         .join("config.toml");
     let mut found = Vec::new();
     if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
@@ -1412,8 +1415,8 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     for entry in &args.set {
         let (key, value) = entry.split_once('=').ok_or_else(|| {
             UsageError(format!(
-                "`-c {entry}` is not a config override: write it as `-c key=value`, \
-                 with the value in TOML — `-c 'model=\"ollama/qwen3\"'`"
+                "invalid configuration override '{entry}'; use a TOML assignment, \
+                 for example '-c model=\\\"ollama/qwen3\\\"'"
             ))
         })?;
         toml.push_str(&format!("{key} = {value}\n"));
@@ -1440,7 +1443,9 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
         .as_ref()
         .is_some_and(|ui| ui.keybindings.is_some() || ui.vim.is_some())
     {
-        return Err(UsageError("keyboard preferences are user/process-only: use ego config set ui.keybindings=TABLE or --vim, not -c".into()));
+        return Err(UsageError(
+            "keyboard preferences cannot be set with '-c'; edit them with 'ego config edit'".into(),
+        ));
     }
     Ok(layer)
 }
@@ -1856,7 +1861,7 @@ mod keyboard_preference_tests {
             args_layer(&args)
                 .unwrap_err()
                 .0
-                .contains("user/process-only")
+                .contains("cannot be set with '-c'")
         );
     }
 }

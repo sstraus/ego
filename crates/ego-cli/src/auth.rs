@@ -256,14 +256,14 @@ impl fmt::Display for AuthError {
             }
             Self::InvalidConfig(message) => f.write_str(message),
             Self::MissingCredential { program, reason } => {
-                write!(f, "no credential from {program}: {reason}")
+                write!(f, "could not get login details from '{program}': {reason}")
             }
             Self::CredentialCommand { program, failure } => {
-                write!(f, "no credential from {program}: {failure}")
+                write!(f, "could not get login details from '{program}': {failure}")
             }
             Self::ReloginRequired { provider, cause } => write!(
                 f,
-                "{provider} login expired; run `ego auth login {provider}`: {cause}"
+                "{provider} login expired ({cause}); sign in again with 'ego auth login {provider}'"
             ),
             Self::Temporary {
                 provider,
@@ -601,7 +601,7 @@ pub async fn execute(
         crate::cli::AuthAction::Logout => {
             let Some(id) = args.provider.as_deref() else {
                 return Err(AuthError::InvalidConfig(
-                    "ego auth logout requires PROVIDER".to_string(),
+                    "no provider was selected for logout; list signed-in providers with 'ego auth status'".to_string(),
                 ));
             };
             let removed = store.remove(id)?;
@@ -619,9 +619,8 @@ pub async fn execute(
                 // listing that arrives as eight unlabelled words reads as a
                 // command that did nothing.
                 crate::output::note(
-                    "these providers log in with `ego auth login PROVIDER`; a \
-                     provider that reads an API key from the environment is not \
-                     among them and needs no login",
+                    "providers with interactive login are listed below; see \
+                     'ego auth login --help' for sign-in instructions",
                 );
                 return Ok(known_and_discovered(&home));
             };
@@ -665,7 +664,7 @@ fn status(store: &AuthStore, selected: Option<&str>) -> Result<String, AuthError
     if text.is_empty() {
         crate::output::note(&crate::output::empty_listing(
             "no provider credentials are stored",
-            "ego auth login PROVIDER",
+            "ego auth login",
         ));
     }
     Ok(text)

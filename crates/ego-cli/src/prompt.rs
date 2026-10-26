@@ -98,9 +98,7 @@ pub fn assemble(
             non_empty(text.trim(), "stdin was empty and no prompt was given")
         }
         (None, true) => Err(UsageError(
-            "no prompt: pass one as an argument, pipe one in, or use `-` to \
-             read it from stdin"
-                .to_string(),
+            "no prompt was supplied; pass your prompt as an argument".to_string(),
         )),
     }
 }
@@ -116,9 +114,7 @@ pub(crate) fn assemble_agent_file(
 ) -> Result<String, UsageError> {
     if mode == Stdin::IsThePrompt {
         return Err(UsageError(
-            "an agent file and `-` are competing instruction inputs: drop `-` \
-             to use the file, or drop --file to read the prompt from stdin"
-                .to_string(),
+            "an agent file cannot be combined with '-'; remove '-' to use the file".to_string(),
         ));
     }
     if body.is_empty() {

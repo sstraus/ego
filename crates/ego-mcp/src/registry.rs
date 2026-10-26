@@ -1301,7 +1301,7 @@ impl McpRegistryStatus {
             .iter()
             .filter_map(|server| {
                 server.diagnostic.as_ref().map(|diagnostic| {
-                    format!("MCP server `{}`: {}", server.name, diagnostic.message)
+                    format!("MCP server '{}': {}", server.name, diagnostic.message)
                 })
             })
             .collect()
@@ -1486,15 +1486,21 @@ fn failed_publication_status(
 
 fn failure_message(failure: McpFailure) -> &'static str {
     match failure {
-        McpFailure::Absent => "server is unavailable",
-        McpFailure::InvalidValue => "server configuration is invalid",
-        McpFailure::InvalidResponse => "server returned an invalid response",
-        McpFailure::Authority => "server authority was rejected",
-        McpFailure::Transport => "server transport is unavailable",
-        McpFailure::Protocol => "server protocol failed",
+        McpFailure::Absent => "server is unavailable; inspect with 'ego mcp ls'",
+        McpFailure::InvalidValue => "server configuration is invalid; inspect with 'ego mcp ls'",
+        McpFailure::InvalidResponse => {
+            "server returned an invalid response; inspect with 'ego mcp ls'"
+        }
+        McpFailure::Authority => {
+            "server access was blocked by the current policy; inspect with 'ego mcp ls'"
+        }
+        McpFailure::Transport => "could not connect to the server; inspect with 'ego mcp ls'",
+        McpFailure::Protocol => "communication with the server failed; inspect with 'ego mcp ls'",
         McpFailure::Authorization => "authorization is required; run '/mcp login NAME'",
         McpFailure::Credential => "server credential is unavailable; run '/mcp login NAME'",
-        McpFailure::Cancelled => "server admission was cancelled",
+        McpFailure::Cancelled => {
+            "connecting to the server was cancelled; inspect with 'ego mcp ls'"
+        }
     }
 }
 

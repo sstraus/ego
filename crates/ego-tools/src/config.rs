@@ -90,7 +90,7 @@ where
             })
         {
             return Err(UserConfigError::new(
-                "managed batch requires 1..64 operations on one target",
+                "a configuration batch must contain between 1 and 64 changes on one target",
             ));
         }
         for change in &changes {

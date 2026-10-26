@@ -578,7 +578,7 @@ pub(super) fn configure_statusline(status: &SharedStatus, template: String) {
         .clone();
     let Some(store) = store else {
         status.lock().expect("surface status lock").notice =
-            Some("the user-config mutation controller is not installed".to_string());
+            Some("saving user settings is not available in this session".to_string());
         repaint_status(status);
         return;
     };
@@ -604,7 +604,9 @@ pub(super) fn configure_statusline(status: &SharedStatus, template: String) {
                     "status line disabled and saved".to_string()
                 }
                 UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
-                    format!("status line saved with uncertain durability: {diagnostic}")
+                    format!(
+                        "status line changed, but saving it to disk could not be confirmed: {diagnostic}"
+                    )
                 }
             });
         }

@@ -702,7 +702,7 @@ async fn new_invalid_server_exposes_no_tool_and_typed_auth_is_sanitized() {
     );
     assert_eq!(
         errors,
-        ["MCP server `alpha`: server configuration is invalid"]
+        ["MCP server 'alpha': server configuration is invalid; inspect with 'ego mcp ls'"]
     );
     admission.push(Outcome::AuthorizationRequired {
         issuer: "https://issuer.example".to_owned(),
@@ -1028,7 +1028,7 @@ async fn status_servers_are_canonicalized_by_name_across_mixed_outcomes() {
     assert!(errors.iter().all(|error| !error.contains("zeta-value")));
     assert_eq!(
         errors,
-        ["MCP server `zeta`: server configuration is invalid"]
+        ["MCP server 'zeta': server configuration is invalid; inspect with 'ego mcp ls'"]
     );
 }
 
@@ -1097,7 +1097,7 @@ async fn rejected_materialization_candidate_does_not_abort_valid_admission() {
     // Catches: missing credentials still demand a guessed CLI strategy.
     assert_eq!(
         errors[0],
-        "MCP server `beta`: server credential is unavailable; run '/mcp login beta'"
+        "MCP server 'beta': server credential is unavailable; run '/mcp login beta'"
     );
     assert!(!errors[0].contains("access_token"));
     assert!(!errors[0].contains("client_secret"));
@@ -1714,8 +1714,9 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
         let status = registry.status();
         let server = status.servers().first().expect("status");
         let diagnostic = server.diagnostic().expect("diagnostic");
-        if status.mcp_errors() != ["MCP server `alpha`: server configuration is invalid"]
-            || diagnostic.message() != "server configuration is invalid"
+        if status.mcp_errors()
+            != ["MCP server 'alpha': server configuration is invalid; inspect with 'ego mcp ls'"]
+            || diagnostic.message() != "server configuration is invalid; inspect with 'ego mcp ls'"
             || diagnostic.failure() != McpFailure::InvalidValue
         {
             // Report the corpus index, never echo the raw cause into test diagnostics.
@@ -1723,7 +1724,10 @@ async fn allowlisted_diagnostics_never_publish_round_seven_to_nine_backend_text(
         }
         for event in journal.events() {
             if let McpRegistryEvent::RefreshFailed { cause, .. } = event {
-                assert_eq!(cause, "server configuration is invalid");
+                assert_eq!(
+                    cause,
+                    "server configuration is invalid; inspect with 'ego mcp ls'"
+                );
             }
         }
     }
@@ -1750,7 +1754,7 @@ async fn private_log_failure_still_journals_refresh_failed_and_keeps_fixed_statu
         .expect("best-effort private log");
     assert_eq!(
         registry.status().mcp_errors(),
-        ["MCP server `alpha`: server configuration is invalid"]
+        ["MCP server 'alpha': server configuration is invalid; inspect with 'ego mcp ls'"]
     );
     assert!(
         journal
@@ -1768,7 +1772,10 @@ async fn private_log_failure_still_journals_refresh_failed_and_keeps_fixed_statu
             _ => None,
         })
         .collect();
-    assert_eq!(failed, ["server configuration is invalid"]);
+    assert_eq!(
+        failed,
+        ["server configuration is invalid; inspect with 'ego mcp ls'"]
+    );
     assert!(
         events
             .iter()

@@ -2833,7 +2833,7 @@ fn wait_image_reply(
                 if matches!(control, Control::Shutdown) { return None; }
                 if !answer_control(editor, phase, surface, controls, pending_control, control) { return None; }
             }
-            recv(answer) -> reply => return Some(reply.unwrap_or_else(|_| Err("image admission was cancelled; the draft was retained".to_owned()))),
+            recv(answer) -> reply => return Some(reply.unwrap_or_else(|_| Err("adding the image was cancelled; your draft was kept".to_owned()))),
             recv(signals) -> sequence => {
                 let Ok(sequence) = sequence else { return None; };
                 let mut out = std::io::stdout().lock();

@@ -717,7 +717,7 @@ fn render_list_text(rows: &[EffectiveRule], out: &dyn TextOutput) {
         // empty one has no stdout at all and says why on stderr instead.
         out.note(&empty_listing(
             "no permission rules are in effect",
-            "ego rules allow RULE",
+            "ego rules allow",
         ));
         return;
     }
@@ -998,7 +998,7 @@ pub(crate) fn render_remember_result_rows(
 pub(crate) fn publication_warning_text(publication: &UserConfigPublication) -> Option<String> {
     match publication {
         UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => Some(format!(
-            "rules were published but durability is uncertain: {diagnostic}"
+            "rules changed, but saving them to disk could not be confirmed: {diagnostic}"
         )),
         _ => None,
     }
@@ -1503,7 +1503,10 @@ mod permission_red {
         };
         assert_eq!(
             publication_warning_text(&uncertain),
-            Some("rules were published but durability is uncertain: sync pending".to_owned())
+            Some(
+                "rules changed, but saving them to disk could not be confirmed: sync pending"
+                    .to_owned()
+            )
         );
         assert_eq!(
             render_remember_result_rows(&UserConfigTarget::Base, None),

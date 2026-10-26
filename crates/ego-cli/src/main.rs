@@ -65,7 +65,7 @@ async fn ordinary_main() -> std::process::ExitCode {
         Ok(Invocation::Interactive(args)) if args.profile.as_deref() == Some("ci")
     ) {
         invocation = Err(cli::UsageError(
-            "profile `ci` is available only through ego run or ego resume".to_owned(),
+            "profile 'ci' is available only through 'ego run' or 'ego resume'".to_owned(),
         ));
     }
     // Before any run work, so a malformed `EGO_LOG` is a usage error rather

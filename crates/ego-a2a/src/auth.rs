@@ -54,15 +54,13 @@ impl fmt::Display for CredentialRefusal {
         match self {
             Self::Unset => write!(
                 f,
-                "`ego a2a` needs a bearer token to authenticate callers with: set \
-                 `{TOKEN_VAR}` to a secret you generate, and give the same value \
-                 to the agents you want to let in"
+                "'ego a2a' needs a secret token to check who can connect; set \
+                 {TOKEN_VAR} to a secret shared only with trusted callers"
             ),
             Self::Empty => write!(
                 f,
-                "`{TOKEN_VAR}` is set but empty, which would admit every caller \
-                 presenting an empty bearer token; set it to a real secret or \
-                 unset it and do not serve"
+                "{TOKEN_VAR} is empty, so the server cannot check who can connect; \
+                 set it to a secret shared only with trusted callers"
             ),
         }
     }

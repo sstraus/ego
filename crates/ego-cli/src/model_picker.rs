@@ -585,7 +585,7 @@ impl ActionSink for ModelPicker {
                 Err(error) => {
                     self.diagnostic = Some(error);
                     LocalActionOutcome::Refused {
-                        reason: "the current model has no selectable reasoning authority",
+                        reason: "reasoning settings are not available for the current model",
                     }
                 }
             },

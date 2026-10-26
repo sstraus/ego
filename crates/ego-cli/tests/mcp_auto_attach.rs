@@ -89,7 +89,7 @@ fn configured_server_is_attached_without_the_mcp_flag() {
         "native web retrieval must coexist with discovered MCP tools: {generations:?}"
     );
     assert!(
-        !finished.stderr.contains("not attached"),
+        !finished.stderr.contains("was not connected"),
         "a healthy server drew a notice: {finished:?}"
     );
 }
@@ -154,7 +154,7 @@ fn refused_configured_server_is_reported_once_and_the_session_continues() {
     assert_eq!(finished.code, Some(0), "{finished:?}");
     assert!(finished.stdout.contains("REMOTE-COMPLETE"), "{finished:?}");
     let notice =
-        "MCP server `remote` not attached: MCP HTTP server `remote` requires --sandbox off";
+        "MCP server 'remote' was not connected: MCP HTTP server `remote` requires --sandbox off";
     assert_eq!(finished.stderr.matches(notice).count(), 1, "{finished:?}");
 }
 
@@ -190,7 +190,7 @@ fn configured_server_that_fails_to_start_is_reported_once_and_the_session_contin
     assert!(finished.stdout.contains("BROKEN-COMPLETE"), "{finished:?}");
     assert!(!finished.stderr.contains("configured but not attached"));
     assert_eq!(
-        finished.stderr.matches("MCP server `missing`").count(),
+        finished.stderr.matches("MCP server 'missing'").count(),
         1,
         "{finished:?}"
     );

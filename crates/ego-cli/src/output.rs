@@ -465,7 +465,56 @@ fn write_note(mut err: impl Write, message: &str, width: Option<usize>, raw: boo
 /// and `rules ls` have their empty text output fixed by their ADRs, and a
 /// prose line on stdout would corrupt every reader of the tab-separated shape.
 pub fn empty_listing(missing: &str, add_with: &str) -> String {
-    format!("{missing}; add the first with `{add_with}`")
+    format!("{missing}; see '{add_with} --help' to add an entry")
+}
+
+/// Human completion notice; full-output handles belong only in model history.
+pub(crate) fn background_exec_notice(snapshot: &ego_core::permit::DetachedExecSnapshot) -> String {
+    use ego_core::permit::DetachedExecOutcome;
+
+    let state = match &snapshot.outcome {
+        None => "running".to_owned(),
+        Some(DetachedExecOutcome::Exited { code, .. }) => format!("exited code {code}"),
+        Some(DetachedExecOutcome::Signalled {
+            signal: Some(signal),
+            ..
+        }) => {
+            format!("stopped by signal {signal}")
+        }
+        Some(DetachedExecOutcome::Signalled { signal: None, .. }) => {
+            "stopped by a signal".to_owned()
+        }
+        Some(DetachedExecOutcome::Cancelled) => "cancelled".to_owned(),
+        Some(DetachedExecOutcome::TimedOut { timeout_ms }) => {
+            format!("timed out after {timeout_ms} ms")
+        }
+        Some(DetachedExecOutcome::Interrupted) => "interrupted".to_owned(),
+        Some(DetachedExecOutcome::Failed { reason }) => format!("failed: {reason}"),
+    };
+    let mut text = format!("Background command {}: {state}.", snapshot.id);
+    for (label, bytes, omitted) in [
+        ("Output", &snapshot.stdout_tail, snapshot.stdout_omitted),
+        (
+            "Error output",
+            &snapshot.stderr_tail,
+            snapshot.stderr_omitted,
+        ),
+    ] {
+        let tail = String::from_utf8_lossy(bytes);
+        let tail = tail.trim_end();
+        if !tail.is_empty() {
+            if omitted == 0 {
+                text.push_str(&format!("\n{label}:\n{tail}"));
+            } else {
+                text.push_str(&format!(
+                    "\n{label} ({omitted} earlier bytes omitted):\n{tail}"
+                ));
+            }
+        } else if omitted > 0 {
+            text.push_str(&format!("\n{label}: {omitted} bytes omitted."));
+        }
+    }
+    text
 }
 
 /// The live view of a run: one `PublicEvent` per line, as it happens.
@@ -657,13 +706,9 @@ impl<'a> TextSink<'a> {
             if let Some(reason) = &goal.check_stop
                 && prior.is_none_or(|prior| prior.check_stop.as_ref() != Some(reason))
             {
-                let next = if goal.state == GoalState::Blocked {
-                    "Next: /goal show; after resolving the blocker, /goal set TEXT starts a new goal. /goal achieve and /goal block require an active goal"
-                } else {
-                    "Next: /goal show, /goal achieve, /goal block"
-                };
+                let next = "Inspect the goal with '/goal show'.";
                 receipts.push(format!(
-                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. {next}; --goal-turns N sets the allowance when checks first start.",
+                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. {next}",
                     goal.objective, goal.continuation_turns,
                     goal.blocker_reason.as_deref().unwrap_or("none recorded")
                 ));
@@ -941,7 +986,7 @@ impl EventSink for TextSink<'_> {
             PublicEvent::SessionStarted { mcp_errors, .. } => {
                 for error in mcp_errors {
                     self.finish();
-                    self.out.note(&format!("{error}. Inspect with ego mcp ls."));
+                    self.out.note(error);
                 }
             }
             // `AgentMessage` and not "either message kind": stdout is the

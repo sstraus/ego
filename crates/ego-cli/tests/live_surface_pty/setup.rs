@@ -78,7 +78,7 @@ fn setup_slash_case(pick: &[u8], answer: Option<&[u8]>, applied: bool) {
         if applied {
             "Setup publication"
         } else {
-            "Setup declined/cancelled"
+            "Setup cancelled"
         },
     );
     until_prompt_from(&reader, &mut output, start);
@@ -155,7 +155,7 @@ fn setup_slash_raw_ctrl_c_stops_stalled_inference_without_publication() {
     let start = output.len();
     input.write_all(b"\x03").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+    until_normalized(&reader, &mut output, start, "Setup cancelled");
     gate.release();
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
@@ -199,7 +199,7 @@ fn interactive_setup_explains_session_model_vs_interpreter_model() {
         until_normalized(&reader, &mut output, start, "Select setup proposal items");
         input.write_all(b"\x1b").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+        until_normalized(&reader, &mut output, start, "Setup cancelled");
         until_prompt_from(&reader, &mut output, start);
         drain_until_quiet(&reader, &mut output);
         if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
@@ -268,7 +268,7 @@ fn followup_setup_rows_have_one_number_and_bounded_home_paths() {
         ));
         input.write_all(b"\x1b").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+        until_normalized(&reader, &mut output, start, "Setup cancelled");
         until_prompt_from(&reader, &mut output, start);
         input.write_all(b"/quit\r").unwrap();
         input.flush().unwrap();
@@ -356,7 +356,7 @@ fn setup_picker_heading_rows_have_no_external_notice_overdraw() {
     }
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "Setup declined/cancelled");
+    until_normalized(&reader, &mut output, start, "Setup cancelled");
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();

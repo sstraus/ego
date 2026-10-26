@@ -719,7 +719,7 @@ pub(crate) fn confirm_apply(
             .collect::<Vec<_>>()
     );
     if !confirm(question) {
-        return Ok("Setup declined/cancelled; no configuration writes.\n".into());
+        return Ok("Setup cancelled; no configuration was changed.\n".into());
     }
     let check = || {
         if config_identity(home).map_err(UserConfigError::new)? != preview.config_identity {
@@ -778,7 +778,7 @@ pub(crate) fn confirm_apply(
         crate::run::profile_roots::defaults(&mut effective, Path::new(&home));
     }
     let mut report = format!(
-        "Setup publication: {:?}; resume before using changed authority.\n",
+        "Setup publication: {:?}; resume the session to apply the new permissions.\n",
         result.publication
     );
     for ((path, write), execution) in paths.into_iter().zip(writes).zip(executions) {
@@ -794,7 +794,7 @@ pub(crate) fn confirm_apply(
             "still blocked"
         };
         report.push_str(&format!(
-            "Re-probe {}: {status}; existing run authority unchanged.\n",
+            "Re-probe {}: {status}; current session permissions unchanged.\n",
             ego_core::permit::terminal_safe(&path.display().to_string())
         ));
     }
@@ -803,7 +803,7 @@ pub(crate) fn confirm_apply(
             && action_reachable(&effective, workspace, &probe)
             && action_call(&probe)
                 .is_ok_and(|call| action_resolution(&effective, workspace, call) == 1);
-        report.push_str(&format!("Re-probe concrete action: {}; policy-only, no execution; existing run authority unchanged.\n", if fixed { "fixed approval" } else { "still blocked/unknown" }));
+        report.push_str(&format!("Re-probe concrete action: {}; policy-only, no execution; current session permissions unchanged.\n", if fixed { "fixed approval" } else { "still blocked/unknown" }));
     }
     Ok(report)
 }
@@ -961,7 +961,7 @@ mod tests {
                 assert!(report.contains("fixed (policy-only)"), "{report}");
             } else {
                 assert!(!home.parent().unwrap().exists());
-                assert!(report.contains("declined/cancelled"));
+                assert_eq!(report, "Setup cancelled; no configuration was changed.\n");
             }
         }
     }
@@ -1247,7 +1247,7 @@ mod tests {
             false
         })
         .unwrap();
-        assert!(report.contains("declined"));
+        assert_eq!(report, "Setup cancelled; no configuration was changed.\n");
         assert_eq!(std::fs::read_to_string(&program).unwrap(), "task evidence");
     }
 
@@ -1665,7 +1665,7 @@ mod tests {
             false
         })
         .unwrap();
-        assert!(report.contains("declined/cancelled"));
+        assert_eq!(report, "Setup cancelled; no configuration was changed.\n");
         assert_eq!(
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
             "roots=[]\n"

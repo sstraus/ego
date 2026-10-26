@@ -1148,7 +1148,7 @@ async fn answer_image_request(
                     .await
                     .map_err(|error| format!("{error:?}; the complete draft was retained")),
                     Err(error) => Err(format!(
-                        "image admission failed: {error:?}; the complete draft was retained"
+                        "the image could not be added: {error:?}; your entire draft was kept"
                     )),
                 }
             }
@@ -1266,8 +1266,8 @@ async fn run_interactive_setup(
     };
     let setup_result = tokio::select! {
         biased;
-        _ = terminal_cancel => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
-        _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup declined/cancelled; no configuration writes".into())),
+        _ = terminal_cancel => Err(crate::cli::UsageError("Setup cancelled; no configuration was changed".into())),
+        _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup cancelled; no configuration was changed".into())),
         result = crate::setup::observed_selection_host(
             root.to_path_buf(),
             &setup_args,
@@ -1296,7 +1296,7 @@ async fn run_interactive_config(
             Ok(set) => match crate::config::repl_set(&set) {
                 Ok(receipt) => {
                     diagnostics.note(&receipt);
-                    diagnostics.note("Saved to user base configuration; applies to future sessions. Current session authority is unchanged.");
+                    diagnostics.note("Saved to your user configuration for future sessions. This session keeps its current settings.");
                     if let Some(warning) = crate::config::saved_override(
                         &set,
                         effective,
@@ -1330,14 +1330,14 @@ async fn select_session_transition<'store>(
     if !seat.has_human() {
         match crate::catalogue::saved_sessions(store.as_ref(), diagnostics) {
             Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
-            Err(error) => {
-                diagnostics.note(&format!("the session catalogue could not be read: {error}"))
-            }
+            Err(error) => diagnostics.note(&format!(
+                "the saved session list could not be read: {error}"
+            )),
         }
         return None;
     }
     if pending_work {
-        diagnostics.note("a session cannot be selected while source work is pending");
+        diagnostics.note("cannot switch sessions while work is pending; wait for it to finish");
         return None;
     }
     let mut metas: Vec<_> = match crate::catalogue::saved_sessions(store.as_ref(), diagnostics) {
@@ -1346,7 +1346,9 @@ async fn select_session_transition<'store>(
             .filter(|meta| meta.id != session_id)
             .collect(),
         Err(error) => {
-            diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+            diagnostics.note(&format!(
+                "the saved session list could not be read: {error}"
+            ));
             return None;
         }
     };
@@ -1380,7 +1382,7 @@ async fn select_session_transition<'store>(
     let target = target?;
     let meta = metas.into_iter().find(|meta| meta.id == target)?;
     if !meta.workspace_root.is_dir() {
-        diagnostics.note("the selected session root is unavailable");
+        diagnostics.note("the selected session's workspace directory is unavailable");
         return None;
     }
     let opened = match session::open_candidate(store.as_ref(), &target, clock) {
@@ -1400,7 +1402,7 @@ async fn select_session_transition<'store>(
         || !target_state.live_attempts.is_empty()
     {
         diagnostics.note(&format!(
-            "session {target} has unfinished work; use ego resume {target}"
+            "session {target} has unfinished work; continue it with 'ego resume {target}'"
         ));
         return None;
     }
@@ -1435,7 +1437,7 @@ async fn new_session_transition<'store>(
     diagnostics: &dyn Diagnostics,
 ) -> Option<EpochTransition<'store>> {
     if pending_work {
-        diagnostics.note("a new session cannot be selected while source work is pending");
+        diagnostics.note("cannot start a new session while work is pending; wait for it to finish");
         return None;
     }
     let target = SessionId::new();
@@ -1450,9 +1452,7 @@ async fn new_session_transition<'store>(
         match ActiveSession::durable(target_opened, SessionState::default(), EVIDENCE_CAP) {
             Ok(owner) => owner,
             Err(error) => {
-                diagnostics.note(&format!(
-                    "the new session evidence could not be opened: {error}"
-                ));
+                diagnostics.note(&format!("the new session log could not be opened: {error}"));
                 return None;
             }
         };
@@ -1475,7 +1475,7 @@ async fn fork_session_transition<'store>(
     diagnostics: &dyn Diagnostics,
 ) -> Option<EpochTransition<'store>> {
     if pending_work {
-        diagnostics.note("the session cannot switch forks while source work is pending");
+        diagnostics.note("cannot fork the session while work is pending; wait for it to finish");
         return None;
     }
     let lifecycle = ego_core::session_lifecycle::SessionLifecycle::new(
@@ -1500,7 +1500,7 @@ async fn fork_session_transition<'store>(
     let publication = match lifecycle.publish_prepared_fork(target, &prepared) {
         Ok(publication) => publication,
         Err(error) => {
-            diagnostics.note(&format!("the fork target was not published: {error}"));
+            diagnostics.note(&format!("the forked session could not be saved: {error}"));
             return None;
         }
     };
@@ -1508,7 +1508,7 @@ async fn fork_session_transition<'store>(
         Ok(opened) => opened,
         Err(error) => {
             diagnostics.note(&format!(
-                "the published fork target {target} could not be opened: {error}"
+                "the forked session {target} was saved but could not be opened: {error}"
             ));
             return None;
         }
@@ -1523,7 +1523,7 @@ async fn fork_session_transition<'store>(
         Ok(owner) => owner,
         Err(error) => {
             diagnostics.note(&format!(
-                "the published fork target {target} could not be replayed: {error}"
+                "the forked session {target} was saved but its history could not be loaded: {error}"
             ));
             return None;
         }
@@ -1676,7 +1676,7 @@ fn activate_epoch(
         } => {
             if let Some(diagnostic) = diagnostic {
                 diagnostics.note(&format!(
-                    "fork target {} is authoritative with a durability warning: {diagnostic}",
+                    "forked session {} is available, but saving it to disk could not be confirmed: {diagnostic}",
                     session_id
                 ));
             }
@@ -1701,7 +1701,7 @@ fn activate_epoch(
         EpochStart::Compact { diagnostic, .. } => {
             if let Some(diagnostic) = diagnostic {
                 diagnostics.note(&format!(
-                    "compaction target is authoritative with a durability warning: {diagnostic}"
+                    "the compacted session is available, but saving it to disk could not be confirmed: {diagnostic}"
                 ));
             }
             sink.publish(
@@ -1812,7 +1812,7 @@ fn render_skill_catalogue(
     diagnostics: &dyn Diagnostics,
 ) {
     let Some(catalogue) = catalogue else {
-        diagnostics.note("the skill catalogue is unavailable");
+        diagnostics.note("the skill list is unavailable");
         return;
     };
     match catalogue.capture() {
@@ -1823,9 +1823,7 @@ fn render_skill_catalogue(
         } else {
             capture.render_summary()
         }),
-        Err(error) => diagnostics.note(&format!(
-            "the skill catalogue could not be captured: {error}"
-        )),
+        Err(error) => diagnostics.note(&format!("the skill list could not be read: {error}")),
     }
 }
 
@@ -1837,13 +1835,11 @@ fn render_session_hooks(hook_state: &SessionHookState<'_>, diagnostics: &dyn Dia
                 "ego config edit",
             )),
             Ok(rendered) => diagnostics.note(&rendered),
-            Err(error) => diagnostics.note(&format!(
-                "the hook catalogue could not be rendered: {error}"
-            )),
+            Err(error) => {
+                diagnostics.note(&format!("the hook list could not be displayed: {error}"))
+            }
         },
-        Err(error) => diagnostics.note(&format!(
-            "the hook catalogue could not be captured: {error}"
-        )),
+        Err(error) => diagnostics.note(&format!("the hook list could not be read: {error}")),
     }
 }
 
@@ -1857,7 +1853,7 @@ async fn switch_session_model(
     diagnostics: &dyn Diagnostics,
 ) {
     let Some(owner) = model_switch_owner else {
-        diagnostics.note("the active session has no model-switch lifecycle owner");
+        diagnostics.note("model switching is not available in this session");
         return;
     };
     seat.busy();
@@ -1877,7 +1873,7 @@ async fn switch_session_model(
     };
     if let Some(UserConfigPublication::PublishedDurabilityUncertain { diagnostic }) = publication {
         diagnostics.note(&format!(
-            "model defaults are authoritative with a durability warning: {diagnostic}"
+            "model defaults have changed, but saving them to disk could not be confirmed: {diagnostic}"
         ));
     }
     match applied {
@@ -1890,7 +1886,7 @@ async fn switch_session_model(
         match selection.snapshot() {
             Ok(selected) => status.seat.refresh_status(state, selected),
             Err(error) => diagnostics.note(&format!(
-                "the model-switch status selection could not be refreshed: {error}"
+                "the status display could not be updated after switching models: {error}"
             )),
         }
     }
@@ -1908,12 +1904,14 @@ async fn report_session_usage(
     let metadata = match store.readable_meta(&session_id) {
         Ok(metadata) => metadata.filter(|meta| meta.workspace_root == root),
         Err(error) => {
-            diagnostics.note(&format!("the session catalogue could not be read: {error}"));
+            diagnostics.note(&format!(
+                "the saved session list could not be read: {error}"
+            ));
             return;
         }
     };
     let Some(meta) = metadata else {
-        diagnostics.note("the active session is absent from its durable catalogue");
+        diagnostics.note("the current session is missing from the saved session list");
         return;
     };
     match UsageReportService::new(store, clock)
@@ -2307,8 +2305,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         || (model_compaction && state.detached_execs.values().any(Option::is_none))
     {
         return Err(CompactionError::Internal(
-            "compaction stopped before target creation because new source work became pending"
-                .to_owned(),
+            "compaction stopped before creating a new session because more work arrived".to_owned(),
         ));
     }
     let prepared = prepared?;
@@ -2397,7 +2394,7 @@ fn activate_fork_transition<'store>(
     }
     diagnostics.note(&format!(
         "forked session {parent} into {}; this is now session {}. \
-                             To return to the source: ego resume {parent} ({})",
+                             To return to the original session: 'ego resume {parent}' ({})",
         active.id(),
         active.id(),
         crate::usage::context_line(active.state().context)
@@ -2423,11 +2420,11 @@ fn rescan_session_skills(
     let (args, effective, jsonl_store, exec_environment) = inputs;
 
     if pending_work {
-        diagnostics.note("skills cannot be rescanned while source work is pending");
+        diagnostics.note("cannot rescan skills while work is pending; wait for it to finish");
         return Ok(None);
     }
     let Some(catalogue) = skills else {
-        diagnostics.note("the skill catalogue is unavailable");
+        diagnostics.note("the skill list is unavailable");
         return Ok(None);
     };
     seat.busy();
@@ -2922,7 +2919,7 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
         repl::Line::HostCommand(repl::HostCommand::McpContext(command)) => {
             if pending_work {
                 diagnostics
-                    .note("MCP context commands are unavailable while source work is pending");
+                    .note("cannot use MCP prompts or resources while work is pending; wait for it to finish");
                 return Ok(CommandOutcome::Continue);
             }
             Ok(CommandOutcome::Input(InteractiveTurnInput::McpContext(
@@ -2931,7 +2928,7 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
         }
         repl::Line::HostCommand(repl::HostCommand::Skill(operation)) => {
             if pending_work {
-                diagnostics.note("a skill cannot be invoked while source work is pending");
+                diagnostics.note("cannot run a skill while work is pending; wait for it to finish");
                 return Ok(CommandOutcome::Continue);
             }
             Ok(CommandOutcome::Input(InteractiveTurnInput::Skill(
@@ -3052,7 +3049,7 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
                 .map(|tool| tool.descriptor().name.to_string())
                 .collect::<Vec<_>>();
             diagnostics.note(&format!(
-                "tools: {} admitted; /tools details for the full list",
+                "tools: {} available; inspect the full list with '/tools details'",
                 tools.len()
             ));
             if details {
@@ -3155,16 +3152,17 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Refresh)) => {
             if pending_work {
-                diagnostics.note("instructions cannot be refreshed while source work is pending");
+                diagnostics.note(
+                    "cannot reload instructions while work is pending; wait for it to finish",
+                );
                 return Ok(CommandOutcome::Continue);
             }
             match instructions(effective, args, root, cwd, diagnostics) {
                 Ok(system) => {
                     config.system = system;
                     *refresh_prompt = true;
-                    diagnostics.note(
-                        "instructions refreshed; the next generation opens a new prompt epoch",
-                    );
+                    diagnostics
+                        .note("instructions refreshed; they will apply to the next model request");
                 }
                 Err(error) => {
                     diagnostics.note(&format!("instructions were not refreshed: {error}"))
@@ -3237,7 +3235,9 @@ fn update_session_metadata<'store>(
     } = input;
 
     if pending_work {
-        diagnostics.note("session metadata is unavailable while source work is pending");
+        diagnostics.note(
+            "cannot change the session name or goal while work is pending; wait for it to finish",
+        );
         return Ok(CommandOutcome::Continue);
     }
     if let Err(error) = crate::metadata::execute_interactive(
@@ -3434,7 +3434,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
                 // Keep the latch until fresh work or /compact: unchanged pressure
                 // must not start another exhausted recovery without input.
                 diagnostics.note(&format!(
-                    "Compaction paused; the session is still open: {error}. Use /compact to retry, or send a new prompt to try again."
+                    "Compaction paused; the session is still open: {error}. Retry with '/compact'."
                 ));
                 return Ok(CommandOutcome::Continue);
             }
@@ -3704,11 +3704,11 @@ fn refresh_epoch_status(
                     format!("the new session status selection could not be refreshed: {error}")
                 }
                 EpochStart::Fork { .. } => {
-                    format!("the forked session status selection could not be refreshed: {error}")
+                    format!("the forked session status could not be updated: {error}")
                 }
-                EpochStart::Compact { .. } => format!(
-                    "the compacted session status selection could not be refreshed: {error}"
-                ),
+                EpochStart::Compact { .. } => {
+                    format!("the compacted session status could not be updated: {error}")
+                }
                 EpochStart::Initial => {
                     unreachable!("initial epoch status is not refreshed through transition setup")
                 }
@@ -3751,7 +3751,7 @@ fn report_settled_execs(
         if let Some(snapshot) = snapshot
             && !settled_before.contains(id)
         {
-            diagnostics.note(&snapshot.model_text());
+            diagnostics.note(&crate::output::background_exec_notice(snapshot));
         }
     }
 }
@@ -3784,7 +3784,7 @@ fn report_interactive_turn_end(
         let action = ego_core::permit::terminal_safe(action);
         let message = format!(
             "stopped: permission refused — {action}\n\
-             Use /mode to choose a mode that permits this action, then resubmit."
+             Choose a mode that permits this action with '/mode'."
         );
         let prefix_width = format!("{}: ", crate::DISPLAY_NAME).width();
         let room = seat.width().saturating_sub(prefix_width + 1).max(1);
@@ -3797,7 +3797,7 @@ fn report_interactive_turn_end(
     }
 
     if let RunTermination::Failed { message } = termination {
-        diagnostics.note(&format!("{message}; fix the error and retry, or use /quit"));
+        diagnostics.note(&format!("{message}; correct the error before trying again"));
     }
 }
 
@@ -3850,7 +3850,7 @@ fn activate_compaction_transition<'store>(
     diagnostics.note(&format!(
         "compacted session {parent_id} into {}; this is now session {}. \
                              Before: {}; after: known once the next reply is generated. \
-                             To return to the source: ego resume {parent_id}",
+                             To return to the original session: 'ego resume {parent_id}'",
         active.id(),
         active.id(),
         crate::usage::context_line(parent_context)

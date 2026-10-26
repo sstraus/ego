@@ -168,10 +168,7 @@ pub async fn command(
         project
     };
     if !std::fs::symlink_metadata(root.join(".mdkb")).is_ok_and(|meta| meta.is_dir()) {
-        return Err(
-            "selected scope has no MDKB index; initialize it explicitly with mdkb init first"
-                .into(),
-        );
+        return Err("the selected scope has no MDKB index; create it with 'mdkb init'".into());
     }
     match request.operation {
         Operation::List => {
@@ -286,7 +283,7 @@ impl InitProposal {
         let claude = root.join("CLAUDE.md");
         let link_exists = match std::fs::symlink_metadata(&claude) {
             Ok(meta) if meta.file_type().is_symlink() && std::fs::read_link(&claude).ok().as_deref() == Some(Path::new("AGENTS.md")) => true,
-            Ok(_) => return Err("CLAUDE.md is independent or points elsewhere; reconcile it with AGENTS.md explicitly before /init".into()),
+            Ok(_) => return Err("CLAUDE.md is independent or points elsewhere; reconcile it with AGENTS.md before using '/init'".into()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(_) => return Err("cannot inspect CLAUDE.md".into()),
         };
@@ -350,7 +347,7 @@ impl InitProposal {
         if !self.link_exists {
             create_link(&self.root.join("CLAUDE.md")).map_err(|_| "CLAUDE.md symlink failed; AGENTS.md is preserved; inspect partial initialization")?;
         }
-        Ok("Project instructions initialized. Use /refresh to request ordinary trust admission in a new prompt epoch.".into())
+        Ok("Project instructions created. Load them with '/refresh'; ego will ask for trust if needed.".into())
     }
 }
 

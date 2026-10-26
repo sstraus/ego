@@ -500,7 +500,7 @@ fn ci_preflight_rejects_profile_from_untrusted_project_configuration_before_effe
         &finished,
         &fixture.session_root,
         &fixture.artifact_root,
-        r#"unknown profile `ci`"#,
+        "profile 'ci' is not defined",
     );
 }
 
@@ -547,7 +547,7 @@ fn ci_preflight_rejects_missing_noninteractive_credentials_before_effects() {
         &finished,
         &fixture.session_root,
         &fixture.artifact_root,
-        "non-interactive credential",
+        "not signed in to the subscription; sign in with 'ego auth login openai-codex'",
     );
 }
 
@@ -654,7 +654,7 @@ fn ci_preflight_rejects_conversational_invocation_before_seat_or_effects() {
         &finished,
         &fixture.session_root,
         &fixture.artifact_root,
-        r#"profile `ci` is available only through ego run or ego resume"#,
+        r#"profile 'ci' is available only through 'ego run' or 'ego resume'"#,
     );
 }
 

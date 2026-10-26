@@ -1030,7 +1030,7 @@ impl fmt::Display for FlowError {
             }
             Self::ReloginRequired { provider, cause } => write!(
                 f,
-                "{provider} login expired; run `ego auth login {provider}`: {cause}"
+                "{provider} login expired ({cause}); sign in again with 'ego auth login {provider}'"
             ),
             Self::Temporary {
                 provider,

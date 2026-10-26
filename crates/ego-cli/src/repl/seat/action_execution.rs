@@ -179,8 +179,10 @@ pub(super) fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str>
             Some("history is unavailable while a turn is running")
         }
         Dispatch::Skill(_) => Some("a skill cannot be invoked while a turn is running"),
-        Dispatch::Skills(_) => Some("skill actions are unavailable while a turn is running"),
-        Dispatch::Export(_) => Some("export is unavailable while a turn is running"),
+        Dispatch::Skills(_) => {
+            Some("cannot run skill actions during a reply; wait for it to finish")
+        }
+        Dispatch::Export(_) => Some("cannot export during a reply; wait for it to finish"),
         Dispatch::Fork(_) => Some("switching forks is unavailable while a turn is running"),
         Dispatch::McpContext(_) => {
             Some("MCP context commands are unavailable while a turn is running")
@@ -191,7 +193,7 @@ pub(super) fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str>
             Some("memory and init are unavailable while a turn is running")
         }
         Dispatch::Fast(_) => Some("fast tier cannot change while a turn is running"),
-        Dispatch::Hooks => Some("hook inspection is unavailable while a turn is running"),
+        Dispatch::Hooks => Some("cannot inspect hooks during a reply; wait for it to finish"),
         _ => None,
     }
 }
@@ -1039,7 +1041,7 @@ pub(super) fn apply_surface_effect(
         SurfaceActionEffect::Export => {
             if busy {
                 status.lock().expect("surface status lock").notice =
-                    Some("export is unavailable while a turn is running".to_owned());
+                    Some("cannot export during a reply; wait for it to finish".to_owned());
             } else {
                 // The shortcut and the menu carry no words, so they select the
                 // default the slash grammar documents: sanitized markdown.
@@ -1109,7 +1111,7 @@ pub(super) fn apply_surface_effect(
                     Confirmation::Confirmed => {}
                     Confirmation::Declined => {
                         status.lock().expect("surface status lock").notice =
-                            Some("composer clear cancelled".to_string());
+                            Some("draft kept".to_string());
                         repaint_status(status);
                         return None;
                     }
@@ -1120,8 +1122,7 @@ pub(super) fn apply_surface_effect(
             let mut current = status.lock().expect("surface status lock");
             current.images.clear();
             current.image_chips.clear();
-            current.notice =
-                Some("Composer cleared; transcript, context and history unchanged".to_owned());
+            current.notice = Some("Draft cleared; conversation and history unchanged".to_owned());
         }
         SurfaceActionEffect::Statusline => {
             let segments = match choose_statusline_preset(editor, phase, status, busy) {
@@ -1179,19 +1180,20 @@ pub(super) fn apply_surface_effect(
                         "tools: none".to_string()
                     } else {
                         format!(
-                            "tools: {} admitted; /tools details when idle",
+                            "tools: {} available; inspect with '/tools' when the current work finishes",
                             catalogue.len()
                         )
                     }
                 }
-                Err(_) => "tools: the admitted tool catalogue is unavailable".to_string(),
+                Err(_) => "tools: the available tool list could not be read".to_string(),
             };
             status.lock().expect("surface status lock").notice = Some(notice);
         }
         SurfaceActionEffect::Skills => {
             if busy {
-                status.lock().expect("surface status lock").notice =
-                    Some("skill actions are unavailable while a turn is running".to_owned());
+                status.lock().expect("surface status lock").notice = Some(
+                    "cannot run skill actions during a reply; wait for it to finish".to_owned(),
+                );
             } else {
                 return Some(Line::HostCommand(HostCommand::Skills(
                     SkillSurfaceAction::List,
@@ -1201,7 +1203,7 @@ pub(super) fn apply_surface_effect(
         SurfaceActionEffect::Hooks => {
             if busy {
                 status.lock().expect("surface status lock").notice =
-                    Some("hook inspection is unavailable while a turn is running".to_owned());
+                    Some("cannot inspect hooks during a reply; wait for it to finish".to_owned());
             } else {
                 return Some(Line::HostCommand(HostCommand::Hooks));
             }
@@ -1271,8 +1273,10 @@ pub(super) fn route_session_metadata(
     busy: bool,
 ) -> Option<Line> {
     if busy {
-        status.lock().expect("surface status lock").notice =
-            Some("session metadata is unavailable while a turn is running".to_owned());
+        status.lock().expect("surface status lock").notice = Some(
+            "cannot change the session name or goal during a reply; wait for it to finish"
+                .to_owned(),
+        );
         repaint_status(status);
         None
     } else {
