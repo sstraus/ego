@@ -3746,7 +3746,7 @@ fn report_settled_execs(
         if let Some(snapshot) = snapshot
             && !settled_before.contains(id)
         {
-            diagnostics.note(&snapshot.model_text());
+            diagnostics.note(&crate::output::background_exec_notice(snapshot));
         }
     }
 }
