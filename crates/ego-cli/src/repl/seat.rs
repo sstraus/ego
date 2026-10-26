@@ -453,6 +453,13 @@ fn repaint_status(status: &SharedStatus) {
     }
 }
 
+struct ChildActivity {
+    name: String,
+    activity: String,
+    started: Instant,
+    output_tokens: u64,
+}
+
 struct SurfaceStatus {
     details: Arc<crate::output::ExpansionHistory>,
     setup_cancel: Option<tokio::sync::watch::Sender<bool>>,
@@ -461,6 +468,7 @@ struct SurfaceStatus {
     activity: bool,
     activity_since: Option<Instant>,
     activity_output_chars: usize,
+    children: std::collections::BTreeMap<ItemId, ChildActivity>,
     thinking_since: Option<Instant>,
     /// When the open modal began; the wait is the person's, not the turn's.
     modal_since: Option<Instant>,
@@ -527,6 +535,49 @@ impl SurfaceStatus {
             return;
         }
         match event {
+            PublicEvent::ItemStarted {
+                item,
+                kind: ItemKind::Tool,
+                name: Some(name),
+                text,
+                ..
+            } if name == "task" => {
+                if let Some(args) = text
+                    .as_deref()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                    && let Some(name) = args.get("name").and_then(serde_json::Value::as_str)
+                {
+                    self.children.entry(*item).or_insert_with(|| ChildActivity {
+                        name: name.to_owned(),
+                        activity: "Working".to_owned(),
+                        started: Instant::now(),
+                        output_tokens: 0,
+                    });
+                }
+                self.thinking_since = None;
+            }
+            PublicEvent::ChildProgress {
+                item,
+                activity,
+                output_tokens,
+                ..
+            } => {
+                if let Some(child) = self.children.get_mut(item) {
+                    child.activity.clone_from(activity);
+                    child.output_tokens = *output_tokens;
+                }
+            }
+            PublicEvent::ItemCompleted {
+                item,
+                kind: ItemKind::Tool | ItemKind::Subagent,
+                ..
+            } => {
+                self.children.remove(item);
+            }
+            PublicEvent::TurnCompleted { .. } => {
+                self.children.clear();
+                self.thinking_since = None;
+            }
             PublicEvent::ItemDelta {
                 kind: ItemKind::Reasoning,
                 text,
@@ -550,8 +601,7 @@ impl SurfaceStatus {
             PublicEvent::ItemStarted {
                 kind: ItemKind::Tool,
                 ..
-            }
-            | PublicEvent::TurnCompleted { .. } => {
+            } => {
                 self.thinking_since = None;
             }
             _ => {}
@@ -569,6 +619,7 @@ impl Default for SurfaceStatus {
             activity: false,
             activity_since: None,
             activity_output_chars: 0,
+            children: Default::default(),
             thinking_since: None,
             modal_since: None,
             modal_waited: std::time::Duration::ZERO,
@@ -2207,6 +2258,7 @@ impl crate::run::InteractiveSeat for Seat {
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = false;
             status.activity_since = None;
+            status.children.clear();
             drop(status);
             repaint_status(&live.status);
         }

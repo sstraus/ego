@@ -1828,3 +1828,128 @@ fn shift_tab_is_a_local_command_in_idle_and_busy_but_not_modals() {
         }
     }
 }
+
+/// Catches: a running task is visible only as finished transcript tool rows.
+#[test]
+fn running_child_has_a_cyan_activity_row_in_the_interactive_seat() {
+    use ego_core::public::{ItemKind, PublicEvent};
+    let mut status = SurfaceStatus {
+        width: 80,
+        permission_capabilities: crate::render::Capabilities {
+            depth: crate::render::Depth::TrueColor,
+            ..crate::render::Capabilities::plain()
+        },
+        ..SurfaceStatus::default()
+    };
+    status.begin_activity();
+    status.observe_generation_progress(&PublicEvent::ItemStarted {
+        turn: ego_core::event::id::TurnId::new(),
+        item: ItemId::new(),
+        kind: ItemKind::Tool,
+        name: Some("task".into()),
+        text: Some(r#"{"name":"Inspect accounting","prompt":"Inspect the usage ledger"}"#.into()),
+    });
+    let waiting = Waiting::new(Arc::new(Mutex::new(status)));
+    let rendered = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+    let row = rendered
+        .lines()
+        .find(|row| row.contains("○ Inspect accounting"))
+        .unwrap_or_else(|| panic!("missing persistent child row: {rendered:?}"));
+    assert!(row.contains("Working"), "{row:?}");
+    assert!(row.contains("0s · ↓ 0 tokens"), "{row:?}");
+    assert!(
+        row.contains("\x1b[38;2;0;255;255m"),
+        "row is not cyan: {row:?}"
+    );
+}
+
+/// Catches: same-name children share counters, width truncates the right suffix,
+/// or a failed/cancelled child leaves a stale live row.
+#[test]
+fn child_activity_rows_keep_identity_counters_width_and_cleanup() {
+    use ego_core::public::{ItemKind, PublicEvent};
+    let turn = ego_core::event::id::TurnId::new();
+    let first = ItemId::new();
+    let second = ItemId::new();
+    let mut status = SurfaceStatus {
+        width: 80,
+        ..SurfaceStatus::default()
+    };
+    status.begin_activity();
+    for item in [first, second] {
+        status.observe_generation_progress(&PublicEvent::ItemStarted {
+            turn, item, kind: ItemKind::Tool, name: Some("task".into()),
+            text: Some(serde_json::json!({"name":"Inspect a very long accounting name 界界界界界", "prompt":"Inspect"}).to_string()),
+        });
+    }
+    status.observe_generation_progress(&PublicEvent::ChildProgress {
+        turn,
+        item: first,
+        activity: "read ledger.rs".into(),
+        output_tokens: 51_200,
+    });
+    status.observe_generation_progress(&PublicEvent::ChildProgress {
+        turn,
+        item: second,
+        activity: "Thinking".into(),
+        output_tokens: 7,
+    });
+    // Clock input only: production uses the same monotonic elapsed interval.
+    status.children.get_mut(&first).unwrap().started = Instant::now() - Duration::from_secs(86);
+    let shared = Arc::new(Mutex::new(status));
+    let waiting = Waiting::new(Arc::clone(&shared));
+    let rendered = waiting
+        .render_prompt_indicator(PromptEditMode::Emacs)
+        .into_owned();
+    let rows: Vec<_> = rendered
+        .lines()
+        .filter(|row| row.starts_with('○'))
+        .collect();
+    assert_eq!(rows.len(), 2, "{rendered}");
+    let first_row = rows.iter().find(|row| row.contains("51.2k")).unwrap();
+    let second_row = rows.iter().find(|row| row.contains("Thinking")).unwrap();
+    assert!(first_row.contains("…  read ledger.rs"), "{first_row}");
+    assert!(
+        first_row.ends_with("1m 26s · ↓ 51.2k tokens"),
+        "{first_row}"
+    );
+    assert!(second_row.ends_with("0s · ↓ 7 tokens"));
+    for row in rows {
+        assert_eq!(crate::render::Line::plain(row).width(), 79);
+        assert!(
+            !row.contains('\x1b'),
+            "plain child row contains escapes: {row:?}"
+        );
+    }
+    {
+        let mut status = shared.lock().unwrap();
+        status.observe_generation_progress(&PublicEvent::ItemCompleted {
+            turn,
+            item: first,
+            kind: ItemKind::Tool,
+            ok: false,
+            text: None,
+        });
+    }
+    let rendered = waiting
+        .render_prompt_indicator(PromptEditMode::Emacs)
+        .into_owned();
+    assert_eq!(
+        rendered.lines().filter(|row| row.starts_with('○')).count(),
+        1
+    );
+    assert!(!rendered.contains("51.2k"));
+    shared
+        .lock()
+        .unwrap()
+        .observe_generation_progress(&PublicEvent::TurnCompleted {
+            turn,
+            ok: false,
+            exit_reason: ego_core::event::domain::ExitReason::Cancelled(CancelCause::User),
+        });
+    assert!(
+        !waiting
+            .render_prompt_indicator(PromptEditMode::Emacs)
+            .contains('○')
+    );
+}

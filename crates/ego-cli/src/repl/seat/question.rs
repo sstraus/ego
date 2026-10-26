@@ -1695,7 +1695,51 @@ fn status_right(status: &SharedStatus) -> String {
 }
 
 fn status_row(status: &SurfaceStatus) -> String {
-    let ephemeral = activity_or_status_row(status);
+    let mut ephemeral = activity_or_status_row(status);
+    let width = if status.width == 0 {
+        status.permission_capabilities.width
+    } else {
+        status.width
+    }
+    .saturating_sub(1);
+    for child in status.children.values() {
+        let clean =
+            |text: &str| ego_core::permit::terminal_safe(&text.replace(['\r', '\n', '\t'], " "));
+        let elapsed = crate::render::duration(child.started.elapsed());
+        let tokens = if child.output_tokens >= 1000 {
+            format!("{:.1}k", child.output_tokens as f64 / 1000.0)
+        } else {
+            child.output_tokens.to_string()
+        };
+        let right = format!("{elapsed} · ↓ {tokens} tokens");
+        let right_width = crate::render::Line::plain(&right).width();
+        let left_budget = width.saturating_sub(right_width + 2);
+        let name = picker_surface::truncate_cells(
+            &clean(&child.name),
+            left_budget.saturating_sub(4).min(28),
+        );
+        let left = picker_surface::truncate_cells(
+            &format!("○ {name}  {}", clean(&child.activity)),
+            left_budget,
+        );
+        let left_width = crate::render::Line::plain(&left).width();
+        let text = if right_width + 2 <= width {
+            format!(
+                "{left}{}{right}",
+                " ".repeat(width - left_width - right_width)
+            )
+        } else {
+            picker_surface::truncate_cells(&format!("○ {} {right}", clean(&child.name)), width)
+        };
+        ephemeral.push_str(
+            &crate::render::Line::styled(
+                text,
+                crate::render::Style::fg(crate::render::Rgb(0, 255, 255)),
+            )
+            .render(status.permission_capabilities.depth),
+        );
+        ephemeral.push('\n');
+    }
     if status.activity || status.retry.is_some() || status.shell.is_some() {
         // The compact default keeps 524's single Working row. Critical state
         // still survives there; custom layouts retain all their configured rows.

@@ -191,9 +191,57 @@ struct TaskSink<'s> {
     parent: SharedJournal<'s>,
     turn: TurnId,
     name: String,
+    item: ItemId,
 }
 impl EventSink for TaskSink<'_> {
-    fn publish(&self, event: &PublicEvent, _: &SessionState) {
+    fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        // Keep progress on the same serialized publication path as nested tools.
+        let activity = match event {
+            PublicEvent::TurnStarted { .. } => Some("Working".to_owned()),
+            PublicEvent::ItemDelta {
+                kind: crate::public::ItemKind::Reasoning,
+                ..
+            } => Some("Thinking".to_owned()),
+            PublicEvent::ItemDelta {
+                kind: crate::public::ItemKind::AgentMessage,
+                ..
+            } => Some("Responding".to_owned()),
+            PublicEvent::ItemStarted {
+                kind: crate::public::ItemKind::Tool,
+                name: Some(name),
+                text,
+                ..
+            } => {
+                let args: Value = text
+                    .as_deref()
+                    .and_then(|text| serde_json::from_str(text).ok())
+                    .unwrap_or(Value::Null);
+                Some(match args.get("path").and_then(Value::as_str) {
+                    Some(path) => format!("{name} {path}"),
+                    None => name.clone(),
+                })
+            }
+            PublicEvent::ItemStarted {
+                kind: crate::public::ItemKind::Permission,
+                ..
+            } => Some("Waiting for permission".to_owned()),
+            PublicEvent::ItemCompleted {
+                kind: crate::public::ItemKind::Tool,
+                ..
+            }
+            | PublicEvent::UsageUpdated { .. } => Some("Working".to_owned()),
+            _ => None,
+        };
+        if let Some(activity) = activity
+            && let Err(error) = self.parent.publish(&PublicEvent::ChildProgress {
+                turn: self.turn,
+                item: self.item,
+                activity,
+                output_tokens: state.usage.output_tokens,
+            })
+        {
+            tracing::error!(%error, "child activity publication failed");
+        }
         let event = match event {
             PublicEvent::ItemStarted {
                 item,
@@ -317,6 +365,7 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
     fn run(
         self,
         started: EventId,
+        item: ItemId,
         request: TaskRequest,
     ) -> BoxFuture<'t, Result<(bool, ToolResult), StoreError>> {
         Box::pin(async move {
@@ -330,6 +379,7 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
                 parent: self.parent.clone(),
                 turn: self.turn,
                 name: request.name,
+                item,
             };
             let mut child = TurnLoop::new(
                 Session {
@@ -672,7 +722,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
             let started = call.started;
             work.push(async move {
                 let step = request.plan_step.clone();
-                let outcome = task.run(started, request).await;
+                let outcome = task.run(started, item, request).await;
                 if let Some(id) = step {
                     let status = if matches!(&outcome, Ok((true, _))) {
                         crate::plan::StepStatus::Completed

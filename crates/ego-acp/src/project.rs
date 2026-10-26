@@ -786,7 +786,8 @@ fn project_v1_with_root(
         // See the module doc comment's "no counterpart in either version"
         // list, plus v1's own note for `TurnCompleted`. The two usage-shaped
         // events need reduced state and are handled by `project_acp_v1`.
-        PublicEvent::SessionStarted { .. }
+        PublicEvent::ChildProgress { .. }
+        | PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
@@ -989,7 +990,8 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         // See the module doc comment's "no counterpart in either version"
         // list. The two usage-shaped events need reduced state and are
         // handled by `project_acp_v2`.
-        PublicEvent::SessionStarted { .. }
+        PublicEvent::ChildProgress { .. }
+        | PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
