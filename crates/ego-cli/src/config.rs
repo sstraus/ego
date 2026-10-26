@@ -1416,7 +1416,7 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
         let (key, value) = entry.split_once('=').ok_or_else(|| {
             UsageError(format!(
                 "invalid configuration override '{entry}'; use a TOML assignment, \
-                 for example '-c model=\"ollama/qwen3\"'"
+                 for example '-c model=\\\"ollama/qwen3\\\"'"
             ))
         })?;
         toml.push_str(&format!("{key} = {value}\n"));
