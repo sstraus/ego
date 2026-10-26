@@ -300,10 +300,7 @@ fn interactive_exec_refusal(bad_interpreter: bool) {
     // Read the retained terminal rows: the working spinner redraws between the
     // notice's wrapped rows in the byte stream and splits phrases there.
     let retained = support::terminal_transcript(&session_output, MODAL_ROWS, MODAL_COLS);
-    let visible: String = retained
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect();
+    let visible: String = retained.chars().filter(|ch| !ch.is_whitespace()).collect();
     for expected in [
         "sandbox exec denied",
         "exec_paths",
