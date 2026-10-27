@@ -110,6 +110,13 @@ fn conversation_from_inner(
     items.sort_by_key(|item| item.seq);
 
     let mut messages: Vec<Message> = Vec::new();
+    if !state.constraints.is_default()
+        && !items
+            .iter()
+            .any(|item| item.kind == ItemKind::ContextCheckpoint)
+    {
+        messages.push(Message::text(Role::User, state.constraints.request_frame()));
+    }
     let mut repairs = Vec::new();
     // Calls this history is still waiting on. A `Vec` and not an `Option`:
     // one generation can dispatch several calls in parallel and the crash
@@ -135,7 +142,10 @@ fn conversation_from_inner(
                 push(
                     &mut messages,
                     Role::User,
-                    text_block(&crate::compact::checkpoint_frame(&item.text)),
+                    text_block(&crate::compact::checkpoint_frame(
+                        &item.text,
+                        &state.constraints,
+                    )),
                 );
             }
             // Replayed if — and only if — the provider sealed the block with

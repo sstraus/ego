@@ -1357,7 +1357,7 @@ and their JSON argument schemas when the admitted runtime opens a prompt.
 
 Slash commands: `/help /model /thinking /fast on|off /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /resume [ID] /continue [ID] /fork [message-id]
-/compact /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
+/compact /pin /unpin /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
 /name /goal /tasks /tools /expand /skills /hooks /memory /init /retry /version`. These commands and aliases form the
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
@@ -1939,6 +1939,29 @@ permission, tool batch, or accepted prompt is active; saved drafts require
 confirmation and remain with the source. The complete decision and prompt
 contract are in
 `ARCHITECTURE.md`.
+
+#### Pinned standing user constraints
+
+`/pin TEXT` keeps the exact text as a standing user constraint outside the
+model-written summary. `/pin` lists pins with stable numbers. `/unpin NUMBER`
+removes one. Numbers are not reused. To change a constraint, remove its old pin
+and add the replacement text. Text states its own scope; ego does not infer it.
+These are local commands, not model requests. Pasted or quoted examples do not
+execute them. Pins persist across replies, resume, and compaction successors;
+they are not global preferences.
+
+Pins are limited to 64 entries, 2,048 UTF-8 bytes per entry, and 16,384 total text
+bytes. Invalid or oversized operations leave existing pins unchanged. No pin is
+silently evicted, truncated, or summarized. Ordinary unmarked chat text is not
+automatically pinned. Workspace instructions retain their separately admitted
+system authority and are loaded again for a compaction target; they are not
+copied into the user pin ledger.
+
+Each checkpoint carries a typed copy of the ledger. Its Binding constraints
+and preferences section is rendered from pins rather than accepted from the
+model, including when the ledger is empty. Multiline pin text is indented in the
+Markdown view; the typed carrier preserves every text byte. The remaining
+summary is fallible historical context, not additional standing authority.
 
 #### Transition identity, output, and host parity
 

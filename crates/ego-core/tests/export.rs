@@ -889,6 +889,13 @@ fn exporter_redacts_goal_fallback_and_permission_material_but_keeps_decisions() 
             source_seq: Seq::ZERO,
             prompt_revision: 1,
             checkpoint: secret.into(),
+            constraints: Default::default(),
+        },
+        EventKind::PinsChanged {
+            constraints: serde_json::from_value(
+                serde_json::json!({"next_id": 1, "entries": {"1": secret}}),
+            )
+            .unwrap(),
         },
         EventKind::Compacted {
             summary: secret.into(),

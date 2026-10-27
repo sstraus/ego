@@ -501,6 +501,7 @@ impl TargetSeed {
                     source_seq,
                     prompt_revision,
                     checkpoint,
+                    constraints: Default::default(),
                 },
             },
             trailing_events: Vec::new(),
@@ -510,6 +511,20 @@ impl TargetSeed {
                 prompt_revision,
             },
         }
+    }
+
+    pub(crate) fn with_constraints(
+        mut self,
+        constraints: crate::compact::ConstraintLedger,
+    ) -> Self {
+        if let EventKind::CompactionSeeded {
+            constraints: ledger,
+            ..
+        } = &mut self.event.kind
+        {
+            *ledger = constraints;
+        }
+        self
     }
 
     fn with_prompt_snapshot(mut self, snapshot: Option<PromptSnapshot>) -> Self {

@@ -1993,6 +1993,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         } else {
             source_seq
         };
+        let constraints = self.state().constraints.clone();
+        constraints.validate().map_err(CompactionError::Internal)?;
         let title = self.state().title.clone();
         let goal = self.state().goal.clone();
         let (history, repairs) =
@@ -2120,6 +2122,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
         };
 
+        let checkpoint = constraints.checkpoint(checkpoint);
+
         let main = Arc::clone(&self.source)
             .resolve(GenerationModelRequest::new(GenerationRole::Main))
             .await
@@ -2133,7 +2137,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
         target_messages.push(Message::text(
             Role::User,
-            checkpoint_frame(checkpoint.text()),
+            checkpoint_frame(checkpoint.text(), &constraints),
         ));
         let baseline = GenRequest {
             web_search: None,
@@ -2163,6 +2167,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             source: self.session_id,
             source_seq,
             checkpoint,
+            constraints,
             baseline,
             title,
             goal,

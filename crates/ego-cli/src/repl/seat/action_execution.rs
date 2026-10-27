@@ -38,6 +38,8 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::New,
                 ActionId::Fork,
                 ActionId::Compact,
+                ActionId::Pin,
+                ActionId::Unpin,
                 ActionId::Refresh,
                 ActionId::Name,
                 ActionId::Goal,
@@ -260,6 +262,11 @@ fn submit_busy_line(
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             return Some((Line::HostCommand(HostCommand::Config(arguments)), false));
         }
+        Dispatch::Pins(command) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Pins(command)), false));
+        }
         Dispatch::Tasks(arguments) => {
             editor.run_edit_commands(&[EditCommand::Clear]);
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
@@ -467,6 +474,7 @@ pub(super) fn surface_line(
                     Dispatch::Action(action) => Some(HostCommand::Action(action)),
                     Dispatch::Config(arguments) => Some(HostCommand::Config(arguments)),
                     Dispatch::Tasks(arguments) => Some(HostCommand::Tasks(arguments)),
+                    Dispatch::Pins(command) => Some(HostCommand::Pins(command)),
                     Dispatch::UnknownSlash(message) => {
                         commit_to_transcript(status, &message);
                         continue;
@@ -549,6 +557,9 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Fork(item) => {
                     return (Line::HostCommand(HostCommand::Fork(item)), failed);
+                }
+                Dispatch::Pins(command) => {
+                    return (Line::HostCommand(HostCommand::Pins(command)), failed);
                 }
                 Dispatch::Tasks(arguments) => {
                     return (Line::HostCommand(HostCommand::Tasks(arguments)), failed);
@@ -1152,6 +1163,16 @@ pub(super) fn apply_surface_effect(
                     .map(|(name, disabled)| (name, *disabled)),
             );
             status.lock().expect("surface status lock").notice = Some(inventory);
+        }
+        SurfaceActionEffect::Pin => {
+            return Some(Line::HostCommand(HostCommand::Pins(
+                ego_core::compact::PinCommand::List,
+            )));
+        }
+        SurfaceActionEffect::Unpin => {
+            return Some(Line::Refused(
+                "usage: /unpin NUMBER (use /pin to list pins)",
+            ));
         }
         SurfaceActionEffect::Tasks => {
             return Some(Line::HostCommand(HostCommand::Tasks(String::new())));
