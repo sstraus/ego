@@ -217,8 +217,8 @@ fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
 }
 
 // Catches: the summary request promotes an already answered one-turn output
-// requirement into standing continuation instructions. This is a prompt contract,
-// not an offline claim about a language model's next generated answer.
+// requirement into standing continuation instructions. Assert the actual summary
+// request, not model compliance or a scripted desired continuation answer.
 #[test]
 fn completed_ready_fixture_requires_instruction_lifetimes_in_summary_request() {
     let fixture: serde_json::Value =
@@ -230,12 +230,86 @@ fn completed_ready_fixture_requires_instruction_lifetimes_in_summary_request() {
     let checkpoint = fixture["checkpoint"].as_str().expect("recorded checkpoint");
     Checkpoint::parse(checkpoint).expect("the observed bad checkpoint is structurally valid");
     assert!(checkpoint.contains(fixture["expected_answer"].as_str().unwrap()));
+    let (source_profile, _) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta {
+                text: fixture["seed_answer"].as_str().unwrap().to_owned(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (summary_profile, generator) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta {
+                text: checkpoint.to_owned(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (target_profile, _) = compaction_profile(
+        "source-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Main, Ok(source_profile)),
+        (GenerationRole::Compaction, Ok(summary_profile)),
+        (GenerationRole::Main, Ok(target_profile)),
+    ]);
+    let (mut turn, store, _) = compaction_turn(source);
+    let seed_prompt = fixture["seed_prompt"].as_str().unwrap();
+    futures::executor::block_on(turn.run(seed_prompt)).expect("recorded READY seed completes");
     assert!(
-        COMPACTION_PROMPT.contains("A completed one-turn response requirement"),
+        store
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnCompleted { ok: true, .. }))
+    );
+    futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
+        .expect("recorded checkpoint crosses the real summary boundary");
+    let calls = generator.calls();
+    assert_eq!(calls.len(), 1);
+    let messages = calls[0].messages.messages();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == &Message::text(Role::User, seed_prompt))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == &Message::text(Role::Assistant, "READY"))
+    );
+    let tail = messages.last().expect("outgoing summary instruction");
+    assert_eq!(tail.role, Role::User);
+    let policy = tail
+        .content
+        .iter()
+        .map(|block| match block {
+            ego_core::generator::types::ContentBlock::Text { text } => text.as_str(),
+            _ => panic!("summary instruction must be text"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        policy.contains("A completed one-turn response requirement"),
         "the summarizer must distinguish completed response requirements from ongoing constraints"
     );
-    assert!(COMPACTION_PROMPT.contains("Preserve unfinished tasks and standing constraints"));
-    assert!(COMPACTION_PROMPT.contains("later user requests take precedence"));
+    assert!(policy.contains("Preserve unfinished tasks and standing constraints"));
+    assert!(policy.contains("later user requests take precedence"));
 }
 
 // Catches: replay drops the durable filename or reorders the new user request
