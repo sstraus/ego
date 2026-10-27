@@ -789,6 +789,7 @@ fn project_v1_with_root(
         PublicEvent::ChildProgress { .. }
         | PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
+        | PublicEvent::CostAnomaly { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
         | PublicEvent::ProviderRetry { .. }
@@ -993,6 +994,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         PublicEvent::ChildProgress { .. }
         | PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
+        | PublicEvent::CostAnomaly { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
         | PublicEvent::ProviderRetry { .. }

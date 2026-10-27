@@ -47,7 +47,8 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 16;
+// Version 17 adds the durable cost anomaly notice.
+pub const PUBLIC_EVENT_VERSION: u32 = 17;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -377,6 +378,12 @@ pub enum PublicEvent {
         ok: bool,
         exit_reason: ExitReason,
     },
+    /// Cost could not be established. Estimates are not actual billed cost.
+    CostAnomaly {
+        turn: TurnId,
+        model: String,
+        estimated_upper_bound: Option<Money>,
+    },
     /// Incremental usage was reported.
     ///
     /// `usage_delta`, not `usage`: this is the increment observed at *this*
@@ -691,6 +698,14 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // `attempt` is deliberately not projected: the public schema is
         // compatibility-governed and v1 has no field for it, so surfacing an
         // internal identity here would be a schema change for no consumer.
+        EventKind::CostAnomaly {
+            model,
+            estimated_upper_bound,
+        } => Some(PublicEvent::CostAnomaly {
+            turn,
+            model: model.clone(),
+            estimated_upper_bound: *estimated_upper_bound,
+        }),
         EventKind::UsageUpdated {
             usage, cost_delta, ..
         } => Some(PublicEvent::UsageUpdated {

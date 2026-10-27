@@ -232,7 +232,11 @@ reasoning-state carryover, context/output ceilings, cancel semantics, cache
 behaviour, transport — is resolved per generation and persisted in the run
 manifest; fallback chains check conversation compatibility and explicitly
 transform or drop provider-private reasoning state before switching. Unknown
-cost fails the budget closed.
+cost stays unknown and raises one durable, visible notice per session and
+model. A configured cap applies to known and estimated spend only. Missing
+prices do not refuse generation; the notice states that the cap cannot cover
+unpriced spend. Missing provider cost charges the reserved upper bound when
+one exists, without recording that estimate as actual billed cost.
 
 M5 adds two public mappings without merging contracts: the OpenAI API-key row uses
 the public Responses endpoint, while `openai-codex` retains its distinct

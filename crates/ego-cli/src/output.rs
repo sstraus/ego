@@ -1077,6 +1077,25 @@ impl EventSink for TextSink<'_> {
             // progress" — and a guarantee the operator asked for and did not
             // get is not progress. Suppressing it would put the flag's silence
             // back exactly where this arm removes it from.
+            PublicEvent::CostAnomaly {
+                model,
+                estimated_upper_bound,
+                ..
+            } => {
+                self.finish();
+                let detail = match estimated_upper_bound {
+                    Some(bound) => format!(
+                        "the reserved upper bound of {} {} counts against any configured cap; actual cost remains unknown",
+                        bound.amount, bound.currency
+                    ),
+                    None => {
+                        "no usable price is available; any configured cap cannot cover this unpriced spend"
+                            .to_owned()
+                    }
+                };
+                self.out
+                    .note(&format!("Cost anomaly for {model}: {detail}. Continuing."));
+            }
             PublicEvent::MeteringSelected { ceiling, rates, .. } => {
                 let mut last = self
                     .ceiling
@@ -1504,6 +1523,36 @@ mod tests {
             name: Some(name.to_owned()),
             text: Some(args.to_owned()),
         }
+    }
+
+    /// Catches: quiet mode hiding missing cost or estimates being called actual cost.
+    #[test]
+    fn cost_anomaly_remains_visible_in_quiet_mode_without_fabricating_actual_cost() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, true, Capabilities::plain());
+        let state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        for bound in [
+            None,
+            Some(ego_core::cost::Money {
+                amount: "0.25".parse().unwrap(),
+                currency: ego_core::cost::CurrencyCode::new("USD").unwrap(),
+            }),
+        ] {
+            sink.publish(
+                &PublicEvent::CostAnomaly {
+                    turn,
+                    model: "openrouter/fixture".into(),
+                    estimated_upper_bound: bound,
+                },
+                &state,
+            );
+        }
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("cap cannot cover this unpriced spend"));
+        assert!(notes[1].contains("reserved upper bound of 0.25 USD"));
+        assert!(notes[1].contains("actual cost remains unknown"));
     }
 
     /// Catches: successful cache hits adding a notice for every generation.
