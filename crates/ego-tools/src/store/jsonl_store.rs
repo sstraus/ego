@@ -3127,6 +3127,10 @@ impl SessionLifecycleStore for JsonlStore {
         self.publish_empty_session_lifecycle(id, root, created, profiles)
     }
 
+    fn storage_root(&self) -> Option<PathBuf> {
+        std::path::absolute(&self.root).ok()
+    }
+
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
         Ok(self
             .lifecycle_facts(id)?

@@ -1825,11 +1825,26 @@ async fn malformed_unknown_and_wrong_root_requests_return_explicit_errors() {
         ),
     ] {
         let (response, _) = connection.request(method, params).await;
-        let data = response["error"]["data"].as_str().unwrap_or_default();
-        assert!(
-            !data.is_empty(),
-            "{method} did not explain its refusal: {response}"
-        );
+        if method == "session/resume" {
+            // Catches: the router loses lookup diagnostics while retaining the refusal code.
+            assert_eq!(
+                response["error"]["data"],
+                serde_json::json!({
+                    "sessionId": "00000000-0000-0000-0000-000000000001",
+                    "storeRoot": null,
+                })
+            );
+            assert_eq!(
+                response["error"]["message"],
+                "session not found: 00000000-0000-0000-0000-000000000001"
+            );
+        } else {
+            let data = response["error"]["data"].as_str().unwrap_or_default();
+            assert!(
+                !data.is_empty(),
+                "{method} did not explain its refusal: {response}"
+            );
+        }
     }
     connection.finish().await;
 }

@@ -772,10 +772,23 @@ fn catalogue_does_not_refuse_healthy_sessions_when_a_cached_session_log_is_missi
     std::fs::remove_file(missing_dir.join("events.jsonl")).unwrap();
     let restarted = make_service();
     let refused = futures::executor::block_on(restarted.load(missing, &workspace)).unwrap_err();
-    assert!(matches!(
-        refused,
-        ego_core::session_lifecycle::LifecycleError::UnknownSession
-    ));
+    // Catches: missing-session diagnostics name the workspace instead of the actual store.
+    assert!(refused.to_string().contains(&missing.to_string()));
+    assert!(
+        refused
+            .to_string()
+            .contains(&sessions.display().to_string())
+    );
+    match refused {
+        ego_core::session_lifecycle::LifecycleError::UnknownSession {
+            session,
+            store_root,
+        } => {
+            assert_eq!(session, missing);
+            assert_eq!(store_root.as_deref(), Some(sessions.as_path()));
+        }
+        other => panic!("expected a missing-session refusal, got {other}"),
+    }
     assert!(missing_dir.join("manifest.json").is_file());
     let page = restarted.list(None, 1, Some(&workspace)).unwrap();
     assert_eq!(
