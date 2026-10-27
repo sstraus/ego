@@ -2649,3 +2649,150 @@ fn constraint_ledger_fork_rerenders_ancestor_checkpoint_after_unpin() {
         "No pinned user constraints."
     );
 }
+
+fn completed_ready_boundary_binding(text: &str) -> &str {
+    text.split_once("# Binding constraints and preferences\n")
+        .unwrap()
+        .1
+        .split_once("# Completed work and evidence")
+        .unwrap()
+        .0
+}
+
+// Production TurnLoop -> prepared seed -> JSON journal replay -> resumed
+// TurnLoop request. Only the external provider is scripted: READY and the
+// checkpoint are recorded observations, not a scripted desired filename answer.
+fn completed_ready_boundary_request(case: usize) -> (serde_json::Value, GenRequest) {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/compaction/constraint-loss.json")).unwrap();
+    let observed = fixture["cases"][case]["checkpoint"].as_str().unwrap();
+    let profile = |script| {
+        compaction_profile(
+            "fixture-model",
+            ThinkingLevel::Low,
+            32_000,
+            4_096,
+            false,
+            script,
+        )
+    };
+    let (seed, _) = profile(vec![
+        AiEvent::TextDelta {
+            text: "READY".to_owned(),
+        },
+        AiEvent::Stop(StopReason::Stop),
+    ]);
+    let (summary, _) = profile(vec![
+        AiEvent::TextDelta {
+            text: observed.to_owned(),
+        },
+        AiEvent::Stop(StopReason::Stop),
+    ]);
+    let (baseline, _) = profile(Vec::new());
+    let source = CompactionSource::new([
+        (GenerationRole::Main, Ok(seed)),
+        (GenerationRole::Compaction, Ok(summary)),
+        (GenerationRole::Main, Ok(baseline)),
+    ]);
+    let (mut turn, store, _) = compaction_turn(source);
+    futures::executor::block_on(turn.run("Remember the chosen report filename ledger-419.txt. Our next task is to return that filename. Reply READY only.")).unwrap();
+    assert!(
+        store
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnCompleted { ok: true, .. }))
+    );
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    let published = prepared.target_seed(Timestamp::from_millis(10_000));
+    let bytes = serde_json::to_vec(published.event()).unwrap();
+    let replay = SessionState::replay([serde_json::from_slice(&bytes).unwrap()]);
+    let (resume, recording) = profile(vec![AiEvent::Stop(StopReason::Stop)]);
+    let source = CompactionSource::new([(GenerationRole::Main, Ok(resume))]);
+    let (mut resumed, _, _) = compaction_turn_with_state(source, replay);
+    futures::executor::block_on(
+        resumed.run("Return the chosen report filename from the checkpoint. No tools."),
+    )
+    .unwrap();
+    let request = recording.calls().pop().expect("resumed provider request");
+    let checkpoint = request
+        .messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| {
+            if let ego_core::generator::types::ContentBlock::Text { text } = block {
+                serde_json::from_str::<serde_json::Value>(text)
+                    .ok()
+                    .filter(|value| value["kind"] == "context_checkpoint")
+            } else {
+                None
+            }
+        })
+        .expect("real replay checkpoint frame");
+    (checkpoint, request)
+}
+
+// Catches: completed READY-only output is promoted into permanent authority
+// after a real completed turn, hostile compaction, durable seed and resume.
+#[test]
+fn completed_ready_boundary_does_not_promote_completed_output_to_standing_instruction() {
+    for case in [2, 0, 1, 3] {
+        let (checkpoint, _) = completed_ready_boundary_request(case);
+        let text = checkpoint["text"].as_str().unwrap();
+        assert_eq!(
+            completed_ready_boundary_binding(text).trim(),
+            "No pinned user constraints.",
+            "hostile recorded case {case} promoted historical instructions"
+        );
+        assert!(!completed_ready_boundary_binding(text).contains("READY"));
+    }
+}
+
+// Catches: replay drops an unfinished filename task while removing completed
+// response instructions. The r2 fixture actually retains this unfinished task.
+#[test]
+fn completed_ready_boundary_retains_active_unfinished_filename_task() {
+    let (checkpoint, _) = completed_ready_boundary_request(0);
+    let text = checkpoint["text"].as_str().unwrap();
+    let work = text
+        .split_once("# Work in progress")
+        .unwrap()
+        .1
+        .split_once("# Decisions and rationale")
+        .unwrap()
+        .0;
+    assert!(work.contains("provide the filename ledger-419.txt upon request"));
+    assert!(text.contains("Return the filename ledger-419.txt"));
+}
+
+// Catches: seed replay places stale checkpoint authority after the current
+// request or fails to label model-written instructions as fallible history.
+#[test]
+fn completed_ready_boundary_current_request_follows_fallible_checkpoint() {
+    for case in 0..4 {
+        let (checkpoint, request) = completed_ready_boundary_request(case);
+        assert!(
+            checkpoint["constraint_authority"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not a source of additional standing instructions"),
+            "hostile recorded case {case} lacks authority separation"
+        );
+        // Conversation normalization coalesces adjacent user messages. Check
+        // the final block, not an artificial message boundary.
+        let last = request.messages.messages().last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert_eq!(
+            last.content.last().unwrap(),
+            &ego_core::generator::types::ContentBlock::Text {
+                text: "Return the chosen report filename from the checkpoint. No tools.".to_owned(),
+            }
+        );
+        assert!(
+            checkpoint["text"]
+                .as_str()
+                .unwrap()
+                .contains("ledger-419.txt")
+        );
+    }
+}
