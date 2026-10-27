@@ -242,7 +242,7 @@ pub struct ToolTiming {
 /// PermissionRequested | PermissionAmended | PermissionDecided |
 /// GenerationStarted | FallbackDecision | ExecutionObserved |
 /// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
-/// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated |
+/// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved |
 /// TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
