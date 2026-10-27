@@ -499,6 +499,33 @@ fn an_embedding_only_local_model_is_neither_offered_nor_resolved_for_chat() {
     assert_eq!(stub.paths(), ["/api/tags"]);
 }
 
+/// Catches completion-capable models being hidden or refused because they also embed.
+#[test]
+fn a_completion_capable_embedding_model_remains_available_for_chat() {
+    // Counterfactual capability combination at the daemon boundary, not a live recording.
+    const DUAL_CAPABILITY_TAGS: &str = r#"{"models":[
+      {"name":"gemma4:e4b-mlx","capabilities":["embedding","completion"]}
+    ]}"#;
+    let (http, stub) = server([(200, DUAL_CAPABILITY_TAGS)]);
+    let report = block_on(ollama::enumerate(&local_row(), &http)).expect("daemon model list");
+    assert_eq!(
+        report
+            .models()
+            .iter()
+            .map(|entry| entry.slug.model.as_str())
+            .collect::<Vec<_>>(),
+        ["gemma4:e4b-mlx"],
+        "embedding support must not hide a completion-capable chat choice"
+    );
+    assert_eq!(stub.paths(), ["/api/tags"]);
+
+    let (http, stub) = server([(200, DUAL_CAPABILITY_TAGS), (200, PS_LOADED)]);
+    let resolved = block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http))
+        .expect("completion capability permits chat even when embedding is also supported");
+    assert_eq!(resolved.capabilities.max_context_tokens, Some(32_768));
+    assert_eq!(stub.paths(), ["/api/tags", "/api/ps"]);
+}
+
 #[test]
 fn a_cloud_relayed_model_is_refused_rather_than_priced_at_zero() {
     // `http.rs` documents Ollama's cloudPassthroughMiddleware proxying a

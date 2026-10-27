@@ -6217,7 +6217,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 33] = [
+    const COMMANDS: [&str; 35] = [
         "help",
         "model",
         "thinking",
@@ -6230,6 +6230,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "sessions",
         "fork",
         "compact",
+        "pin",
+        "unpin",
         "clear",
         "usage",
         "statusline",
@@ -6313,6 +6315,16 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("fork", None),
         // The inherited model permits a checkpoint request; its empty reply must fail.
         ("compact", Some("compaction failed")),
+        (
+            "pin REPORT-NAME-LOCK: keep for subsequent tasks",
+            Some("1: REPORT-NAME-LOCK: keep for subsequent tasks"),
+        ),
+        (
+            "pin",
+            Some("1: REPORT-NAME-LOCK: keep for subsequent tasks"),
+        ),
+        ("unpin 1", Some("No pinned user constraints.")),
+        ("unpin", Some("usage: /unpin")),
         ("clear", None),
         ("usage", Some("usage as of")),
         ("export", None),

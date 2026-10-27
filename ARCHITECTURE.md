@@ -33,7 +33,7 @@ QuestionSettled | QuestionMemberSettled | PermissionRequested | PermissionAmende
 PermissionDecided | GenerationStarted | FallbackDecision | ExecutionObserved |
 ExecutionMeasured | JudgeResponse | SandboxResidualDecided | AttemptSettled |
 CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved | TurnCompleted |
-CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
+PinsChanged | CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
 HookLifecycleReached | HookInvocationStarted | HookInvocationSettled |
 SubagentRequested | SubagentSpawned | SubagentSettled |
 BackgroundTaskRequested | SubagentCompletionDelivered |
@@ -41,7 +41,7 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-70 variants in the current schema, and this list is exhaustive by contract.
+71 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
 70, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, background-task, skill, and clean-session compaction lifecycles.

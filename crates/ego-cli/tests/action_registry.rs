@@ -7,7 +7,7 @@ use ego_cli::repl::actions::{
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
-const NAMES: [&str; 33] = [
+const NAMES: [&str; 35] = [
     "help",
     "model",
     "thinking",
@@ -20,6 +20,8 @@ const NAMES: [&str; 33] = [
     "sessions",
     "fork",
     "compact",
+    "pin",
+    "unpin",
     "clear",
     "usage",
     "statusline",
@@ -534,5 +536,49 @@ fn custom_shortcuts_cannot_capture_text_ime_or_reserved_controls() {
             ),]))
             .unwrap_err()
             .contains("unknown keybinding action")
+    );
+}
+
+// Catches: pin commands become model prompts, lose literal text, or execute from pasted examples.
+#[test]
+fn pin_commands_are_local_and_preserve_text_while_pasted_examples_do_not_execute() {
+    use ego_core::compact::PinCommand;
+    let registry = ActionRegistry::final_surface();
+    for (input, expected) in [
+        ("/pin", PinCommand::List),
+        (
+            "/pin REPORT-NAME-LOCK: keep for subsequent tasks",
+            PinCommand::Pin("REPORT-NAME-LOCK: keep for subsequent tasks".into()),
+        ),
+        (
+            "/pin   exact whitespace  ",
+            PinCommand::Pin("  exact whitespace  ".into()),
+        ),
+        ("/unpin 12", PinCommand::Unpin(12)),
+    ] {
+        assert_eq!(
+            registry.classify(registry.submit(input, InputOrigin::Typed)),
+            Dispatch::Pins(expected)
+        );
+    }
+    for input in ["/unpin", "/unpin 0", "/unpin -1", "/unpin 1 2"] {
+        assert!(matches!(
+            registry.classify(registry.submit(input, InputOrigin::Typed)),
+            Dispatch::Refused { .. }
+        ));
+    }
+    assert!(!matches!(
+        registry.classify(registry.submit("/pin do not execute", InputOrigin::BracketedPaste)),
+        Dispatch::Pins(_)
+    ));
+}
+
+// Catches: the approved /pin list inspection silently adds a standing constraint named list.
+#[test]
+fn pin_list_inspects_without_registering_a_literal_list_constraint() {
+    let registry = ActionRegistry::final_surface();
+    assert_eq!(
+        registry.classify(registry.submit("/pin list", InputOrigin::Typed)),
+        Dispatch::Pins(ego_core::compact::PinCommand::List)
     );
 }
