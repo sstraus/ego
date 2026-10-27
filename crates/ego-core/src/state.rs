@@ -1188,6 +1188,9 @@ pub struct SessionState {
     /// but it is unbounded over a session's life. The *lifecycle* state
     /// ([`Self::live_attempts`]) is the part bounded by live generations.
     pub charges: Vec<Charge>,
+    /// Models whose cost anomaly has already been durably announced.
+    #[serde(default)]
+    pub cost_anomaly_models: HashSet<String>,
     /// Every attempt that has settled, and the generation it settled under.
     ///
     /// This is what makes "a correction for an unknown attempt is refused"
@@ -1291,6 +1294,7 @@ impl Default for SessionState {
             generations: HashMap::default(),
             cost: CumulativeCost::default(),
             charges: Vec::default(),
+            cost_anomaly_models: HashSet::default(),
             settled_attempts: HashMap::default(),
             live_attempts: HashMap::default(),
             attribution_began: false,
@@ -2229,6 +2233,9 @@ impl SessionState {
             }
             EventKind::ExecutionMeasured { .. } => {}
             EventKind::JudgeResponse { .. } | EventKind::SandboxResidualDecided { .. } => {}
+            EventKind::CostAnomaly { model, .. } => {
+                self.cost_anomaly_models.insert(model.clone());
+            }
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
                 usage,

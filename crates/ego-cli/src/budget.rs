@@ -116,7 +116,7 @@ pub struct TableSource<'a> {
 
 /// Why a ceiling could not be given rates to rest on.
 ///
-/// Every arm is a refusal. A missing row names the exact provider and model
+/// These diagnostics do not refuse generation. A missing row names the provider and model
 /// so the operator can distinguish an unlisted model from a failed fetch.
 #[derive(Debug)]
 pub enum NoRates {
@@ -200,6 +200,20 @@ impl TableSource<'_> {
     /// only in a design that revalidates on every priced run, and this one
     /// does not: a fresh table is used as it stands.
     pub async fn rates(
+        &self,
+        model: &ResolvedModel,
+        ledger: &Ledger,
+    ) -> Result<Option<ResolvedRates>, NoRates> {
+        match self.try_rates(model, ledger).await {
+            Ok(rates) => Ok(rates),
+            Err(error) => {
+                tracing::debug!(%error, "price source unavailable; admitting without a quote");
+                Ok(None)
+            }
+        }
+    }
+
+    async fn try_rates(
         &self,
         model: &ResolvedModel,
         ledger: &Ledger,
@@ -302,9 +316,16 @@ impl TableSource<'_> {
     ) -> Result<Option<ResolvedRates>, NoRates> {
         let table = Table::decode(bytes).map_err(|source| NoRates::Table { source })?;
         match table.quote(model.row.id(), &model.model) {
-            Ok(entry) => Ok(Some(table_rates(entry.into_quote(revision.clone())))),
-            // The one absence that is not a failure: the gate turns it into
-            // `NoPricingQuote`, naming the model rather than the table.
+            Ok(entry) => {
+                let rates = table_rates(entry.into_quote(revision.clone()));
+                Ok(Some(if model.row.id() == "openrouter" {
+                    ego_ai::catalogue::openrouter_admission_rates(rates)
+                } else {
+                    rates
+                }))
+            }
+            // Keep the source diagnostic; rates() degrades unavailable pricing
+            // to no quote so the gate can admit with a durable anomaly notice.
             Err(TableError::NoEntry { provider, model }) => {
                 Err(NoRates::MissingRow { provider, model })
             }

@@ -825,7 +825,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 16,
+  "v": 17,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -2331,8 +2331,8 @@ The builtin layer exists so that a machine with a configured credential and no
 files can run. It carries only release-pinned facts from each stated authority,
 cites the source and read date beside every provider's rows, and **states no
 prices**: a rate is the one fact whose staleness costs money instead of raising
-an error, so a run under a `--max-cost` ceiling with no operator rates still
-refuses with `NoPricingQuote`. Unknown price is not free price. It lists only
+an error. Missing operator and cached rates do not refuse generation: unknown
+price stays unknown, with a visible anomaly notice. It lists only
 the **current model generations** of each provider, generated from a pinned
 models.dev snapshot (`crates/ego-cli/catalogue/models.generated.toml`, rows with a
 provenance line each; the `model-catalogue-refresh` skill refreshes it). It ships
@@ -2592,8 +2592,8 @@ recovery does not depend on detecting a terminal's operator.
 positive integer. The same `max_output_tokens` key is accepted in configuration
 and named profiles. Each generated request uses the smaller of the configured
 cap and the model output maximum. Without a cap, ego uses the model output
-maximum, not the context window. A missing output maximum fails closed when a
-bounded reservation needs it. System output caps cannot be relaxed by lower
+maximum, not the context window. A missing output maximum leaves the monetary
+reservation unbounded and raises a cost anomaly notice. System output caps cannot be relaxed by lower
 configuration layers. `ego compact --budget LIMIT` uses the same spend grammar
 and admission gate as `run`.
 
@@ -2602,8 +2602,12 @@ message framing and tool schemas, capped by the model context window. Image
 and opaque reasoning inputs retain the full context-window bound because ego
 has no provider-independent maximum for those inputs. Input uses the dearest
 reachable rate, including cache creation; output uses the request cap. Actual
-provider usage settles the reservation after the response. Missing table
-prices fail closed and name the provider, model and required `chat` mode row.
+provider usage settles the reservation after the response. Missing, offline or
+unusable table prices do not refuse model resolution. One durable `cost_anomaly`
+notice per session/model states that any configured cap cannot cover unpriced
+spend. The notice is visible in text (including quiet mode), JSONL and ACP.
+Unknown actual cost charges the reserved upper bound when available, not a
+fabricated actual cost. Known and estimated spend remain subject to the cap.
 
 ### Checked session goals (2026-10-15)
 
@@ -2924,8 +2928,9 @@ journal references them. Replay checks the reference and encoding again. Missing
 or corrupt blobs cause an explicit refusal; they are never fetched again or
 silently omitted. The operator must preserve the session blob store with its log.
 
-Audio-specific pricing is not represented by text-token quotes. Monetary ceilings
-fail closed for this model; no-ceiling runs can report unknown cost. No paid audio
+Audio-specific pricing is not represented by text-token quotes. Calls continue
+with unknown cost and a visible anomaly notice; a monetary cap cannot cover that
+unpriced spend. No paid audio
 acceptance probe is part of this feature's validation. Provider contract sources:
 <https://developers.openai.com/api/docs/models/gpt-audio-1.5.md> and
 <https://developers.openai.com/api/docs/guides/audio-chat-completions.md>, read

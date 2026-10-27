@@ -682,6 +682,20 @@ fn project_v1_with_root(
     root: Option<&std::path::Path>,
 ) -> Option<v1::SessionUpdate> {
     match event {
+        PublicEvent::CostAnomaly {
+            turn,
+            model,
+            estimated_upper_bound,
+        } => Some(v1::SessionUpdate::AgentMessageChunk(
+            v1::ContentChunk::new(
+                ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref())
+                    .into(),
+            )
+            .message_id(Some(v1::MessageId::new(format!(
+                "cost-anomaly-{turn:?}-{model}"
+            )))),
+        )),
+
         PublicEvent::ItemStarted {
             item,
             kind,
@@ -898,6 +912,15 @@ pub fn project_plan_v1(plan: &ego_core::plan::Plan) -> v1::SessionUpdate {
 /// See the module doc comment for the events with no v2 counterpart and why.
 pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
     match event {
+        PublicEvent::CostAnomaly {
+            turn,
+            model,
+            estimated_upper_bound,
+        } => Some(v2::SessionUpdate::AgentMessageChunk(v2::ContentChunk::new(
+            ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref()).into(),
+            format!("cost-anomaly-{turn:?}-{model}"),
+        ))),
+
         PublicEvent::ItemStarted {
             item,
             kind,

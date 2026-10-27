@@ -695,25 +695,19 @@ impl CliGenerationModelSource {
             resolved.metering.ceiling_needs_rates(ledger) && resolved.rates.is_none()
         }) {
             use ego_core::event::time::Clock;
-            let home = crate::config::ego_home().ok_or_else(|| {
-                GenerationModelError::new(
-                    GenerationModelErrorClass::Usage,
-                    "a money ceiling needs EGO_HOME or HOME for the price cache",
-                )
-            })?;
-            resolved.rates = crate::budget::TableSource {
-                io: &ego_tools::store::OsIo,
-                ego_home: &home,
-                http,
-                offline: self.offline,
-                now: ego_tools::clock::SystemClock.now(),
-                max_age: ego_tools::pricing::MAX_AGE,
+            if let Some(home) = crate::config::ego_home() {
+                resolved.rates = crate::budget::TableSource {
+                    io: &ego_tools::store::OsIo,
+                    ego_home: &home,
+                    http,
+                    offline: self.offline,
+                    now: ego_tools::clock::SystemClock.now(),
+                    max_age: ego_tools::pricing::MAX_AGE,
+                }
+                .rates(&resolved, &ledger)
+                .await
+                .unwrap_or(None);
             }
-            .rates(&resolved, &ledger)
-            .await
-            .map_err(|error| {
-                GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
-            })?;
         }
         if matches!(provider_id, "openai" | "anthropic")
             && let Some(rates) = &mut resolved.rates
