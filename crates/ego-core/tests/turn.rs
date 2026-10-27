@@ -7915,6 +7915,17 @@ mod turn {
         assert_eq!(source.seen.lock().unwrap().len(), 2);
         assert_eq!(fx.store.events().iter().filter(|event| matches!(&event.kind,
             EventKind::HostContextAppended { text } if text.starts_with("mdkb session warmup data"))).count(), 1);
+        // Catches: retry restoration mistakes a merged memory hint for missing
+        // host-state evidence and appends another copy to every request.
+        for request in fx.generator.calls() {
+            assert_eq!(
+                serde_json::to_string(&request.messages)
+                    .unwrap()
+                    .matches("One warmup entry")
+                    .count(),
+                1
+            );
+        }
     }
 
     // Catches: empty warmup resets mdkb's recall deduplication on every prompt.
@@ -10944,6 +10955,7 @@ mod turn {
                         .messages
                         .messages()
                         .iter()
+                        .rev()
                         .filter(|message| message.role == Role::User)
                         .flat_map(|message| &message.content)
                         .find_map(|block| match block {
@@ -11037,13 +11049,32 @@ mod turn {
                 TurnConfig {
                     cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
-                    identity: None,
+                    identity: Some(ego_core::turn::AgentIdentity {
+                        version: "test".into(),
+                        sandbox: Confinement::Off,
+                        offline: false,
+                        host: None,
+                    }),
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
                 },
             );
             assert!(ok, "the final fallback attempt completed");
+            // Catches: rebuilding a retry drops a just-admitted host observation
+            // or appends another copy, changing the already-sent cache prefix.
+            let requests = trace.requests.lock().unwrap();
+            assert_eq!(requests[0].messages, requests[1].messages);
+            assert_eq!(requests[0].cache, requests[1].cache);
+            assert_eq!(requests[2].messages, requests[3].messages);
+            assert_eq!(requests[2].cache, requests[3].cache);
+            assert!(
+                requests[2]
+                    .messages
+                    .messages()
+                    .starts_with(requests[0].messages.messages())
+            );
+            drop(requests);
 
             let events = fx.store.events();
             let started: Vec<_> = events
@@ -12846,6 +12877,7 @@ mod turn {
     struct SkillResourceGenerator {
         sent: AtomicBool,
         path: &'static str,
+        requests: Mutex<Vec<GenRequest>>,
     }
 
     impl Generator for SkillResourceGenerator {
@@ -12853,6 +12885,7 @@ mod turn {
             Ok(())
         }
         fn generate(&self, request: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+            self.requests.lock().unwrap().push(request.clone());
             let script = if self.sent.swap(true, Ordering::SeqCst) {
                 vec![AiEvent::Stop(StopReason::Stop)]
             } else {
@@ -12909,6 +12942,7 @@ mod turn {
             let generator = Arc::new(SkillResourceGenerator {
                 sent: AtomicBool::new(false),
                 path,
+                requests: Mutex::new(Vec::new()),
             });
             let evidence = SkillEvidence::new();
             let mut gate = fx.gate.borrow_mut();
@@ -12942,6 +12976,32 @@ mod turn {
             )
             .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
             block_on(turn.run_admitted_skill(operation)).unwrap();
+            // Catches: a tool continuation copies active skill authority again
+            // or changes its original provider-visible message boundary.
+            let requests = generator.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(
+                requests[1]
+                    .messages
+                    .messages()
+                    .starts_with(requests[0].messages.messages())
+            );
+            assert_eq!(
+                requests[1]
+                    .messages
+                    .messages()
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } =>
+                            Some(text.matches("Use the admitted resource").count()),
+                        _ => None,
+                    })
+                    .sum::<usize>(),
+                1
+            );
+            drop(requests);
+
             let state = turn.state();
             let call = state
                 .items
@@ -13004,6 +13064,7 @@ mod turn {
             let generator = Arc::new(SkillResourceGenerator {
                 sent: AtomicBool::new(false),
                 path,
+                requests: Mutex::new(Vec::new()),
             });
             let evidence = SkillEvidence::new();
             let mut gate = fx.gate.borrow_mut();
