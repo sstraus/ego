@@ -27,7 +27,7 @@ checks, and output paths. No hosted website is implied.
 | Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
 | Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
 | Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
-| Read the locally prepared release changes | [Release notes: 0.3.0](release-notes/0.3.0.md) |
+| Read the locally prepared release changes | [Release notes: 0.4.0](release-notes/0.4.0.md) |
 | Understand crate responsibilities and design | [Architecture](architecture.md) |
 
 The [generated command reference](reference/cli.md) remains at its generator-owned
