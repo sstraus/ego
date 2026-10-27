@@ -277,12 +277,7 @@ pub(super) async fn drive_headless_turn(
                 let RegisteredTool::Skill(catalogue) = tool else {
                     return None;
                 };
-                let spec = catalogue.authorize_user(&named[..end]).ok()?;
-                spec.command_template()?;
-                Some(AdmittedSkillOperation::invoke(
-                    spec.descriptor(),
-                    named[end..].trim_start(),
-                ))
+                catalogue.user_command(&named[..end], named[end..].trim_start())
             })
         }),
         HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => None,

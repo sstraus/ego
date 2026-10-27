@@ -59,10 +59,10 @@ impl SessionTrustAdmission for CliSessionTrustAdmission {
             return Vec::new();
         };
         capture
-            .descriptors()
-            .iter()
-            .filter(|spec| spec.descriptor().user_invocable)
-            .map(|spec| spec.descriptor().clone())
+            .core()
+            .announce_for_user()
+            .into_iter()
+            .cloned()
             .collect()
     }
     fn attest_trusted(&self, root: &RunRoot) {
