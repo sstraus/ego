@@ -486,8 +486,32 @@ fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
         );
     }
     let room = width.saturating_sub(2).max(1);
-    call.result
-        .lines()
+    let source: Vec<_> = call.result.lines().collect();
+    let mut lines = Vec::new();
+    let mut empty_stream = false;
+    for (index, &line) in source.iter().enumerate() {
+        if call.name == "exec" && matches!(line, "[stdout]" | "[stderr]") {
+            // Process receipts always include both stream labels. Only display
+            // a label when that section has output; the synthesized exit
+            // diagnostic is not stderr from the process.
+            empty_stream = !source[index + 1..]
+                .iter()
+                .take_while(|line| !matches!(**line, "[stdout]" | "[stderr]"))
+                .any(|line| !line.trim().is_empty() && (call.ok || !line.starts_with(EXIT_PREFIX)));
+            if !empty_stream {
+                lines.push(line);
+            }
+        } else if !empty_stream || !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    if call.name == "exec" {
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+    }
+    lines
+        .into_iter()
         .flat_map(|line| Line::plain(printable_output(line)).wrap(room))
         .map(|line| {
             let mut indented = Line::plain("  ");
@@ -553,6 +577,50 @@ mod tests {
                 "{width}: {}",
                 result.rows
             );
+        }
+    }
+
+    // Catches: empty process streams grow labels, or their removal hides real
+    // stderr, an exit diagnostic, or marker-like text returned by another tool.
+    #[test]
+    fn expanded_exec_labels_only_streams_with_visible_output() {
+        for (name, ok, source, expected) in [
+            (
+                "exec",
+                true,
+                "[stdout]\nout\n\n[stderr]\n",
+                "  [stdout]\n  out",
+            ),
+            (
+                "exec",
+                true,
+                "[stdout]\n\n[stderr]\nwarning\n",
+                "  [stderr]\n  warning",
+            ),
+            ("exec", true, "[stdout]\n\n[stderr]\n", ""),
+            (
+                "exec",
+                true,
+                "[stdout]\nprocess exited unsuccessfully with code 2\n[stderr]\n",
+                "  [stdout]\n  process exited unsuccessfully with code 2",
+            ),
+            (
+                "exec",
+                false,
+                "[stdout]\n\n[stderr]\n\nprocess exited unsuccessfully with code Some(2)",
+                "  process exited unsuccessfully with code Some(2)",
+            ),
+            ("read", true, "[stderr]\n", "  [stderr]"),
+        ] {
+            let rendered = record(
+                &call(name, r#"{"argv":["x"],"path":"x"}"#, ok, source),
+                at(120),
+            );
+            let body = rendered
+                .detail
+                .split_once('\n')
+                .map_or("", |(_, body)| body);
+            assert_eq!(body, expected, "{name}: {source:?}");
         }
     }
 

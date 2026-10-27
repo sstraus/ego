@@ -2113,6 +2113,48 @@ mod tests {
         (output, receiver)
     }
 
+    fn expand_recorded_exec() -> String {
+        let events: Vec<ego_core::event::domain::DomainEvent> =
+            serde_json::from_str(include_str!("../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let (output, rows) = interactive();
+        let sink = TextSink::new(&output, false, Capabilities::plain());
+        let mut state = SessionState::default();
+        for event in &events {
+            state.apply(event);
+            if let Some(public) = ego_core::public::project_public(event) {
+                sink.publish(&public, &state);
+            }
+        }
+        rows.try_iter().for_each(drop);
+        output.expand_last_tool();
+        rows.try_iter().collect::<String>()
+    }
+
+    // Catches: one expansion emitting the same recorded tool block twice.
+    #[test]
+    fn recorded_stdout_only_exec_expands_once() {
+        let expanded = expand_recorded_exec();
+        for marker in [
+            "✓ $ bash",
+            "tuic bg: pid=12345",
+            "log=/Users/",
+            "wake=/Users/",
+            "tuic-bg:",
+        ] {
+            assert_eq!(expanded.matches(marker).count(), 1, "{expanded}");
+        }
+    }
+
+    // Catches: an empty stderr stream adding a dangling label to expanded output.
+    #[test]
+    fn recorded_stdout_only_exec_omits_empty_stderr() {
+        let expanded = expand_recorded_exec();
+        assert_eq!(
+            expanded,
+            include_str!("../tests/fixtures/expand-visible-streams.expected.txt")
+        );
+    }
+
     #[test]
     fn expand_shows_the_latest_call_and_not_an_earlier_one() {
         let (output, rows) = interactive();
