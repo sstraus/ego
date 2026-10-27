@@ -12979,27 +12979,35 @@ mod turn {
             // Catches: a tool continuation copies active skill authority again
             // or changes its original provider-visible message boundary.
             let requests = generator.requests.lock().unwrap();
-            assert_eq!(requests.len(), 2);
-            assert!(
-                requests[1]
-                    .messages
-                    .messages()
-                    .starts_with(requests[0].messages.messages())
-            );
             assert_eq!(
-                requests[1]
-                    .messages
-                    .messages()
-                    .iter()
-                    .flat_map(|message| &message.content)
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } =>
-                            Some(text.matches("Use the admitted resource").count()),
-                        _ => None,
-                    })
-                    .sum::<usize>(),
-                1
+                requests.len(),
+                if denied { 1 } else { 2 },
+                "{path}, denied={denied}"
             );
+            for pair in requests.windows(2) {
+                assert!(
+                    pair[1]
+                        .messages
+                        .messages()
+                        .starts_with(pair[0].messages.messages())
+                );
+            }
+            for request in requests.iter() {
+                assert_eq!(
+                    request
+                        .messages
+                        .messages()
+                        .iter()
+                        .flat_map(|message| &message.content)
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } =>
+                                Some(text.matches("Use the admitted resource").count()),
+                            _ => None,
+                        })
+                        .sum::<usize>(),
+                    1
+                );
+            }
             drop(requests);
 
             let state = turn.state();
