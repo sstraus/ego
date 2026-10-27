@@ -747,6 +747,59 @@ fn reopened_lifecycle_preserves_title_lineage_and_keyset_catalogue_order() {
 }
 
 #[test]
+fn catalogue_does_not_refuse_healthy_sessions_when_a_cached_session_log_is_missing() {
+    // Catches: one manifest-only session turns ACP session/list into "session not found".
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let make_service = || {
+        SessionLifecycle::new(
+            Arc::new(JsonlStore::new(&sessions, &workspace, Box::new(OsIo))),
+            Arc::new(InactiveRuns),
+            Arc::new(FixedClock),
+        )
+    };
+    let service = make_service();
+    let missing = service.create(workspace.clone()).unwrap().id;
+    let healthy = service.create(workspace.clone()).unwrap().id;
+    futures::executor::block_on(service.load(missing, &workspace)).unwrap();
+    drop(service);
+
+    // Fault injection affects only this test's files. Preserve the real manifest
+    // produced by creation; it must not confer authority after its log is gone.
+    let missing_dir = sessions.join(missing.to_string());
+    std::fs::remove_file(missing_dir.join("events.jsonl")).unwrap();
+    let restarted = make_service();
+    let refused = futures::executor::block_on(restarted.load(missing, &workspace)).unwrap_err();
+    // Catches: missing-session diagnostics name the workspace instead of the actual store.
+    assert!(refused.to_string().contains(&missing.to_string()));
+    assert!(
+        refused
+            .to_string()
+            .contains(&sessions.display().to_string())
+    );
+    match refused {
+        ego_core::session_lifecycle::LifecycleError::UnknownSession {
+            session,
+            store_root,
+        } => {
+            assert_eq!(session, missing);
+            assert_eq!(store_root.as_deref(), Some(sessions.as_path()));
+        }
+        other => panic!("expected a missing-session refusal, got {other}"),
+    }
+    assert!(missing_dir.join("manifest.json").is_file());
+    let page = restarted.list(None, 1, Some(&workspace)).unwrap();
+    assert_eq!(
+        page.items.iter().map(|meta| meta.id).collect::<Vec<_>>(),
+        vec![healthy]
+    );
+    assert!(page.next_cursor.is_none());
+    futures::executor::block_on(restarted.load(healthy, &workspace)).unwrap();
+}
+
+#[test]
 fn lifecycle_title_requires_the_session_writer_lease() {
     let dir = tempdir().unwrap();
     let workspace = dir.path().join("workspace");

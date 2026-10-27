@@ -84,6 +84,12 @@ pub trait SessionLifecycleStore:
         profiles: SessionProfiles,
     ) -> Result<LifecyclePublication, StoreError>;
 
+    /// Diagnostic identity of the backing store, not the session's workspace.
+    /// Non-filesystem adapters have no storage root.
+    fn storage_root(&self) -> Option<PathBuf> {
+        None
+    }
+
     fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError>;
 
     fn acquire_inactive_lease(
@@ -386,7 +392,10 @@ fn hex_decode(text: &str) -> Option<Vec<u8>> {
 
 #[derive(Debug)]
 pub enum LifecycleError {
-    UnknownSession,
+    UnknownSession {
+        session: SessionId,
+        store_root: Option<PathBuf>,
+    },
     Deleted,
     InvalidCursor,
     InvalidLimit,
@@ -417,7 +426,16 @@ pub enum LifecycleError {
 impl fmt::Display for LifecycleError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownSession => formatter.write_str("session not found"),
+            Self::UnknownSession {
+                session,
+                store_root,
+            } => {
+                write!(formatter, "session not found: {session}")?;
+                if let Some(root) = store_root {
+                    write!(formatter, " (store root: {})", root.display())?;
+                }
+                Ok(())
+            }
             Self::Deleted => formatter.write_str("session was deleted"),
             Self::NotPaused { state } => write!(
                 formatter,
@@ -756,10 +774,17 @@ where
         })
     }
 
+    fn unknown_session(&self, session: SessionId) -> LifecycleError {
+        LifecycleError::UnknownSession {
+            session,
+            store_root: self.store.storage_root(),
+        }
+    }
+
     fn raw_meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
         self.store
             .lifecycle_meta(id)?
-            .ok_or(LifecycleError::UnknownSession)
+            .ok_or_else(|| self.unknown_session(id))
     }
 
     fn state(&self, id: SessionId) -> Result<SessionState, LifecycleError> {
@@ -776,12 +801,12 @@ where
         cutoff: Option<Seq>,
     ) -> Result<(SessionState, Vec<ReplayFrame>), LifecycleError> {
         if self.store.is_quarantined(id)? {
-            return Err(LifecycleError::UnknownSession);
+            return Err(self.unknown_session(id));
         }
         let entries = self
             .store
             .entries(&id)?
-            .ok_or(LifecycleError::UnknownSession)?;
+            .ok_or_else(|| self.unknown_session(id))?;
         let mut state = SessionState::default();
         let mut frames = Vec::new();
         let mut semantic = Seq::ZERO;
@@ -927,6 +952,10 @@ where
         }
     }
 
+    pub fn storage_root(&self) -> Option<PathBuf> {
+        self.metadata.store.storage_root()
+    }
+
     pub fn meta(&self, id: SessionId) -> Result<SessionMeta, LifecycleError> {
         self.metadata.meta(id)
     }
@@ -973,7 +1002,7 @@ where
             self.metadata
                 .store
                 .entries(&source)?
-                .ok_or(LifecycleError::UnknownSession)?
+                .ok_or_else(|| self.metadata.unknown_session(source))?
                 .into_iter()
                 .filter_map(|entry| match entry {
                     SessionEntry::Event(event)
@@ -1134,7 +1163,7 @@ where
         // Another connection may have quarantined the session while activity
         // was awaited; the check inside `replay` ran before that.
         if self.metadata.store.is_quarantined(id)? {
-            return Err(LifecycleError::UnknownSession);
+            return Err(self.metadata.unknown_session(id));
         }
         if replay && let Some(lineage) = state.lineage {
             let steps = walk_lineage(
@@ -1230,13 +1259,13 @@ where
                 return Err(ReplayError::Cycle { session: source }.into());
             }
             if self.metadata.store.is_quarantined(source)? {
-                return Err(LifecycleError::UnknownSession);
+                return Err(self.metadata.unknown_session(source));
             }
             let entries = self
                 .metadata
                 .store
                 .entries(&source)?
-                .ok_or(LifecycleError::UnknownSession)?;
+                .ok_or_else(|| self.metadata.unknown_session(source))?;
             let mut events = Vec::new();
             let mut seq = Seq::ZERO;
             for entry in entries {
@@ -1324,7 +1353,7 @@ where
             .metadata
             .store
             .entries(&id)?
-            .ok_or(LifecycleError::UnknownSession)?;
+            .ok_or_else(|| self.metadata.unknown_session(id))?;
         let status = entries.iter().rev().find_map(|entry| match entry {
             SessionEntry::RunTransaction(transaction) => Some(transaction.status()),
             _ => None,
