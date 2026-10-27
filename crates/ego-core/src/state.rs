@@ -2232,7 +2232,9 @@ impl SessionState {
                 self.execution_observation = Some(observation.clone());
             }
             EventKind::ExecutionMeasured { .. } => {}
-            EventKind::JudgeResponse { .. } | EventKind::SandboxResidualDecided { .. } => {}
+            EventKind::JudgeResponse { .. }
+            | EventKind::SandboxResidualDecided { .. }
+            | EventKind::ProviderLimitsObserved { .. } => {}
             EventKind::CostAnomaly { model, .. } => {
                 self.cost_anomaly_models.insert(model.clone());
             }

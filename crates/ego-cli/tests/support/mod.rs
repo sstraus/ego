@@ -284,6 +284,7 @@ pub struct Plan {
     /// relayed into what a terminal or an ACP host is shown.
     pub tags_refusal: Option<(u16, String)>,
     pub models_response: Option<String>,
+    pub key_response: Option<String>,
     /// Hold fresh model resolution after the first answer so tests can inject store I/O failure.
     pub subsequent_resolution_gate: Option<Arc<ReleaseGate>>,
 }
@@ -297,6 +298,7 @@ impl Default for Plan {
             completions: vec![Reply::Sse(text("It is done."))],
             tags_refusal: None,
             models_response: None,
+            key_response: None,
             subsequent_resolution_gate: None,
         }
     }
@@ -550,6 +552,11 @@ fn serve(
     }
 
     match path.as_str() {
+        "/api/v1/key" if plan.key_response.is_some() => {
+            let body: serde_json::Value =
+                serde_json::from_str(plan.key_response.as_ref().unwrap()).unwrap();
+            json(&mut stream, &body)
+        }
         "/api/v1/models" if plan.models_response.is_some() => {
             let body = plan.models_response.as_ref().unwrap();
             write!(

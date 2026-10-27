@@ -348,6 +348,8 @@ impl Generator for WireGenerator {
         let wire = self.wire;
         let websocket = wire.websocket();
         let session = self.codex_session.clone();
+        let provider = self.row.id().to_owned();
+        let limit_model = format!("{}/{}", provider, req.model);
         let inner = stream::once(async move {
             if websocket {
                 crate::codex_session::execute(
@@ -362,7 +364,20 @@ impl Generator for WireGenerator {
                 profile.execute(http.as_ref(), request).await
             }
         })
-        .flat_map(move |response| wire.decode(response, cost.clone()))
+        .flat_map(move |response| {
+            let limits = response
+                .as_ref()
+                .ok()
+                .map(|response| crate::usage_limits::response_limits(&provider, &response.headers))
+                .unwrap_or_default();
+            let observation =
+                (!limits.is_empty()).then(|| ego_core::generator::port::AiEvent::ProviderLimits {
+                    provider: provider.clone(),
+                    model: limit_model.clone(),
+                    limits,
+                });
+            stream::iter(observation).chain(wire.decode(response, cost.clone()))
+        })
         .flat_map(move |event| stream::iter(names.restore(event)))
         .boxed();
         let stream = AttemptStream::new(attempt, inner);
