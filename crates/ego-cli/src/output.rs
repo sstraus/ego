@@ -1059,6 +1059,11 @@ impl EventSink for TextSink<'_> {
                             args: &started.args,
                             ok: *ok,
                             result: text.as_deref().unwrap_or(""),
+                            result_blocks: state
+                                .items
+                                .get(item)
+                                .and_then(|item| item.tool_result.as_ref())
+                                .map(|result| result.content.as_slice()),
                             timing: state.items.get(item).and_then(|item| item.tool_timing),
                         },
                         self.capabilities.with_current_width(),

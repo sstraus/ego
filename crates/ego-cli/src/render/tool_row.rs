@@ -53,6 +53,8 @@ pub struct Finished<'a> {
     pub ok: bool,
     /// The result text the model was given, or the failure message.
     pub result: &'a str,
+    /// Authoritative blocks, when the reduced item or replay supplies them.
+    pub result_blocks: Option<&'a [ego_core::permit::ToolContentBlock]>,
     pub timing: Option<ego_core::event::domain::ToolTiming>,
 }
 
@@ -486,32 +488,25 @@ fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
         );
     }
     let room = width.saturating_sub(2).max(1);
-    let source: Vec<_> = call.result.lines().collect();
-    let mut lines = Vec::new();
-    let mut empty_stream = false;
-    for (index, &line) in source.iter().enumerate() {
-        if call.name == "exec" && matches!(line, "[stdout]" | "[stderr]") {
-            // Process receipts always include both stream labels. Only display
-            // a label when that section has output; the synthesized exit
-            // diagnostic is not stderr from the process.
-            empty_stream = !source[index + 1..]
-                .iter()
-                .take_while(|line| !matches!(**line, "[stdout]" | "[stderr]"))
-                .any(|line| !line.trim().is_empty() && (call.ok || !line.starts_with(EXIT_PREFIX)));
-            if !empty_stream {
-                lines.push(line);
-            }
-        } else if !empty_stream || !line.trim().is_empty() {
-            lines.push(line);
-        }
-    }
-    if call.name == "exec" {
-        while lines.last().is_some_and(|line| line.trim().is_empty()) {
-            lines.pop();
-        }
-    }
-    lines
-        .into_iter()
+    // Stream identity comes from evidence provenance, never from marker-like
+    // text a process may legitimately print. Without blocks, retain all text.
+    let visible = call
+        .result_blocks
+        .filter(|_| call.name == "exec")
+        .map(|blocks| {
+            ego_core::permit::ToolResult::new(
+                blocks
+                    .iter()
+                    .filter(|block| !block.backend_owned_pipe() || !block.text.trim().is_empty())
+                    .cloned()
+                    .collect(),
+            )
+            .model_text()
+        });
+    visible
+        .as_deref()
+        .unwrap_or(call.result)
+        .lines()
         .flat_map(|line| Line::plain(printable_output(line)).wrap(room))
         .map(|line| {
             let mut indented = Line::plain("  ");
@@ -539,6 +534,7 @@ mod tests {
             args,
             ok,
             result,
+            result_blocks: None,
             timing: Some(ego_core::event::domain::ToolTiming {
                 execution_ms: Some(1500),
                 approval_wait_ms: 0,
@@ -580,48 +576,65 @@ mod tests {
         }
     }
 
-    // Catches: empty process streams grow labels, or their removal hides real
-    // stderr, an exit diagnostic, or marker-like text returned by another tool.
+    // Catches: empty evidence streams grow labels, or marker-like process
+    // payloads are parsed as labels and disappear from expanded output.
     #[test]
     fn expanded_exec_labels_only_streams_with_visible_output() {
-        for (name, ok, source, expected) in [
+        use ego_core::event::domain::{DomainEvent, EventKind};
+        let events: Vec<DomainEvent> =
+            serde_json::from_str(include_str!("../../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let recorded = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolCallCompleted { result, .. } => Some(result),
+                _ => None,
+            })
+            .unwrap();
+        for (stdout, stderr, diagnostic, expected) in [
+            ("out\n", "", None, "  [stdout]\n  out"),
+            ("", "warning\n", None, "  [stderr]\n  warning"),
+            ("", "", None, ""),
             (
-                "exec",
-                true,
-                "[stdout]\nout\n\n[stderr]\n",
-                "  [stdout]\n  out",
-            ),
-            (
-                "exec",
-                true,
-                "[stdout]\n\n[stderr]\nwarning\n",
-                "  [stderr]\n  warning",
-            ),
-            ("exec", true, "[stdout]\n\n[stderr]\n", ""),
-            (
-                "exec",
-                true,
-                "[stdout]\nprocess exited unsuccessfully with code 2\n[stderr]\n",
-                "  [stdout]\n  process exited unsuccessfully with code 2",
-            ),
-            (
-                "exec",
-                false,
-                "[stdout]\n\n[stderr]\n\nprocess exited unsuccessfully with code Some(2)",
+                "",
+                "",
+                Some("process exited unsuccessfully with code Some(2)"),
                 "  process exited unsuccessfully with code Some(2)",
             ),
-            ("read", true, "[stderr]\n", "  [stderr]"),
+            ("[stderr]\n", "", None, "  [stdout]\n  [stderr]"),
+            (
+                "",
+                "\n[stdout]\n\n[stderr]\n",
+                None,
+                "  [stderr]\n\n  [stdout]\n\n  [stderr]",
+            ),
         ] {
+            let mut result = recorded.clone();
+            result.content[0].text = stdout.to_owned();
+            result.content[1].text = stderr.to_owned();
+            if let Some(diagnostic) = diagnostic {
+                result
+                    .content
+                    .push(ego_core::permit::ToolContentBlock::builtin(diagnostic));
+            }
+            let text = result.model_text();
             let rendered = record(
-                &call(name, r#"{"argv":["x"],"path":"x"}"#, ok, source),
+                &Finished {
+                    result_blocks: Some(&result.content),
+                    ..call("exec", r#"{"argv":["x"]}"#, diagnostic.is_none(), &text)
+                },
                 at(120),
             );
             let body = rendered
                 .detail
                 .split_once('\n')
                 .map_or("", |(_, body)| body);
-            assert_eq!(body, expected, "{name}: {source:?}");
+            assert_eq!(body, expected, "stdout={stdout:?}, stderr={stderr:?}");
         }
+        let raw = record(
+            &call("exec", r#"{"argv":["x"]}"#, true, "[stderr]"),
+            at(120),
+        );
+        assert!(raw.detail.ends_with("\n  [stderr]"), "{}", raw.detail);
     }
 
     // Catches: stderr becomes indistinguishable from stdout in a collapsed preview.

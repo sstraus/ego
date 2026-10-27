@@ -83,6 +83,10 @@ fn history_and_skill_real_turn_rows_have_execution_duration() {
                 args: &item.args,
                 ok: true,
                 result: &result,
+                result_blocks: item
+                    .tool_result
+                    .as_ref()
+                    .map(|result| result.content.as_slice()),
                 timing: item.tool_timing,
             },
             Capabilities::plain(),
