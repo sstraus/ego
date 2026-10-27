@@ -74,6 +74,7 @@ pub enum HostCommand {
     Fast(bool),
     Setup(String),
     Tasks(String),
+    Pins(ego_core::compact::PinCommand),
     Mcp(String),
     McpContext(actions::McpContextCommand),
     Background,

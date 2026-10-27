@@ -494,6 +494,7 @@ fn rendered_status_explains_unmeasured_context() {
             source_seq: Seq::ZERO,
             prompt_revision: 1,
             checkpoint: "Retained facts".into(),
+            constraints: Default::default(),
         },
     }]);
     assert_eq!(row(&compacted, &names, 80), "▱▱▱▱▱▱▱▱▱▱ ?/?");

@@ -545,7 +545,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // surface — costing a `PUBLIC_EVENT_VERSION` bump — to tell nobody
         // anything they cannot already read. It is exported, because an audit
         // that cannot see a deliberate hold reads it as a crash.
-        EventKind::ContextRequested { .. }
+        EventKind::PinsChanged { .. }
+        | EventKind::ContextRequested { .. }
         | EventKind::ContextCooldown { .. }
         | EventKind::ContextRequestConsumed
         | EventKind::SessionTitleChanged { .. }

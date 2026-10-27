@@ -368,6 +368,7 @@ pub enum ExportEvent {
         source_seq: Seq,
         prompt_revision: u32,
     },
+    PinsChanged,
     Compacted,
     Forked {
         source: SessionId,
@@ -859,6 +860,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::GoalContinuation
         }
+        EventKind::PinsChanged { constraints: _ } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::PinsChanged
+        }
         EventKind::PlanUpdated { update: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::PlanUpdated
@@ -1162,6 +1167,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             source_seq,
             prompt_revision,
             checkpoint: _,
+            constraints: _,
         } => {
             redactions.opaque_prose += 1;
             ExportEvent::CompactionSeeded {

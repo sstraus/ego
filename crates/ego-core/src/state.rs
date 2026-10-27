@@ -1098,6 +1098,12 @@ impl QueuedPrompt {
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    /// Standing user registrations, reduced independently of model prose.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::compact::ConstraintLedger::is_default"
+    )]
+    pub constraints: crate::compact::ConstraintLedger,
     #[serde(default)]
     pub context_request: Option<crate::context::ContextRequest>,
     #[serde(default)]
@@ -1270,6 +1276,7 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            constraints: Default::default(),
             context_request: None,
             context_cooldown: 0,
             execution_observation: None,
@@ -1968,6 +1975,11 @@ impl SessionState {
         self.known_events.insert(ev.env.id);
 
         match &ev.kind {
+            EventKind::PinsChanged { constraints } => {
+                if constraints.validate().is_ok() {
+                    self.constraints = constraints.clone();
+                }
+            }
             EventKind::SessionTitleChanged { title } => self.title = title.clone(),
             EventKind::SessionDeleted => self.deleted = true,
             // Total like every other arm, and the transitions it will not make
@@ -2274,7 +2286,9 @@ impl SessionState {
                 source_seq,
                 prompt_revision,
                 checkpoint,
+                constraints,
             } => {
+                self.constraints = constraints.clone();
                 self.prompt_snapshot = None;
                 self.lineage = Some(SessionLineage::Compaction {
                     source: *source,
