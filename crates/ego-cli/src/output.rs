@@ -1059,6 +1059,11 @@ impl EventSink for TextSink<'_> {
                             args: &started.args,
                             ok: *ok,
                             result: text.as_deref().unwrap_or(""),
+                            result_blocks: state
+                                .items
+                                .get(item)
+                                .and_then(|item| item.tool_result.as_ref())
+                                .map(|result| result.content.as_slice()),
                             timing: state.items.get(item).and_then(|item| item.tool_timing),
                         },
                         self.capabilities.with_current_width(),
@@ -2111,6 +2116,33 @@ mod tests {
         let (sender, receiver) = crossbeam::channel::unbounded();
         let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
         (output, receiver)
+    }
+
+    fn expand_recorded_exec() -> String {
+        let events: Vec<ego_core::event::domain::DomainEvent> =
+            serde_json::from_str(include_str!("../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let (output, rows) = interactive();
+        let sink = TextSink::new(&output, false, Capabilities::plain());
+        let mut state = SessionState::default();
+        for event in &events {
+            state.apply(event);
+            if let Some(public) = ego_core::public::project_public(event) {
+                sink.publish(&public, &state);
+            }
+        }
+        rows.try_iter().for_each(drop);
+        output.expand_last_tool();
+        rows.try_iter().collect::<String>()
+    }
+
+    // Catches: an empty stderr stream adding a dangling label to expanded output.
+    #[test]
+    fn recorded_stdout_only_exec_omits_empty_stderr() {
+        let expanded = expand_recorded_exec();
+        assert_eq!(
+            expanded,
+            include_str!("../tests/fixtures/expand-visible-streams.expected.txt")
+        );
     }
 
     #[test]

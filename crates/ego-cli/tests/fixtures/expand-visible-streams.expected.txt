@@ -1,0 +1,7 @@
+
+✓ $ bash -lc '/home/example/workspace · exit 0 · 139ms
+  [stdout]
+  tuic bg: pid=12345
+  log=/home/example/workspace
+  wake=/home/example/workspace
+  tuic-bg: you will get BG DONE; end your turn now

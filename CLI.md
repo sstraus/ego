@@ -1564,7 +1564,9 @@ later tool call replaces it as the expansion target.
 
 `/expand`, also `Alt-O`, prints the full result of the most recent tool call
 under its row: for `edit`, the line diff; for every other tool, the whole
-result text the model received, up to 256 KiB. Only the 16 most recent tool calls
+result text the model received, up to 256 KiB. Expanded process output omits
+labels for empty stdout and stderr streams; nonempty streams retain their labels.
+Only the 16 most recent tool calls
 and collapsed prompts of the session are kept, and only the latest can be shown. It runs between turns,
 like `/help`. Headless runs write each row to stderr, prefixed `εgo:`, and have
 no expand key.

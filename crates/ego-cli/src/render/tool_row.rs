@@ -53,6 +53,8 @@ pub struct Finished<'a> {
     pub ok: bool,
     /// The result text the model was given, or the failure message.
     pub result: &'a str,
+    /// Authoritative blocks, when the reduced item or replay supplies them.
+    pub result_blocks: Option<&'a [ego_core::permit::ToolContentBlock]>,
     pub timing: Option<ego_core::event::domain::ToolTiming>,
 }
 
@@ -486,7 +488,24 @@ fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
         );
     }
     let room = width.saturating_sub(2).max(1);
-    call.result
+    // Stream identity comes from evidence provenance, never from marker-like
+    // text a process may legitimately print. Without blocks, retain all text.
+    let visible = call
+        .result_blocks
+        .filter(|_| call.name == "exec")
+        .map(|blocks| {
+            ego_core::permit::ToolResult::new(
+                blocks
+                    .iter()
+                    .filter(|block| !block.backend_owned_pipe() || !block.text.trim().is_empty())
+                    .cloned()
+                    .collect(),
+            )
+            .model_text()
+        });
+    visible
+        .as_deref()
+        .unwrap_or(call.result)
         .lines()
         .flat_map(|line| Line::plain(printable_output(line)).wrap(room))
         .map(|line| {
@@ -515,6 +534,7 @@ mod tests {
             args,
             ok,
             result,
+            result_blocks: None,
             timing: Some(ego_core::event::domain::ToolTiming {
                 execution_ms: Some(1500),
                 approval_wait_ms: 0,
@@ -554,6 +574,67 @@ mod tests {
                 result.rows
             );
         }
+    }
+
+    // Catches: empty evidence streams grow labels, or marker-like process
+    // payloads are parsed as labels and disappear from expanded output.
+    #[test]
+    fn expanded_exec_labels_only_streams_with_visible_output() {
+        use ego_core::event::domain::{DomainEvent, EventKind};
+        let events: Vec<DomainEvent> =
+            serde_json::from_str(include_str!("../../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let recorded = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolCallCompleted { result, .. } => Some(result),
+                _ => None,
+            })
+            .unwrap();
+        for (stdout, stderr, diagnostic, expected) in [
+            ("out\n", "", None, "  [stdout]\n  out"),
+            ("", "warning\n", None, "  [stderr]\n  warning"),
+            ("", "", None, ""),
+            (
+                "",
+                "",
+                Some("process exited unsuccessfully with code Some(2)"),
+                "  process exited unsuccessfully with code Some(2)",
+            ),
+            ("[stderr]\n", "", None, "  [stdout]\n  [stderr]"),
+            (
+                "",
+                "\n[stdout]\n\n[stderr]\n",
+                None,
+                "  [stderr]\n\n  [stdout]\n\n  [stderr]",
+            ),
+        ] {
+            let mut result = recorded.clone();
+            result.content[0].text = stdout.to_owned();
+            result.content[1].text = stderr.to_owned();
+            if let Some(diagnostic) = diagnostic {
+                result
+                    .content
+                    .push(ego_core::permit::ToolContentBlock::builtin(diagnostic));
+            }
+            let text = result.model_text();
+            let rendered = record(
+                &Finished {
+                    result_blocks: Some(&result.content),
+                    ..call("exec", r#"{"argv":["x"]}"#, diagnostic.is_none(), &text)
+                },
+                at(120),
+            );
+            let body = rendered
+                .detail
+                .split_once('\n')
+                .map_or("", |(_, body)| body);
+            assert_eq!(body, expected, "stdout={stdout:?}, stderr={stderr:?}");
+        }
+        let raw = record(
+            &call("exec", r#"{"argv":["x"]}"#, true, "[stderr]"),
+            at(120),
+        );
+        assert!(raw.detail.ends_with("\n  [stderr]"), "{}", raw.detail);
     }
 
     // Catches: stderr becomes indistinguishable from stdout in a collapsed preview.

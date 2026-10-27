@@ -1,0 +1,133 @@
+[
+  {
+    "env": {
+      "seq": 207,
+      "id": "00000000-0000-4000-8000-00000001007a",
+      "turn": "00000000-0000-4000-8000-000000010077",
+      "item": "00000000-0000-4000-8000-000000010079",
+      "parent": "00000000-0000-4000-8000-000000010078",
+      "ts": 949801306830,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "ToolCallStarted",
+      "name": "exec",
+      "args": "{\"argv\":[\"bash\",\"-lc\",\"/home/example/workspace /home/example/workspace -- bash /home/example/workspace\"],\"cwd\":\"/home/example/workspace\",\"timeout_ms\":10000,\"background\":false}",
+      "call_id": "call_example_capture_0002"
+    }
+  },
+  {
+    "env": {
+      "seq": 211,
+      "id": "00000000-0000-4000-8000-00000001007b",
+      "turn": "00000000-0000-4000-8000-000000010077",
+      "item": "00000000-0000-4000-8000-000000010079",
+      "parent": "00000000-0000-4000-8000-00000001007a",
+      "ts": 949801306834,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "HookLifecycleReached",
+      "occurrence": {
+        "lifecycle": "PreToolUse",
+        "owner": {
+          "kind": "item",
+          "item": "00000000-0000-4000-8000-000000010079"
+        }
+      },
+      "subject": {
+        "scope": "item",
+        "item": "00000000-0000-4000-8000-000000010079"
+      },
+      "plan": []
+    }
+  },
+  {
+    "env": {
+      "seq": 213,
+      "id": "00000000-0000-4000-8000-00000001007c",
+      "turn": "00000000-0000-4000-8000-000000010077",
+      "item": "00000000-0000-4000-8000-000000010079",
+      "parent": "00000000-0000-4000-8000-00000001007a",
+      "ts": 949801306986,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "ToolCallMeasured",
+      "timing": {
+        "execution_ms": 139,
+        "approval_wait_ms": 0
+      }
+    }
+  },
+  {
+    "env": {
+      "seq": 214,
+      "id": "00000000-0000-4000-8000-00000001007d",
+      "turn": "00000000-0000-4000-8000-000000010077",
+      "item": "00000000-0000-4000-8000-000000010079",
+      "parent": "00000000-0000-4000-8000-00000001007a",
+      "ts": 949801306986,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "ToolCallCompleted",
+      "ok": true,
+      "result": {
+        "content": [
+          {
+            "text": "tuic bg: pid=12345 log=/home/example/workspace wake=/home/example/workspace\ntuic-bg: you will get BG DONE; end your turn now\n",
+            "provenance": {
+              "source": "process",
+              "stream": "stdout",
+              "encoding": "utf8",
+              "truncated": false,
+              "omitted_bytes": 0
+            },
+            "full_output": "c10475db71c79d32d68ee03a598cf625edd3df6529757005b871cec275ae278d:125"
+          },
+          {
+            "text": "",
+            "provenance": {
+              "source": "process",
+              "stream": "stderr",
+              "encoding": "utf8",
+              "truncated": false,
+              "omitted_bytes": 0
+            },
+            "full_output": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:0"
+          }
+        ],
+        "provenance": {
+          "kind": "builtin"
+        }
+      }
+    }
+  },
+  {
+    "env": {
+      "seq": 215,
+      "id": "00000000-0000-4000-8000-00000001007e",
+      "turn": "00000000-0000-4000-8000-000000010077",
+      "item": "00000000-0000-4000-8000-000000010079",
+      "parent": "00000000-0000-4000-8000-00000001007a",
+      "ts": 949801306986,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "HookLifecycleReached",
+      "occurrence": {
+        "lifecycle": "PostToolUse",
+        "owner": {
+          "kind": "item",
+          "item": "00000000-0000-4000-8000-000000010079"
+        }
+      },
+      "subject": {
+        "scope": "item",
+        "item": "00000000-0000-4000-8000-000000010079"
+      },
+      "plan": []
+    }
+  }
+]

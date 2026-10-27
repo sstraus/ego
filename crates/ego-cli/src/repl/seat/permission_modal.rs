@@ -572,6 +572,7 @@ mod tests {
                 args: &args,
                 ok: true,
                 result: hostile,
+                result_blocks: None,
                 timing: None,
             },
             crate::render::Capabilities::plain(),
