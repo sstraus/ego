@@ -147,3 +147,66 @@ fn usage_context_occupancy_has_session_model_and_provenance_without_billing_tota
         assert!(session["lines"].get("context").is_none());
     }
 }
+
+// Catches: inventing an OpenRouter remaining balance or publishing it for another provider's session.
+#[test]
+fn usage_limits_recorded_key_is_current_credential_scoped_not_session_spend() {
+    for model in ["openrouter/openai/gpt-4o", "ollama/qwen3"] {
+        let places = Places::new();
+        let stub = Stub::start(Plan {
+            models_response: Some(include_str!("fixtures/openrouter-models.json").to_owned()),
+            key_response: Some(
+                include_str!("../../ego-ai/tests/fixtures/usage_limits/openrouter-key.json")
+                    .to_owned(),
+            ),
+            completions: vec![support::Reply::Sse(text("usage fixture"))],
+            ..Plan::default()
+        });
+        let command = || {
+            places
+                .ego(&stub)
+                .env("OPENROUTER_API_KEY", "fixture-key")
+                .env(
+                    "OPENROUTER_BASE_URL",
+                    &format!("http://{}/api/v1/", stub.address),
+                )
+        };
+        let run = command()
+            .args([
+                "--model",
+                model,
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+                "Seed usage",
+            ])
+            .run();
+        assert_eq!(run.code, Some(0), "{}", run.stderr);
+        let result = command().subcommand("usage").args(["--json"]).run();
+        let report = json_report(&result);
+        assert_eq!(report["v"], 4);
+        assert!(
+            report["sessions"][0].get("provider_limits").is_none(),
+            "a key lookup is not session history"
+        );
+        if model.starts_with("openrouter/") {
+            assert_eq!(report["provider_limits"][0]["provider"], "openrouter");
+            assert!(report["provider_limits"][0].get("model").is_none());
+            assert_eq!(
+                report["provider_limits"][0]["limits"][0]["remaining"],
+                "73.123456789"
+            );
+            assert_eq!(
+                report["provider_limits"][0]["limits"][0]["used"],
+                "123.987654321"
+            );
+            assert!(report["provider_limits"][0]["observed_at"].is_number());
+        } else {
+            assert!(
+                report.get("provider_limits").is_none(),
+                "an unrelated configured key must not supply limits"
+            );
+        }
+    }
+}

@@ -797,6 +797,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         EventKind::GenerationStarted { .. }
         | EventKind::AttemptSettled { .. }
         | EventKind::UsageCorrected { .. }
+        | EventKind::ProviderLimitsObserved { .. }
         | EventKind::SessionSelectionsSelected { .. }
         | EventKind::ExecutionObserved { .. }
         | EventKind::ExecutionMeasured { .. }

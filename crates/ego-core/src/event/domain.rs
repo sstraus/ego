@@ -624,6 +624,12 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<u64>,
     },
+    /// Provider-reported levels from this generation's response headers.
+    ProviderLimitsObserved {
+        provider: String,
+        model: String,
+        limits: Vec<crate::usage::ProviderLimit>,
+    },
     /// A turn finished.
     TurnCompleted { ok: bool, exit_reason: ExitReason },
     /// The first semantic fact in a clean checkpoint-seeded session.
@@ -877,6 +883,7 @@ impl EventKind {
             EventKind::UsageUpdated { .. } => "usage_updated",
             EventKind::UsageCorrected { .. } => "usage_corrected",
             EventKind::ContextWindowUpdated { .. } => "context_window_updated",
+            EventKind::ProviderLimitsObserved { .. } => "provider_limits_observed",
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::CompactionSeeded { .. } => "compaction_seeded",
             EventKind::Compacted { .. } => "compacted",

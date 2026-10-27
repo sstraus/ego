@@ -261,6 +261,21 @@ mod generator {
                         },
                     }]
                 }
+                AiEvent::ProviderLimits {
+                    provider,
+                    model,
+                    limits,
+                } => {
+                    let env = self.envelope(None);
+                    vec![DomainEvent {
+                        env,
+                        kind: EventKind::ProviderLimitsObserved {
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            limits: limits.clone(),
+                        },
+                    }]
+                }
                 AiEvent::Usage(usage) => {
                     let env = self.envelope(None);
                     vec![DomainEvent {

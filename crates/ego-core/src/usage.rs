@@ -8,7 +8,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::cost::{
-    CostAttribution, CostDelta, CurrencyCode, Money, SubscriptionEquivalent, UnknownCost,
+    Amount, CostAttribution, CostDelta, CurrencyCode, Money, SubscriptionEquivalent, UnknownCost,
 };
 use crate::event::domain::{GenerationRole, OccupancyProvenance};
 use crate::event::id::SessionId;
@@ -17,9 +17,9 @@ use crate::session::SessionLineage;
 use crate::state::{Charge, ChargeAttribution, SessionState, Usage};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
-/// The current closed v3 contract separates subscription equivalents from monetary spend.
+/// The v4 contract adds observed context capacity and provider limits.
 /// Old report snapshots are not accepted through compatibility defaults.
-pub const USAGE_REPORT_VERSION: u32 = 3;
+pub const USAGE_REPORT_VERSION: u32 = 4;
 
 /// A deterministic workspace or active-session usage report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,9 @@ pub struct UsageReport {
     pub period: UsagePeriod,
     pub sessions: Vec<SessionUsage>,
     pub totals: UsageLines,
+    /// Current-credential observations, not historical session charges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_limits: Vec<ProviderLimitsObservation>,
 }
 
 /// Which original generation timestamps a report includes.
@@ -48,6 +51,10 @@ pub struct SessionUsage {
     pub lineage: Option<SessionLineage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_capacity: Option<ContextCapacity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_limits: Option<ProviderLimitsObservation>,
     pub lines: UsageLines,
 }
 
@@ -56,6 +63,50 @@ pub struct SessionUsage {
 pub struct ContextUsage {
     pub used_tokens: u64,
     pub provenance: OccupancyProvenance,
+}
+
+/// A capacity stated by the generation that observed the context, never a catalogue guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCapacity {
+    pub tokens: u64,
+    pub source: String,
+    pub observed_at: Timestamp,
+}
+
+/// One provider's point-in-time limits. These are levels, never additive usage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderLimitsObservation {
+    pub provider: String,
+    /// Present for a response from a session generation. Absent for the command's current key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub observed_at: Timestamp,
+    pub limits: Vec<ProviderLimit>,
+}
+
+/// The unit and boundary of an explicitly reported remaining value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderLimitKind {
+    Requests,
+    Tokens,
+    InputTokens,
+    OutputTokens,
+    Usd,
+}
+
+/// Only provider-stated values. No subtraction, reset prediction or local-spend reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderLimit {
+    pub kind: ProviderLimitKind,
+    pub remaining: Amount,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<Amount>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<Amount>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset: Option<String>,
+    pub source: String,
 }
 
 /// The fixed accounting lines under the one durable ledger.
@@ -185,8 +236,43 @@ impl<'a> UsageReportService<'a> {
         for meta in metadata {
             let mut state = SessionState::default();
             let mut entries = self.store.read(&meta.id)?;
+            let mut context_capacity = None;
+            let mut provider_limits = None;
             while let Some(entry) = entries.next().await {
                 if let SessionEntry::Event(event) = entry? {
+                    match &event.kind {
+                        crate::event::domain::EventKind::ContextWindowUpdated {
+                            window, ..
+                        } => {
+                            context_capacity =
+                                window
+                                    .filter(|tokens| *tokens > 0)
+                                    .map(|tokens| ContextCapacity {
+                                        tokens,
+                                        source: "context_window_updated".to_owned(),
+                                        observed_at: event.env.ts,
+                                    });
+                        }
+                        crate::event::domain::EventKind::ProviderLimitsObserved {
+                            provider,
+                            model,
+                            limits,
+                        } => {
+                            // A judge or fallback may use a different provider. Do not lend its quota
+                            // to the session's displayed model. Sequence order, not wall time, wins.
+                            if meta.model.as_deref() == Some(model.as_str())
+                                && model.split_once('/').is_some_and(|(id, _)| id == provider)
+                            {
+                                provider_limits = Some(ProviderLimitsObservation {
+                                    provider: provider.clone(),
+                                    model: Some(model.clone()),
+                                    observed_at: event.env.ts,
+                                    limits: limits.clone(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
                     state.apply(&event);
                 }
             }
@@ -226,6 +312,8 @@ impl<'a> UsageReportService<'a> {
                 model: meta.model,
                 lineage: meta.lineage,
                 context,
+                context_capacity,
+                provider_limits,
                 lines: lines.finish(),
             });
         }
@@ -236,6 +324,7 @@ impl<'a> UsageReportService<'a> {
             period,
             sessions,
             totals: totals.finish(),
+            provider_limits: Vec::new(),
         })
     }
 }

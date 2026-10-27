@@ -2228,7 +2228,9 @@ impl SessionState {
                 self.execution_observation = Some(observation.clone());
             }
             EventKind::ExecutionMeasured { .. } => {}
-            EventKind::JudgeResponse { .. } | EventKind::SandboxResidualDecided { .. } => {}
+            EventKind::JudgeResponse { .. }
+            | EventKind::SandboxResidualDecided { .. }
+            | EventKind::ProviderLimitsObserved { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
                 usage,

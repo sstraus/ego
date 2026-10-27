@@ -1135,7 +1135,8 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                 AiEvent::Error { message, .. } => {
                     provider_error.get_or_insert(message);
                 }
-                AiEvent::ProviderContent { .. }
+                AiEvent::ProviderLimits { .. }
+                | AiEvent::ProviderContent { .. }
                 | AiEvent::WebSearch { .. }
                 | AiEvent::Citation { .. }
                 | AiEvent::ReasoningDelta { .. }
@@ -6215,6 +6216,23 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 // A total for the request, so the last statement replaces
                 // the previous one rather than adding to it — the rule
                 // `AttemptStream` folds it under.
+                AiEvent::ProviderLimits {
+                    provider,
+                    model,
+                    limits,
+                } => self
+                    .journal
+                    .append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::ProviderLimitsObserved {
+                            provider,
+                            model,
+                            limits,
+                        },
+                    )
+                    .map(|_| ()),
                 AiEvent::ProviderCost { cost } => {
                     stated_cost = Some(cost);
                     Ok(())

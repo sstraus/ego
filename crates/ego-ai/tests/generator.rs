@@ -1543,3 +1543,63 @@ mod codex_recovery {
         }
     }
 }
+
+// Catches: a key response being reduced to limit minus lifetime usage, or attached to another provider.
+#[tokio::test]
+async fn usage_limits_recorded_key_crosses_the_authenticated_http_boundary() {
+    struct Clock;
+    impl ego_core::event::time::Clock for Clock {
+        fn now(&self) -> ego_core::event::time::Timestamp {
+            ego_core::event::time::Timestamp::from_millis(1_009_843_200_000)
+        }
+    }
+    let row = ProviderRow::openrouter_default();
+    let credential = row
+        .credential
+        .resolve(&FakeCredentials::holding(KEY))
+        .unwrap();
+    let body = include_bytes!("fixtures/usage_limits/openrouter-key.json").to_vec();
+    let http = StubHttp::new(Ok(OneHopResponse::streaming_response(
+        200,
+        Vec::new(),
+        Box::pin(futures::stream::iter([Ok(body)])),
+    )));
+    let port = http.clone() as Arc<dyn Http>;
+    let observed = ego_ai::usage_limits::openrouter_key_limits(&row, &credential, &port, &Clock)
+        .await
+        .unwrap()
+        .unwrap();
+    let json = serde_json::to_value(observed).unwrap();
+    assert_eq!(json["provider"], "openrouter");
+    assert!(
+        json.get("model").is_none(),
+        "current credential is not a historical session identity"
+    );
+    assert_eq!(json["observed_at"], 1_009_843_200_000_u64);
+    assert_eq!(json["limits"][0]["remaining"], "73.123456789");
+    assert_eq!(
+        json["limits"][0]["source"],
+        "openrouter_key:data.limit_remaining"
+    );
+    let calls = http.calls();
+    assert!(
+        ego_ai::usage_limits::openrouter_key_limits(&self::row(), &credential, &port, &Clock)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        http.calls(),
+        calls,
+        "a different provider must not contact OpenRouter"
+    );
+    let seen = http.seen.lock().unwrap();
+    assert_eq!(seen[0].method, Method::Get);
+    assert_eq!(seen[0].url.as_str(), "https://openrouter.ai/api/v1/key");
+    assert!(
+        seen[0]
+            .headers
+            .iter()
+            .any(|header| header.name() == "authorization")
+    );
+}
