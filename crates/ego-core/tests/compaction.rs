@@ -197,7 +197,7 @@ fn seeded_event(kind: EventKind) -> DomainEvent {
 
 #[test]
 fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
-    assert_eq!(COMPACTION_PROMPT_REVISION, 2);
+    assert_eq!(COMPACTION_PROMPT_REVISION, 3);
     assert!(COMPACTION_PROMPT.contains("Produce one self-contained context checkpoint"));
     assert!(COMPACTION_PROMPT.contains("do not continue the task"));
     assert!(COMPACTION_PROMPT.contains("# Objective"));
@@ -214,6 +214,72 @@ fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
     assert!(COMPACTION_PROMPT.contains("even inside fenced code"));
     assert!(COMPACTION_PROMPT.contains("indent the line by four spaces"));
     assert!(COMPACTION_PROMPT.contains("each once, in this order"));
+}
+
+// Catches: the summary request promotes an already answered one-turn output
+// requirement into standing continuation instructions. This is a prompt contract,
+// not an offline claim about a language model's next generated answer.
+#[test]
+fn completed_ready_fixture_requires_instruction_lifetimes_in_summary_request() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/compaction/completed-ready.json"))
+            .expect("recorded transcript fixture");
+    assert_eq!(fixture["seed_completed"], true);
+    assert_eq!(fixture["seed_answer"], "READY");
+    assert_eq!(fixture["observed_answer"], "READY");
+    let checkpoint = fixture["checkpoint"].as_str().expect("recorded checkpoint");
+    Checkpoint::parse(checkpoint).expect("the observed bad checkpoint is structurally valid");
+    assert!(checkpoint.contains(fixture["expected_answer"].as_str().unwrap()));
+    assert!(
+        COMPACTION_PROMPT.contains("A completed one-turn response requirement"),
+        "the summarizer must distinguish completed response requirements from ongoing constraints"
+    );
+    assert!(COMPACTION_PROMPT.contains("Preserve unfinished tasks and standing constraints"));
+    assert!(COMPACTION_PROMPT.contains("later user requests take precedence"));
+}
+
+// Catches: replay drops the durable filename or reorders the new user request
+// before the checkpoint. Model obedience to that request needs a model eval.
+#[test]
+fn completed_ready_fixture_replays_filename_before_current_request() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/compaction/completed-ready.json"))
+            .expect("recorded transcript fixture");
+    let checkpoint = fixture["checkpoint"].as_str().unwrap();
+    let current = fixture["current_prompt"].as_str().unwrap();
+    let mut seed = seeded_event(EventKind::CompactionSeeded {
+        source: serde_json::from_value(fixture["provenance"]["source_session"].clone()).unwrap(),
+        source_seq: seq(20),
+        prompt_revision: 2,
+        checkpoint: checkpoint.to_owned(),
+    });
+    seed.env.seq = seq(1);
+    let mut prompt = seeded_event(EventKind::UserPrompt {
+        text: current.to_owned(),
+        queued_prompt: None,
+        images: Vec::new(),
+        audio: Vec::new(),
+    });
+    prompt.env.seq = seq(2);
+    let state = SessionState::replay([seed, prompt]);
+    let (history, repairs) = conversation_from(&state).expect("real checkpoint replay");
+    assert!(repairs.is_empty());
+    let blocks: Vec<_> = history
+        .messages()
+        .iter()
+        .flat_map(|message| {
+            assert_eq!(message.role, Role::User);
+            message.content.iter().map(|block| match block {
+                ego_core::generator::types::ContentBlock::Text { text } => text.as_str(),
+                _ => panic!("text-only recorded transcript"),
+            })
+        })
+        .collect();
+    assert_eq!(blocks.len(), 2);
+    let frame: serde_json::Value = serde_json::from_str(blocks[0]).unwrap();
+    assert_eq!(frame["text"], checkpoint);
+    assert!(blocks[0].contains("ledger-419.txt"));
+    assert_eq!(blocks[1], current);
 }
 
 #[test]
@@ -272,7 +338,10 @@ fn compaction_seed_event_carries_exact_source_lineage_revision_and_checkpoint() 
     let encoded = serde_json::to_value(&seeded).expect("seed event is serialisable");
     assert_eq!(encoded["kind"]["kind"], "CompactionSeeded");
     assert_eq!(encoded["kind"]["source"], SOURCE);
-    assert_eq!(encoded["kind"]["prompt_revision"], 2);
+    assert_eq!(
+        encoded["kind"]["prompt_revision"],
+        COMPACTION_PROMPT_REVISION
+    );
     assert_eq!(encoded["kind"]["checkpoint"], checkpoint());
 
     let decoded: DomainEvent = serde_json::from_value(encoded).expect("seed event decodes");
