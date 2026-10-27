@@ -413,6 +413,12 @@ impl SkillCatalogueEvidence {
     pub fn descriptors(&self) -> &[SkillDescriptorEvidence] {
         &self.0
     }
+
+    /// Commands offered to explicit user-input adapters, including ACP.
+    /// Both advertisement and command selection use this view.
+    pub fn user_commands(&self) -> impl Iterator<Item = &SkillDescriptorEvidence> {
+        self.0.iter().filter(|descriptor| descriptor.user_invocable)
+    }
 }
 
 impl<'de> Deserialize<'de> for SkillCatalogueEvidence {

@@ -2776,6 +2776,12 @@ Optional strict YAML frontmatter accepts string `description` and `argument-hint
 `model`, `allowed-tools`, and all other behavioral fields are rejected visibly;
 they never silently grant foreign authority. Commands appear with admitted
 skills in help, completion, `/skills`, and ACP `available_commands_update`.
+ACP invokes each advertised skill or command by sending `/name args` as a text
+prompt. Plain skills use the same admitted instruction, argument substitution,
+policy, hook, and child-execution path as an explicit interactive invocation.
+Advertisement and selection use the same user-command catalogue; model-only
+skills are not advertised. Image and audio attachments are refused for these
+text-only invocations rather than silently discarded.
 See the [command contract](ARCHITECTURE.md)
 for bounds, ordering, and the distinction between atomic prompt publication and
 non-transactional shell side effects.

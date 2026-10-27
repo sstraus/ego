@@ -616,11 +616,16 @@ impl SkillCatalogue {
     }
 
     pub fn announce_for_user(&self) -> Vec<&SkillDescriptorEvidence> {
+        self.evidence.user_commands().collect()
+    }
+
+    /// Select from the same command view that user surfaces advertise.
+    /// Plain skills and command templates share the admitted invocation path.
+    pub fn user_command(&self, name: &str, raw_arguments: &str) -> Option<AdmittedSkillOperation> {
         self.evidence
-            .descriptors()
-            .iter()
-            .filter(|descriptor| descriptor.user_invocable)
-            .collect()
+            .user_commands()
+            .find(|descriptor| descriptor.name == name)
+            .map(|descriptor| AdmittedSkillOperation::invoke(descriptor, raw_arguments))
     }
 
     pub fn announce_for_model(&self) -> Vec<&SkillDescriptorEvidence> {
