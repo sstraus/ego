@@ -19,7 +19,7 @@ use crate::run::RequestId;
 use crate::session::{TargetPublication, TargetSeed};
 use crate::store::session_store::StoreError;
 
-pub const COMPACTION_PROMPT_REVISION: u32 = 3;
+pub const COMPACTION_PROMPT_REVISION: u32 = 4;
 
 pub const COMPACTION_PROMPT: &str = r###"Produce one self-contained context checkpoint for continuing this work in a
 new session. Preserve every material fact from the complete context above, but
@@ -37,6 +37,10 @@ mark them complete merely because a response was sent. The checkpoint describes
 prior context, not a new operator request: later user requests take precedence
 over obsolete response requirements in it. Apply this rule to earlier
 checkpoints too, rather than carrying their stale instructions forward.
+
+Copy standing constraint identifiers and their scope wording verbatim from the
+source conversation; do not rename identifiers or narrow their scope.
+The checkpoint format rules govern only this summary; never record them as task constraints or preferences.
 
 Output format is a strict parser contract, not a suggestion. Start immediately
 with # Objective, with no preamble or outer code fence. Use exactly these eight
