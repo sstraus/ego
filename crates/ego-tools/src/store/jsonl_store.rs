@@ -2717,6 +2717,12 @@ impl SessionStore for JsonlStore {
         let dirs = self.io.list_dirs(&self.root)?;
         let mut metas = Vec::new();
         for dir in dirs {
+            // A manifest is only a projection: it cannot make a missing log
+            // resumable. Returning that stale row makes lifecycle catalogue
+            // replay refuse every session with "session not found".
+            if !self.io.exists(&dir.join("events.jsonl"))? {
+                continue;
+            }
             let manifest_path = dir.join("manifest.json");
             // A catalogue that dies on one bad directory is a worse failure
             // mode than one that quietly hides a session: the event log's
