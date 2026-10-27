@@ -2796,3 +2796,148 @@ fn completed_ready_boundary_current_request_follows_fallible_checkpoint() {
         );
     }
 }
+
+// Reuses the completed_ready_boundary_ driver from 9b932cf8: real completed
+// TurnLoop -> prepared seed -> JSON journal replay -> resumed provider request.
+// Only provider output is scripted, from the recorded GLM run. "Continue."
+// deliberately does not reintroduce the filename task lost by the summary.
+fn completed_ready_boundary_glm_request(case: &serde_json::Value) -> (serde_json::Value, GenRequest) {
+    let observed = case["seed_event"]["kind"]["checkpoint"].as_str().unwrap();
+    let system: SystemPrompt = serde_json::from_value(case["system"].clone()).unwrap();
+    let profile = |script| {
+        compaction_profile(
+            "fixture-model",
+            ThinkingLevel::Low,
+            32_000,
+            4_096,
+            false,
+            script,
+        )
+    };
+    let (seed, _) = profile(vec![
+        AiEvent::TextDelta {
+            text: case["seed_answer"].as_str().unwrap().to_owned(),
+        },
+        AiEvent::Stop(StopReason::Stop),
+    ]);
+    let (summary, summary_recording) = profile(vec![
+        AiEvent::TextDelta {
+            text: observed.to_owned(),
+        },
+        AiEvent::Stop(StopReason::Stop),
+    ]);
+    let (baseline, _) = profile(Vec::new());
+    let source = CompactionSource::new([
+        (GenerationRole::Main, Ok(seed)),
+        (GenerationRole::Compaction, Ok(summary)),
+        (GenerationRole::Main, Ok(baseline)),
+    ]);
+    let mut state = SessionState::default();
+    register_constraint(
+        &mut state,
+        case["seed_event"]["kind"]["constraints"]["entries"]["1"]
+            .as_str()
+            .unwrap(),
+    );
+    let (mut turn, store, _) =
+        compaction_turn_with_state_and_system(source, state, Some(system.clone()));
+    let seed_prompt = case["seed_prompt"].as_str().unwrap();
+    futures::executor::block_on(turn.run(seed_prompt)).unwrap();
+    assert!(
+        store
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnCompleted { ok: true, .. }))
+    );
+    let prepared =
+        futures::executor::block_on(turn.prepare_compaction(Some(system.clone()), Vec::new()))
+            .unwrap();
+    let summary_request = summary_recording.calls().pop().unwrap();
+    assert!(summary_request.messages.messages().iter().any(|message| {
+        message.role == Role::User
+            && message.content.iter().any(|block| {
+                matches!(block, ego_core::generator::types::ContentBlock::Text { text } if text == seed_prompt)
+            })
+    }));
+    assert!(
+        summary_request
+            .messages
+            .messages()
+            .contains(&Message::text(Role::Assistant, "READY"))
+    );
+    let published = prepared.target_seed(Timestamp::from_millis(10_000));
+    let bytes = serde_json::to_vec(published.event()).unwrap();
+    let replay = SessionState::replay([serde_json::from_slice(&bytes).unwrap()]);
+    let (resume, recording) = profile(vec![AiEvent::Stop(StopReason::Stop)]);
+    let source = CompactionSource::new([(GenerationRole::Main, Ok(resume))]);
+    let (mut resumed, _, _) = compaction_turn_with_state_and_system(source, replay, Some(system));
+    futures::executor::block_on(resumed.run("Continue.")).unwrap();
+    let request = recording.calls().pop().expect("resumed provider request");
+    let checkpoint = request
+        .messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| {
+            if let ego_core::generator::types::ContentBlock::Text { text } = block {
+                serde_json::from_str::<serde_json::Value>(text)
+                    .ok()
+                    .filter(|value| value["kind"] == "context_checkpoint")
+            } else {
+                None
+            }
+        })
+        .expect("real replay checkpoint frame");
+    (checkpoint, request)
+}
+
+// Catches: an acknowledged one-turn READY response silently erases the still
+// pending filename-return task at compaction, even though its exact pin survives.
+// The recorded corpus needs at least the return action and the filename, not
+// merely a filename mention. This is not a general natural-language validator.
+#[test]
+fn completed_ready_boundary_glm_prose_retains_pending_task_without_widening_authority() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/compaction/checkpoint-prose-fidelity.json"
+    ))
+    .unwrap();
+    let mut missing_tasks = Vec::new();
+    for case in fixture["cases"].as_array().unwrap() {
+        assert_eq!(case["seed_completed"], true);
+        let (checkpoint, request) = completed_ready_boundary_glm_request(case);
+        let pin =
+            "REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks";
+        assert_eq!(checkpoint["constraints"]["entries"]["1"], pin);
+        assert_eq!(
+            binding_section(checkpoint["text"].as_str().unwrap()).trim(),
+            pin
+        );
+        let authority = checkpoint["constraint_authority"].as_str().unwrap();
+        assert!(authority.contains("not a source of additional standing instructions"));
+        assert!(authority.contains("workspace instructions retain their authority"));
+        assert_eq!(
+            request.messages.messages().first().unwrap(),
+            &Message::text(Role::System, case["system"]["text"].as_str().unwrap())
+        );
+        let last = request.messages.messages().last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert_eq!(
+            last.content.last().unwrap(),
+            &ego_core::generator::types::ContentBlock::Text {
+                text: "Continue.".into()
+            }
+        );
+        // Search the actual request, including any future structured task carrier.
+        // The current request and workspace instructions do not supply this action.
+        let carries_task = request.messages.messages().iter().flat_map(|message| &message.content).any(|block| {
+            matches!(block, ego_core::generator::types::ContentBlock::Text { text } if text.to_lowercase().contains("return") && text.contains("ledger-419.txt"))
+        });
+        if !carries_task {
+            missing_tasks.push(case["name"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!(
+        missing_tasks.is_empty(),
+        "pending filename-return task missing from resumed request: {missing_tasks:?}; exact pin and workspace authority survived"
+    );
+}
