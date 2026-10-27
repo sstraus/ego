@@ -32,7 +32,7 @@ DetachedExecStarted | DetachedExecSettled | QuestionRequested |
 QuestionSettled | QuestionMemberSettled | PermissionRequested | PermissionAmended |
 PermissionDecided | GenerationStarted | FallbackDecision | ExecutionObserved |
 ExecutionMeasured | JudgeResponse | SandboxResidualDecided | AttemptSettled |
-UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
+CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
 CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
 HookLifecycleReached | HookInvocationStarted | HookInvocationSettled |
 SubagentRequested | SubagentSpawned | SubagentSettled |
@@ -41,9 +41,9 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-68 variants in the current schema, and this list is exhaustive by contract.
+69 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-68, including the session-metadata, pause and goal, question, detached-exec,
+69, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, background-task, skill, and clean-session compaction lifecycles.
 `SessionSelectionsSelected` records the admitted model, mode and sandbox so
 resume retains those selections unless the user passes explicit new flags.

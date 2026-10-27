@@ -1083,18 +1083,10 @@ impl EventSink for TextSink<'_> {
                 ..
             } => {
                 self.finish();
-                let detail = match estimated_upper_bound {
-                    Some(bound) => format!(
-                        "the reserved upper bound of {} {} counts against any configured cap; actual cost remains unknown",
-                        bound.amount, bound.currency
-                    ),
-                    None => {
-                        "no usable price is available; any configured cap cannot cover this unpriced spend"
-                            .to_owned()
-                    }
-                };
-                self.out
-                    .note(&format!("Cost anomaly for {model}: {detail}. Continuing."));
+                self.out.note(&ego_core::public::cost_anomaly_message(
+                    model,
+                    estimated_upper_bound.as_ref(),
+                ));
             }
             PublicEvent::MeteringSelected { ceiling, rates, .. } => {
                 let mut last = self

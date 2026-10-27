@@ -50,6 +50,19 @@ use crate::state::Usage;
 // Version 17 adds the durable cost anomaly notice.
 pub const PUBLIC_EVENT_VERSION: u32 = 17;
 
+/// Shared warning text for terminal and ACP projections of the same notice.
+pub fn cost_anomaly_message(model: &str, estimated_upper_bound: Option<&Money>) -> String {
+    let detail = match estimated_upper_bound {
+        Some(bound) => format!(
+            "the reserved upper bound of {} {} counts against any configured cap; actual cost remains unknown",
+            bound.amount, bound.currency
+        ),
+        None => "no usable price is available; any configured cap cannot cover this unpriced spend"
+            .to_owned(),
+    };
+    format!("Cost anomaly for {model}: {detail}. Continuing.")
+}
+
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -9,9 +9,8 @@
 //!
 //! The claim under test is §7's first row and it is a *privacy* claim, not an
 //! optimisation: an ordinary `ego` run contacts nobody but the model provider.
-//! Everything else here is the fail-closed posture — a ceiling is a guarantee
-//! the operator asked for, so "I could not establish what this costs" must
-//! never resolve to "proceed unbounded".
+//! Missing price sources now resolve without a quote. The admission gate
+//! emits a durable anomaly rather than inventing a price or refusing a call.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -21,7 +20,7 @@ use ego_ai::catalogue::{ResolvedModel, tabulated, unmetered};
 use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::ProviderRow;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
-use ego_cli::budget::{NoRates, TableSource};
+use ego_cli::budget::TableSource;
 use ego_core::budget::{BudgetGate, Ledger, Metering};
 use ego_core::cost::{CurrencyCode, Money, RateSource};
 use ego_core::event::time::Timestamp;
@@ -302,28 +301,19 @@ async fn an_offline_run_prices_a_ceiling_from_a_fresh_cache() {
     assert_eq!(wire.calls(), 0);
 }
 
-/// §7 row 3: `--offline` with nothing cached is a self-contradictory
-/// invocation — an air-gapped posture *and* a guarantee that needs the network
-/// — so the command line is what must change, and the error says so rather
-/// than reporting a network failure that never happened.
+/// Catches: missing offline cache refusing generation or causing a forbidden fetch.
 #[tokio::test]
-async fn offline_with_no_cached_table_refuses_without_reaching_for_the_network() {
+async fn offline_with_no_cached_table_continues_without_reaching_for_the_network() {
     let fixture = Fixture::new();
     let wire = Wire::answering(200, TABLE, Some(ETAG));
     let http = transport(&wire);
-
-    let err = fixture
+    let rates = fixture
         .source(&http, true)
         .rates(&model(tabulated()), &limited())
         .await
-        .expect_err("no table, and none may be fetched");
-
-    assert!(matches!(err, NoRates::Offline { .. }), "{err}");
-    assert_eq!(
-        wire.calls(),
-        0,
-        "the refusal is by posture, before any transport could refuse it"
-    );
+        .unwrap();
+    assert!(rates.is_none());
+    assert_eq!(wire.calls(), 0);
 }
 
 /// A stale cache offers its validator back, and an unchanged table costs one
@@ -388,50 +378,37 @@ async fn a_first_priced_run_fetches_the_table_and_leaves_it_cached() {
     assert_eq!(quiet.calls(), 0, "fetched once, per §6's title");
 }
 
-/// §7 row 6: online, the fetch fails, and nothing usable is cached. Refused,
-/// and reported as the network failure it is so a script can retry it.
+/// Catches: price-fetch failure refusing a model whose provider remains reachable.
 #[tokio::test]
-async fn a_failed_fetch_with_no_cache_refuses_as_a_provider_failure() {
+async fn a_failed_fetch_with_no_cache_continues_without_a_quote() {
     let fixture = Fixture::new();
     let wire = Wire::silent();
     let http = transport(&wire);
-
-    let err = fixture
+    let rates = fixture
         .source(&http, false)
         .rates(&model(tabulated()), &limited())
         .await
-        .expect_err("nothing to price with");
-
-    assert!(matches!(err, NoRates::Fetch { .. }), "{err}");
-    assert_eq!(wire.calls(), 1, "it was tried");
+        .unwrap();
+    assert!(rates.is_none());
+    assert_eq!(wire.calls(), 1, "it was tried once");
 }
 
-// Catches: a missing public OpenAI price emits only an opaque NoPricingQuote.
+// Catches: malformed cached prices refusing generation or triggering needless fetches.
 #[tokio::test]
-async fn missing_price_names_provider_model_and_mode() {
+async fn malformed_cached_prices_continue_without_a_quote_or_fetch() {
     let fixture = Fixture::new();
-    fixture.cached(TABLE, Duration::ZERO);
+    fixture.cached(
+        &TABLE.replace("1.25e-06", "\"not-a-price\""),
+        Duration::ZERO,
+    );
     let wire = Wire::silent();
     let http = transport(&wire);
-    let mut absent = model(tabulated());
-    absent.model = "gpt-99".to_string();
-    let error = fixture
+    let rates = fixture
         .source(&http, false)
-        .rates(&absent, &limited())
+        .rates(&model(tabulated()), &limited())
         .await
-        .expect_err("missing row must fail closed");
-    assert!(
-        matches!(&error, NoRates::MissingRow { provider, model } if provider == "openai" && model == "gpt-99")
-    );
-    let diagnostic = error.to_string();
-    for expected in [
-        "NoPricingQuote",
-        "provider=openai",
-        "model=gpt-99",
-        "mode=chat",
-    ] {
-        assert!(diagnostic.contains(expected), "{diagnostic}");
-    }
+        .unwrap();
+    assert!(rates.is_none());
     assert_eq!(wire.calls(), 0);
 }
 
@@ -543,9 +520,9 @@ async fn missing_catalogue_row_does_not_refuse_a_capped_generation() {
 
 mod support;
 
-// Catches: the real fresh-generation path never calls the cached price source.
+// Catches: unavailable cached pricing aborting the real CLI before generation.
 #[test]
-fn real_run_reports_the_missing_cached_model_price_before_send() {
+fn real_run_with_missing_cached_model_price_sends_and_notifies() {
     use ego_core::event::time::Clock;
     let places = support::Places::new();
     let stub = support::Stub::start(support::Plan::default());
@@ -584,11 +561,12 @@ fn real_run_reports_the_missing_cached_model_price_before_send() {
         );
     }
     assert!(
-        evidence.contains("provider=anthropic")
-            && evidence.contains("model=claude-haiku-5-5")
-            && evidence.contains("mode=chat"),
+        evidence.contains("CostAnomaly") && evidence.contains("anthropic/claude-haiku-5-5"),
         "{}\n{evidence}",
         result.stderr
     );
-    assert!(stub.generations().is_empty());
+    assert!(
+        !stub.generations().is_empty(),
+        "missing pricing must not prevent send"
+    );
 }

@@ -986,25 +986,20 @@ fn openrouter_absent_cache_prices_admit_reservation_at_prompt_rate() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-// Catches: cache fallback also conceals a missing prompt or completion price.
+// Catches: missing base prices refusing generation or becoming fabricated prices.
 #[test]
-fn openrouter_absent_base_prices_still_refuse_reservation() {
-    use ego_core::budget::{BudgetDenied, BudgetGate};
-    use ego_core::cost::{CurrencyCode, Money, TokenCategory, UnknownCost};
+fn openrouter_absent_base_prices_admit_without_fabricating_a_price() {
+    use ego_core::budget::BudgetGate;
+    use ego_core::cost::{CurrencyCode, Money};
 
     let capture: Value = serde_json::from_str(include_str!(
         "goldens/openrouter/cache-prices-2026-10-27.json"
     ))
     .unwrap();
     let row = &capture["data"][0];
-    for (missing_prompt, missing_output, category) in [
-        (true, false, TokenCategory::UncachedInput),
-        (false, true, TokenCategory::Output),
-        (true, true, TokenCategory::UncachedInput),
-    ] {
+    for (missing_prompt, missing_output) in [(true, false), (false, true), (true, true)] {
         let mut quote = captured_openrouter_quote(row);
-        // Supply cache rates so this test checks the base-rate safeguard even
-        // before the cache fallback fix, not an earlier unrelated refusal.
+        // Keep cache prices present to isolate the missing base-rate case.
         quote.cache_read = quote.uncached_input;
         quote.cache_write = quote.uncached_input;
         if missing_prompt {
@@ -1019,10 +1014,18 @@ fn openrouter_absent_base_prices_still_refuse_reservation() {
             "2".parse().unwrap(),
             CurrencyCode::new("USD").unwrap(),
         ));
-        assert!(matches!(gate.reserve(
-            &resolved.metering, resolved.rates.as_ref().map(|r| &r.quote),
-            &request(model, vec![]), &resolved.capabilities,
-        ), Err(BudgetDenied::CostUnknown(UnknownCost::UnpricedCategory { category: found })) if found == category));
+        let reservation = gate
+            .reserve(
+                &resolved.metering,
+                resolved.rates.as_ref().map(|r| &r.quote),
+                &request(model, vec![]),
+                &resolved.capabilities,
+            )
+            .expect("missing base prices must still admit generation");
+        assert!(
+            reservation.upper_bound().is_none(),
+            "do not invent a base price"
+        );
     }
 }
 

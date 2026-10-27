@@ -116,7 +116,7 @@ pub struct TableSource<'a> {
 
 /// Why a ceiling could not be given rates to rest on.
 ///
-/// Every arm is a refusal. A missing row names the exact provider and model
+/// These diagnostics do not refuse generation. A missing row names the provider and model
 /// so the operator can distinguish an unlisted model from a failed fetch.
 #[derive(Debug)]
 pub enum NoRates {
@@ -200,6 +200,20 @@ impl TableSource<'_> {
     /// only in a design that revalidates on every priced run, and this one
     /// does not: a fresh table is used as it stands.
     pub async fn rates(
+        &self,
+        model: &ResolvedModel,
+        ledger: &Ledger,
+    ) -> Result<Option<ResolvedRates>, NoRates> {
+        match self.try_rates(model, ledger).await {
+            Ok(rates) => Ok(rates),
+            Err(error) => {
+                tracing::debug!(%error, "price source unavailable; admitting without a quote");
+                Ok(None)
+            }
+        }
+    }
+
+    async fn try_rates(
         &self,
         model: &ResolvedModel,
         ledger: &Ledger,
@@ -310,8 +324,8 @@ impl TableSource<'_> {
                     rates
                 }))
             }
-            // The one absence that is not a failure: the gate turns it into
-            // `NoPricingQuote`, naming the model rather than the table.
+            // Keep the source diagnostic; rates() degrades unavailable pricing
+            // to no quote so the gate can admit with a durable anomaly notice.
             Err(TableError::NoEntry { provider, model }) => {
                 Err(NoRates::MissingRow { provider, model })
             }
