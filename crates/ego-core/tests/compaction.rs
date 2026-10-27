@@ -2393,8 +2393,9 @@ fn constraint_ledger_keeps_real_workspace_instruction_load_outside_hostile_summa
     use ego_core::config::{Limits, Selection, load_with_home, system_prompt};
     let fixture = constraint_fixture();
     let line = fixture["standing_text"].as_str().unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
+    let directory = std::env::temp_dir().join(format!("ego-workspace-{}", SessionId::new()));
+    std::fs::create_dir(&directory).unwrap();
+    let root = directory.canonicalize().unwrap();
     std::fs::write(root.join("AGENTS.md"), line).unwrap();
     let loaded = load_with_home(
         &ego_tools::instructions::OsInstructionIo,
@@ -2431,6 +2432,7 @@ fn constraint_ledger_keeps_real_workspace_instruction_load_outside_hostile_summa
                 .contains("workspace instructions retain their authority")
         );
     }
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 // Catches: a new pin has no effect until compaction, or /unpin leaves stale replay authority.
