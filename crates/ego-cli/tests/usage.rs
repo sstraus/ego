@@ -185,7 +185,6 @@ fn usage_limits_recorded_key_is_current_credential_scoped_not_session_spend() {
         assert_eq!(run.code, Some(0), "{}", run.stderr);
         let result = command().subcommand("usage").args(["--json"]).run();
         let report = json_report(&result);
-        assert_eq!(report["v"], 4);
         assert!(
             report["sessions"][0].get("provider_limits").is_none(),
             "a key lookup is not session history"

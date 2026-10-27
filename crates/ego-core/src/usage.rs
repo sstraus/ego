@@ -253,23 +253,21 @@ impl<'a> UsageReportService<'a> {
                                         observed_at: event.env.ts,
                                     });
                         }
+                        // A judge or fallback may use a different provider. Do not lend its quota
+                        // to the session's displayed model. Sequence order, not wall time, wins.
                         crate::event::domain::EventKind::ProviderLimitsObserved {
                             provider,
                             model,
                             limits,
-                        } => {
-                            // A judge or fallback may use a different provider. Do not lend its quota
-                            // to the session's displayed model. Sequence order, not wall time, wins.
-                            if meta.model.as_deref() == Some(model.as_str())
-                                && model.split_once('/').is_some_and(|(id, _)| id == provider)
-                            {
-                                provider_limits = Some(ProviderLimitsObservation {
-                                    provider: provider.clone(),
-                                    model: Some(model.clone()),
-                                    observed_at: event.env.ts,
-                                    limits: limits.clone(),
-                                });
-                            }
+                        } if meta.model.as_deref() == Some(model.as_str())
+                            && model.split_once('/').is_some_and(|(id, _)| id == provider) =>
+                        {
+                            provider_limits = Some(ProviderLimitsObservation {
+                                provider: provider.clone(),
+                                model: Some(model.clone()),
+                                observed_at: event.env.ts,
+                                limits: limits.clone(),
+                            });
                         }
                         _ => {}
                     }
