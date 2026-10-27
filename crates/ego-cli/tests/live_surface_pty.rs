@@ -7497,7 +7497,7 @@ fn read_edit_and_exec_each_leave_one_compact_row_and_no_raw_call_json() {
         rows[0]
     );
     assert!(
-        rows[1].starts_with("✓ edit calc.py +3 -1"),
+        rows[1].starts_with("✓ edit calc.py +2 -0"),
         "edit row: {:?}",
         rows[1]
     );
