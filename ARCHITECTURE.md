@@ -90,13 +90,16 @@ independently.
 
 ## 2. Crate layout (resolves §4.1)
 
-The final layout has six crates in one workspace, and all six are present. M2
-added `ego-mcp` with its real client/server surface. Dependency arrows point
-inward toward consumer-owned ports.
+The current workspace has eight crates. M2 added `ego-mcp` with its real
+client/server surface; `ego-a2a` serves discovery and `ego-listen` owns the
+shared inbound listener. Dependency arrows point inward toward consumer-owned
+ports.
 
 ```
 ego          (bin)  CLI: interactive line UI, headless, subcommands, config
 ├── ego-acp         ACP server on agent-client-protocol 2.0
+├── ego-a2a         discovery-only A2A surface
+├── ego-listen      shared inbound endpoint admission and lifecycle
 ├── ego-mcp         current MCP client + `ego mcp-server` on a release-gated
 │                   rmcp 3.x
 ├── ego-tools       builtin tools + execution backends (the OS lives here);
@@ -120,10 +123,13 @@ depends on `ego-mcp` solely to implement its consumer-owned HTTP and duplex
 effect ports. The binary wires implementations in. The crate count is a
 consequence, not a requirement.
 
-The complete allowed workspace edge set is: `ego-core -> {}`;
-`ego-ai -> {ego-core}`; `ego-acp -> {ego-core}`;
+The current production workspace edge set is: `ego-core -> {}`;
+`ego-ai -> {ego-core}`; `ego-listen -> {ego-core}`;
+`ego-acp -> {ego-core, ego-listen}`; `ego-a2a -> {ego-core, ego-listen}`;
 `ego-mcp -> {ego-core}`; `ego-tools -> {ego-core, ego-mcp}`; and
-`ego-cli -> {ego-core, ego-ai, ego-tools, ego-acp, ego-mcp}`. In particular,
+`ego-cli -> {ego-core, ego-ai, ego-tools, ego-acp, ego-a2a, ego-listen, ego-mcp}`.
+The package manifests own these edges; listener I/O lives in `ego-listen`,
+separate from protocol semantics. In particular,
 `ego-mcp -> ego-tools` remains forbidden: protocol owns the narrow port and the
 outer OS crate implements it.
 

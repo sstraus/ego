@@ -174,7 +174,9 @@ normalize the banner version. Do not rewrite these records for a version bump.
 macOS uses Seatbelt and Linux uses its confinement backends when the host can prove
 the requested guarantee. Windows transport and private-state support exist, but
 Windows `workspace`, `ro`, and `--offline` confinement remain unsupported.
-The final product proof remains open.
+The final product proof remains open; the
+[0.4.0 closure audit](ARCHITECTURE.md) separates
+release evidence from remaining operator and publication work.
 An unavailable confinement guarantee is refused rather than silently weakened.
 See [platforms and troubleshooting](docs/guides/troubleshooting.md) and
 [the roadmap](ARCHITECTURE.mdregression case-resolves-48).
