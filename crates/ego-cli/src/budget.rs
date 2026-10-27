@@ -302,7 +302,14 @@ impl TableSource<'_> {
     ) -> Result<Option<ResolvedRates>, NoRates> {
         let table = Table::decode(bytes).map_err(|source| NoRates::Table { source })?;
         match table.quote(model.row.id(), &model.model) {
-            Ok(entry) => Ok(Some(table_rates(entry.into_quote(revision.clone())))),
+            Ok(entry) => {
+                let rates = table_rates(entry.into_quote(revision.clone()));
+                Ok(Some(if model.row.id() == "openrouter" {
+                    ego_ai::catalogue::openrouter_admission_rates(rates)
+                } else {
+                    rates
+                }))
+            }
             // The one absence that is not a failure: the gate turns it into
             // `NoPricingQuote`, naming the model rather than the table.
             Err(TableError::NoEntry { provider, model }) => {

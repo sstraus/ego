@@ -469,6 +469,58 @@ async fn rates_that_are_already_resolved_are_not_replaced_by_the_table() {
     assert_eq!(wire.calls(), 0);
 }
 
+// Catches: the cached-table path bypasses OpenRouter's absent-cache policy,
+// or applies it to providers whose cache-write premium is not known.
+#[tokio::test]
+async fn openrouter_cached_table_completes_only_standard_missing_cache_prices() {
+    let fixture = Fixture::new();
+    let capture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../ego-ai/tests/goldens/openrouter/cache-prices-2026-10-27.json"
+    ))
+    .unwrap();
+    let public = &capture["data"][0]["pricing"];
+    let base = serde_json::json!({
+        "input_cost_per_token": serde_json::from_str::<serde_json::Value>(public["prompt"].as_str().unwrap()).unwrap(),
+        "output_cost_per_token": serde_json::from_str::<serde_json::Value>(public["completion"].as_str().unwrap()).unwrap(),
+        "litellm_provider": "openrouter", "mode": "chat"
+    });
+    let mut table = serde_json::Map::new();
+    table.insert("openrouter/z-ai/glm-4.7-flash".into(), base);
+    fixture.cached(
+        &serde_json::Value::Object(table).to_string(),
+        Duration::ZERO,
+    );
+    let wire = Wire::silent();
+    let http = transport(&wire);
+    let mut routed = model(tabulated());
+    routed.row = ProviderRow::openrouter_default();
+    routed.model = "z-ai/glm-4.7-flash".into();
+    let rates = fixture
+        .source(&http, true)
+        .rates(&routed, &limited())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rates.quote.cache_read.unwrap().to_string(), "0.0000000605");
+    assert_eq!(rates.quote.cache_write.unwrap().to_string(), "0.0000000605");
+    assert!(rates.quote.cache_write_extended.is_none());
+    assert!(matches!(rates.source, RateSource::Table { .. }));
+    assert_eq!(wire.calls(), 0);
+
+    // The existing OpenAI supplied quote test protects the non-OpenRouter
+    // source path. The generic table must still retain absent cache rates.
+    let generic = ego_ai::pricing::Table::decode(
+        TABLE
+            .replace("\"cache_creation_input_token_cost\": 1.5e-06,", "")
+            .as_bytes(),
+    )
+    .unwrap()
+    .quote("openai", "gpt-5")
+    .unwrap()
+    .into_quote(ego_core::cost::PricingRevision("generic-table".into()));
+    assert!(generic.cache_write.is_none());
+}
+
 mod support;
 
 // Catches: the real fresh-generation path never calls the cached price source.
