@@ -361,8 +361,30 @@ fn loop_with_session_state(
     identity: Option<AgentIdentity>,
     state: SessionState,
 ) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
+    loop_with_session_clock(
+        generator,
+        static_tools,
+        source,
+        policy_source,
+        system,
+        identity,
+        state,
+        Box::leak(Box::new(FixedClock)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn loop_with_session_clock(
+    generator: Arc<dyn Generator>,
+    static_tools: &[RegisteredTool],
+    source: Arc<dyn AdmittedToolSource>,
+    policy_source: Arc<dyn ego_core::turn::GenerationPolicySource>,
+    system: Option<SystemPrompt>,
+    identity: Option<AgentIdentity>,
+    state: SessionState,
+    clock: &'static dyn Clock,
+) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
     let store: &'static MemoryStore = Box::leak(Box::new(MemoryStore::default()));
-    let clock = Box::leak(Box::new(FixedClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));
     let fs = Box::leak(Box::new(ego_core::permit::fake::FakeFs::default()));
     let process = Box::leak(Box::new(NoProcess));
@@ -1289,5 +1311,181 @@ fn host_context_deltas_append_after_history_and_survive_replay() {
         text.matches("host revision two").count(),
         1,
         "unchanged context is not appended again"
+    );
+}
+
+// Catches: changing only the runtime clock retains another 57-repository snapshot.
+#[test]
+fn host_context_timestamp_refresh_does_not_duplicate_captured_inventory() {
+    struct AdvancingClock(std::sync::atomic::AtomicU64);
+    impl Clock for AdvancingClock {
+        fn now(&self) -> Timestamp {
+            Timestamp::from_millis(self.0.load(std::sync::atomic::Ordering::Relaxed))
+        }
+    }
+    let clock = Box::leak(Box::new(AdvancingClock(std::sync::atomic::AtomicU64::new(
+        1_787_000_000_000,
+    ))));
+    let notes: Vec<String> =
+        serde_json::from_str(include_str!("fixtures/host-context-9476afd9.json")).unwrap();
+    let generator = Arc::new(FakeGenerator::new([
+        vec![AiEvent::Stop(StopReason::Stop)],
+        vec![AiEvent::Stop(StopReason::Stop)],
+        vec![AiEvent::Stop(StopReason::Stop)],
+    ]));
+    let (mut turn, store) = loop_with_session_clock(
+        generator.clone(),
+        &[],
+        Arc::new(HostNotes(Arc::new(Mutex::new(notes.join("\n"))))),
+        common::default_policy_source(),
+        None,
+        Some(AgentIdentity {
+            version: "test".into(),
+            sandbox: Confinement::Off,
+            offline: false,
+            host: None,
+        }),
+        SessionState::default(),
+        clock,
+    )
+    .unwrap();
+    for prompt in ["one", "two", "three"] {
+        clock
+            .0
+            .fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
+        futures::executor::block_on(turn.run(prompt)).unwrap();
+    }
+    let blocks: Vec<_> = store
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::HostContextAppended { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "timestamp-only changes must retain exactly one semantic snapshot"
+    );
+    let calls = generator.calls();
+    assert!(
+        calls[2]
+            .messages
+            .messages()
+            .starts_with(calls[0].messages.messages())
+    );
+    assert_eq!(
+        serde_json::to_string(&calls[2].messages)
+            .unwrap()
+            .matches("gh-metrics")
+            .count(),
+        2,
+        "one repository name and one path, not repeated inventories"
+    );
+}
+
+// Catches: repository or inbox updates resend the inventory, disappear, or are
+// appended again after a cold replay instead of extending the exact prefix.
+#[test]
+fn host_context_repository_and_inbox_deltas_preserve_resume_prefix() {
+    let captured: Vec<String> =
+        serde_json::from_str(include_str!("fixtures/host-context-9476afd9.json")).unwrap();
+    let notes = Arc::new(Mutex::new(captured.join("\n")));
+    let generator = Arc::new(FakeGenerator::new([
+        vec![AiEvent::Stop(StopReason::Stop)],
+        vec![AiEvent::Stop(StopReason::Stop)],
+        vec![AiEvent::Stop(StopReason::Stop)],
+    ]));
+    let (mut turn, store) = loop_with_policy(
+        generator.clone(),
+        &[],
+        Arc::new(HostNotes(notes.clone())),
+        common::default_policy_source(),
+        None,
+        None,
+    )
+    .unwrap();
+    futures::executor::block_on(turn.run("one")).unwrap();
+    let mut workspace: serde_json::Value =
+        serde_json::from_str(captured[0].lines().nth(1).unwrap()).unwrap();
+    workspace["repos"][30]["branch"] = serde_json::json!("fix/changed-host-repo");
+    let changed_workspace = format!("{}\n{}", captured[0].lines().next().unwrap(), workspace);
+    *notes.lock().unwrap() = format!("{changed_workspace}\n{}", captured[1]);
+    futures::executor::block_on(turn.run("two")).unwrap();
+    let mut inbox: serde_json::Value =
+        serde_json::from_str(captured[1].lines().nth(1).unwrap()).unwrap();
+    inbox["messages"] = serde_json::json!([{"message":"a new inbox message","revision":1}]);
+    inbox["nextSince"] = serde_json::json!(1);
+    *notes.lock().unwrap() = format!(
+        "{changed_workspace}\n{}\n{inbox}",
+        captured[1].lines().next().unwrap()
+    );
+    futures::executor::block_on(turn.run("three")).unwrap();
+    let blocks: Vec<_> = store
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::HostContextAppended { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[1].contains("/repos/30/branch") && blocks[1].contains("fix/changed-host-repo"));
+    assert!(blocks[2].contains("a new inbox message") && blocks[2].contains("nextSince"));
+    for delta in &blocks[1..] {
+        assert!(
+            !delta.contains("gh-metrics"),
+            "unchanged repository inventory leaked into delta"
+        );
+        assert!(
+            delta.len() < 2_000,
+            "one field change must not resend 57 repositories"
+        );
+    }
+    let calls = generator.calls();
+    assert!(
+        calls[1]
+            .messages
+            .messages()
+            .starts_with(calls[0].messages.messages())
+    );
+    assert!(
+        calls[2]
+            .messages
+            .messages()
+            .starts_with(calls[1].messages.messages())
+    );
+    let replayed = SessionState::replay(store.events.lock().unwrap().clone());
+    let resumed_generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+    let (mut resumed, resumed_store) = loop_with_session_state(
+        resumed_generator.clone(),
+        &[],
+        Arc::new(HostNotes(notes)),
+        common::default_policy_source(),
+        None,
+        None,
+        replayed,
+    )
+    .unwrap();
+    futures::executor::block_on(resumed.run("four")).unwrap();
+    assert!(
+        resumed_generator.calls()[0]
+            .messages
+            .messages()
+            .starts_with(calls[2].messages.messages())
+    );
+    assert!(
+        !resumed_store
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::HostContextAppended { .. })),
+        "cold replay must restore the latest semantic revision without appending it again"
     );
 }
