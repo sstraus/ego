@@ -184,11 +184,10 @@ pub trait Generator: Send + Sync {
     /// signature rather than by convention: it can only be built from a
     /// [`Reservation`](crate::budget::Reservation), whose constructor is
     /// sealed inside [`crate::budget`], so the only source is
-    /// `BudgetGate::reserve` — which refuses when the cost cannot be
-    /// bounded. `ARCHITECTURE.md` §3.1 requires an unknown cost to fail
-    /// *closed*, and a check on the response cannot do that, because the
-    /// money is already spent by then. A generation that skipped the gate
-    /// does not compile.
+    /// `BudgetGate::reserve`, which enforces a configured cap on known and
+    /// estimable spend. Missing prices admit an explicitly unbounded attempt
+    /// with a durable anomaly notice. A generation that skipped the gate does
+    /// not compile.
     ///
     /// Taken **by value**, and handed back inside the returned
     /// [`AttemptStream`]. Not borrowed: a borrowed token stays usable for a

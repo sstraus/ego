@@ -21,6 +21,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
+pub use crate::openrouter::admission_rates as openrouter_admission_rates;
+
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{MeteringRevision, RateSource};
 use ego_core::generator::capabilities::{ModelCapabilities, ReasoningSelectionError};

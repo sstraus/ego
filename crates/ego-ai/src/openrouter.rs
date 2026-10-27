@@ -1,4 +1,4 @@
-//! OpenRouter's current public model inventory, without imported prices.
+//! OpenRouter's current public model inventory and admission pricing policy.
 
 use std::sync::Arc;
 
@@ -187,6 +187,22 @@ pub async fn enumerate(
     }
 }
 
+/// Complete standard cache categories absent from an OpenRouter quote at the
+/// prompt rate. Explicit rates (including zero or a cache-write premium) win.
+/// Base prices and extended-retention writes remain unknown when absent.
+///
+/// This is an admission upper bound, not an imported public tariff. OpenRouter
+/// still settles from its reported cost. Keep the rule here for both supplied
+/// quotes and the CLI's third-party table fallback, never in the generic gate.
+pub fn admission_rates(
+    mut rates: ego_core::budget::ResolvedRates,
+) -> ego_core::budget::ResolvedRates {
+    let quote = &mut rates.quote;
+    quote.cache_read = quote.cache_read.or(quote.uncached_input);
+    quote.cache_write = quote.cache_write.or(quote.uncached_input);
+    rates
+}
+
 pub async fn resolve(
     catalogue: &Catalogue,
     row: &ProviderRow,
@@ -254,6 +270,7 @@ pub async fn resolve(
         ),
         rates: catalogue
             .supplied_rates(&format!("{}/{model}", row.id()))
-            .cloned(),
+            .cloned()
+            .map(admission_rates),
     })
 }

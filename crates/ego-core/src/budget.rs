@@ -5,12 +5,9 @@
 //!
 //! ## Why the gate is in the signature, not at a call site
 //!
-//! `ARCHITECTURE.md` §3.1 requires that an unknown cost fail the budget
-//! *closed*. A check performed on the response cannot do that: by the time a
-//! provider reports what a generation cost, the money is spent and the only
-//! remaining option is to report the overrun. So the check has to happen
-//! before the request — and "before" has to be enforced by something
-//! stronger than remembering to call a function.
+//! A configured cap applies to known and estimable spend before generation.
+//! Missing prices do not stop generation: they leave an explicit gap in cap
+//! coverage. Callers publish a durable anomaly notice rather than invent cost.
 //!
 //! [`Generator::generate`] therefore takes a `&Reservation`, whose
 //! constructor is sealed inside this module. No caller anywhere in the
@@ -1143,8 +1140,8 @@ pub struct BudgetGate {
     /// about the *session*, which is why it survives `Unlimited`.
     currency: CurrencyCode,
     ledger: Ledger,
-    /// Set once a settled generation has cost more than its bound. From that
-    /// moment the gate admits nothing: see [`BudgetGate::reserve`].
+    /// Evidence that a settled generation cost more than its estimate.
+    /// The actual charge still counts against a configured cap.
     breached: Option<BoundBreach>,
 }
 
@@ -1211,7 +1208,7 @@ impl BudgetGate {
         &self.ledger
     }
 
-    /// The breach that closed this gate, if one has happened.
+    /// The first estimate breach, if one has happened.
     pub fn breached(&self) -> Option<&BoundBreach> {
         self.breached.as_ref()
     }
@@ -1241,53 +1238,10 @@ impl BudgetGate {
         }
     }
 
-    /// Authorise one generation, or refuse.
-    ///
-    /// Fails closed on anything it cannot bound: an unpriced token category,
-    /// a model with no stated context or output ceiling, an arithmetic
-    /// overflow, a currency the budget is not in. In every one of those
-    /// cases the honest answer is "we do not know what this will cost", and
-    /// `ARCHITECTURE.md` §3.1 says an unknown cost does not proceed.
-    ///
-    /// A gate that has already seen a generation cost more than its bound
-    /// refuses everything, permanently. That looks severe for one mispriced
-    /// generation, and it is the same rule: a breach proves the bound is not
-    /// a bound, so every admission after it would be computed from a premise
-    /// this gate has watched fail. Continuing to admit would be exactly the
-    /// "we do not know what this will cost, but proceed anyway" the gate
-    /// exists to refuse — only worse, because the evidence is in hand.
-    /// A row that is not metered in currency is admitted with a **zero**
-    /// reservation, minted from its policy in this gate's own settlement
-    /// currency. A monetary limit then bounds nothing: every reservation is
-    /// zero, so the gate admits until the provider refuses. That is the
-    /// honest arithmetic, and it is why the run announces
-    /// [`PublicEvent::MeteringSelected`](crate::public::PublicEvent::MeteringSelected)
-    /// per generation rather than leaving `--budget` silently vacuous.
-    ///
-    /// ## What the ledger and the rates decide between them
-    ///
-    /// `2026-08-21-a-run-with-no-ceiling.md` §2, exhaustively:
-    ///
-    /// | [`Ledger`] | A bound is computable | Result |
-    /// |---|---|---|
-    /// | `Limited` | yes | [`Bounded`](Reserved::Bounded), compared against the ceiling |
-    /// | `Limited` | no | refused |
-    /// | `Unlimited` | yes | `Bounded`; nothing compared, but the bound still does two jobs |
-    /// | `Unlimited` | no | [`Unbounded`](Reserved::Unbounded) |
-    ///
-    /// **Bounding whenever a bound is computable, not only when a ceiling
-    /// exists**, because the bound earns its cost twice with nothing to
-    /// compare against: it is the figure [`reconcile`](Self::reconcile)
-    /// charges when the actual cost is unusable, and it is a *falsifiable
-    /// claim* — a settled cost above it proves the quote, the capability
-    /// record or the provider's usage report is wrong.
-    ///
-    /// **On an `Unlimited` ledger nothing here refuses for want of a bound**,
-    /// including an unstated context window or an unpriced category. §1 is
-    /// explicit that a run nobody asked to bound is not refused for a price
-    /// nobody asked for, so every such failure degrades to `Unbounded`
-    /// instead. On a `Limited` ledger the identical failure is fatal, because
-    /// there the operator did ask for a guarantee.
+    /// Admit one generation, enforcing a configured cap on known and estimable
+    /// spend. An unusable price grants an unbounded reservation; callers must
+    /// announce that the cap cannot cover it. Unknown actual cost charges the
+    /// reserved estimate when one exists, without inventing actual billed cost.
     pub fn reserve(
         &mut self,
         metering: &Metering,
@@ -1295,10 +1249,6 @@ impl BudgetGate {
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Reservation, BudgetDenied> {
-        if let Some(breach) = self.breached {
-            return Err(BudgetDenied::BoundBreached(breach));
-        }
-
         let Ledger::Limited {
             limit,
             clamped_from,
@@ -1309,24 +1259,27 @@ impl BudgetGate {
             return Ok(self.mint(self.unenforced(metering, rates, req, caps)));
         };
 
-        if let Some(quote) = rates
-            && matches!(metering, Metering::Currency { .. })
-            && quote.currency != limit.currency
-        {
-            return Err(BudgetDenied::CurrencyMismatch {
-                limit: limit.currency,
-                quote: quote.currency,
-            });
-        }
-        let upper_bound = metering
-            .upper_bound(rates, req, caps, self.currency)
-            .map_err(BudgetDenied::CostUnknown)?
-            // The narrowed meaning of this variant: not "this build has no
-            // table anywhere", but "you asked for a ceiling on a model I
-            // cannot price". Nothing about a missing price is evidence about
-            // the operator's intent, and nothing about intent is evidence
-            // about a price — so the refusal only happens where both are in.
-            .ok_or(BudgetDenied::CostUnknown(UnknownCost::NoPricingQuote))?;
+        // Known and estimable spend is capped. Missing or unusable prices
+        // grant no monetary reservation; the journal announces that gap.
+        let reserved = self.unenforced(metering, rates, req, caps);
+        let Reserved::Bounded {
+            upper_bound,
+            binding,
+        } = reserved
+        else {
+            if committed
+                .checked_add(&outstanding)
+                .map_or(true, |held| held.amount >= limit.amount)
+            {
+                return Err(BudgetDenied::WouldExceed(Box::new(Overrun {
+                    committed,
+                    outstanding,
+                    requested: Money::zero(self.currency),
+                    limit,
+                })));
+            }
+            return Ok(self.mint(reserved));
+        };
 
         let held = committed
             .checked_add(&outstanding)
@@ -1341,8 +1294,6 @@ impl BudgetGate {
             })));
         }
 
-        let binding =
-            BudgetBinding::of(req, caps, metering, rates).map_err(BudgetDenied::CostUnknown)?;
         self.ledger = Ledger::Limited {
             limit,
             clamped_from,
@@ -1369,6 +1320,11 @@ impl BudgetGate {
         let unbounded = || Reserved::Unbounded {
             model: req.model.clone(),
         };
+        if matches!(metering, Metering::Currency { .. })
+            && rates.is_some_and(|quote| quote.currency != self.currency)
+        {
+            return unbounded();
+        }
         let Ok(Some(upper_bound)) = metering.upper_bound(rates, req, caps, self.currency) else {
             return unbounded();
         };
@@ -1415,7 +1371,7 @@ impl BudgetGate {
     /// An actual *above* the reserved bound is charged in full and reported
     /// in [`Reconciled::over_bound`] — the money is spent, and the bound was
     /// the larger of the two only in the cases where it is charged instead.
-    /// It also closes the gate permanently; see [`BudgetGate::reserve`].
+    /// Later admissions still enforce the configured cap against that charge.
     /// An [`Unbounded`](Reserved::Unbounded) reservation released nothing, so
     /// there is nothing to release and no bound to fall back to. It charges
     /// the actual figure when there is one and reports
@@ -1467,9 +1423,17 @@ impl BudgetGate {
         };
 
         let Some(released) = reservation.upper_bound().copied() else {
-            // Nothing was held, so nothing is released and the ledger — which
-            // is `Unlimited`, the only ledger that mints this shape — has no
-            // total to move.
+            // Nothing was held. A known actual still counts against a cap;
+            // an unknown actual stays unknown, never a fabricated zero.
+            if let (
+                Some(charged),
+                Ledger::Limited {
+                    limit, committed, ..
+                },
+            ) = (stated, &mut self.ledger)
+            {
+                *committed = committed.checked_add(&charged).unwrap_or(*limit);
+            }
             return Ok(Reconciled {
                 charged: stated,
                 exact: stated.is_some(),

@@ -242,7 +242,7 @@ pub struct ToolTiming {
 /// PermissionRequested | PermissionAmended | PermissionDecided |
 /// GenerationStarted | FallbackDecision | ExecutionObserved |
 /// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
-/// AttemptSettled | UsageUpdated | UsageCorrected | ContextWindowUpdated |
+/// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated |
 /// TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
@@ -557,6 +557,12 @@ pub enum EventKind {
     AttemptSettled {
         attempt: AttemptRef,
         outcome: Outcome,
+    },
+    /// Missing pricing or actual cost, announced once per session and model.
+    /// This is a notice, not an accounting booking or a provider failure.
+    CostAnomaly {
+        model: String,
+        estimated_upper_bound: Option<crate::cost::Money>,
     },
     /// One attempt's usage was reported (added to the running totals),
     /// together with what it cost.
@@ -874,6 +880,7 @@ impl EventKind {
             EventKind::JudgeResponse { .. } => "judge_response",
             EventKind::SandboxResidualDecided { .. } => "sandbox_residual_decided",
             EventKind::AttemptSettled { .. } => "attempt_settled",
+            EventKind::CostAnomaly { .. } => "cost_anomaly",
             EventKind::UsageUpdated { .. } => "usage_updated",
             EventKind::UsageCorrected { .. } => "usage_corrected",
             EventKind::ContextWindowUpdated { .. } => "context_window_updated",

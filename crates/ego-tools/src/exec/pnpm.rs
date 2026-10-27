@@ -68,7 +68,7 @@ pub(super) fn custom_store(home: &Path, workspace: &Path) -> Option<PathBuf> {
                 (key.trim() == "store-dir")
                     .then(|| value.trim().trim_matches(['\"', '\'']).to_owned())
             })
-            .last()
+            .next_back()
     };
     let yaml = text(&workspace.join("pnpm-workspace.yaml"))
         .and_then(|text| yaml_rust2::YamlLoader::load_from_str(&text).ok())

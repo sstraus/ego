@@ -896,6 +896,139 @@ fn openrouter_resolution_preserves_operator_quote() {
     assert!(stub.paths().is_empty());
 }
 
+// Quotes are translated from captured public fields exactly as the 419 runner
+// writes operator facts. The runtime inventory intentionally imports no prices.
+fn captured_openrouter_quote(row: &Value) -> ego_core::budget::PricingQuote {
+    let rate = |field: &str| row["pricing"][field].as_str().map(|s| s.parse().unwrap());
+    ego_core::budget::PricingQuote {
+        revision: ego_core::cost::PricingRevision("captured-openrouter-2026-10-27".into()),
+        currency: ego_core::cost::CurrencyCode::new("USD").unwrap(),
+        uncached_input: rate("prompt"),
+        output: rate("completion"),
+        cache_read: rate("input_cache_read"),
+        cache_write: rate("input_cache_write"),
+        cache_write_extended: rate("input_cache_write_1h"),
+        web_search: None,
+    }
+}
+
+fn resolve_openrouter_quote(
+    model: &str,
+    quote: ego_core::budget::PricingQuote,
+) -> ego_ai::catalogue::ResolvedModel {
+    let slug = format!("openrouter/{model}");
+    let catalogue = Catalogue::new([ProviderRow::openrouter_default()]).with_hosted(
+        &slug,
+        HostedModel {
+            capabilities: supplied_capabilities(),
+            authority: SuppliedAuthority::User,
+            metering: tabulated(),
+            rates: Some(ego_ai::catalogue::operator_rates(quote)),
+        },
+    );
+    block_on(catalogue.resolve(
+        &ModelSlug::parse(&slug).unwrap(),
+        &unasked_http(),
+        &credential(),
+    ))
+    .unwrap()
+}
+
+// Catches: absent OpenRouter cache prices deny reservation or underprice cached usage.
+#[test]
+fn openrouter_absent_cache_prices_admit_reservation_at_prompt_rate() {
+    use ego_core::budget::BudgetGate;
+    use ego_core::cost::{CostDelta, CurrencyCode, Money};
+    use ego_core::state::Usage;
+
+    let capture: Value = serde_json::from_str(include_str!(
+        "goldens/openrouter/cache-prices-2026-10-27.json"
+    ))
+    .unwrap();
+    let mut failures = Vec::new();
+    for (row, expected) in capture["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(["0.000121", "0.0001428"])
+    {
+        let model = row["id"].as_str().unwrap();
+        let resolved = resolve_openrouter_quote(model, captured_openrouter_quote(row));
+        let quote = &resolved.rates.as_ref().unwrap().quote;
+        let mut gate = BudgetGate::new(Money::new(
+            "2".parse().unwrap(),
+            CurrencyCode::new("USD").unwrap(),
+        ));
+        if let Err(error) = gate.reserve(
+            &resolved.metering,
+            Some(quote),
+            &request(model, vec![]),
+            &resolved.capabilities,
+        ) {
+            failures.push(format!("{model}: reservation {error:?}"));
+        }
+        let cost = quote.price(&Usage {
+            cache_read_tokens: 1000,
+            cache_write_tokens: 1000,
+            uncached_input_tokens: 0,
+            cache_write_extended_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: None,
+            web_search_requests: 0,
+        });
+        if !matches!(cost, CostDelta::Known { amount, .. } if amount.amount == expected.parse().unwrap())
+        {
+            failures.push(format!(
+                "{model}: cached price {cost:?}, expected USD {expected}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// Catches: missing base prices refusing generation or becoming fabricated prices.
+#[test]
+fn openrouter_absent_base_prices_admit_without_fabricating_a_price() {
+    use ego_core::budget::BudgetGate;
+    use ego_core::cost::{CurrencyCode, Money};
+
+    let capture: Value = serde_json::from_str(include_str!(
+        "goldens/openrouter/cache-prices-2026-10-27.json"
+    ))
+    .unwrap();
+    let row = &capture["data"][0];
+    for (missing_prompt, missing_output) in [(true, false), (false, true), (true, true)] {
+        let mut quote = captured_openrouter_quote(row);
+        // Keep cache prices present to isolate the missing base-rate case.
+        quote.cache_read = quote.uncached_input;
+        quote.cache_write = quote.uncached_input;
+        if missing_prompt {
+            quote.uncached_input = None;
+        }
+        if missing_output {
+            quote.output = None;
+        }
+        let model = row["id"].as_str().unwrap();
+        let resolved = resolve_openrouter_quote(model, quote);
+        let mut gate = BudgetGate::new(Money::new(
+            "2".parse().unwrap(),
+            CurrencyCode::new("USD").unwrap(),
+        ));
+        let reservation = gate
+            .reserve(
+                &resolved.metering,
+                resolved.rates.as_ref().map(|r| &r.quote),
+                &request(model, vec![]),
+                &resolved.capabilities,
+            )
+            .expect("missing base prices must still admit generation");
+        assert!(
+            reservation.upper_bound().is_none(),
+            "do not invent a base price"
+        );
+    }
+}
+
 // Catches: an absent quote is fabricated or copied from a different routed slug.
 #[test]
 fn openrouter_resolution_does_not_borrow_another_models_quote() {

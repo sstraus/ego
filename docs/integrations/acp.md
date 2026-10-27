@@ -133,6 +133,14 @@ still have returned `end_turn`. For a cancelled run, agent → host:
 - Invalid prompt parameters return a JSON-RPC error. Match responses by ID and
   inspect `error` rather than assuming every response has `result`. Do not
   replay a prompt blindly after a transport error: the work might have started.
+- An unavailable durable session returns `ResourceNotFound`. For a missing or
+  quarantined lookup, `error.message` names the session ID and filesystem store
+  root, and `error.data` is an object with `sessionId` and `storeRoot`. The ID is
+  the failed lookup, which can be a catalogue candidate or ancestor rather than
+  the selected chat. `storeRoot` is the absolute session-storage path, not the
+  workspace cwd; a non-filesystem store reports `null`. Keep these diagnostics
+  when reporting a failure. Do not recreate the session implicitly or treat an
+  optional catalogue failure as proof that another attached chat is missing.
 - EOF closes the ACP connection; it does not submit another prompt. For an
   orderly shutdown, cancel pending work when needed, answer pending host
   requests, drain the prompt settlement, then close stdin and reap the process.

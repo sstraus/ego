@@ -177,6 +177,28 @@ impl<'s> SharedJournal<'s> {
             .map_err(Into::into)
     }
 
+    /// Persist and publish the anomaly once, atomically with its replayed key.
+    pub fn cost_anomaly(
+        &self,
+        turn: TurnId,
+        model: &str,
+        estimated_upper_bound: Option<crate::cost::Money>,
+    ) -> Result<(), SharedJournalError> {
+        let mut journal = self.lock()?;
+        if !journal.state.cost_anomaly_models.contains(model) {
+            journal.append(
+                turn,
+                None,
+                None,
+                EventKind::CostAnomaly {
+                    model: model.to_owned(),
+                    estimated_upper_bound,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     /// Compare, append, and fold one lease-bound lifecycle event while the
     /// session's sole journal authority is locked.
     pub(crate) fn compare_and_append_lifecycle(
