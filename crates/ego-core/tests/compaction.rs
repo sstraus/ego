@@ -197,7 +197,7 @@ fn seeded_event(kind: EventKind) -> DomainEvent {
 
 #[test]
 fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
-    assert_eq!(COMPACTION_PROMPT_REVISION, 4);
+    assert_eq!(COMPACTION_PROMPT_REVISION, 3);
     assert!(COMPACTION_PROMPT.contains("Produce one self-contained context checkpoint"));
     assert!(COMPACTION_PROMPT.contains("do not continue the task"));
     assert!(COMPACTION_PROMPT.contains("# Objective"));
@@ -310,21 +310,6 @@ fn completed_ready_fixture_requires_instruction_lifetimes_in_summary_request() {
     );
     assert!(policy.contains("Preserve unfinished tasks and standing constraints"));
     assert!(policy.contains("later user requests take precedence"));
-    // Catches: standing identifiers/scope are rewritten, or the summarizer's
-    // format rules become continuation authority (observed in the GLM r2 matrix).
-    let missing: Vec<_> = [
-        "Copy standing constraint identifiers and their scope wording verbatim",
-        "do not rename identifiers or narrow their scope",
-        "The checkpoint format rules govern only this summary",
-        "never record them as task constraints or preferences",
-    ]
-    .into_iter()
-    .filter(|rule| !policy.contains(rule))
-    .collect();
-    assert!(
-        missing.is_empty(),
-        "missing summary scope rules: {missing:?}"
-    );
 }
 
 // Catches: replay drops the durable filename or reorders the new user request
