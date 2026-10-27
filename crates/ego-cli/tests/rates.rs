@@ -521,6 +521,26 @@ async fn openrouter_cached_table_completes_only_standard_missing_cache_prices() 
     assert!(generic.cache_write.is_none());
 }
 
+// Catches: a missing table row aborting model resolution before the permissive budget gate.
+#[tokio::test]
+async fn missing_catalogue_row_does_not_refuse_a_capped_generation() {
+    let fixture = Fixture::new();
+    fixture.cached(TABLE, Duration::ZERO);
+    let wire = Wire::silent();
+    let http = transport(&wire);
+    let mut absent = model(tabulated());
+    absent.model = "gpt-99".to_string();
+    let rates = fixture
+        .source(&http, false)
+        .rates(&absent, &limited())
+        .await
+        .expect("missing price must continue to admission with an anomaly, not refuse resolution");
+    assert!(
+        rates.is_none(),
+        "do not invent a quote for an unlisted model"
+    );
+}
+
 mod support;
 
 // Catches: the real fresh-generation path never calls the cached price source.
