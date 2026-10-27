@@ -572,3 +572,13 @@ fn pin_commands_are_local_and_preserve_text_while_pasted_examples_do_not_execute
         Dispatch::Pins(_)
     ));
 }
+
+// Catches: the approved /pin list inspection silently adds a standing constraint named list.
+#[test]
+fn pin_list_inspects_without_registering_a_literal_list_constraint() {
+    let registry = ActionRegistry::final_surface();
+    assert_eq!(
+        registry.classify(registry.submit("/pin list", InputOrigin::Typed)),
+        Dispatch::Pins(ego_core::compact::PinCommand::List)
+    );
+}

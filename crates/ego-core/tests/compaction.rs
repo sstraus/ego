@@ -2468,3 +2468,41 @@ fn constraint_ledger_applies_to_the_next_request_before_any_compaction() {
             .contains("REPORT-NAME-LOCK")
     );
 }
+
+// Catches: a valid CRLF model checkpoint panics during deterministic Binding replacement.
+#[test]
+fn constraint_ledger_accepts_crlf_checkpoint_without_panicking() {
+    let summary = checkpoint().replace('\n', "\r\n");
+    Checkpoint::parse(&summary).expect("CRLF is valid checkpoint grammar");
+    let mut state = SessionState::default();
+    register_constraint(&mut state, "Keep ledger-419.txt for subsequent tasks");
+    let prepared = prepare_constraint_summary(state, &summary);
+    assert_eq!(
+        frame(&prepared)["constraints"]["entries"]["1"],
+        "Keep ledger-419.txt for subsequent tasks"
+    );
+    Checkpoint::parse(prepared.checkpoint().text()).unwrap();
+}
+
+// Catches: a fork inherits standing text as ancestor prose but loses its editable pin ledger.
+#[test]
+fn constraint_ledger_fork_retains_pins_for_listing_and_explicit_removal() {
+    let mut source = SessionState::default();
+    register_constraint(&mut source, "Keep ledger-419.txt for subsequent tasks");
+    let prepared = ego_core::session::PreparedFork::new(
+        SessionId::new(),
+        &source,
+        Timestamp::from_millis(1_000),
+    )
+    .unwrap();
+    let mut target = SessionState::replay(prepared.seed().events().cloned());
+    assert_eq!(
+        pin_command(&mut target, PinCommand::List).unwrap(),
+        "1: Keep ledger-419.txt for subsequent tasks"
+    );
+    pin_command(&mut target, PinCommand::Unpin(1)).expect("inherited pin can be removed");
+    assert_eq!(
+        pin_command(&mut target, PinCommand::List).unwrap(),
+        "No pinned user constraints."
+    );
+}
