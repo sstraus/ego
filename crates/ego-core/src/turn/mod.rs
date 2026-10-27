@@ -1052,6 +1052,18 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                     DeliveryCertainty::DefinitelyUnsent,
                 )
             })?;
+        if reservation.upper_bound().is_none()
+            && matches!(profile.metering, crate::budget::Metering::Currency { .. })
+        {
+            self.journal
+                .cost_anomaly(turn, &profile.identity.0, None)
+                .map_err(|error| {
+                    ToollessGenerationFailure::new(
+                        error.to_string(),
+                        DeliveryCertainty::DefinitelyUnsent,
+                    )
+                })?;
+        }
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
@@ -1150,6 +1162,11 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
             ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::PossiblySent)
         })?;
         let delivery = settlement.outcome.delivery();
+        if !settlement.reconciled.exact {
+            self.journal
+                .cost_anomaly(turn, &profile.identity.0, settlement.reconciled.charged)
+                .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?;
+        }
         let observed = usage.unwrap_or(Usage::IDENTITY);
         let cost_delta = settled_cost_for_delivery(
             &profile.metering,
@@ -5463,6 +5480,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 },
             )?;
         }
+        if !settlement.reconciled.exact {
+            self.journal
+                .cost_anomaly(turn, &profile.identity.0, settlement.reconciled.charged)?;
+        }
         let terminal = self.journal.append(
             turn,
             None,
@@ -5500,6 +5521,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return self.refuse(turn, denied.to_string(), reason).map(Err);
             }
         };
+        if reservation.upper_bound().is_none()
+            && matches!(profile.metering, crate::budget::Metering::Currency { .. })
+        {
+            self.journal.cost_anomaly(turn, &profile.identity.0, None)?;
+        }
         let attempt = match GenerationAttempt::from_attempt(
             next_attempt,
             reservation,

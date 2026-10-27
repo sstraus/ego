@@ -327,6 +327,10 @@ pub enum ExportEvent {
         attempt: AttemptRef,
         outcome: Outcome,
     },
+    CostAnomaly {
+        model: String,
+        estimated_upper_bound: Option<crate::cost::Money>,
+    },
     UsageUpdated {
         usage: Usage,
         cost_delta: CostDelta,
@@ -1105,6 +1109,13 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         EventKind::AttemptSettled { attempt, outcome } => ExportEvent::AttemptSettled {
             attempt: *attempt,
             outcome: *outcome,
+        },
+        EventKind::CostAnomaly {
+            model,
+            estimated_upper_bound,
+        } => ExportEvent::CostAnomaly {
+            model: model.clone(),
+            estimated_upper_bound: *estimated_upper_bound,
         },
         EventKind::UsageUpdated {
             usage,

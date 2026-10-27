@@ -2112,6 +2112,8 @@ type LifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LifecycleErr
 /// capability handlers without coupling the legacy router constructor to a
 /// concrete outer store. It contains no ACP DTOs and owns no durable policy.
 trait LifecycleOperations: Send + Sync {
+    fn storage_root(&self) -> Option<std::path::PathBuf>;
+
     fn create_with_id(
         &self,
         id: SessionId,
@@ -2159,6 +2161,10 @@ impl<S> LifecycleOperations for SessionLifecycle<S>
 where
     S: SessionLifecycleStore + 'static,
 {
+    fn storage_root(&self) -> Option<std::path::PathBuf> {
+        SessionLifecycle::storage_root(self)
+    }
+
     fn create_with_id(
         &self,
         id: SessionId,
@@ -2539,7 +2545,10 @@ impl<R: JsonRpcRequest> JsonRpcRequest for McpChecked<R> {
 /// admitted only after that. Until admission settles the session is hidden:
 /// not listed, not loadable, not forkable. A host sees it only once it is whole.
 #[derive(Clone, Default)]
-struct UnadmittedSessions(Arc<Mutex<HashSet<SessionId>>>);
+struct UnadmittedSessions {
+    sessions: Arc<Mutex<HashSet<SessionId>>>,
+    store_root: Option<std::path::PathBuf>,
+}
 
 impl UnadmittedSessions {
     fn hold(&self, session: SessionId) -> UnadmittedSession {
@@ -2557,13 +2566,16 @@ impl UnadmittedSessions {
 
     fn refuse(&self, session: SessionId) -> Result<(), Error> {
         if self.contains(session) {
-            return Err(lifecycle_error(&LifecycleError::UnknownSession));
+            return Err(lifecycle_error(&LifecycleError::UnknownSession {
+                session,
+                store_root: self.store_root.clone(),
+            }));
         }
         Ok(())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<SessionId>> {
-        self.0
+        self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -2876,7 +2888,14 @@ fn lifecycle_error(error: &LifecycleError) -> Error {
     let code = match error {
         // The id was well-formed and names nothing, or names something that is
         // gone. A caller cannot fix either by sending better parameters.
-        LifecycleError::UnknownSession | LifecycleError::Deleted => ErrorCode::ResourceNotFound,
+        LifecycleError::UnknownSession {
+            session,
+            store_root,
+        } => {
+            return Error::new(ErrorCode::ResourceNotFound.into(), error.to_string())
+                .data(serde_json::json!({ "sessionId": session, "storeRoot": store_root }));
+        }
+        LifecycleError::Deleted => ErrorCode::ResourceNotFound,
         // Transient by construction: another writer has the session, or moved
         // it under this request. Retrying is what these are for, and both
         // methods are idempotent so retrying is safe.
@@ -3198,7 +3217,12 @@ where
     I: IdSource + 'static,
 {
     let sessions = Sessions::new(controller.retention().completed_receipts());
-    let unadmitted = UnadmittedSessions::default();
+    let unadmitted = UnadmittedSessions {
+        store_root: lifecycle
+            .as_ref()
+            .and_then(|service| service.storage_root()),
+        ..UnadmittedSessions::default()
+    };
     let client_capabilities = Arc::new(Mutex::new(ClientInit::default()));
     let advertises_compaction = compaction.is_some();
     let advertises_lifecycle = lifecycle.is_some();
@@ -4414,4 +4438,42 @@ where
             },
             on_receive_request!(),
         )
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    // Catches: ACP drops the missing id or confuses storage root with workspace cwd.
+    #[test]
+    fn missing_session_refusal_keeps_lookup_identity_in_message_and_data() {
+        let session = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+        for (root, expected_message, expected_root) in [
+            (
+                Some(std::path::PathBuf::from("/data/ego/sessions")),
+                "session not found: 00000000-0000-0000-0000-000000000001 (store root: /data/ego/sessions)",
+                serde_json::json!("/data/ego/sessions"),
+            ),
+            (
+                None,
+                "session not found: 00000000-0000-0000-0000-000000000001",
+                serde_json::Value::Null,
+            ),
+        ] {
+            let error = lifecycle_error(&LifecycleError::UnknownSession {
+                session,
+                store_root: root,
+            });
+            assert_eq!(error.code, ErrorCode::ResourceNotFound);
+            let wire = serde_json::to_value(error).unwrap();
+            assert_eq!(wire["message"], expected_message);
+            assert_eq!(
+                wire["data"],
+                serde_json::json!({
+                    "sessionId": "00000000-0000-0000-0000-000000000001",
+                    "storeRoot": expected_root,
+                })
+            );
+        }
+    }
 }

@@ -1,6 +1,29 @@
 use agent_client_protocol_schema::v1::SessionUpdate;
 use ego_acp::project::{AcpNotice, NoticeAction, project_notice_v1};
 
+// Catches: ACP dropping the sole warning that a configured cap cannot cover unpriced spend.
+#[test]
+fn cost_anomaly_reaches_the_acp_client_as_visible_text() {
+    use ego_acp::project::{project_v1, project_v2};
+    use ego_core::event::id::TurnId;
+    use ego_core::public::PublicEvent;
+
+    let event = PublicEvent::CostAnomaly {
+        turn: TurnId::new(),
+        model: "openrouter/z-ai/glm-4.7-flash".to_owned(),
+        estimated_upper_bound: None,
+    };
+    for update in [
+        project_v1(&event).map(|update| serde_json::to_value(update).unwrap()),
+        project_v2(&event).map(|update| serde_json::to_value(update).unwrap()),
+    ] {
+        let update = update.expect("cost anomalies must remain visible to ACP users");
+        let text = update["content"]["text"].as_str().unwrap();
+        assert!(text.contains("openrouter/z-ai/glm-4.7-flash"));
+        assert!(text.contains("cap"));
+    }
+}
+
 #[test]
 fn card_notice_is_a_standard_message_with_an_open_result_action() {
     let notice = AcpNotice {
