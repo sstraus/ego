@@ -37,7 +37,23 @@ impl std::error::Error for PinError {}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConstraintLedger {
     next_id: u64,
+    #[serde(deserialize_with = "deserialize_entries")]
     entries: BTreeMap<u64, String>,
+}
+
+// Tagged events buffer JSON object keys as strings before decoding their payload.
+fn deserialize_entries<'de, D>(deserializer: D) -> Result<BTreeMap<u64, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeMap::<String, String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(id, text)| {
+            id.parse::<u64>()
+                .map(|id| (id, text))
+                .map_err(serde::de::Error::custom)
+        })
+        .collect()
 }
 
 impl ConstraintLedger {
@@ -112,7 +128,7 @@ impl ConstraintLedger {
     /// Headings have already been parsed. The model cannot create standing
     /// authority by writing a Binding section, even when no pins exist.
     pub(crate) fn checkpoint(&self, checkpoint: super::Checkpoint) -> super::Checkpoint {
-        let text = checkpoint.into_text();
+        let text = checkpoint.into_text().replace("\r\n", "\n");
         let binding = format!("\n{}\n", super::HEADINGS[1]);
         let completed = format!("\n{}\n", super::HEADINGS[2]);
         let start = text.find(&binding).expect("parsed binding heading") + binding.len();

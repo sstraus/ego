@@ -82,7 +82,7 @@ const TORN: &str = "the tool call did not complete: the session ended before its
 pub fn conversation_from(
     state: &SessionState,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
-    conversation_from_inner(state, None)
+    conversation_from_inner(state, None, &state.constraints)
 }
 
 /// Rebuild and hydrate every durable image through the session blob port.
@@ -98,24 +98,33 @@ pub(crate) fn conversation_from_with_blob_reader(
     state: &SessionState,
     read_blob: &BlobReader<'_>,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
-    conversation_from_inner(state, Some(read_blob))
+    conversation_from_inner(state, Some(read_blob), &state.constraints)
+}
+
+pub(crate) fn conversation_from_with_constraints(
+    state: &SessionState,
+    read_blob: &BlobReader<'_>,
+    constraints: &crate::compact::ConstraintLedger,
+) -> Result<(Conversation, Vec<Repair>), HistoryError> {
+    conversation_from_inner(state, Some(read_blob), constraints)
 }
 
 fn conversation_from_inner(
     state: &SessionState,
     read_blob: Option<&BlobReader<'_>>,
+    constraints: &crate::compact::ConstraintLedger,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
     let mut items: Vec<&ItemState> = state.items.values().collect();
     // By `seq`, not by `ItemId` — see `ItemState::seq`.
     items.sort_by_key(|item| item.seq);
 
     let mut messages: Vec<Message> = Vec::new();
-    if !state.constraints.is_default()
+    if !constraints.is_default()
         && !items
             .iter()
             .any(|item| item.kind == ItemKind::ContextCheckpoint)
     {
-        messages.push(Message::text(Role::User, state.constraints.request_frame()));
+        messages.push(Message::text(Role::User, constraints.request_frame()));
     }
     let mut repairs = Vec::new();
     // Calls this history is still waiting on. A `Vec` and not an `Option`:
@@ -142,10 +151,7 @@ fn conversation_from_inner(
                 push(
                     &mut messages,
                     Role::User,
-                    text_block(&crate::compact::checkpoint_frame(
-                        &item.text,
-                        &state.constraints,
-                    )),
+                    text_block(&crate::compact::checkpoint_frame(&item.text, constraints)),
                 );
             }
             // Replayed if — and only if — the provider sealed the block with

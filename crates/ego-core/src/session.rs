@@ -266,6 +266,8 @@ pub struct ReplayedContext {
     prompt_snapshot: Option<PromptSnapshot>,
     session_pins: Vec<SessionId>,
     blob_pins: Vec<BlobRef>,
+    state: SessionState,
+    verified_blobs: HashMap<BlobRef, Vec<u8>>,
 }
 
 impl ReplayedContext {
@@ -278,6 +280,25 @@ impl ReplayedContext {
 
     pub fn conversation(&self) -> &Conversation {
         &self.conversation
+    }
+
+    pub(crate) fn conversation_with_constraints(
+        &self,
+        constraints: &crate::compact::ConstraintLedger,
+    ) -> Result<Conversation, crate::generator::types::HistoryError> {
+        crate::generator::history::conversation_from_with_constraints(
+            &self.state,
+            &|reference| {
+                self.verified_blobs
+                    .get(reference)
+                    .cloned()
+                    .ok_or_else(|| BlobError::NotFound {
+                        reference: reference.id.clone(),
+                    })
+            },
+            constraints,
+        )
+        .map(|(conversation, _)| conversation)
     }
 
     pub fn session_pins(&self) -> &[SessionId] {
@@ -309,6 +330,8 @@ impl<'a> ReplayContext<'a> {
                 prompt_snapshot: None,
                 session_pins: Vec::new(),
                 blob_pins: Vec::new(),
+                state: SessionState::default(),
+                verified_blobs: HashMap::new(),
             });
         };
 
@@ -434,6 +457,8 @@ impl<'a> ReplayContext<'a> {
             conversation,
             session_pins,
             blob_pins,
+            state,
+            verified_blobs,
         })
     }
 }
@@ -517,12 +542,15 @@ impl TargetSeed {
         mut self,
         constraints: crate::compact::ConstraintLedger,
     ) -> Self {
-        if let EventKind::CompactionSeeded {
-            constraints: ledger,
-            ..
-        } = &mut self.event.kind
-        {
-            *ledger = constraints;
+        match &mut self.event.kind {
+            EventKind::CompactionSeeded {
+                constraints: ledger,
+                ..
+            } => *ledger = constraints,
+            EventKind::Forked { .. } if !constraints.is_default() => {
+                self.push_trailing(EventKind::PinsChanged { constraints });
+            }
+            _ => {}
         }
         self
     }
@@ -722,7 +750,8 @@ impl PreparedFork {
                 .with_prompt_snapshot(state.prompt_snapshot.clone())
                 .with_title(state.title.clone())
                 .with_goal(state.goal.as_ref())
-                .with_plan(&state.plan),
+                .with_plan(&state.plan)
+                .with_constraints(state.constraints.clone()),
         })
     }
 
@@ -760,7 +789,8 @@ impl PreparedFork {
                 .with_prompt_snapshot(prefix.prompt_snapshot.clone())
                 .with_title(prefix.title.clone())
                 .with_goal(prefix.goal.as_ref())
-                .with_plan(&prefix.plan),
+                .with_plan(&prefix.plan)
+                .with_constraints(prefix.constraints.clone()),
         })
     }
 

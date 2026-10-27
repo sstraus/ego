@@ -2508,3 +2508,144 @@ fn constraint_ledger_fork_retains_pins_for_listing_and_explicit_removal() {
         "No pinned user constraints."
     );
 }
+
+// Catches: a message fork copies pins added after its cutoff or reuses removed IDs.
+#[test]
+fn constraint_ledger_message_fork_uses_cutoff_and_preserves_next_id() {
+    let mut state = SessionState::default();
+    register_constraint(&mut state, "Keep cutoff pin");
+    let turn = TurnId::new();
+    let message = ItemId::new();
+    let mut events = vec![event(EventKind::PinsChanged {
+        constraints: state.constraints.clone(),
+    })];
+    let mut prompt = seeded_event(EventKind::UserPrompt {
+        text: "Complete this turn".into(),
+        audio: Vec::new(),
+        images: Vec::new(),
+        queued_prompt: None,
+    });
+    prompt.env.item = Some(message);
+    events.push(prompt);
+    events.push(event(EventKind::TurnCompleted {
+        ok: true,
+        exit_reason: ego_core::event::domain::ExitReason::Completed,
+    }));
+    register_constraint(&mut state, "Must stay after cutoff");
+    events.push(event(EventKind::PinsChanged {
+        constraints: state.constraints.clone(),
+    }));
+    for (index, event) in events.iter_mut().enumerate() {
+        event.env.seq = seq(index as u64 + 1);
+        event.env.turn = turn;
+    }
+    let fork = ego_core::session::PreparedFork::after_message(
+        SessionId::new(),
+        &events,
+        message,
+        Timestamp::from_millis(1_000),
+    )
+    .unwrap();
+    let mut child = SessionState::replay(fork.seed().events().cloned());
+    assert_eq!(child.constraints.listing(), "1: Keep cutoff pin");
+    pin_command(&mut child, PinCommand::Unpin(1)).unwrap();
+    // An empty inherited ledger still carries the used ID counter.
+    let fork = ego_core::session::PreparedFork::new(
+        SessionId::new(),
+        &child,
+        Timestamp::from_millis(1_001),
+    )
+    .unwrap();
+    let mut grandchild = SessionState::replay(fork.seed().events().cloned());
+    register_constraint(&mut grandchild, "New child pin");
+    assert_eq!(grandchild.constraints.listing(), "2: New child pin");
+    let prepared = prepare_constraint_summary(grandchild, &checkpoint());
+    assert_eq!(
+        frame(&prepared)["constraints"]["entries"]["2"],
+        "New child pin"
+    );
+}
+
+// Catches: unpin in a fork leaves frozen ancestor Binding text in the next request.
+#[test]
+fn constraint_ledger_fork_rerenders_ancestor_checkpoint_after_unpin() {
+    use ego_core::session::{
+        ReplayContext, ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage,
+    };
+    struct Source(Vec<DomainEvent>);
+    impl ReplaySource for Source {
+        fn lineage(&self, _: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
+            Ok(None)
+        }
+        fn entries(&self, _: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+            Ok(Some(
+                self.0.iter().cloned().map(SessionEntry::Event).collect(),
+            ))
+        }
+    }
+    impl SessionBlobSource for Source {
+        fn read(
+            &self,
+            _: &SessionId,
+            _: &ego_core::store::blob::BlobRef,
+        ) -> Result<Vec<u8>, ego_core::store::blob::BlobError> {
+            panic!("text-only fork must not read blobs")
+        }
+    }
+    let mut source = SessionState::default();
+    register_constraint(&mut source, "PIN-REMOVAL-ORACLE");
+    let compacted = prepare_constraint_summary(source, &checkpoint());
+    let source = Source(
+        compacted
+            .target_seed(Timestamp::from_millis(1_000))
+            .events()
+            .cloned()
+            .collect(),
+    );
+    let fork = ego_core::session::PreparedFork::new(
+        SessionId::new(),
+        &SessionState::replay(source.0.clone()),
+        Timestamp::from_millis(1_001),
+    )
+    .unwrap();
+    let replay = ReplayContext::new(&source, &source)
+        .replay_lineage(fork.seed().lineage())
+        .unwrap();
+    let mut child = SessionState::replay(fork.seed().events().cloned());
+    pin_command(&mut child, PinCommand::Unpin(1)).unwrap();
+    let (compact, recorder) = compaction_profile(
+        "summary-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta { text: checkpoint() },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let (main, _) = compaction_profile(
+        "main-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        Vec::new(),
+    );
+    let source = CompactionSource::new([
+        (GenerationRole::Compaction, Ok(compact)),
+        (GenerationRole::Main, Ok(main)),
+    ]);
+    let (turn, _, _) = compaction_turn_with_state(source, child);
+    let mut turn = turn.with_replayed_context(&replay);
+    let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+    assert!(
+        !serde_json::to_string(recorder.calls()[0].messages.messages())
+            .unwrap()
+            .contains("PIN-REMOVAL-ORACLE")
+    );
+    assert_eq!(
+        binding_section(prepared.checkpoint().text()),
+        "No pinned user constraints."
+    );
+}

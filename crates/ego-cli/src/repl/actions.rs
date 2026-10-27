@@ -1243,7 +1243,7 @@ impl ActionRegistry {
                 let text = command[boundary..]
                     .strip_prefix(' ')
                     .unwrap_or(raw_arguments);
-                return Dispatch::Pins(if text.trim().is_empty() {
+                return Dispatch::Pins(if text.trim().is_empty() || text == "list" {
                     ego_core::compact::PinCommand::List
                 } else {
                     ego_core::compact::PinCommand::Pin(text.to_owned())

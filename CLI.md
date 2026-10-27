@@ -1943,7 +1943,7 @@ contract are in
 #### Pinned standing user constraints
 
 `/pin TEXT` keeps the exact text as a standing user constraint outside the
-model-written summary. `/pin` lists pins with stable numbers. `/unpin NUMBER`
+model-written summary. `/pin` or `/pin list` lists pins with stable numbers. `/unpin NUMBER`
 removes one. Numbers are not reused. To change a constraint, remove its old pin
 and add the replacement text. Text states its own scope; ego does not infer it.
 These are local commands, not model requests. Pasted or quoted examples do not
