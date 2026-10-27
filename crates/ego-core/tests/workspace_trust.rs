@@ -249,3 +249,35 @@ fn external_instruction_consent_is_bound_to_target_and_content() {
         Some(Trust::Untrusted)
     );
 }
+
+/// Catches legacy approval authorizing external disclosure or a record with no digest.
+#[test]
+fn legacy_trust_requires_a_digest_and_no_external_instruction_disclosure() {
+    let ledger: TrustLedger = serde_json::from_value(serde_json::json!({
+        "v": 1,
+        "workspaces": {
+            "/approved": {"decision": "trusted", "digest": "old-inventory"},
+            "/incomplete": {"decision": "trusted"}
+        }
+    }))
+    .expect("legacy ledger documents deserialize through the public contract");
+    let mut offered = ExecutableSurface::default();
+    assert_eq!(
+        ledger.remembered("/approved", &offered),
+        Some(Trust::Trusted)
+    );
+    assert_eq!(
+        ledger.remembered("/incomplete", &offered),
+        None,
+        "absence of external instructions cannot replace a missing legacy digest"
+    );
+    offered.external_instructions.insert(
+        "/shared/AGENTS.md".into(),
+        TrustInventory::new([file("AGENTS.md", b"hello")]).digest(),
+    );
+    assert_eq!(
+        ledger.remembered("/approved", &offered),
+        None,
+        "a legacy digest never approves disclosure of external instruction bytes"
+    );
+}
