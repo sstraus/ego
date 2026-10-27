@@ -2668,15 +2668,51 @@ its bounded stderr preview. An exec allow rule does not grant filesystem access:
 the evaluator script and its inputs must be readable under the run confinement.
 
 
-Usage report v3 is the current closed contract: its role lines are `main`,
+Usage report v4 is the current closed contract: its role lines are `main`,
 `judge`, `goal_check`, `compaction`, `subagent`, `hook`, and `total`.
-`goal_check` is required in v3 reports, including zero usage; no legacy-report
+`goal_check` is required in v4 reports, including zero usage; no legacy-report
 decoder or compatibility default is provided.
 Cost `known` and `unknown` describe monetary spend only. Display-only standard
 API estimates are separate `subscription_equivalent` totals by currency, with
 missing or overflowing estimates in `subscription_unknown`. The text view labels
 them `subscription-equivalent (standard API)` and never presents subscription
 accounting zero as known monetary spend.
+
+Usage JSON v4 adds optional observed limits. A session can contain
+`context_capacity: {tokens, source, observed_at}` from its latest
+`ContextWindowUpdated` event. The source is `context_window_updated` and the
+observation time is UTC epoch milliseconds. A missing or zero capacity is
+omitted; the command does not look up a denominator in a different model's
+catalogue or derive one from billed tokens.
+
+A session can also contain `provider_limits: {provider, model, observed_at,
+limits}` from response headers observed during its generations. Only an exact
+match with the session's reported model is eligible. Each limit has `kind`,
+`remaining`, and `source`, with optional `limit`, `used`, and `reset`. Numeric
+limit values are exact nonnegative decimal strings. The supported kinds are
+`requests`, `tokens`, `input_tokens`, `output_tokens`, and `usd`. Sources name
+the actual remaining header, for example
+`response_header:anthropic-ratelimit-input-tokens-remaining` or
+`response_header:x-ratelimit-remaining-tokens`. A reset is the provider's raw
+bounded reset value, not a predicted refill time. Headers are observations at
+one point in time, not a promise that a subsequent request is admitted.
+
+When an OpenRouter session is present, `--json` can also query the free
+OpenRouter `/api/v1/key` endpoint with the current environment credential.
+This lookup is bounded to five seconds, respects user-level offline
+configuration, and does not run credential commands or read a keychain. Its
+result is a top-level `provider_limits` array, not a historical session fact.
+The observation has `provider: "openrouter"` and no `model`. A `usd` limit uses
+`data.limit_remaining` directly; it does not subtract lifetime `usage` from a
+periodic `limit`. Its source is `openrouter_key:data.limit_remaining`. The
+optional `used` and `limit` values retain their distinct provider meanings.
+Consumers must not assign this current credential to a historical session or
+use it for another provider. Text output performs no key lookup.
+
+Missing headers, unlimited or absent key limits, missing credentials, offline
+configuration, lookup failures, invalid values, and timeouts produce no limit
+field. No zero, percentage, balance, reset, or fallback provider is inferred.
+The command makes no paid generation request for this information.
 
 ### Model-requested context changes
 

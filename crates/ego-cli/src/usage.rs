@@ -48,12 +48,53 @@ async fn report_workspace(args: &UsageArgs) -> Result<UsageReport, RunTerminatio
             message: format!("the session store could not be listed: {error}"),
         })?;
     let clock = SystemClock;
-    UsageReportService::new(&store, &clock)
+    let mut report = UsageReportService::new(&store, &clock)
         .report(&metadata, args.period)
         .await
         .map_err(|error| RunTermination::Failed {
             message: format!("the usage report could not be built: {error}"),
+        })?;
+    if args.json
+        && report.sessions.iter().any(|session| {
+            session
+                .model
+                .as_deref()
+                .is_some_and(|model| model.starts_with("openrouter/"))
         })
+    {
+        report.provider_limits = current_openrouter_limits().await.into_iter().collect();
+    }
+    Ok(report)
+}
+
+/// A bounded, free key lookup. Failure means absence, never a zero or a guessed balance.
+async fn current_openrouter_limits() -> Option<ego_core::usage::ProviderLimitsObservation> {
+    let effective = crate::config::user_effective().ok()?;
+    if effective.network == ego_core::config::Network::Off {
+        return None;
+    }
+    let row = crate::model::rows(&effective.auth)
+        .ok()?
+        .into_iter()
+        .find(|row| row.id() == "openrouter")?;
+    // No keychain or credential command is needed for the OpenRouter environment key.
+    let credential = row
+        .credential
+        .resolve(&ego_ai::provider::EnvCredentials)
+        .ok()?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let scope =
+            crate::provider_http::CommandHttpScope::online(ego_core::turn::CancelToken::new())
+                .await
+                .ok()?;
+        ego_ai::usage_limits::openrouter_key_limits(&row, &credential, scope.http(), &SystemClock)
+            .await
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The columns of the text table, in order.
@@ -344,6 +385,7 @@ mod text_red {
             as_of: Timestamp::from_millis(as_of),
             period: UsagePeriod::All,
             sessions: Vec::new(),
+            provider_limits: Vec::new(),
             totals: UsageLines {
                 main: empty(),
                 judge: empty(),
@@ -434,6 +476,8 @@ mod text_red {
                 model: Some("fixture".to_owned()),
                 lineage: None,
                 context: None,
+                context_capacity: None,
+                provider_limits: None,
                 lines,
             });
             let text = render_text(&report, false, None);
@@ -502,7 +546,7 @@ mod text_red {
             serde_json::to_string(&report(1_790_662_411_741, usd(156_247, 8))).expect("serialise");
         assert_eq!(
             json,
-            r#"{"v":3,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}}}}"#
+            r#"{"v":4,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}}}}"#
         );
     }
 }

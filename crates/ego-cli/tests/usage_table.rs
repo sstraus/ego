@@ -13,7 +13,7 @@ mod support;
 use support::{Places, Plan, Stub};
 
 /// A workspace with exactly one session that spent tokens on `main` only.
-fn seeded<const N: usize>(args: [&str; N]) -> support::Finished {
+fn seeded_workspace() -> (Places, Stub) {
     let places = Places::new();
     let stub = Stub::start(Plan {
         completions: vec![support::Reply::Sse(support::costing(
@@ -36,6 +36,11 @@ fn seeded<const N: usize>(args: [&str; N]) -> support::Finished {
         ])
         .run();
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    (places, stub)
+}
+
+fn seeded<const N: usize>(args: [&str; N]) -> support::Finished {
+    let (places, stub) = seeded_workspace();
     places.ego(&stub).subcommand("usage").args(args).run()
 }
 
@@ -110,8 +115,13 @@ fn all_roles_restores_the_complete_breakdown() {
 
 #[test]
 fn all_roles_does_not_change_the_json_report() {
-    let plain = seeded(["--json"]);
-    let widened = seeded(["--all-roles", "--json"]);
+    let (places, stub) = seeded_workspace();
+    let plain = places.ego(&stub).subcommand("usage").args(["--json"]).run();
+    let widened = places
+        .ego(&stub)
+        .subcommand("usage")
+        .args(["--all-roles", "--json"])
+        .run();
     assert_eq!(plain.code, Some(0), "stderr: {}", plain.stderr);
     assert_eq!(widened.code, Some(0), "stderr: {}", widened.stderr);
     let plain: Value = serde_json::from_str(plain.stdout.trim()).expect("one report object");

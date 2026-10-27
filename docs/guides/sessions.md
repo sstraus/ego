@@ -98,7 +98,7 @@ sanitized Markdown; explicit `local` selects local content.
 `--json` control its view. Main, judge, compaction, hook, and child work can incur
 separate accounting. Token usage, context occupancy, and cost are separate facts.
 Subscription generations show explicitly labelled standard API equivalents, not
-monetary zero. Usage JSON v3 keeps these in `subscription_equivalent`, separate
+monetary zero. Usage JSON v4 keeps these in `subscription_equivalent`, separate
 from monetary `known` totals; `subscription_unknown` records missing estimates.
 Unknown or subscription monetary cost is not a known zero.
 

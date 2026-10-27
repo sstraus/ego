@@ -85,6 +85,12 @@ pub enum AiEvent {
     /// hold is not "exactly one" but that the events **sum to the provider's
     /// final total**.
     Usage(Usage),
+    /// Explicit rate-limit levels from this provider response, not billable usage.
+    ProviderLimits {
+        provider: String,
+        model: String,
+        limits: Vec<crate::usage::ProviderLimit>,
+    },
     /// What the provider says it will charge for this request.
     ///
     /// A **total for the request**, not an increment — the opposite of
