@@ -679,6 +679,11 @@ fn keyboard_preferences_at(
 /// same [`ConfigLayer`] and [`resolve`] path generation uses; authentication
 /// must not grow a second interpretation of `config.toml`.
 pub fn auth() -> Result<std::collections::HashMap<String, AuthProviderLayer>, UsageError> {
+    user_effective().map(|effective| effective.auth)
+}
+
+/// System and user selections for commands that cannot admit project configuration.
+pub(crate) fn user_effective() -> Result<Effective, UsageError> {
     let mut found = Vec::new();
     if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
         found.push(system);
@@ -688,9 +693,7 @@ pub fn auth() -> Result<std::collections::HashMap<String, AuthProviderLayer>, Us
     {
         found.push(user);
     }
-    resolve(&found, Trust::Untrusted, None)
-        .map(|effective| effective.auth)
-        .map_err(|err| UsageError(err.to_string()))
+    resolve(&found, Trust::Untrusted, None).map_err(|err| UsageError(err.to_string()))
 }
 
 /// The complete non-interactive hook-inspection input. Project and local

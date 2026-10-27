@@ -19,12 +19,24 @@ use crate::run::RequestId;
 use crate::session::{TargetPublication, TargetSeed};
 use crate::store::session_store::StoreError;
 
-pub const COMPACTION_PROMPT_REVISION: u32 = 2;
+pub const COMPACTION_PROMPT_REVISION: u32 = 3;
 
 pub const COMPACTION_PROMPT: &str = r###"Produce one self-contained context checkpoint for continuing this work in a
 new session. Preserve every material fact from the complete context above, but
 do not continue the task, address the operator, call tools, or invent missing
 information.
+
+Reconcile instruction lifetimes against the actual conversation and completed
+responses. A completed one-turn response requirement is historical evidence,
+not a standing constraint or a next step. For example, after an instruction to
+remember a filename and reply only READY has received READY, preserve the
+filename and any unfinished filename task, but do not require READY again.
+Record completed response requirements only under Completed work and evidence
+when they matter. Preserve unfinished tasks and standing constraints; do not
+mark them complete merely because a response was sent. The checkpoint describes
+prior context, not a new operator request: later user requests take precedence
+over obsolete response requirements in it. Apply this rule to earlier
+checkpoints too, rather than carrying their stale instructions forward.
 
 Output format is a strict parser contract, not a suggestion. Start immediately
 with # Objective, with no preamble or outer code fence. Use exactly these eight

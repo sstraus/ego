@@ -937,15 +937,11 @@ impl ActionRegistry {
             return Vec::new();
         };
         capture
-            .descriptors()
-            .iter()
-            .filter(|spec| spec.descriptor().user_invocable && spec.name().starts_with(filter))
-            .map(|spec| {
-                (
-                    spec.name().to_owned(),
-                    spec.descriptor().description.clone(),
-                )
-            })
+            .core()
+            .announce_for_user()
+            .into_iter()
+            .filter(|descriptor| descriptor.name.starts_with(filter))
+            .map(|descriptor| (descriptor.name.clone(), descriptor.description.clone()))
             .collect()
     }
     pub fn select(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Option<ActionSelection> {
@@ -1459,10 +1455,7 @@ fn admitted_skill_operation(
     name: &str,
     raw_arguments: &str,
 ) -> Option<AdmittedSkillOperation> {
-    capture
-        .descriptor(name)
-        .filter(|spec| spec.descriptor().user_invocable)
-        .map(|spec| AdmittedSkillOperation::invoke(spec.descriptor(), raw_arguments))
+    capture.core().user_command(name, raw_arguments)
 }
 
 #[cfg(test)]

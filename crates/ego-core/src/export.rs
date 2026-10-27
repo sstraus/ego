@@ -354,6 +354,11 @@ pub enum ExportEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<u64>,
     },
+    ProviderLimitsObserved {
+        provider: String,
+        model: String,
+        limits: Vec<crate::usage::ProviderLimit>,
+    },
     TurnCompleted {
         ok: bool,
         exit_reason: ExitReason,
@@ -1138,6 +1143,15 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             used_tokens: *used_tokens,
             provenance: *provenance,
             window: *window,
+        },
+        EventKind::ProviderLimitsObserved {
+            provider,
+            model,
+            limits,
+        } => ExportEvent::ProviderLimitsObserved {
+            provider: provider.clone(),
+            model: model.clone(),
+            limits: limits.clone(),
         },
         EventKind::TurnCompleted { ok, exit_reason } => ExportEvent::TurnCompleted {
             ok: *ok,

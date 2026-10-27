@@ -91,9 +91,7 @@ impl AcpSink {
     fn available_commands(&self, state: &SessionState) -> Vec<v1::AvailableCommand> {
         let mut commands: Vec<_> = state
             .skill_catalogue()
-            .descriptors()
-            .iter()
-            .filter(|descriptor| descriptor.user_invocable)
+            .user_commands()
             .map(|descriptor| {
                 let command = v1::AvailableCommand::new(
                     descriptor.name.clone(),

@@ -1543,3 +1543,204 @@ mod codex_recovery {
         }
     }
 }
+
+// Catches: a key response being reduced to limit minus lifetime usage, or attached to another provider.
+#[tokio::test]
+async fn usage_limits_recorded_key_crosses_the_authenticated_http_boundary() {
+    struct Clock;
+    impl ego_core::event::time::Clock for Clock {
+        fn now(&self) -> ego_core::event::time::Timestamp {
+            ego_core::event::time::Timestamp::from_millis(1_009_843_200_000)
+        }
+    }
+    let row = ProviderRow::openrouter_default();
+    let credential = row
+        .credential
+        .resolve(&FakeCredentials::holding(KEY))
+        .unwrap();
+    let body = include_bytes!("fixtures/usage_limits/openrouter-key.json").to_vec();
+    let http = StubHttp::new(Ok(OneHopResponse::streaming_response(
+        200,
+        Vec::new(),
+        Box::pin(futures::stream::iter([Ok(body)])),
+    )));
+    let port = http.clone() as Arc<dyn Http>;
+    let observed = ego_ai::usage_limits::openrouter_key_limits(&row, &credential, &port, &Clock)
+        .await
+        .unwrap()
+        .unwrap();
+    let json = serde_json::to_value(observed).unwrap();
+    assert_eq!(json["provider"], "openrouter");
+    assert!(
+        json.get("model").is_none(),
+        "current credential is not a historical session identity"
+    );
+    assert_eq!(json["observed_at"], 1_009_843_200_000_u64);
+    assert_eq!(json["limits"][0]["remaining"], "73.123456789");
+    assert_eq!(
+        json["limits"][0]["source"],
+        "openrouter_key:data.limit_remaining"
+    );
+    let calls = http.calls();
+    assert!(
+        ego_ai::usage_limits::openrouter_key_limits(&self::row(), &credential, &port, &Clock)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        http.calls(),
+        calls,
+        "a different provider must not contact OpenRouter"
+    );
+    let seen = http.seen.lock().unwrap();
+    assert_eq!(seen[0].method, Method::Get);
+    assert_eq!(seen[0].url.as_str(), "https://openrouter.ai/api/v1/key");
+    assert!(
+        seen[0]
+            .headers
+            .iter()
+            .any(|header| header.name() == "authorization")
+    );
+}
+
+// Catches: a response publishing another provider's, ambiguous, or malformed counters.
+// These are adversarial transport inputs, not live account recordings.
+#[tokio::test]
+async fn usage_limits_generation_rejects_cross_provider_and_ambiguous_headers() {
+    async fn observed(
+        row: ProviderRow,
+        fields: Vec<HttpHeader>,
+    ) -> Vec<ego_core::usage::ProviderLimit> {
+        let credential = row
+            .credential
+            .resolve(&FakeCredentials::holding(KEY))
+            .unwrap();
+        let http = StubHttp::new(Ok(OneHopResponse::streaming_response(
+            200,
+            fields,
+            Box::pin(futures::stream::iter([Ok(TEXT_TRANSCRIPT
+                .as_bytes()
+                .to_vec())])),
+        )));
+        let generator = WireGenerator::new(row, &OpenAiCompletions, http, credential);
+        let mut gate = BudgetGate::new(usd("10"));
+        let attempt = attempt_for(&mut gate, &request());
+        generator
+            .generate(request(), attempt)
+            .filter_map(|event| async move {
+                match event {
+                    AiEvent::ProviderLimits { limits, .. } => Some(limits),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+    let header =
+        |name: &str, value: &str| HttpHeader::new(name, value.as_bytes().to_vec()).unwrap();
+    for (provider, remaining, limit) in [
+        (
+            ProviderRow::openai(),
+            "X-RateLimit-Remaining-Tokens",
+            "x-ratelimit-limit-tokens",
+        ),
+        (
+            ProviderRow::anthropic_default(),
+            "anthropic-ratelimit-tokens-remaining",
+            "anthropic-ratelimit-tokens-limit",
+        ),
+    ] {
+        let fields = || vec![header(remaining, "0"), header(limit, "100")];
+        let limits = observed(provider.clone(), fields()).await;
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].remaining, Amount::ZERO);
+        assert_eq!(limits[0].limit.unwrap().to_string(), "100");
+        assert!(
+            observed(ProviderRow::openrouter_default(), fields())
+                .await
+                .is_empty()
+        );
+        let other = if provider.id() == "openai" {
+            ProviderRow::anthropic_default()
+        } else {
+            ProviderRow::openai()
+        };
+        assert!(observed(other, fields()).await.is_empty());
+        for invalid in ["-1", "1.2", "NaN", "18446744073709551616", ""] {
+            assert!(
+                observed(provider.clone(), vec![header(remaining, invalid)])
+                    .await
+                    .is_empty(),
+                "{invalid}"
+            );
+        }
+        assert!(
+            observed(
+                provider.clone(),
+                vec![header(remaining, "5"), header(remaining, "6")]
+            )
+            .await
+            .is_empty()
+        );
+        assert!(
+            observed(provider, vec![header(limit, "100")])
+                .await
+                .is_empty()
+        );
+    }
+}
+
+// Catches: missing, unlimited or malformed key remaining being invented from limit/usage.
+#[tokio::test]
+async fn usage_limits_key_boundary_preserves_recorded_absence_mutations() {
+    struct Clock;
+    impl ego_core::event::time::Clock for Clock {
+        fn now(&self) -> ego_core::event::time::Timestamp {
+            ego_core::event::time::Timestamp::from_millis(1500)
+        }
+    }
+    let original: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/usage_limits/openrouter-key.json"))
+            .unwrap();
+    let mut cases = Vec::new();
+    for replacement in [
+        serde_json::Value::Null,
+        serde_json::json!(-1),
+        serde_json::json!("42"),
+    ] {
+        let mut mutated = original.clone();
+        mutated["data"]["limit_remaining"] = replacement;
+        cases.push(mutated);
+    }
+    let mut absent = original;
+    absent["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("limit_remaining");
+    cases.push(absent);
+    for body in cases {
+        let row = ProviderRow::openrouter_default();
+        let credential = row
+            .credential
+            .resolve(&FakeCredentials::holding(KEY))
+            .unwrap();
+        let http = StubHttp::new(Ok(OneHopResponse::streaming_response(
+            200,
+            Vec::new(),
+            Box::pin(futures::stream::iter([Ok(
+                serde_json::to_vec(&body).unwrap()
+            )])),
+        )));
+        let port = http as Arc<dyn Http>;
+        assert!(
+            ego_ai::usage_limits::openrouter_key_limits(&row, &credential, &port, &Clock)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}

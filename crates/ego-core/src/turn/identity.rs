@@ -79,7 +79,7 @@ impl AgentIdentity {
         };
         let network = if self.offline { "offline" } else { "online" };
         format!(
-            "Current runtime facts (ego-owned; refreshed for this generation):\n\
+            "Current runtime facts (ego-owned; updated when facts change):\n\
              - Ego session ID: {session}\n\
              - Model: {model} (reasoning effort: {thinking})\n\
              - Workspace root: {workspace}\n\
