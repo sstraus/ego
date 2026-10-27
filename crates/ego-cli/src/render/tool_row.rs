@@ -116,15 +116,18 @@ fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
     let heading = header(call, &args, width);
 
+    let body = body(call, &args, width);
     let mut rows = vec![heading.clone()];
     if call.name == "exec" {
         rows.extend(tail(call, width));
+    } else if !body.is_empty() {
+        rows.push(hidden_lines(body.len(), width));
     }
 
     let shell_progress =
         (call.name == "exec" && call.ok && output_lines(call).is_empty()).then(|| heading.clone());
     let mut detail = vec![heading];
-    detail.extend(body(call, &args, width));
+    detail.extend(body);
     ToolRecord {
         shell_progress,
         rows: render(&rows, depth),
@@ -187,7 +190,17 @@ fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 
 /// `(added, removed)` lines of an edit, from the same line diff the expanded
 /// view draws, so the two cannot disagree.
-fn edit_stat(args: &Value) -> Option<(usize, usize)> {
+fn edit_stat(args: &Value, result: &str) -> Option<(usize, usize)> {
+    // Builtin receipts carry actual whole-file totals, including repeated
+    // substitutions sharing a line. Older receipts can still use the unique
+    // fragment below, but cannot establish replace_all totals.
+    if let Some((_, counts)) = result.lines().next().unwrap_or_default().rsplit_once(" (+")
+        && let Some(counts) = counts.strip_suffix(" lines)")
+        && let Some((added, removed)) = counts.split_once(" -")
+        && let (Ok(added), Ok(removed)) = (added.parse(), removed.parse())
+    {
+        return Some((added, removed));
+    }
     // One fragment cannot establish total changed lines across repeated matches.
     if args.get("replace_all").and_then(Value::as_bool) == Some(true) {
         return None;
@@ -236,7 +249,7 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
         ),
     };
     let stat = if call.ok && call.name == "edit" {
-        edit_stat(args).map(|(added, removed)| format!("+{added} -{removed}"))
+        edit_stat(args, call.result).map(|(added, removed)| format!("+{added} -{removed}"))
     } else {
         None
     };
@@ -604,8 +617,103 @@ mod tests {
                 },
                 at(80),
             );
-            assert_eq!(record.rows, expected);
+            assert_eq!(header_of(&record), expected);
         }
+    }
+
+    // Catches: a collapsed read counts source lines instead of hidden wrapped rows.
+    #[test]
+    fn collapsed_read_counts_wrapped_rows() {
+        let rendered = record(
+            &call("read", r#"{"path":"a.rs"}"#, true, &"界".repeat(80)),
+            at(42),
+        );
+        assert_eq!(
+            rendered.rows.lines().nth(1),
+            Some("  … 4 more lines · Option+O or /expand")
+        );
+        println!("read after:\n{}", rendered.rows);
+    }
+
+    // Catches: an edit hides the diff without naming its context and change rows.
+    #[test]
+    fn collapsed_edit_counts_diff_rows() {
+        let rendered = record(
+            &call(
+                "edit",
+                r#"{"path":"a.rs","old_string":"x\ny\n","new_string":"x\nz\nw\n"}"#,
+                true,
+                "replaced 1 occurrence in a.rs (+2 -1 lines)",
+            ),
+            at(80),
+        );
+        assert_eq!(
+            rendered.rows,
+            "✓ edit a.rs +2 -1 · 1.5s\n  … 4 more lines · Option+O or /expand"
+        );
+        assert!(rendered.detail.contains(" 2 -y"));
+        println!("edit after:\n{}", rendered.rows);
+    }
+
+    // Catches: a write confuses file lines with the receipt rows actually hidden.
+    #[test]
+    fn collapsed_write_counts_receipt_rows() {
+        let rendered = record(
+            &call(
+                "write",
+                r#"{"path":"a.rs","contents":"x\ny\nz\n"}"#,
+                true,
+                "wrote a.rs",
+            ),
+            at(80),
+        );
+        assert_eq!(
+            rendered.rows,
+            "✓ write a.rs · 3 lines · 1.5s\n  … 1 more line · Option+O or /expand"
+        );
+        assert!(rendered.detail.ends_with("  wrote a.rs"));
+        println!("write after:\n{}", rendered.rows);
+    }
+
+    // Catches: only builtins get counts, or empty results advertise nonexistent rows.
+    #[test]
+    fn collapsed_generic_counts_hidden_rows() {
+        for (result, hint) in [
+            (
+                "one\n\nthree\n",
+                Some("  … 3 more lines · Option+O or /expand"),
+            ),
+            ("", None),
+        ] {
+            let rendered = record(&call("mcp:server/tool", "{}", true, result), at(80));
+            assert_eq!(rendered.rows.lines().nth(1), hint);
+            println!("generic after:\n{}", rendered.rows);
+        }
+    }
+
+    // Catches: repeated substitutions on one line are multiplied into false totals.
+    #[test]
+    fn repeated_edit_uses_actual_changed_line_totals() {
+        let rendered = record(
+            &call(
+                "edit",
+                r#"{"path":"a.rs","old_string":"x","new_string":"y","replace_all":true}"#,
+                true,
+                "replaced 3 occurrences in a.rs (+1 -1 lines)\nwrite notice",
+            ),
+            at(100),
+        );
+        assert_eq!(
+            header_of(&rendered),
+            "✓ edit a.rs +1 -1 · all occurrences · 1.5s"
+        );
+        assert!(
+            rendered
+                .rows
+                .ends_with("  … 2 more lines · Option+O or /expand")
+        );
+        assert!(rendered.detail.contains("replaced 3 occurrences"));
+        println!("repeated edit after:\n{}", rendered.rows);
     }
 
     #[test]
