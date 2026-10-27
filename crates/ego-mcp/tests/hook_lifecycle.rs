@@ -4416,3 +4416,173 @@ mod transport_selection_boundary {
         );
     }
 }
+
+// Catches: the legacy object schema replaces the full round in continuation identity.
+#[tokio::test(flavor = "current_thread")]
+async fn regression_case_distinct_rounds_do_not_alias_one_durable_continuation() {
+    let journal = Arc::new(Journal::default());
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(owner.clone(), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(factory);
+    resolver.insert(capture.clone());
+    let mut ids = Vec::new();
+    for message in ["Confirm staging", "Confirm production"] {
+        let mapped = McpInputMapping::from_rmcp(
+            serde_json::from_value(json!({
+                "resultType": "input_required",
+                "inputRequests": {"answer": {"method": "elicitation/create", "params": {
+                    "mode": "form", "message": message,
+                    "requestedSchema": {"type": "object", "properties": {
+                        "choice": {"type": "string"}
+                    }, "required": ["choice"], "additionalProperties": false}
+                }}},
+                "requestState": "opaque-state"
+            }))
+            .expect("current-protocol round"),
+        )
+        .expect("mapped round");
+        let call = prepare_lookup(&tool);
+        let envelope = call.mcp_envelope().expect("envelope").clone();
+        let auth = authorized(call);
+        let (sealer, floor) = prepared_resume();
+        let guarded = guarded_resume_with_session_context(
+            sealer.prepare(&auth, floor).expect("resume"),
+            hooks_with_mode(HookMode::Continue, Trace::default()),
+            &capture,
+            GenerationPolicyCapture::new(
+                CanonPath::new("/workspace"),
+                Mode::Yolo,
+                Ruleset::default(),
+                None,
+            )
+            .expect("policy")
+            .snapshot(),
+        );
+        let required = owner
+            .record_input_required(envelope, mapped, guarded)
+            .await
+            .expect("different rounds must both be durably recordable");
+        let record = journal
+            .load(required.continuation_id())
+            .expect("durable record");
+        assert_eq!(
+            record.question_round().expect("durable round").requests["answer"].prompt,
+            message
+        );
+        ids.push(required.continuation_id().to_owned());
+    }
+    assert_ne!(
+        ids[0], ids[1],
+        "different questions must not share continuation authority"
+    );
+}
+
+// Catches: a single changed authority field is accepted because adjacent checks use &&.
+#[tokio::test(flavor = "current_thread")]
+async fn regression_case_resume_rejects_each_changed_envelope_authority_before_recording() {
+    use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
+    for changed in ["server", "method", "tool", "schema"] {
+        let trace = Trace::default();
+        let journal = Arc::new(Journal::with_trace(trace.clone()));
+        let resolver = Arc::new(ExactCaptureResolver::default());
+        let owner = context_free_owner(journal.clone(), resolver.clone());
+        let factory = Arc::new(
+            McpStdioOperationFactory::new(owner.clone(), 64 * 1024, Duration::from_secs(30))
+                .expect("factory"),
+        );
+        let (capture, tool) = captured_lookup(factory);
+        resolver.insert(capture.clone());
+        let call = prepare_lookup(&tool);
+        let original = call.mcp_envelope().expect("original envelope").clone();
+        // Keep the sealed transport fingerprint so this exercises the owner boundary,
+        // not PreparedResume's independent transport-fingerprint rejection.
+        let subject = if changed == "method" {
+            McpSubject::Resource {
+                server: "server".into(),
+                uri: "fixture://lookup".into(),
+            }
+        } else {
+            McpSubject::Tool {
+                server: if changed == "server" {
+                    "other"
+                } else {
+                    "server"
+                }
+                .into(),
+                name: "lookup".into(),
+            }
+        };
+        let adversarial = PreparedCall::mcp_acp(
+            subject,
+            if changed == "method" {
+                McpOperationKind::ReadResource
+            } else {
+                McpOperationKind::CallTool
+            },
+            Vec::new(),
+            McpAdmissionFingerprint::new(
+                original.admission().capture(),
+                if changed == "tool" {
+                    "other-tool"
+                } else {
+                    original.admission().operation()
+                },
+                if changed == "schema" {
+                    "other-schema"
+                } else {
+                    original.admission().schema()
+                },
+            )
+            .expect("adversarial admission"),
+            original.transport_fingerprint(),
+            "server",
+            &json!({}),
+        )
+        .expect("public envelope constructor");
+        let auth = authorized(call);
+        let (sealer, floor) = prepared_resume();
+        let guarded = guarded_resume_with_session_context(
+            sealer.prepare(&auth, floor).expect("resume"),
+            hooks_with_mode(HookMode::Continue, trace.clone()),
+            &capture,
+            GenerationPolicyCapture::new(
+                CanonPath::new("/workspace"),
+                Mode::Yolo,
+                Ruleset::default(),
+                None,
+            )
+            .expect("policy")
+            .snapshot(),
+        );
+        let result = owner
+            .record_input_required(
+                adversarial
+                    .mcp_envelope()
+                    .expect("adversarial envelope")
+                    .clone(),
+                mapped_input(),
+                guarded,
+            )
+            .await;
+        let error = result.expect_err(&format!("changed {changed} authority must be refused"));
+        assert_eq!(error.failure(), McpFailure::Authority, "changed {changed}");
+        assert!(
+            error
+                .to_string()
+                .contains("resume authority does not match"),
+            "{error}"
+        );
+        assert!(
+            journal.events().is_empty(),
+            "changed {changed} must not be recorded"
+        );
+        assert!(
+            trace.events().is_empty(),
+            "changed {changed} must not reach hooks"
+        );
+    }
+}
