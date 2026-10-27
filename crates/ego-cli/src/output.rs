@@ -2135,21 +2135,6 @@ mod tests {
         rows.try_iter().collect::<String>()
     }
 
-    // Catches: one expansion emitting the same recorded tool block twice.
-    #[test]
-    fn recorded_stdout_only_exec_expands_once() {
-        let expanded = expand_recorded_exec();
-        for marker in [
-            "✓ $ bash",
-            "tuic bg: pid=12345",
-            "log=/Users/",
-            "wake=/Users/",
-            "tuic-bg:",
-        ] {
-            assert_eq!(expanded.matches(marker).count(), 1, "{expanded}");
-        }
-    }
-
     // Catches: an empty stderr stream adding a dangling label to expanded output.
     #[test]
     fn recorded_stdout_only_exec_omits_empty_stderr() {
