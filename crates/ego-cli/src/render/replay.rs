@@ -390,7 +390,7 @@ mod tests {
             let grid = capture(&replayed, width);
             assert_eq!(
                 grid,
-                "> first\n\nProse\n\n✓ read first · 1 line\n\nDone\n\n> second\n\nFinal"
+                "> first\n\nProse\n\n✓ read first · 1 line\n  … 1 more line · Option+O or /expand\n\nDone\n\n> second\n\nFinal"
             );
             println!("rhythm replay width={width} grid={grid:?}");
 

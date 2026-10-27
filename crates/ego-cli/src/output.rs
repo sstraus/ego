@@ -1969,7 +1969,11 @@ mod tests {
 
         let rows = out.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].0 == "✓ read a.rs · 2 lines", "{:?}", rows[0].0);
+        assert!(
+            rows[0].0 == "✓ read a.rs · 2 lines\n  … 2 more lines · Option+O or /expand",
+            "{:?}",
+            rows[0].0
+        );
         assert!(!rows[0].0.contains('{'), "{:?}", rows[0].0);
         assert!(out.notes.lock().unwrap().is_empty());
     }
