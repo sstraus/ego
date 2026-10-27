@@ -1,0 +1,25 @@
+{
+  "provenance": {
+    "run": "20000102T120000Z-00000002",
+    "source_session": "00000000-0000-4000-8000-0000000100a2",
+    "target_session": "00000000-0000-4000-8000-0000000100a6",
+    "source_physical_lines": [
+      6,
+      20,
+      24
+    ],
+    "target_physical_lines": [
+      2,
+      9,
+      24
+    ],
+    "sanitization": "Capture identities and timestamps are synthetic; checkpoint behavior and time relationships are preserved. The workspace path is <recorded-workspace>."
+  },
+  "seed_prompt": "Remember the chosen report filename ledger-419.txt. Our next task is to return that filename. Reply READY only.",
+  "seed_answer": "READY",
+  "seed_completed": true,
+  "checkpoint": "# Objective\nReturn the previously chosen report filename ledger-419.txt and confirm readiness by replying only READY.\n\n# Binding constraints and preferences\n- The chosen report filename must be remembered: ledger-419.txt\n- The immediate output must be only the string \"READY\" with no additional text or explanation\n\n# Completed work and evidence\n- No actions performed in this session; only context retrieval and preparation\n\n# Work in progress\n- None. The pending action is to reply with the remembered filename confirmation ready string.\n\n# Decisions and rationale\n- No reasoning or decisions made yet beyond the instruction to confirm readiness and return the filename\n\n# Blockers and uncertainty\n- None\n\n# Ordered next steps\n1. Reply with exactly \"READY\" to indicate the filename ledger-419.txt is remembered and ready for use\n\n# Critical references\n- Session ID: 00000000-0000-4000-8000-0000000100a2\n- Workspace root: <recorded-workspace>\n- Tools available: `read`\n- Current local date-time: 2000-02-06T00:53:53+01:00",
+  "current_prompt": "Return the chosen report filename from the checkpoint. No tools.",
+  "observed_answer": "READY",
+  "expected_answer": "ledger-419.txt"
+}
