@@ -253,6 +253,17 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
         (true, _) => None,
     };
     let mut notes: Vec<String> = outcome.into_iter().collect();
+    if call.name == "exec"
+        && let Ok(params) = serde_json::from_value::<ego_tools::tools::ExecParams>(args.clone())
+        && let Ok(Some(timeout)) = params.effective_timeout()
+    {
+        let label = if timeout.as_millis() % 60_000 == 0 {
+            format!("{}m", timeout.as_secs() / 60)
+        } else {
+            duration(timeout)
+        };
+        notes.push(format!("(timeout {label})"));
+    }
     if let Some(millis) = call.timing.and_then(|timing| timing.execution_ms) {
         notes.push(duration(Duration::from_millis(millis)));
     }
@@ -608,6 +619,48 @@ mod tests {
         }
     }
 
+    // Catches: transcript hides the effective default, invents an unbounded
+    // background deadline, or reports a rejected foreground override as admitted.
+    #[test]
+    fn exec_row_shows_effective_timeout() {
+        for (args, expected) in [
+            (r#"{"argv":["echo"]}"#, Some("(timeout 2m)")),
+            (
+                r#"{"argv":["echo"],"timeout_ms":null}"#,
+                Some("(timeout 2m)"),
+            ),
+            (
+                r#"{"argv":["echo"],"timeout_ms":600000}"#,
+                Some("(timeout 10m)"),
+            ),
+            (
+                r#"{"argv":["echo"],"timeout_ms":1500}"#,
+                Some("(timeout 1.5s)"),
+            ),
+            (r#"{"argv":["echo"],"background":true}"#, None),
+            (
+                r#"{"argv":["echo"],"background":true,"timeout_ms":601000}"#,
+                Some("(timeout 10m01s)"),
+            ),
+            (r#"{"argv":["echo"],"timeout_ms":600001}"#, None),
+        ] {
+            let rendered = record(&call("exec", args, true, ""), at(120));
+            match expected {
+                Some(text) => assert!(
+                    header_of(&rendered).contains(text),
+                    "{args}: {}",
+                    rendered.rows
+                ),
+                None => assert!(
+                    !header_of(&rendered).contains("(timeout"),
+                    "{args}: {}",
+                    rendered.rows
+                ),
+            }
+            println!("exec timeout after: {}", rendered.rows);
+        }
+    }
+
     #[test]
     fn durations_switch_unit_at_a_second_and_at_a_minute() {
         assert_eq!(duration(Duration::from_millis(12)), "12ms");
@@ -662,7 +715,7 @@ mod tests {
             at(80),
         );
         let rows: Vec<_> = record.rows.lines().collect();
-        assert_eq!(rows[0], "✗ $ sh -c 'exit 3' · exit 3 · 1.5s");
+        assert_eq!(rows[0], "✗ $ sh -c 'exit 3' · exit 3 · (timeout 2m) · 1.5s");
         assert_eq!(rows[1..], ["  stderr: boom"]);
     }
 

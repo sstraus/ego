@@ -21,10 +21,34 @@ use serde::Deserialize;
 pub struct ExecParams {
     pub argv: Vec<String>,
     pub cwd: Option<String>,
-    /// Process lifetime limit, not a yield delay. Omit or use null for no deadline.
+    /// Process lifetime in milliseconds. Foreground defaults to 120000 (maximum
+    /// 600000). Background has no deadline when omitted or null.
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub background: bool,
+}
+
+impl ExecParams {
+    /// The admitted process lifetime shared by preparation and presentation.
+    /// Background work retains its explicit lifetime without the foreground cap.
+    pub fn effective_timeout(&self) -> Result<Option<Duration>, ToolError> {
+        let milliseconds = self.timeout_ms.or((!self.background).then_some(120_000));
+        milliseconds
+            .map(|milliseconds| {
+                if milliseconds == 0 {
+                    return Err(ToolError::InvalidParams(
+                        "timeout_ms must be greater than zero".into(),
+                    ));
+                }
+                if !self.background && milliseconds > 600_000 {
+                    return Err(ToolError::InvalidParams(
+                        "foreground timeout_ms must not exceed 600000; use background=true for longer work".into(),
+                    ));
+                }
+                Ok(Duration::from_millis(milliseconds))
+            })
+            .transpose()
+    }
 }
 
 #[derive(Default)]
@@ -47,7 +71,7 @@ impl TypedTool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Run one argv-native process: pass executable and arguments separately, with no implicit shell, pipes or redirects. Use cwd for its working directory. timeout_ms limits the entire process lifetime (including background work), not how long to wait for a handle; omit or use null for no deadline. Set background=true for long work; returns a session-owned ID immediately for exec_status or exec_cancel, and completion wakes an idle interactive session. Use read_tool_result with returned full-output references for truncated output"
+        "Run one argv-native process: pass executable and arguments separately, with no implicit shell, pipes or redirects. Use cwd for its working directory. timeout_ms limits the entire process lifetime, not how long to wait for a handle. Foreground defaults to 120000 ms (2 min), with overrides from 1 to 600000 ms (10 min); omitted or null uses the default. Background has no deadline when timeout_ms is omitted or null, and accepts an explicit lifetime limit. Set background=true for long work; returns a session-owned ID immediately for exec_status or exec_cancel, and completion wakes an idle interactive session. Use read_tool_result with returned full-output references for truncated output"
     }
 
     fn prepare_typed(
@@ -65,18 +89,7 @@ impl TypedTool for ExecTool {
                 "argv must not contain NUL bytes".to_string(),
             ));
         }
-        let timeout = params
-            .timeout_ms
-            .map(|milliseconds| {
-                if milliseconds == 0 {
-                    Err(ToolError::InvalidParams(
-                        "timeout_ms must be greater than zero".to_string(),
-                    ))
-                } else {
-                    Ok(Duration::from_millis(milliseconds))
-                }
-            })
-            .transpose()?;
+        let timeout = params.effective_timeout()?;
         let cwd = match params.cwd {
             Some(named) => Some(resolve_directory(ctx, &named)?),
             None => Some(ctx.cwd.clone()),
@@ -137,4 +150,61 @@ fn resolve_directory(ctx: &PrepareCtx<'_>, named: &str) -> Result<CanonPath, Too
         ctx.cwd.as_path().join(named)
     };
     Ok(ctx.resolver.canonicalize(&joined)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Catches: omitted foreground deadlines stay unbounded, or rejected overrides
+    // reach SpawnSpec. This drives tool preparation, not just timeout arithmetic.
+    #[test]
+    fn foreground_exec_timeout_contract() {
+        let fs = crate::fs::OsFs;
+        let ctx = PrepareCtx {
+            cwd: CanonPath::new(std::env::current_dir().unwrap()),
+            resolver: &fs,
+        };
+        for (args, expected) in [
+            (r#"{"argv":["echo"]}"#, Ok(Some(120000))),
+            (r#"{"argv":["echo"],"timeout_ms":null}"#, Ok(Some(120000))),
+            (r#"{"argv":["echo"],"timeout_ms":1}"#, Ok(Some(1))),
+            (r#"{"argv":["echo"],"timeout_ms":600000}"#, Ok(Some(600000))),
+            (r#"{"argv":["echo"],"timeout_ms":0}"#, Err(())),
+            (r#"{"argv":["echo"],"timeout_ms":600001}"#, Err(())),
+            (
+                r#"{"argv":["echo"],"timeout_ms":18446744073709551615}"#,
+                Err(()),
+            ),
+            (r#"{"argv":["echo"],"background":true}"#, Ok(None)),
+            (
+                r#"{"argv":["echo"],"background":true,"timeout_ms":null}"#,
+                Ok(None),
+            ),
+            (
+                r#"{"argv":["echo"],"background":true,"timeout_ms":601000}"#,
+                Ok(Some(601000)),
+            ),
+            (
+                r#"{"argv":["echo"],"background":true,"timeout_ms":0}"#,
+                Err(()),
+            ),
+        ] {
+            let params = serde_json::from_str(args).unwrap();
+            let prepared = ExecTool::default().prepare_typed(params, &ctx);
+            match expected {
+                Ok(timeout) => {
+                    let call = prepared.unwrap_or_else(|error| panic!("{args}: {error}"));
+                    let [Op::Spawn { spec }] = call.ops() else {
+                        panic!("one spawn: {args}")
+                    };
+                    assert_eq!(spec.timeout(), timeout.map(Duration::from_millis), "{args}");
+                }
+                Err(()) => assert!(
+                    matches!(prepared, Err(ToolError::InvalidParams(_))),
+                    "{args}"
+                ),
+            }
+        }
+    }
 }
