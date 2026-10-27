@@ -102,6 +102,8 @@ enum SurfaceActionEffect {
     Yolo,
     Permissions,
     Compact,
+    Pin,
+    Unpin,
     Refresh,
     Fork,
     Sessions,
@@ -147,6 +149,8 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Yolo => SurfaceActionEffect::Yolo,
             ActionId::Permissions => SurfaceActionEffect::Permissions,
             ActionId::Compact => SurfaceActionEffect::Compact,
+            ActionId::Pin => SurfaceActionEffect::Pin,
+            ActionId::Unpin => SurfaceActionEffect::Unpin,
             ActionId::Refresh => SurfaceActionEffect::Refresh,
             ActionId::Export => SurfaceActionEffect::Export,
             ActionId::Fork => SurfaceActionEffect::Fork,
@@ -1570,6 +1574,7 @@ impl Seat {
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
+                    Dispatch::Pins(command) => Line::HostCommand(HostCommand::Pins(command)),
                     Dispatch::McpContext(command) => {
                         Line::HostCommand(HostCommand::McpContext(command))
                     }
@@ -1723,6 +1728,8 @@ impl Seat {
             ActionId::Yolo,
             ActionId::Permissions,
             ActionId::Compact,
+            ActionId::Pin,
+            ActionId::Unpin,
             ActionId::Refresh,
             ActionId::Export,
             ActionId::Fork,

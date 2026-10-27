@@ -2899,6 +2899,21 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
             diagnostics.note(why);
             Ok(CommandOutcome::Continue)
         }
+        repl::Line::HostCommand(repl::HostCommand::Pins(command)) => {
+            if pending_work && command != ego_core::compact::PinCommand::List {
+                diagnostics.note("cannot change pins while work is pending; wait for it to finish");
+                return Ok(CommandOutcome::Continue);
+            }
+            match session_journal.pins(command) {
+                Ok(receipt) => diagnostics.note(&receipt),
+                Err(error) => diagnostics.note(&format!("pin operation failed: {error}")),
+            }
+            *state = session_journal
+                .inspect(Clone::clone)
+                .map_err(hook_journal_termination)?;
+            last.state = state.clone();
+            Ok(CommandOutcome::Continue)
+        }
         repl::Line::HostCommand(repl::HostCommand::SessionMetadata(operation)) => {
             update_session_metadata(
                 SessionMetadataCommand {

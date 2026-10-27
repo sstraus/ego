@@ -243,7 +243,7 @@ pub struct ToolTiming {
 /// GenerationStarted | FallbackDecision | ExecutionObserved |
 /// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
 /// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved |
-/// TurnCompleted | CompactionSeeded | Compacted | Forked |
+/// TurnCompleted | PinsChanged | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
 /// SubagentSettled | BackgroundTaskRequested | SubagentCompletionDelivered |
@@ -638,12 +638,21 @@ pub enum EventKind {
     },
     /// A turn finished.
     TurnCompleted { ok: bool, exit_reason: ExitReason },
+    /// User-owned standing constraints changed through a local pin command.
+    PinsChanged {
+        constraints: crate::compact::ConstraintLedger,
+    },
     /// The first semantic fact in a clean checkpoint-seeded session.
     CompactionSeeded {
         source: SessionId,
         source_seq: Seq,
         prompt_revision: u32,
         checkpoint: String,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::compact::ConstraintLedger::is_default"
+        )]
+        constraints: crate::compact::ConstraintLedger,
     },
     /// The session log was compacted; `summary` replaces the compacted span.
     Compacted { summary: String },
@@ -892,6 +901,7 @@ impl EventKind {
             EventKind::ContextWindowUpdated { .. } => "context_window_updated",
             EventKind::ProviderLimitsObserved { .. } => "provider_limits_observed",
             EventKind::TurnCompleted { .. } => "turn_completed",
+            EventKind::PinsChanged { .. } => "pins_changed",
             EventKind::CompactionSeeded { .. } => "compaction_seeded",
             EventKind::Compacted { .. } => "compacted",
             EventKind::Forked { .. } => "forked",

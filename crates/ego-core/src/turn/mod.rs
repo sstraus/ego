@@ -1295,6 +1295,11 @@ pub trait PromptContextSource: Send + Sync {
     }
 }
 
+enum AncestorHistory {
+    Conversation(Conversation),
+    Replayed(Box<crate::session::ReplayedContext>),
+}
+
 /// Runs turns against one session. One `run` call is one turn.
 pub struct TurnLoop<'session, 'turn> {
     session_id: SessionId,
@@ -1321,7 +1326,7 @@ pub struct TurnLoop<'session, 'turn> {
     analysis_observation: Option<ExecObservation>,
     execution_observation: Option<(ExecObservation, Option<crate::store::evidence::EvidenceRef>)>,
     tools: Tools<'turn>,
-    ancestor: Option<Conversation>,
+    ancestor: Option<AncestorHistory>,
     cancel: CancelToken,
     pause: PauseToken,
     control: Option<&'turn mut InteractiveControl>,
@@ -1778,7 +1783,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         {
             self.prompt_snapshot = snapshot.clone();
         }
-        self.ancestor = Some(replayed.conversation().clone());
+        self.ancestor = Some(AncestorHistory::Replayed(Box::new(replayed.clone())));
         if let Some(tuic) = self.delegation_host {
             self = self.with_delegation_host(tuic);
         }
@@ -1787,7 +1792,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
     /// Attach ancestor-only provider history resolved by [`crate::session::ReplayContext`].
     pub fn with_ancestor_conversation(mut self, ancestor: Conversation) -> Self {
-        self.ancestor = Some(ancestor);
+        self.ancestor = Some(AncestorHistory::Conversation(ancestor));
         self
     }
 
@@ -1993,6 +1998,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         } else {
             source_seq
         };
+        let constraints = self.state().constraints.clone();
+        constraints.validate().map_err(CompactionError::Internal)?;
         let title = self.state().title.clone();
         let goal = self.state().goal.clone();
         let (history, repairs) =
@@ -2120,6 +2127,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             }
         };
 
+        let checkpoint = constraints.checkpoint(checkpoint);
+
         let main = Arc::clone(&self.source)
             .resolve(GenerationModelRequest::new(GenerationRole::Main))
             .await
@@ -2133,7 +2142,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
         target_messages.push(Message::text(
             Role::User,
-            checkpoint_frame(checkpoint.text()),
+            checkpoint_frame(checkpoint.text(), &constraints),
         ));
         let baseline = GenRequest {
             web_search: None,
@@ -2163,6 +2172,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             source: self.session_id,
             source_seq,
             checkpoint,
+            constraints,
             baseline,
             title,
             goal,
@@ -5915,10 +5925,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         &self,
         history: Conversation,
     ) -> Result<Conversation, crate::generator::types::HistoryError> {
-        let Some(ancestor) = self.ancestor.as_ref() else {
-            return Ok(history);
+        let ancestor = match &self.ancestor {
+            Some(AncestorHistory::Replayed(replayed)) => {
+                replayed.conversation_with_constraints(&self.state().constraints)?
+            }
+            Some(AncestorHistory::Conversation(ancestor)) => ancestor.clone(),
+            None => return Ok(history),
         };
-        let mut messages: Vec<Message> = ancestor.clone().into();
+        let mut messages: Vec<Message> = ancestor.into();
         messages.extend(Vec::<Message>::from(history));
         Conversation::new(messages)
     }
