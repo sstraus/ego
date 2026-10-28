@@ -63,8 +63,18 @@ pub(super) fn leave_modal(
         if let Some(snapshot) = status.snapshot.as_mut() {
             snapshot.set_modal(false);
         }
+        // The driver can finish while this modal owns input. Resolve the
+        // successor from its current activity, not the phase saved on entry.
+        // Share the status lock with busy/idle publication so neither ordering
+        // can restore Busy after the driver's idle transition.
+        phase.set(if after == EditPhase::Modal {
+            after
+        } else if status.activity {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        });
     }
-    phase.set(after);
     repaint_status(status);
 }
 

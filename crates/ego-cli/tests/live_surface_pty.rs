@@ -4406,7 +4406,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let clear_start = output.len();
     input.write_all(b"\x03").expect("clear draft");
     input.flush().expect("clear draft flush");
-    until_prompt_from(&reader, &mut output, clear_start);
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        clear_start,
+        PROGRESS_DEADLINE,
+        "clear initial draft",
+    );
 
     let resize_start = output.len();
     pair.master
@@ -4433,7 +4439,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let narrow_clear = output.len();
     input.write_all(b"\x15").expect("clear narrow draft");
     input.flush().expect("clear narrow draft flush");
-    until_prompt_from(&reader, &mut output, narrow_clear);
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        narrow_clear,
+        PROGRESS_DEADLINE,
+        "clear narrow draft",
+    );
     let restore_start = output.len();
     pair.master
         .resize(PtySize {
@@ -4473,7 +4485,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         .write_all(b"\x1b")
         .expect("close model reasoning picker");
     input.flush().expect("close model reasoning picker flush");
-    until_prompt_from(&reader, &mut output, slash_accept_start);
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        slash_accept_start,
+        PROGRESS_DEADLINE,
+        "close slash reasoning picker",
+    );
 
     let meta_start = output.len();
     // ConPTY translates the standard ESC-prefixed terminal spelling into a
@@ -4493,7 +4511,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let meta_close_start = output.len();
     input.write_all(b"\x1b").expect("close Meta-P modal");
     input.flush().expect("close Meta-P modal flush");
-    until_prompt_from(&reader, &mut output, meta_close_start);
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        meta_close_start,
+        PROGRESS_DEADLINE,
+        "close Meta-P picker",
+    );
 
     let composed_start = output.len();
     input.write_all("π".as_bytes()).expect("composed Option-P");
@@ -4509,7 +4533,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let composed_close_start = output.len();
     input.write_all(b"\x1b").expect("close composed modal");
     input.flush().expect("close composed modal flush");
-    until_prompt_from(&reader, &mut output, composed_close_start);
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        composed_close_start,
+        PROGRESS_DEADLINE,
+        "close composed picker",
+    );
 
     #[cfg(not(windows))]
     {
@@ -4519,7 +4549,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
             .expect("pasted slash");
         input.flush().expect("pasted slash flush");
         until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
-        until_prompt_from(&reader, &mut output, pasted_start);
+        until_prompt_from_with_context(
+            &reader,
+            &mut output,
+            pasted_start,
+            PROGRESS_DEADLINE,
+            "submit pasted slash",
+        );
         drain_until_quiet(&reader, &mut output);
         assert!(
             rendered_prompt_count(&output[pasted_start..]) > 0,
@@ -4565,7 +4601,13 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let cleanup_start = output.len();
     input.write_all(b"\x03").expect("clear restored draft");
     input.flush().expect("clear restored draft flush");
-    until_prompt_from(&reader, &mut output, cleanup_start);
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        cleanup_start,
+        PROGRESS_DEADLINE,
+        "clear restored draft",
+    );
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit command flush");
     let status = bounded_exit(child);

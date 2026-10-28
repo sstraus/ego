@@ -958,6 +958,7 @@ fn enter_and_leave_modal_restore_composer_cursor_origin_and_phase() {
         origin: InputOrigin::BracketedPaste,
         ..SurfaceStatus::default()
     }));
+    status.lock().unwrap().begin_activity();
     let saved = enter_modal(&mut editor, &phase, &status);
     assert_eq!(phase.get(), EditPhase::Modal);
     assert_eq!(editor.current_buffer_contents(), "");

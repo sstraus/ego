@@ -864,6 +864,15 @@ impl SurfacePhase {
         self.0.store(phase as u8, Ordering::Release);
     }
 
+    /// Publish driver activity without taking input away from a modal.
+    fn set_activity(&self, phase: EditPhase) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current != EditPhase::Modal as u8).then_some(phase as u8)
+            });
+    }
+
     fn get(&self) -> EditPhase {
         match self.0.load(Ordering::Acquire) {
             0 => EditPhase::Idle,
@@ -1550,9 +1559,9 @@ impl Seat {
                     line,
                     Line::Submitted(_) | Line::HostCommand(HostCommand::SubmittedDraft { .. })
                 ) {
-                    live.phase.set(EditPhase::Busy);
                     let mut status = live.status.lock().expect("surface status lock");
                     status.begin_activity();
+                    live.phase.set_activity(EditPhase::Busy);
                     drop(status);
                     repaint_status(&live.status);
                 }
@@ -2284,9 +2293,9 @@ impl crate::run::InteractiveSeat for Seat {
             },
         );
         if let SeatKind::Live(live) = &self.kind {
-            live.phase.set(EditPhase::Busy);
             let mut status = live.status.lock().expect("surface status lock");
             status.begin_activity();
+            live.phase.set_activity(EditPhase::Busy);
             drop(status);
             repaint_status(&live.status);
         }
@@ -2306,15 +2315,9 @@ impl crate::run::InteractiveSeat for Seat {
 
     fn idle(&self) {
         if let SeatKind::Live(live) = &self.kind {
-            // The terminal owner alone leaves Modal, even if idle arrives late.
-            let _ = live.phase.0.compare_exchange(
-                EditPhase::Busy as u8,
-                EditPhase::Idle as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = false;
+            live.phase.set_activity(EditPhase::Idle);
             status.activity_since = None;
             status.children.clear();
             drop(status);

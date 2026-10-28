@@ -662,9 +662,10 @@ mod tests {
             assert!(rendered.contains("anthropic/claude-haiku-4-5"));
         }
     }
+    // Catches: leaving a modal resurrects Busy after the driver published idle.
     #[test]
-    fn coordinator_idle_preserves_the_terminal_owners_modal_phase() {
-        let phase = SurfacePhase::new(EditPhase::Modal);
+    fn coordinator_idle_during_modal_restores_an_idle_composer() {
+        let phase = SurfacePhase::new(EditPhase::Busy);
         let (_inspection_sender, inspections) = crossbeam::channel::unbounded();
         let (_input_sender, input) = bounded(CHANNEL_CAPACITY);
         let (control, _control_receiver) = bounded(CHANNEL_CAPACITY);
@@ -694,13 +695,37 @@ mod tests {
             registry,
             coordinator: Mutex::new(Some(coordinator)),
         };
-        seat.idle();
-        assert_eq!(phase.get(), EditPhase::Modal);
-        // Once the terminal owner leaves the modal, ordinary activity settles.
-        phase.set(EditPhase::Busy);
-        seat.idle();
-        assert_eq!(phase.get(), EditPhase::Idle);
-        seat.idle();
-        assert_eq!(phase.get(), EditPhase::Idle);
+        let SeatKind::Live(live) = &seat.kind else {
+            unreachable!("live fixture");
+        };
+        let mut editor = Reedline::create();
+        for (idle_during_modal, next_turn) in [(true, false), (false, false), (true, true)] {
+            seat.busy();
+            editor.run_edit_commands(&[
+                EditCommand::Clear,
+                EditCommand::InsertString("retained draft".to_owned()),
+            ]);
+            let saved = enter_modal(&mut editor, &phase, &live.status);
+            if idle_during_modal {
+                seat.idle();
+            }
+            if next_turn {
+                seat.busy();
+            }
+            assert_eq!(phase.get(), EditPhase::Modal);
+            leave_modal(&mut editor, &phase, &live.status, saved, EditPhase::Busy);
+            assert_eq!(editor.current_buffer_contents(), "retained draft");
+            assert_eq!(
+                phase.get(),
+                if idle_during_modal && !next_turn {
+                    EditPhase::Idle
+                } else {
+                    EditPhase::Busy
+                },
+                "idle during modal={idle_during_modal}, next turn={next_turn}"
+            );
+            seat.idle();
+            assert_eq!(phase.get(), EditPhase::Idle);
+        }
     }
 }
