@@ -1,5 +1,5 @@
 
-✓ $ bash -lc '/home/example/workspace · exit 0 · 139ms
+✓ $ bash -lc '/home/example/workspace · exit 0 · (timeout 10.0s) · 139ms
   [stdout]
   tuic bg: pid=12345
   log=/home/example/workspace
