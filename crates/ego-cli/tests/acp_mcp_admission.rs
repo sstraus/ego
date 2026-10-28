@@ -4,8 +4,9 @@ mod support;
 
 use support::{AcpHost, Ego, Places};
 
+/// Catches: reversing the admission backoff comparison restarts a failed child immediately.
 #[test]
-fn repeated_failed_acp_load_does_not_restart_the_same_stdio_server_immediately() {
+fn repeated_failed_acp_admission_does_not_restart_the_same_stdio_server_immediately() {
     let places = Places::new();
     std::fs::write(
         places.home_path().join("config.toml"),
@@ -270,4 +271,79 @@ fn unknown_mcp_transport_is_refused_before_a_session_exists() {
     host.finish();
     assert!(response["error"].is_object(), "{response}");
     assert_eq!(listed["result"]["sessions"], serde_json::json!([]));
+}
+
+/// Catches: applying capacity eviction to an existing key erases its backoff,
+/// while skipping eviction for a new key retains failed selections indefinitely.
+#[test]
+fn failed_acp_admission_preserves_backoff_at_capacity_and_evicts_oldest_for_new_selection() {
+    let places = Places::new();
+    std::fs::write(
+        places.home_path().join("config.toml"),
+        "[profile.acp]\nmodel = 'ollama/qwen3'\nthinking = 'off'\nsandbox = 'off'\nmode = 'default'\n",
+    )
+    .expect("isolated profile configuration");
+    let starts = places.workspace_path().join("mcp-starts.txt");
+    let server = places.file(
+        "failing-mcp.sh",
+        "IFS= read -r request || exit 1\nprintf '%s\\n' \"$2\" >> \"$1\"\nexit 1\n",
+    );
+    let mut host = AcpHost::adopt(
+        Ego::at(places.home_path(), places.workspace_path(), None)
+            .subcommand("acp")
+            .args(["--profile", "acp"])
+            .spawn_conversing(),
+    );
+    host.initialize();
+    let session = host.new_session(places.workspace_path().to_str().expect("UTF-8 root"));
+    let load = |selection: usize| {
+        serde_json::json!({
+            "sessionId": session,
+            "cwd": places.workspace_path(),
+            "mcpServers": [{
+                "name": "failing",
+                "command": "/bin/sh",
+                "args": [server, starts, selection.to_string()],
+                "env": []
+            }]
+        })
+    };
+    let began = std::time::Instant::now();
+    for selection in 0..64 {
+        let response = host.request("session/load", load(selection));
+        assert!(response["error"].is_object(), "{response}");
+    }
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(60),
+        "fill must finish inside the initial backoff"
+    );
+    let repeated = host.request("session/load", load(0));
+    assert!(
+        repeated["error"]["data"]
+            .as_str()
+            .is_some_and(|message| message.contains("retry later")),
+        "an existing failed selection must keep its backoff at capacity: {repeated}"
+    );
+    let requests = std::fs::read_to_string(&starts).expect("failed starts recorded");
+    assert_eq!(
+        requests.lines().count(),
+        64,
+        "a full cache must not restart an existing selection"
+    );
+
+    let added = host.request("session/load", load(64));
+    assert!(added["error"].is_object(), "{added}");
+    let evicted = host.request("session/load", load(0));
+    assert!(evicted["error"].is_object(), "{evicted}");
+    host.finish();
+    let requests = std::fs::read_to_string(starts).expect("evicted selection starts again");
+    let selections: Vec<_> = requests.lines().collect();
+    let expected: Vec<_> = (0..65)
+        .chain(std::iter::once(0))
+        .map(|selection| selection.to_string())
+        .collect();
+    assert_eq!(
+        selections, expected,
+        "a new selection must evict the oldest inactive failure"
+    );
 }
