@@ -107,9 +107,23 @@ unknown and fails closed where needed. Image bytes enter session blobs before
 provider-specific encoding; selecting a model without image support refuses them.
 
 Subscription metering, local unmetered work, and known API pricing are different.
-Unknown monetary cost does not become USD 0. A monetary ceiling requires a usable
-quote; a token ceiling does not invent one. See
+Unknown monetary cost does not become USD 0. With a monetary cap, unpriced
+generations can run while cap headroom remains. The cap covers known and
+estimable spend only; without a usable price there is no monetary reservation
+and no finite monetary bound for that work. Admission still stops when
+committed spend plus outstanding reservations reaches the cap.
+
+A durable cost-anomaly notice appears once per session/model, including after
+resume. If actual cost is unknown but a reserved estimate exists, that estimate
+counts against the cap without being reported as known actual cost. A later
+known actual cost from an unpriced generation also counts against the cap.
+Subscription and local metering remain distinct from unknown API prices;
+a token ceiling does not invent a monetary quote. See
 [configuration](../reference/configuration.md) for every model/pricing field.
+
+Sources: [budget admission and settlement](../../crates/ego-core/src/budget.rs),
+[durable notice deduplication](../../crates/ego-core/src/turn/journal.rs), and
+[budget regression coverage](../../crates/ego-core/tests/budget.rs).
 
 Sources and existing coverage: [model selection](../../crates/ego-cli/src/model.rs),
 [authentication](../../crates/ego-cli/src/auth.rs),
