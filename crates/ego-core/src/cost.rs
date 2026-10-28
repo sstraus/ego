@@ -38,6 +38,62 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::event::time::Timestamp;
 
+/// Credential-safe reason a price source could not supply a quote.
+///
+/// Closed variants keep arbitrary upstream bodies, URLs, model keys and local
+/// filesystem errors out of durable, public and exported notices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingUnavailable {
+    OfflineNoCache,
+    OfflineStaleCache,
+    OfflineInvalidCache,
+    FetchFailed,
+    InvalidTable,
+    InvalidRate,
+    ConflictingRates,
+    MissingRow,
+    CacheUnavailable,
+    UnidentifiedTable,
+}
+
+impl fmt::Display for PricingUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OfflineNoCache => {
+                "offline with no cached price table; fetch prices online or configure a quote"
+            }
+            Self::OfflineStaleCache => {
+                "offline with an expired price table; refresh prices online or configure a quote"
+            }
+            Self::OfflineInvalidCache => {
+                "offline with an unusable pricing cache; repair the cache or configure a quote"
+            }
+            Self::FetchFailed => {
+                "price table fetch failed; check network access or configure a quote"
+            }
+            Self::InvalidTable => {
+                "price source is not a valid table; refresh the table or configure a quote"
+            }
+            Self::InvalidRate => {
+                "price table contains an invalid rate; correct the table or configure a quote"
+            }
+            Self::ConflictingRates => {
+                "price table contains conflicting rates; correct the table or configure a quote"
+            }
+            Self::MissingRow => {
+                "price table has no matching model row; update the table or configure a quote"
+            }
+            Self::CacheUnavailable => {
+                "pricing cache cannot be read or written; check cache access or configure a quote"
+            }
+            Self::UnidentifiedTable => {
+                "price table has no upstream validator; check the proxy or configure a quote"
+            }
+        })
+    }
+}
+
 /// The most fractional decimal digits an [`Amount`] may carry.
 ///
 /// Twelve places is far below the point where `u128` overflows and far above

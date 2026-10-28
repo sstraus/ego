@@ -2414,6 +2414,7 @@ mod turn {
                     generator: self.generator.clone(),
                     capabilities,
                     metering: self.metering.clone(),
+                    pricing_unavailable: None,
                     rates: self.rates.clone(),
                 },
             )))
@@ -8902,6 +8903,7 @@ mod turn {
                 }),
                 capabilities,
                 metering: metering(),
+                pricing_unavailable: None,
                 rates: Some(rates()),
             };
             assert_eq!(profile.output_ceiling(), settings.output_ceiling);

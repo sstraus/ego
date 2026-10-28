@@ -48,7 +48,7 @@ use ego_ai::http::Http;
 use ego_ai::pricing::{self, FetchError, Fetched, Table, TableError};
 use ego_core::budget::{BudgetGate, Ledger, ResolvedRates};
 use ego_core::ceiling::Ceilings;
-use ego_core::cost::{CurrencyCode, Money, PricingRevision};
+use ego_core::cost::{CurrencyCode, Money, PricingRevision, PricingUnavailable};
 use ego_core::event::time::Timestamp;
 use ego_tools::pricing::{CacheError, Cached, PricingCache};
 use ego_tools::store::StoreIo;
@@ -96,15 +96,8 @@ pub struct TableSource<'a> {
     pub io: &'a dyn StoreIo,
     pub ego_home: &'a Path,
     pub http: &'a Arc<dyn Http>,
-    /// Whether `--offline` was asked for.
-    ///
-    /// **Carried rather than inferred from the transport's refusal**, because
-    /// §7 indexes its outcomes by *posture* and gives two of them different
-    /// exit codes: `--offline` with nothing cached is a self-contradictory
-    /// invocation and takes exit 2, while a failed fetch while online is a
-    /// network failure and takes the exit `CLI.md:211-212` reserves for what a
-    /// script retries. Reading that distinction back out of an `HttpError`
-    /// would be recovering a fact the caller already had.
+    /// Whether `--offline` was asked for. Kept explicitly so the notice can
+    /// distinguish a forbidden fetch from a failed online exchange.
     pub offline: bool,
     pub now: Timestamp,
     /// How old a table may be and still bound a ceiling.
@@ -116,28 +109,21 @@ pub struct TableSource<'a> {
 
 /// Why a ceiling could not be given rates to rest on.
 ///
-/// These diagnostics do not refuse generation. A missing row names the provider and model
-/// so the operator can distinguish an unlisted model from a failed fetch.
+/// Model resolution turns these errors into a safe notice cause, not a refusal.
+/// Raw source errors remain local; only the closed category crosses the notice boundary.
 #[derive(Debug)]
 pub enum NoRates {
     MissingRow {
         provider: String,
         model: String,
     },
-    /// `--offline`, and nothing usable is cached.
-    ///
-    /// §7's exit 2: the operator asked for an air-gapped posture *and* for a
-    /// guarantee that needs the network, so the command line is what must
-    /// change. Carries what the cache said so the message can distinguish "no
-    /// table has ever been fetched here" from "the one here is too old".
+    /// `--offline`, and nothing usable is cached. The cache category tells
+    /// the operator whether to fetch a first table, refresh it, or repair it.
     Offline {
         cache: CacheError,
     },
-    /// Online, and the fetch did not produce a table.
-    ///
-    /// §7's exit 4, reached only when nothing usable was cached — a fresh
-    /// cache is used without a fetch at all, so there is no "fetch failed but
-    /// we carried on" case for this build to report.
+    /// Online, and the fetch did not produce a table. A fresh cache avoids
+    /// fetching altogether.
     Fetch {
         source: FetchError,
     },
@@ -155,23 +141,44 @@ pub enum NoRates {
     },
 }
 
-impl fmt::Display for NoRates {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NoRates::MissingRow { provider, model } => write!(
-                f,
-                "NoPricingQuote: missing price row provider={provider}, model={model}, mode=chat; configure a quote or update the price table"
-            ),
-            NoRates::Offline { cache } => write!(
-                f,
-                "a money ceiling needs prices and --offline forbids fetching them: {cache}"
-            ),
-            NoRates::Fetch { source } => write!(f, "{source}"),
-            NoRates::Table { source } => write!(f, "the cached price table is unusable: {source}"),
-            NoRates::Cache { source } => {
-                write!(f, "the price table cache: {cache}", cache = source)
+impl NoRates {
+    /// Retain the actionable category, never raw source text or identifiers.
+    pub fn cause(&self) -> PricingUnavailable {
+        fn table(source: &TableError) -> PricingUnavailable {
+            match source {
+                TableError::NotATable { .. } => PricingUnavailable::InvalidTable,
+                TableError::NoEntry { .. } => PricingUnavailable::MissingRow,
+                TableError::Rate { .. } => PricingUnavailable::InvalidRate,
+                TableError::Contradiction { .. } => PricingUnavailable::ConflictingRates,
             }
         }
+        match self {
+            Self::MissingRow { .. } => PricingUnavailable::MissingRow,
+            Self::Offline {
+                cache: CacheError::Empty,
+            } => PricingUnavailable::OfflineNoCache,
+            Self::Offline {
+                cache: CacheError::Stale { .. },
+            } => PricingUnavailable::OfflineStaleCache,
+            Self::Offline { .. } => PricingUnavailable::OfflineInvalidCache,
+            Self::Fetch {
+                source: FetchError::Unreachable { .. },
+            } => PricingUnavailable::FetchFailed,
+            Self::Fetch {
+                source: FetchError::NotATable { source },
+            } => table(source),
+            Self::Fetch {
+                source: FetchError::Unidentified { .. },
+            } => PricingUnavailable::UnidentifiedTable,
+            Self::Table { source } => table(source),
+            Self::Cache { .. } => PricingUnavailable::CacheUnavailable,
+        }
+    }
+}
+
+impl fmt::Display for NoRates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.cause(), f)
     }
 }
 
@@ -204,20 +211,6 @@ impl TableSource<'_> {
         model: &ResolvedModel,
         ledger: &Ledger,
     ) -> Result<Option<ResolvedRates>, NoRates> {
-        match self.try_rates(model, ledger).await {
-            Ok(rates) => Ok(rates),
-            Err(error) => {
-                tracing::debug!(%error, "price source unavailable; admitting without a quote");
-                Ok(None)
-            }
-        }
-    }
-
-    async fn try_rates(
-        &self,
-        model: &ResolvedModel,
-        ledger: &Ledger,
-    ) -> Result<Option<ResolvedRates>, NoRates> {
         if !model.metering.ceiling_needs_rates(ledger) {
             return Ok(None);
         }
@@ -238,7 +231,13 @@ impl TableSource<'_> {
 
         if self.offline {
             return Err(NoRates::Offline {
-                cache: held.err().unwrap_or(CacheError::Empty),
+                cache: match held {
+                    Ok(cached) => CacheError::Stale {
+                        age: self.age(&cached),
+                        max_age: self.max_age,
+                    },
+                    Err(error) => error,
+                },
             });
         }
         self.refresh(model, held.ok()).await
@@ -324,8 +323,8 @@ impl TableSource<'_> {
                     rates
                 }))
             }
-            // Keep the source diagnostic; rates() degrades unavailable pricing
-            // to no quote so the gate can admit with a durable anomaly notice.
+            // Model resolution carries this cause into the durable anomaly notice
+            // while leaving admission to the permissive budget gate.
             Err(TableError::NoEntry { provider, model }) => {
                 Err(NoRates::MissingRow { provider, model })
             }

@@ -589,6 +589,7 @@ impl ego_core::generation_model_source::GenerationModelSource for GeneratorSourc
                 metering: Metering::Unmetered {
                     revision: MeteringRevision("regression_case".to_owned()),
                 },
+                pricing_unavailable: None,
                 rates: None,
             },
         )))

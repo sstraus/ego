@@ -563,6 +563,8 @@ pub enum EventKind {
     CostAnomaly {
         model: String,
         estimated_upper_bound: Option<crate::cost::Money>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<crate::cost::PricingUnavailable>,
     },
     /// One attempt's usage was reported (added to the running totals),
     /// together with what it cost.

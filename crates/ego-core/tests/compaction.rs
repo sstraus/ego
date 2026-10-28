@@ -473,7 +473,7 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 
 #[test]
 fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_authority_low() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 17);
+    assert_eq!(PUBLIC_EVENT_VERSION, 18);
     let source: SessionId =
         serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let seeded = seeded_event(EventKind::CompactionSeeded {
@@ -917,6 +917,7 @@ fn compaction_profile(
             metering: Metering::Unmetered {
                 revision: MeteringRevision("regression_case".to_string()),
             },
+            pricing_unavailable: None,
             rates: None,
         },
         generator,

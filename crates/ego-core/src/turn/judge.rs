@@ -77,7 +77,12 @@ impl JudgeGeneration<'_, '_, '_> {
         if reservation.upper_bound().is_none()
             && matches!(profile.metering, crate::budget::Metering::Currency { .. })
         {
-            self.journal.cost_anomaly(turn, &profile.identity.0, None)?;
+            self.journal.cost_anomaly(
+                turn,
+                &profile.identity.0,
+                None,
+                profile.pricing_unavailable,
+            )?;
         }
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
@@ -160,8 +165,12 @@ impl JudgeGeneration<'_, '_, '_> {
         };
         failure.map_or(Ok(()), Err)?;
         if !settlement.reconciled.exact {
-            self.journal
-                .cost_anomaly(turn, &profile.identity.0, settlement.reconciled.charged)?;
+            self.journal.cost_anomaly(
+                turn,
+                &profile.identity.0,
+                settlement.reconciled.charged,
+                profile.pricing_unavailable,
+            )?;
         }
         self.journal.append(
             turn,

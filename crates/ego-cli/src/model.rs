@@ -718,12 +718,13 @@ impl CliGenerationModelSource {
                 .ledger()
                 .clone()
         });
+        let mut pricing_unavailable = None;
         if let Some(ledger) = ledger.filter(|ledger| {
             resolved.metering.ceiling_needs_rates(ledger) && resolved.rates.is_none()
         }) {
             use ego_core::event::time::Clock;
             if let Some(home) = crate::config::ego_home() {
-                resolved.rates = crate::budget::TableSource {
+                let result = crate::budget::TableSource {
                     io: &ego_tools::store::OsIo,
                     ego_home: &home,
                     http,
@@ -732,8 +733,11 @@ impl CliGenerationModelSource {
                     max_age: ego_tools::pricing::MAX_AGE,
                 }
                 .rates(&resolved, &ledger)
-                .await
-                .unwrap_or(None);
+                .await;
+                match result {
+                    Ok(rates) => resolved.rates = rates,
+                    Err(error) => pricing_unavailable = Some(error.cause()),
+                }
             }
         }
         if matches!(provider_id, "openai" | "anthropic")
@@ -825,6 +829,7 @@ impl CliGenerationModelSource {
             capabilities: resolved.capabilities,
             metering: resolved.metering,
             rates: resolved.rates,
+            pricing_unavailable,
         })
     }
 }

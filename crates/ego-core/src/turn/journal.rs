@@ -217,6 +217,7 @@ impl<'s> SharedJournal<'s> {
         turn: TurnId,
         model: &str,
         estimated_upper_bound: Option<crate::cost::Money>,
+        cause: Option<crate::cost::PricingUnavailable>,
     ) -> Result<(), SharedJournalError> {
         let mut journal = self.lock()?;
         if !journal.state.cost_anomaly_models.contains(model) {
@@ -227,6 +228,7 @@ impl<'s> SharedJournal<'s> {
                 EventKind::CostAnomaly {
                     model: model.to_owned(),
                     estimated_upper_bound,
+                    cause,
                 },
             )?;
         }

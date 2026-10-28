@@ -12,6 +12,7 @@ fn cost_anomaly_reaches_the_acp_client_as_visible_text() {
         turn: TurnId::new(),
         model: "openrouter/z-ai/glm-4.7-flash".to_owned(),
         estimated_upper_bound: None,
+        cause: Some(ego_core::cost::PricingUnavailable::OfflineNoCache),
     };
     for update in [
         project_v1(&event).map(|update| serde_json::to_value(update).unwrap()),
@@ -21,6 +22,7 @@ fn cost_anomaly_reaches_the_acp_client_as_visible_text() {
         let text = update["content"]["text"].as_str().unwrap();
         assert!(text.contains("openrouter/z-ai/glm-4.7-flash"));
         assert!(text.contains("cap"));
+        assert!(text.contains("offline with no cached price table"));
     }
 }
 

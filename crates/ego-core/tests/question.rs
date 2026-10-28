@@ -281,7 +281,7 @@ fn valid_resume_settles_the_same_turn_and_completes_the_pure_tool_result() {
 
 #[test]
 fn public_question_item_and_headless_report_are_structured_and_versioned() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 17);
+    assert_eq!(PUBLIC_EVENT_VERSION, 18);
     assert_eq!(CODEC_VERSION, 12);
 
     let turn = TurnId::new();
