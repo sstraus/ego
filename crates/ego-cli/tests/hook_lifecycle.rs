@@ -4,6 +4,8 @@
 //! adapter are the production owners exercised here. No CLI lifecycle wrapper
 //! is created in the test.
 
+mod support;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -279,14 +281,26 @@ impl HookInvocationPort for ObserverFailurePort {
 }
 
 #[derive(Default)]
-struct RuntimeStore;
+struct RuntimeStore {
+    refuse_selection: bool,
+}
 
 impl SessionStore for RuntimeStore {
     fn append(
         &self,
         _id: &SessionId,
-        _event: &ego_core::event::domain::DomainEvent,
+        event: &ego_core::event::domain::DomainEvent,
     ) -> Result<(), StoreError> {
+        if self.refuse_selection
+            && matches!(
+                event.kind,
+                ego_core::event::domain::EventKind::SessionSelectionsSelected { .. }
+            )
+        {
+            return Err(StoreError::Io(std::io::Error::other(
+                "selection append refused",
+            )));
+        }
         Ok(())
     }
 
@@ -324,8 +338,15 @@ fn runtime<P>(port: P) -> SessionHookRuntime<'static>
 where
     P: HookInvocationPort + 'static,
 {
+    runtime_with_store(port, RuntimeStore::default())
+}
+
+fn runtime_with_store<P>(port: P, store: RuntimeStore) -> SessionHookRuntime<'static>
+where
+    P: HookInvocationPort + 'static,
+{
     let session = SessionId::new();
-    let store: &'static RuntimeStore = Box::leak(Box::new(RuntimeStore));
+    let store: &'static RuntimeStore = Box::leak(Box::new(store));
     let clock: &'static FixedClock = Box::leak(Box::new(FixedClock));
     let sink: &'static NullSink = Box::leak(Box::new(NullSink));
     let journal = SharedJournal::new(Journal::new(
@@ -743,6 +764,27 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
     });
     let blocked_port = BlockingPort::default();
     let blocked = runtime(blocked_port.clone());
+    let blocked_state = blocked.hook_state();
+    let previous = ego_core::run::RunSelections::new(
+        Some(ModelRef("openai/old".to_owned())),
+        Some(ThinkingLevel::Medium),
+        Some(ego_core::config::Mode::Plan),
+        None,
+        None,
+    )
+    .with_sandbox(ego_core::permit::Confinement::Workspace)
+    .with_trust(Trust::Trusted);
+    blocked_state
+        .journal()
+        .append(
+            TurnId::new(),
+            None,
+            None,
+            ego_core::event::domain::EventKind::SessionSelectionsSelected {
+                selections: previous.clone(),
+            },
+        )
+        .unwrap();
     let blocked_request = staged_request(Arc::clone(&blocked_selection), blocked_config.clone());
     let blocked_owner = RunModelSwitchOwner::new(
         Arc::clone(&blocked_selection),
@@ -761,6 +803,11 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
         ModelRef("openai/old".to_owned())
     );
     assert_eq!(blocked_config.publications(), 0);
+    assert_eq!(
+        blocked_state.state().session_selections,
+        Some(previous.clone()),
+        "blocked switches must not change resume selections"
+    );
 
     let observed_selection = Arc::new(GenerationSelection::new(
         ModelRef("openai/old".to_owned()),
@@ -772,6 +819,18 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
     });
     let observer_port = ObserverFailurePort::default();
     let observer_failure = runtime(observer_port.clone());
+    let observer_state = observer_failure.hook_state();
+    observer_state
+        .journal()
+        .append(
+            TurnId::new(),
+            None,
+            None,
+            ego_core::event::domain::EventKind::SessionSelectionsSelected {
+                selections: previous,
+            },
+        )
+        .unwrap();
     let observer_request = staged_request(Arc::clone(&observed_selection), observed_config.clone());
     let observer_owner = RunModelSwitchOwner::new(
         Arc::clone(&observed_selection),
@@ -791,6 +850,19 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
         "observer failure cannot roll back durable commit"
     );
     assert_eq!(observed_config.publications(), 1);
+    let recorded = observer_state.state().session_selections.unwrap();
+    assert_eq!(recorded.model(), Some(&ModelRef("openai/new".to_owned())));
+    assert_eq!(
+        recorded.thinking(),
+        Some(ThinkingLevel::Off),
+        "observer errors cannot revert committed resume selections"
+    );
+    assert_eq!(recorded.mode(), Some(ego_core::config::Mode::Plan));
+    assert_eq!(
+        recorded.sandbox(),
+        Some(ego_core::permit::Confinement::Workspace)
+    );
+    assert_eq!(recorded.trust(), Some(Trust::Trusted));
 }
 
 fn staged_request(
@@ -865,4 +937,184 @@ fn direct_mcp_scope_keeps_runtime_owner_and_sessionless_controller_access() {
         Arc::ptr_eq(controller, runtime.controller()),
         "the controller comes from the process scope's sole runtime owner"
     );
+}
+
+// Catches: launch selections override an installed session-only switch on resume.
+#[test]
+fn resume_uses_last_successful_session_model_switch() {
+    use support::{Ego, Plan, Reply, Stub, text};
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let stub = Stub::start(Plan {
+        installed: vec!["qwen3".to_owned(), "switched".to_owned()],
+        completions: vec![Reply::Sse(text("first")), Reply::Sse(text("resumed"))],
+        ..Plan::default()
+    });
+    let id = "c2b477a4-14bc-4a31-9a9e-2147810e0632";
+    let first = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--thinking",
+            "off",
+            "--session-id",
+            id,
+            "--session-dir",
+            sessions.path().to_str().unwrap(),
+            "first",
+        ])
+        .run();
+    assert_eq!(first.code, Some(0), "{} {}", first.stdout, first.stderr);
+    {
+        let store = ego_tools::store::JsonlStore::new(
+            sessions.path().to_owned(),
+            workspace.path().canonicalize().unwrap(),
+            Box::new(ego_tools::store::OsIo),
+        );
+        let clock = ego_tools::clock::SystemClock;
+        let sink = NullSink;
+        let session: SessionId = id.parse().unwrap();
+        let opened = ego_cli::session::open(&store, &session, &clock).unwrap();
+        let journal = SharedJournal::new(Journal::new(
+            session,
+            &opened.writer,
+            &clock,
+            &sink,
+            ego_core::event::id::Producer::Main,
+            opened.state.clone(),
+        ));
+        let hooks = SessionHookState::new(
+            HookLifecycleDispatcher::new(
+                HookRunner::new(),
+                HookCatalogue::admit_typed(&[], &[], Trust::Trusted).unwrap(),
+            ),
+            journal,
+            CancelToken::new(),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .bind(Arc::new(RecordingPort::default()));
+        let selection = Arc::new(GenerationSelection::new(
+            ModelRef("ollama/qwen3".into()),
+            ThinkingLevel::Off,
+        ));
+        let config = Arc::new(ConfigStore {
+            selection: selection.clone(),
+            publications: Arc::new(Mutex::new(0)),
+        });
+        let provenance = ModelFactProvenance::supplied(SuppliedAuthority::System);
+        let snapshot = Arc::new(ModelCatalogueSnapshot::from_entries_and_sources(
+            vec![ModelCatalogueEntry {
+                slug: ModelSlug::parse("ollama/switched").unwrap(),
+                capabilities: capabilities(),
+                metering: ego_core::public::MeteringKind::Currency,
+                provenance,
+                freshness: FactFreshness::Current,
+                availability: ModelAvailability::Available,
+            }],
+            vec![],
+        ));
+        let mut picker = ModelPicker::for_selection(snapshot, selection.clone(), config.clone());
+        ActionSink::invoke(
+            &mut picker,
+            LocalAction {
+                id: ActionId::Model,
+                busy: false,
+            },
+        );
+        picker.input(PickerInput::Number(1)).unwrap();
+        picker.input(PickerInput::Enter).unwrap();
+        picker.input(PickerInput::Number(1)).unwrap();
+        let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+            picker.input(PickerInput::SessionOnly).unwrap()
+        else {
+            panic!("session-only request")
+        };
+        let owner = RunModelSwitchOwner::new(selection, config.clone(), hooks, TurnId::new(), None);
+        futures::executor::block_on(owner.apply(request)).unwrap();
+        assert_eq!(
+            config.publications(),
+            0,
+            "session choice must not change user defaults"
+        );
+    }
+    // A changed user default must not replace the switched effort on resume.
+    std::fs::write(home.path().join("config.toml"), "thinking = 'high'\n").unwrap();
+    let resumed = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("resume")
+        .args([
+            id,
+            "--session-dir",
+            sessions.path().to_str().unwrap(),
+            "resumed",
+        ])
+        .run();
+    assert_eq!(
+        resumed.code,
+        Some(0),
+        "{} {}",
+        resumed.stdout,
+        resumed.stderr
+    );
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["model"], "switched");
+    assert_eq!(
+        requests[1]["reasoning_effort"], "none",
+        "resume must retain the switched off effort"
+    );
+    let overridden = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("resume")
+        .args([
+            id,
+            "--session-dir",
+            sessions.path().to_str().unwrap(),
+            "--model",
+            "ollama/qwen3",
+            "--thinking",
+            "low",
+            "explicit override",
+        ])
+        .run();
+    assert_eq!(
+        overridden.code,
+        Some(0),
+        "{} {}",
+        overridden.stdout,
+        overridden.stderr
+    );
+    let requests = stub.generations();
+    assert_eq!(requests[2]["model"], "qwen3");
+    assert_eq!(requests[2]["reasoning_effort"], "low");
+}
+
+// Catches: a failed journal commit still installs a model that resume cannot recover.
+#[test]
+fn model_switch_append_failure_preserves_active_and_durable_selection() {
+    let selection = Arc::new(GenerationSelection::new(
+        ModelRef("openai/old".to_owned()),
+        ThinkingLevel::Medium,
+    ));
+    let config = Arc::new(ConfigStore {
+        selection: selection.clone(),
+        publications: Arc::new(Mutex::new(0)),
+    });
+    let hooks = runtime_with_store(
+        RecordingPort::default(),
+        RuntimeStore {
+            refuse_selection: true,
+        },
+    );
+    let state = hooks.hook_state();
+    let request = staged_request(selection.clone(), config.clone());
+    let owner = RunModelSwitchOwner::new(selection.clone(), config, hooks, TurnId::new(), None);
+    let error = futures::executor::block_on(owner.apply(request)).unwrap_err();
+    assert!(
+        error.to_string().contains("selection append refused"),
+        "{error}"
+    );
+    let selected = selection.snapshot().unwrap();
+    assert_eq!(selected.identity, ModelRef("openai/old".to_owned()));
+    assert_eq!(selected.thinking, ThinkingLevel::Medium);
+    assert!(state.state().session_selections.is_none());
 }

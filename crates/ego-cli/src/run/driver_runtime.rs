@@ -58,13 +58,19 @@ async fn admit_saved_session_policy(
 fn record_session_selections(
     active: &mut ActiveSession<'_>,
     effective: &Effective,
+    selection: &model::GenerationSelection,
     confinement: &RunConfinement,
     clock: &SystemClock,
     sink: &dyn EventSink,
 ) -> Result<(), RunTermination> {
+    let selected = selection
+        .snapshot()
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
     let selections = RunSelections::new(
-        effective.model.clone(),
-        None,
+        Some(selected.identity),
+        selected.explicit_thinking,
         Some(effective.mode.unwrap_or(Mode::Default)),
         None,
         None,
@@ -434,7 +440,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                 None,
             )
             .await?;
-            record_session_selections(&mut active, &effective, &confinement, &clock, sink)?;
+            record_session_selections(
+                &mut active,
+                &effective,
+                &selection,
+                &confinement,
+                &clock,
+                sink,
+            )?;
             let opening = active.state().clone();
             let pause = PauseToken::default();
             let driven = drive_headless_turn(
@@ -583,7 +596,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                         human.as_ref().map(|human| human as &dyn HumanApprover),
                     )
                     .await?;
-                    record_session_selections(&mut active, &effective, &confinement, &clock, sink)?;
+                    record_session_selections(
+                        &mut active,
+                        &effective,
+                        &selection,
+                        &confinement,
+                        &clock,
+                        sink,
+                    )?;
                     perimeter =
                         perimeter.with_execution_observation(&observation, probe_evidence.as_ref());
                     let (recovered_epoch_policy, session_policy) =
@@ -4376,5 +4396,61 @@ mod pid_index_tests {
         )
         .unwrap();
         assert_eq!(after["session_id"], active.writer.id().to_string());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    // Catches: a later interactive epoch journals launch Effective over the live switch.
+    #[test]
+    fn epoch_selections_follow_live_model_instead_of_launch_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(
+            root.path().to_owned(),
+            root.path().to_owned(),
+            Box::new(ego_tools::store::OsIo),
+        );
+        let id = SessionId::new();
+        let clock = SystemClock;
+        let opened = session::open(&store, &id, &clock).unwrap();
+        let mut active = ActiveSession::durable(opened, SessionState::default(), 1024).unwrap();
+        let mut effective = ego_core::config::resolve(&[], Trust::Trusted, None).unwrap();
+        effective.model = Some(ModelRef("ollama/launch".to_owned()));
+        effective.thinking = Some(ThinkingLevel::Low);
+        let selection = model::GenerationSelection::new(
+            ModelRef("ollama/launch".to_owned()),
+            ThinkingLevel::Low,
+        );
+        let confinement =
+            RunConfinement::new(Confinement::Off, false, CanonPath::new(root.path())).unwrap();
+        record_session_selections(
+            &mut active,
+            &effective,
+            &selection,
+            &confinement,
+            &clock,
+            &NullSink,
+        )
+        .unwrap();
+        selection
+            .install(ModelRef("ollama/switched".to_owned()), ThinkingLevel::High)
+            .unwrap();
+        record_session_selections(
+            &mut active,
+            &effective,
+            &selection,
+            &confinement,
+            &clock,
+            &NullSink,
+        )
+        .unwrap();
+        let recorded = active.state().session_selections.as_ref().unwrap();
+        assert_eq!(
+            recorded.model(),
+            Some(&ModelRef("ollama/switched".to_owned()))
+        );
+        assert_eq!(recorded.thinking(), Some(ThinkingLevel::High));
     }
 }
