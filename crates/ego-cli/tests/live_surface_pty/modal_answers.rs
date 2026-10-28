@@ -12,6 +12,11 @@ fn modal_unknown_slash_answer_reaches_question() {
     .to_string();
     let (generations, _) = question_session(&call, |input, reader, output| {
         until_normalized(reader, output, 0, "Which absolute path?\n");
+        // Registered aliases are commands, not free-text answers.
+        let start = output.len();
+        input.write_all(b"/history path\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(reader, output, start, "unavailable while a question");
         input.write_all(b"/etc/hosts\r").unwrap();
         input.flush().unwrap();
     });
@@ -27,10 +32,7 @@ fn modal_unknown_slash_answer_reaches_question() {
 // Catches: Enter on a prefilled absolute cwd is discarded instead of preserving the amendment.
 #[test]
 fn modal_prefilled_absolute_path_is_preserved() {
-    let mut session = modal_session((
-        "exec",
-        r#"{"argv":["pwd"],"cwd":"/","timeout_ms":5000}"#,
-    ));
+    let mut session = modal_session(("exec", r#"{"argv":["pwd"],"cwd":"/","timeout_ms":5000}"#));
     session.press(b"use the tools\r");
     session.wait("[d] details");
     session.press(b"e");
@@ -43,7 +45,11 @@ fn modal_prefilled_absolute_path_is_preserved() {
     session.wait("background: ");
     session.press(b"false\r");
     session.wait("[d] details");
-    assert_eq!(session.stub.generations().len(), 1, "the amendment must ask again");
+    assert_eq!(
+        session.stub.generations().len(),
+        1,
+        "the amendment must ask again"
+    );
     session.press(b"y");
     session.wait(TOOL_TURN_DONE);
     let (generations, _) = session.finish();
