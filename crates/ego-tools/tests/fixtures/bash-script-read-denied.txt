@@ -1,0 +1,1 @@
+/bin/bash: /home/example/workspace Operation not permitted

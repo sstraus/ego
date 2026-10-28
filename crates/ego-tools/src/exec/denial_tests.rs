@@ -419,6 +419,89 @@ fn reading_executable_script_still_offers_read_authority() {
     );
 }
 
+// Catches: a shell opening a +x script operand is mistaken for a launch
+// refusal, suppressing exact-path Read and the unattended recovery note.
+#[cfg(unix)]
+#[test]
+fn executable_script_operand_read_denial_offers_read_grant() {
+    use ego_core::permit::{
+        CanonPath, Confinement, RunConfinement, SandboxAccess, StreamProvenance, ToolContentBlock,
+        ToolOutputEncoding, ToolOutputProvenance, ToolResult,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let script = base.join("executable-script.sh");
+    std::fs::write(&script, "#!/bin/bash\nprintf 'SCRIPT-RAN\\n'\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Recorded from a real denied /bin/bash <script> invocation on macOS,
+    // 2026-10-28. Only the temporary path is relocated for this test.
+    let recorded = include_str!("../../tests/fixtures/bash-script-read-denied.txt");
+    let recorded_path = super::printed_path(recorded.trim_end()).unwrap();
+    let result = ToolResult::new(vec![ToolContentBlock {
+        text: recorded.replace(recorded_path, script.to_str().unwrap()),
+        provenance: ToolOutputProvenance::Process {
+            stream: StreamProvenance::Stderr,
+            encoding: ToolOutputEncoding::Utf8,
+            truncated: false,
+            omitted_bytes: 0,
+        },
+        full_output: None,
+    }]);
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    for operand in [
+        script.clone(),
+        std::path::PathBuf::from("../executable-script.sh"),
+    ] {
+        for separator in [false, true] {
+            let mut argv = vec!["/bin/bash".into()];
+            if separator {
+                argv.push("--".into());
+            }
+            argv.push(operand.clone().into_os_string());
+            let spec = SpawnSpec::new(
+                argv,
+                Some(CanonPath::new(&workspace)),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .unwrap();
+            let denied = super::analyze(&spec, &result, &policy, &[]).unwrap();
+            let request = denied.request.as_ref().expect("exact script read request");
+            assert_eq!(request.path, CanonPath::new(&script));
+            assert_eq!(request.access, SandboxAccess::Read);
+            let note = super::note(&denied, &policy, super::Outcome::NobodyToAsk);
+            assert!(note.contains("no one was available"), "{note}");
+            assert!(!note.contains("exec denied"), "{note}");
+            let granted = [request.clone()];
+            assert!(
+                super::analyze(&spec, &result, &policy, &granted)
+                    .unwrap()
+                    .request
+                    .is_none(),
+                "a read allowance must not escalate into an executable write"
+            );
+            // A bad-interpreter diagnostic is launch evidence even when
+            // the invocation also names the script as a direct operand.
+            let mut bad_interpreter = result.clone();
+            bad_interpreter.content[0].text = format!(
+                "/bin/bash: {}: /usr/bin/env: bad interpreter: Operation not permitted",
+                script.display()
+            );
+            assert!(
+                super::analyze(&spec, &bad_interpreter, &policy, &[])
+                    .unwrap()
+                    .request
+                    .is_none(),
+                "bad-interpreter launch refusals must remain fail-closed"
+            );
+        }
+    }
+}
+
 fn executable_refusal_fixture(bad_interpreter: bool) {
     use ego_core::permit::{
         CanonPath, Confinement, ProfileRoot, RootAccess, RunConfinement, SandboxAccess,
