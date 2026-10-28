@@ -1,6 +1,7 @@
 //! Adapt run policy to external effects, hooks, children, and skills.
 
 use super::*;
+use ego_core::event::time::Clock;
 
 /// The wall-clock wait between two attempts of one generation plan.
 pub(super) struct TokioRetryPause;
@@ -683,6 +684,21 @@ impl ChildHost for CliChildHost {
     }
 }
 
+struct BackgroundTaskSinkFactory(repl::BackgroundActivity);
+
+impl ego_core::run::EventSinkFactory for BackgroundTaskSinkFactory {
+    fn create(&self, _: &ModelCapabilities) -> Arc<dyn EventSink> {
+        Arc::new(self.0.clone())
+    }
+}
+
+impl EventSink for repl::BackgroundActivity {
+    fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        let activity = ego_core::turn::child_activity(event);
+        self.progress(activity.as_deref(), state.usage.output_tokens);
+    }
+}
+
 pub(super) struct CliChildSinkFactory;
 
 impl ego_core::run::EventSinkFactory for CliChildSinkFactory {
@@ -787,6 +803,7 @@ pub(super) struct CliSkillInvocationOwner<'a> {
     pub(super) task_policy: Option<ego_core::turn::GenerationPolicyDigest>,
     token_family: Option<(Arc<JsonlStore>, SessionId)>,
     task_refresh: futures::lock::Mutex<()>,
+    task_surface: Option<repl::BackgroundTaskSurface>,
     pub(super) tasks: Mutex<BTreeMap<SubagentInvocationId, BackgroundTask>>,
 }
 
@@ -808,7 +825,76 @@ impl<'a> CliSkillInvocationOwner<'a> {
             task_policy: None,
             token_family: None,
             task_refresh: futures::lock::Mutex::new(()),
+            task_surface: None,
         }
+    }
+
+    pub(super) fn with_task_surface(
+        mut self,
+        surface: Option<repl::BackgroundTaskSurface>,
+    ) -> Self {
+        self.task_surface = surface;
+        self
+    }
+
+    async fn register_task_activity(
+        &self,
+        id: SubagentInvocationId,
+        item: ItemId,
+        recovered: bool,
+    ) -> Result<(), String> {
+        let Some(surface) = &self.task_surface else {
+            return Ok(());
+        };
+        let state = self.hooks.hook_state().state();
+        let name = state
+            .items
+            .get(&item)
+            .and_then(|item| serde_json::from_str::<serde_json::Value>(&item.args).ok())
+            .and_then(|args| {
+                args.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "task".into());
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut tokens = 0;
+        if let Some((store, parent)) = &self.token_family {
+            let mut entries =
+                SessionStore::read(store.as_ref(), parent).map_err(|error| error.to_string())?;
+            let mut child = None;
+            while let Some(entry) = entries.next().await {
+                if let SessionEntry::Event(event) = entry.map_err(|error| error.to_string())?
+                    && let EventKind::SubagentSpawned {
+                        invocation,
+                        child: run,
+                    } = event.kind
+                    && invocation == id
+                {
+                    child = Some(run.session_id());
+                    // Display-only age, not accounting or event ordering. Clamp clock rollback.
+                    elapsed = std::time::Duration::from_millis(
+                        SystemClock
+                            .now()
+                            .as_millis()
+                            .saturating_sub(event.env.ts.as_millis()),
+                    );
+                }
+            }
+            if let Some(child) = child {
+                let mut state = SessionState::default();
+                let mut entries = SessionStore::read(store.as_ref(), &child)
+                    .map_err(|error| error.to_string())?;
+                while let Some(entry) = entries.next().await {
+                    if let SessionEntry::Event(event) = entry.map_err(|error| error.to_string())? {
+                        state.apply(&event);
+                    }
+                }
+                tokens = state.usage.output_tokens;
+            }
+        }
+        surface.register(id, &name, elapsed, tokens, recovered);
+        Ok(())
     }
 
     pub(super) fn with_token_family(mut self, store: Arc<JsonlStore>, session: SessionId) -> Self {
@@ -838,6 +924,7 @@ impl<'a> CliSkillInvocationOwner<'a> {
     fn launch_on(
         service: &ChildRunService,
         invocation: SubagentInvocationId,
+        activity: Option<repl::BackgroundActivity>,
     ) -> Result<Option<ChildExecutionTask>, SkillError> {
         let Some(execution) = service
             .take_execution(invocation)
@@ -847,7 +934,13 @@ impl<'a> CliSkillInvocationOwner<'a> {
         };
         let service = service.clone();
         Ok(Some(tokio::spawn(async move {
-            service.execute(execution).await
+            let result = service.execute(execution).await;
+            if let Some(activity) = activity
+                && service.is_settled(invocation).unwrap_or(false)
+            {
+                activity.settled();
+            }
+            result
         })))
     }
 
@@ -855,7 +948,7 @@ impl<'a> CliSkillInvocationOwner<'a> {
         &self,
         invocation: SubagentInvocationId,
     ) -> Result<Option<ChildExecutionTask>, SkillError> {
-        Self::launch_on(&self.service, invocation)
+        Self::launch_on(&self.service, invocation, None)
     }
 
     pub(super) async fn await_execution(
@@ -1144,7 +1237,16 @@ impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
             }
             let parent_run = authority.parent_run;
             let tools = authority.tools;
-            let service = self.service.for_background_task(parent_run);
+            let activity = self
+                .task_surface
+                .as_ref()
+                .map(|surface| surface.handle(task.invocation));
+            let factory = activity.clone().map(|activity| {
+                Arc::new(BackgroundTaskSinkFactory(activity))
+                    as Arc<dyn ego_core::run::EventSinkFactory>
+            });
+            let service = self.service.for_background_task(parent_run, factory);
+            let recovered = state.subagents.iter().any(|event| matches!(event, ego_core::state::SubagentEvent::Spawned { invocation, .. } if *invocation == task.invocation));
             if service
                 .recover_from_durable(
                     task.invocation,
@@ -1187,8 +1289,29 @@ impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            let execution =
-                Self::launch_on(&service, task.invocation).map_err(|error| error.to_string())?;
+            if !service
+                .is_settled(task.invocation)
+                .map_err(|error| error.to_string())?
+            {
+                // Display seeding errors do not revoke admitted execution or spending authority.
+                if let Err(error) = self
+                    .register_task_activity(task.invocation, task.item, recovered)
+                    .await
+                {
+                    tracing::warn!(%error, "background activity recovery failed");
+                    if let Some(surface) = &self.task_surface {
+                        surface.register(
+                            task.invocation,
+                            "task",
+                            std::time::Duration::ZERO,
+                            0,
+                            recovered,
+                        );
+                    }
+                }
+            }
+            let execution = Self::launch_on(&service, task.invocation, activity)
+                .map_err(|error| error.to_string())?;
             self.tasks
                 .lock()
                 .expect("background tasks")
@@ -1257,6 +1380,9 @@ impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
                     .clone();
                 if !service.is_settled(id).map_err(|error| error.to_string())? {
                     continue;
+                }
+                if let Some(surface) = &self.task_surface {
+                    surface.handle(id).settled();
                 }
                 let result = service
                     .collect_background(id, &self.hooks)

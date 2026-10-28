@@ -657,6 +657,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                         )
                         .with_token_family(Arc::clone(jsonl_store), active.id())
                         .with_task_blobs(active.evidence().clone())
+                        .with_task_surface(
+                            status
+                                .as_ref()
+                                .and_then(|status| status.seat.background_task_surface()),
+                        )
                         .with_task_policy(
                             policy_source
                                 .capture()

@@ -185,6 +185,47 @@ impl SessionStore for TaskStore<'_> {
     }
 }
 
+/// The shared activity vocabulary for foreground and durable child projections.
+/// Text is presentation only; consumers apply their own terminal and storage bounds.
+pub fn child_activity(event: &PublicEvent) -> Option<String> {
+    match event {
+        PublicEvent::TurnStarted { .. } => Some("Working".to_owned()),
+        PublicEvent::ItemDelta {
+            kind: crate::public::ItemKind::Reasoning,
+            ..
+        } => Some("Thinking".to_owned()),
+        PublicEvent::ItemDelta {
+            kind: crate::public::ItemKind::AgentMessage,
+            ..
+        } => Some("Responding".to_owned()),
+        PublicEvent::ItemStarted {
+            kind: crate::public::ItemKind::Tool,
+            name: Some(name),
+            text,
+            ..
+        } => {
+            let args: Value = text
+                .as_deref()
+                .and_then(|text| serde_json::from_str(text).ok())
+                .unwrap_or(Value::Null);
+            Some(match args.get("path").and_then(Value::as_str) {
+                Some(path) => format!("{name} {path}"),
+                None => name.clone(),
+            })
+        }
+        PublicEvent::ItemStarted {
+            kind: crate::public::ItemKind::Permission,
+            ..
+        } => Some("Waiting for permission".to_owned()),
+        PublicEvent::ItemCompleted {
+            kind: crate::public::ItemKind::Tool,
+            ..
+        }
+        | PublicEvent::UsageUpdated { .. } => Some("Working".to_owned()),
+        _ => None,
+    }
+}
+
 /// The parent journal serializes publication to the existing terminal writer.
 /// No child transcript is appended to the parent conversation.
 struct TaskSink<'s> {
@@ -196,42 +237,7 @@ struct TaskSink<'s> {
 impl EventSink for TaskSink<'_> {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         // Keep progress on the same serialized publication path as nested tools.
-        let activity = match event {
-            PublicEvent::TurnStarted { .. } => Some("Working".to_owned()),
-            PublicEvent::ItemDelta {
-                kind: crate::public::ItemKind::Reasoning,
-                ..
-            } => Some("Thinking".to_owned()),
-            PublicEvent::ItemDelta {
-                kind: crate::public::ItemKind::AgentMessage,
-                ..
-            } => Some("Responding".to_owned()),
-            PublicEvent::ItemStarted {
-                kind: crate::public::ItemKind::Tool,
-                name: Some(name),
-                text,
-                ..
-            } => {
-                let args: Value = text
-                    .as_deref()
-                    .and_then(|text| serde_json::from_str(text).ok())
-                    .unwrap_or(Value::Null);
-                Some(match args.get("path").and_then(Value::as_str) {
-                    Some(path) => format!("{name} {path}"),
-                    None => name.clone(),
-                })
-            }
-            PublicEvent::ItemStarted {
-                kind: crate::public::ItemKind::Permission,
-                ..
-            } => Some("Waiting for permission".to_owned()),
-            PublicEvent::ItemCompleted {
-                kind: crate::public::ItemKind::Tool,
-                ..
-            }
-            | PublicEvent::UsageUpdated { .. } => Some("Working".to_owned()),
-            _ => None,
-        };
+        let activity = child_activity(event);
         if let Some(activity) = activity
             && let Err(error) = self.parent.publish(&PublicEvent::ChildProgress {
                 turn: self.turn,

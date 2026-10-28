@@ -1694,6 +1694,66 @@ fn status_right(status: &SharedStatus) -> String {
         .unwrap_or_default()
 }
 
+fn child_activity_row(
+    name: &str,
+    identity: Option<&str>,
+    activity: &str,
+    elapsed: Duration,
+    output_tokens: u64,
+    width: usize,
+    depth: crate::render::Depth,
+) -> String {
+    let mut rendered = String::new();
+    let clean =
+        |text: &str| ego_core::permit::terminal_safe(&text.replace(['\r', '\n', '\t'], " "));
+    let elapsed = crate::render::duration(elapsed);
+    let tokens = if output_tokens >= 1000 {
+        format!("{:.1}k", output_tokens as f64 / 1000.0)
+    } else {
+        output_tokens.to_string()
+    };
+    let right = format!("{elapsed} · ↓ {tokens} tokens");
+    let right_width = crate::render::Line::plain(&right).width();
+    let left_budget = width.saturating_sub(right_width + 2);
+    let display_name = if let Some(identity) = identity {
+        let suffix = format!(" [{identity}]");
+        let budget = left_budget.saturating_sub(2 + suffix.len());
+        format!(
+            "{}{suffix}",
+            picker_surface::truncate_cells(&clean(name), budget.min(28))
+        )
+    } else {
+        picker_surface::truncate_cells(&clean(name), left_budget.saturating_sub(4).min(28))
+    };
+    let left = picker_surface::truncate_cells(
+        &format!("○ {display_name}  {}", clean(activity)),
+        left_budget,
+    );
+    let left_width = crate::render::Line::plain(&left).width();
+    let text = if let Some(identity) = identity
+        && left_budget < identity.len() + 5
+    {
+        // At narrow widths identity outranks the optional name/activity and numeric suffix.
+        picker_surface::truncate_cells(&format!("○ [{identity}] {right}"), width)
+    } else if right_width + 2 <= width {
+        format!(
+            "{left}{}{right}",
+            " ".repeat(width - left_width - right_width)
+        )
+    } else {
+        picker_surface::truncate_cells(&format!("○ {} {right}", clean(name)), width)
+    };
+    rendered.push_str(
+        &crate::render::Line::styled(
+            text,
+            crate::render::Style::fg(crate::render::Rgb(0, 255, 255)),
+        )
+        .render(depth),
+    );
+    rendered.push('\n');
+    rendered
+}
+
 fn status_row(status: &SurfaceStatus) -> String {
     let mut ephemeral = activity_or_status_row(status);
     let width = if status.width == 0 {
@@ -1703,41 +1763,56 @@ fn status_row(status: &SurfaceStatus) -> String {
     }
     .saturating_sub(1);
     for child in status.children.values() {
-        let clean =
-            |text: &str| ego_core::permit::terminal_safe(&text.replace(['\r', '\n', '\t'], " "));
-        let elapsed = crate::render::duration(child.started.elapsed());
-        let tokens = if child.output_tokens >= 1000 {
-            format!("{:.1}k", child.output_tokens as f64 / 1000.0)
-        } else {
-            child.output_tokens.to_string()
-        };
-        let right = format!("{elapsed} · ↓ {tokens} tokens");
-        let right_width = crate::render::Line::plain(&right).width();
-        let left_budget = width.saturating_sub(right_width + 2);
-        let name = picker_surface::truncate_cells(
-            &clean(&child.name),
-            left_budget.saturating_sub(4).min(28),
-        );
-        let left = picker_surface::truncate_cells(
-            &format!("○ {name}  {}", clean(&child.activity)),
-            left_budget,
-        );
-        let left_width = crate::render::Line::plain(&left).width();
-        let text = if right_width + 2 <= width {
-            format!(
-                "{left}{}{right}",
-                " ".repeat(width - left_width - right_width)
-            )
-        } else {
-            picker_surface::truncate_cells(&format!("○ {} {right}", clean(&child.name)), width)
-        };
-        ephemeral.push_str(
-            &crate::render::Line::styled(
-                text,
-                crate::render::Style::fg(crate::render::Rgb(0, 255, 255)),
-            )
-            .render(status.permission_capabilities.depth),
-        );
+        ephemeral.push_str(&child_activity_row(
+            &child.name,
+            None,
+            &child.activity,
+            child.started.elapsed(),
+            child.output_tokens,
+            width,
+            status.permission_capabilities.depth,
+        ));
+    }
+    let children = &status.background_children.rows;
+    let height = crossterm::terminal::size()
+        .map(|(_, height)| usize::from(height))
+        .unwrap_or(24);
+    // Reserve half the screen for composer/modal/status. A summary keeps hidden tasks discoverable.
+    let budget = (height / 2).saturating_sub(ephemeral.lines().count() + 2);
+    let visible = if children.len() > budget {
+        budget.saturating_sub(1)
+    } else {
+        children.len()
+    };
+    let identities: Vec<_> = children.keys().map(ToString::to_string).collect();
+    for ((_, child), identity) in children.iter().zip(&identities).take(visible) {
+        let length = (8..=identity.len())
+            .find(|length| {
+                identities
+                    .iter()
+                    .filter(|other| other.ends_with(&identity[identity.len() - *length..]))
+                    .count()
+                    == 1
+            })
+            .unwrap_or(identity.len());
+        ephemeral.push_str(&child_activity_row(
+            &child.name,
+            Some(&identity[identity.len() - length..]),
+            &child.activity,
+            child.elapsed_before.saturating_add(child.started.elapsed()),
+            child.output_tokens,
+            width,
+            status.permission_capabilities.depth,
+        ));
+    }
+    if children.len() > visible {
+        ephemeral.push_str(&picker_surface::truncate_cells(
+            &format!(
+                "… {} more background tasks · /tasks",
+                children.len() - visible
+            ),
+            width,
+        ));
         ephemeral.push('\n');
     }
     if status.activity || status.retry.is_some() || status.shell.is_some() {
@@ -1883,7 +1958,7 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
 impl Prompt for Waiting {
     fn supports_indicator_row_updates(&self) -> bool {
         let status = self.status.lock().expect("surface status lock");
-        status.activity && !status.permission_modal
+        (status.activity || !status.background_children.rows.is_empty()) && !status.permission_modal
     }
 
     fn render_prompt_footer(&self) -> Cow<'_, str> {

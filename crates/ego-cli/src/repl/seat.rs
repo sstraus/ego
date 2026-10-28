@@ -457,6 +457,9 @@ fn repaint_status(status: &SharedStatus) {
     }
 }
 
+mod background;
+pub(crate) use background::{BackgroundActivity, BackgroundTaskSurface};
+
 struct ChildActivity {
     name: String,
     activity: String,
@@ -473,6 +476,7 @@ struct SurfaceStatus {
     activity_since: Option<Instant>,
     activity_output_chars: usize,
     children: std::collections::BTreeMap<ItemId, ChildActivity>,
+    background_children: background::BackgroundRows,
     thinking_since: Option<Instant>,
     /// When the open modal began; the wait is the person's, not the turn's.
     modal_since: Option<Instant>,
@@ -624,6 +628,7 @@ impl Default for SurfaceStatus {
             activity_since: None,
             activity_output_chars: 0,
             children: Default::default(),
+            background_children: Default::default(),
             thinking_since: None,
             modal_since: None,
             modal_waited: std::time::Duration::ZERO,
@@ -1489,9 +1494,12 @@ impl Seat {
                     let Some(status) = activity_status.upgrade() else {
                         break;
                     };
-                    let busy = activity_phase.get() == EditPhase::Busy
-                        && status.lock().expect("surface status lock").activity;
-                    if busy {
+                    let repaint = {
+                        let state = status.lock().expect("surface status lock");
+                        (activity_phase.get() == EditPhase::Busy && state.activity)
+                            || !state.background_children.rows.is_empty()
+                    };
+                    if repaint {
                         repaint_status(&status);
                     }
                 }

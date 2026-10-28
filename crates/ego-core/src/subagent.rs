@@ -491,18 +491,26 @@ impl ChildRunService {
         }
     }
     /// Reopen a task under its original run lineage after the CLI process restarts.
-    pub fn for_background_task(&self, parent_run: RunId) -> Self {
+    pub fn for_background_task(
+        &self,
+        parent_run: RunId,
+        sink_factory: Option<Arc<dyn crate::run::EventSinkFactory>>,
+    ) -> Self {
+        let mut bindings = self
+            .inner
+            .bindings
+            .clone()
+            .without_delegation()
+            .with_cancel(crate::turn::CancelToken::new());
+        if let Some(factory) = sink_factory {
+            bindings.sink_factory = factory;
+        }
         Self {
             inner: Arc::new(Inner {
                 controller: Arc::clone(&self.inner.controller),
                 gate: self.inner.gate.clone(),
                 root: self.inner.root.clone(),
-                bindings: self
-                    .inner
-                    .bindings
-                    .clone()
-                    .without_delegation()
-                    .with_cancel(crate::turn::CancelToken::new()),
+                bindings,
                 ports: ChildServicePorts::new(parent_run, Arc::clone(&self.inner.ports.host)),
                 active: Mutex::new(BTreeMap::new()),
             }),

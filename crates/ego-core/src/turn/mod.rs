@@ -24,7 +24,9 @@ mod mcp_registry;
 mod policy;
 mod residual;
 mod task;
-pub use task::{BackgroundTaskLaunch, BackgroundTaskPort, NamedAgent, delegation_guidance};
+pub use task::{
+    BackgroundTaskLaunch, BackgroundTaskPort, NamedAgent, child_activity, delegation_guidance,
+};
 mod tools;
 
 /// One ordered durable user prompt, optionally consuming a queue acceptance.
