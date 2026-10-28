@@ -1998,6 +1998,26 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         } else {
             source_seq
         };
+        // Clear deliberately drops source conversation; ordinary compaction keeps
+        // one historical source request, independent of the generated prose.
+        let latest_user_request = if self
+            .state()
+            .context_request
+            .as_ref()
+            .is_some_and(|request| request.action == crate::context::ContextAction::Clear)
+        {
+            None
+        } else {
+            self.state()
+                .latest_user_request()
+                .map(str::to_owned)
+                .or_else(|| match &self.ancestor {
+                    Some(AncestorHistory::Replayed(replayed)) => {
+                        replayed.latest_user_request().map(str::to_owned)
+                    }
+                    _ => None,
+                })
+        };
         let constraints = self.state().constraints.clone();
         constraints.validate().map_err(CompactionError::Internal)?;
         let title = self.state().title.clone();
@@ -2142,7 +2162,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         }
         target_messages.push(Message::text(
             Role::User,
-            checkpoint_frame(checkpoint.text(), &constraints),
+            checkpoint_frame(
+                checkpoint.text(),
+                &constraints,
+                latest_user_request.as_deref(),
+            ),
         ));
         let baseline = GenRequest {
             web_search: None,
@@ -2172,6 +2196,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             source: self.session_id,
             source_seq,
             checkpoint,
+            latest_user_request,
             constraints,
             baseline,
             title,

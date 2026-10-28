@@ -151,7 +151,11 @@ fn conversation_from_inner(
                 push(
                     &mut messages,
                     Role::User,
-                    text_block(&crate::compact::checkpoint_frame(&item.text, constraints)),
+                    text_block(&crate::compact::checkpoint_frame(
+                        &item.text,
+                        constraints,
+                        item.latest_user_request.as_deref(),
+                    )),
                 );
             }
             // Replayed if — and only if — the provider sealed the block with

@@ -1167,9 +1167,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             source_seq,
             prompt_revision,
             checkpoint: _,
+            latest_user_request,
             constraints: _,
         } => {
-            redactions.opaque_prose += 1;
+            redactions.opaque_prose += 1 + u64::from(latest_user_request.is_some());
             ExportEvent::CompactionSeeded {
                 source: *source,
                 source_seq: *source_seq,

@@ -1916,9 +1916,14 @@ prints the same session identities and preserves the measured source context.
 The new session resolves ordinary system, project,
 runtime, model, and tool context afresh. The only conversation material carried
 from the source is one distinct context-checkpoint block containing the
-compaction response: no old user, assistant, reasoning, tool-call, tool-result,
-or retained-tail item is replayed. The checkpoint is context, not a
-user-authored prompt or higher-authority instruction.
+compaction response and the latest user request, copied verbatim by core into a
+separate field. A new user message replaces that quote; repeated compactions do
+not accumulate quotes. It is historical context, not a declaration that the
+request remains unfinished. The summary records completed work. Old checkpoint
+records without the field remain readable. A context clear does not retain the
+source request. No old user, assistant, reasoning, tool-call, tool-result, or
+retained-tail item is replayed. The checkpoint is context, not a new user request
+or higher-authority instruction.
 
 The source session remains complete and resumable. The target records the
 source session and source sequence. Event parents stay within their session:

@@ -648,6 +648,9 @@ pub enum EventKind {
         source_seq: Seq,
         prompt_revision: u32,
         checkpoint: String,
+        /// Latest source UserPrompt text, not a declaration of unfinished work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        latest_user_request: Option<String>,
         #[serde(
             default,
             skip_serializing_if = "crate::compact::ConstraintLedger::is_default"
