@@ -742,6 +742,12 @@ impl RunEffectPorts {
         Arc::clone(&self.http) as Arc<dyn OneHop>
     }
 
+    /// Provider-only HTTP authority with an explicitly selected proxy.
+    /// Other effect consumers retain this run's direct transport.
+    pub fn provider_proxy_handle(&self, proxy: crate::http::ProviderProxy) -> Arc<dyn OneHop> {
+        Arc::new(self.http.with_proxy(proxy))
+    }
+
     pub fn begin_http_call(&self) -> Instant {
         self.http.begin_call()
     }

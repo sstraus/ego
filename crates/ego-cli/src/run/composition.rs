@@ -1374,6 +1374,7 @@ pub(super) struct GenerationPreflight {
 }
 
 pub(super) struct GenerationPreflightInput<'a> {
+    pub(super) proxy: Option<ego_tools::http::ProviderProxy>,
     pub(super) session_id: SessionId,
     pub(super) confinement: &'a RunConfinement,
     pub(super) effective: &'a Effective,
@@ -1416,6 +1417,7 @@ pub(super) async fn generation_preflight_inner(
     status: &mut Option<InteractiveStatus>,
 ) -> Result<GenerationPreflight, RunTermination> {
     let GenerationPreflightInput {
+        proxy,
         session_id,
         confinement,
         effective,
@@ -1443,7 +1445,8 @@ pub(super) async fn generation_preflight_inner(
         None,
     )
     .await?;
-    let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
+    let http = Arc::new(ProviderHttpAdapter::new(proof_ports).with_proxy(proxy.clone()))
+        as Arc<dyn ego_ai::http::Http>;
 
     let mode = effective.mode.unwrap_or(Mode::Default);
     let judge_identity = effective.judge.clone();
@@ -1523,7 +1526,8 @@ pub(super) async fn generation_preflight_inner(
             effective.auth.clone(),
         )
         .with_output_limit(effective.max_output_tokens)
-        .with_offline(confinement.offline()),
+        .with_offline(confinement.offline())
+        .with_proxy(proxy),
     );
     let selection = source.selection();
     let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);

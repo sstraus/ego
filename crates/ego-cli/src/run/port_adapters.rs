@@ -188,7 +188,7 @@ pub(super) async fn acquire_image_inputs(
     // Resolving the profile is what makes the refusal truthful rather than
     // generic: both admission paths need this model's own image limits, and
     // this is the first point on either where they are known.
-    let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
+    let http = source.provider_http(Arc::clone(ports));
     let profile = source
         .bind(http, cancel.clone(), run_deadline)
         .resolve(GenerationModelRequest::new(GenerationRole::Main))
@@ -234,7 +234,7 @@ pub(super) async fn acquire_audio(
             "audio prompt exceeds product count or aggregate byte bound".into(),
         ));
     }
-    let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
+    let http = source.provider_http(Arc::clone(ports));
     let profile = source
         .bind(http, cancel.clone(), deadline)
         .resolve(GenerationModelRequest::new(GenerationRole::Main))

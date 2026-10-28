@@ -3002,3 +3002,11 @@ acceptance probe is part of this feature's validation. Provider contract sources
 <https://developers.openai.com/api/docs/models/gpt-audio-1.5.md> and
 <https://developers.openai.com/api/docs/guides/audio-chat-completions.md>, read
 2026-10-20.
+
+### Explicit provider HTTPS proxy
+
+`ego run --proxy http://127.0.0.1:8080 "prompt"` uses an explicitly selected HTTP CONNECT proxy for provider HTTPS requests. The same options apply to interactive `ego` and `ego resume`; specify them again when resuming. `--proxy-ca FILE` adds one PEM CA certificate (at most 64 KiB) to this invocation's provider TLS trust, for example `ego --proxy http://127.0.0.1:8080 --proxy-ca ./inspection-ca.pem`. Certificate verification remains enabled.
+
+The endpoint must use `http://` with no credentials, path, query, or fragment (default port 80). Local provider DNS admission must still succeed. The proxy socket is resolved and pinned through the run resolver. CONNECT retains the logical provider authority, Host, and TLS SNI. The explicitly trusted proxy controls downstream DNS and connection routing. A CA permits that proxy to inspect inference content and provider credentials.
+
+Ambient `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` values do not select or bypass this proxy. There is no direct fallback on proxy failure. Offline mode refuses proxy use, including loopback proxies. HTTP provider endpoints and WebSocket inference are refused when `--proxy` is selected. These options do not proxy MCP, OAuth login, attachment downloads, served protocol hosts, or standalone commands such as `ego models` and `ego compact`.

@@ -24,7 +24,6 @@ use ego_tools::exec::RunEffectPorts;
 use ego_tools::hook::{CommandHookAdapter, HookAdapterResult, HttpHookAdapter};
 
 use crate::model::CliGenerationModelSource;
-use crate::provider_http::ProviderHttpAdapter;
 
 pub type GenerationFuture<'a> =
     Pin<Box<dyn Future<Output = Result<GeneratedHookResult, ToollessGenerationError>> + Send + 'a>>;
@@ -254,8 +253,7 @@ impl ToollessGenerationService for RunToollessGenerationService<'_, '_> {
         Box::pin(async move {
             let input = serde_json::to_string(request.input())
                 .map_err(|error| ToollessGenerationError::new(error.to_string()))?;
-            let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&self.ports)))
-                as Arc<dyn ego_ai::http::Http>;
+            let http = self.source.provider_http(Arc::clone(&self.ports));
             let source = self.source.bind(
                 http,
                 request.effect_scope().cancel_token(),

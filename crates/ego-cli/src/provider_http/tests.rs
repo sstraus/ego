@@ -804,3 +804,5 @@ mod codex_real_recovery {
         .expect("bounded real WebSocket recovery");
     }
 }
+
+mod proxy_tests;

@@ -149,8 +149,7 @@ pub(super) async fn drive_headless_turn(
     )
     .await?;
     let execution_capabilities = observation.capabilities();
-    let http =
-        Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
+    let http = source.provider_http(Arc::clone(&ports));
     let journal = SharedJournal::new(Journal::new(
         active.id(),
         active.store(),

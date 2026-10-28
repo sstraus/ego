@@ -495,6 +495,7 @@ pub struct CliGenerationModelSource {
     initial_thinking: Option<ThinkingLevel>,
     output_limit: Option<std::num::NonZeroU64>,
     offline: bool,
+    proxy: Option<ego_tools::http::ProviderProxy>,
     judge: Option<ModelRef>,
     ceilings: Ceilings,
     auth: std::collections::HashMap<String, AuthProviderLayer>,
@@ -515,6 +516,7 @@ impl CliGenerationModelSource {
             initial_thinking: thinking,
             output_limit: None,
             offline: false,
+            proxy: None,
             judge,
             ceilings,
             auth,
@@ -530,6 +532,20 @@ impl CliGenerationModelSource {
     pub fn with_offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
+    }
+
+    pub fn with_proxy(mut self, proxy: Option<ego_tools::http::ProviderProxy>) -> Self {
+        self.proxy = proxy;
+        self
+    }
+
+    pub(crate) fn provider_http(
+        &self,
+        ports: Arc<ego_tools::exec::RunEffectPorts>,
+    ) -> Arc<dyn Http> {
+        Arc::new(
+            crate::provider_http::ProviderHttpAdapter::new(ports).with_proxy(self.proxy.clone()),
+        )
     }
 
     pub fn selection(&self) -> Arc<GenerationSelection> {

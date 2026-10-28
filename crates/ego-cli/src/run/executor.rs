@@ -313,6 +313,7 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         stdin: crate::cli::Stdin::Ambient,
         model: None,
         offline: false,
+        proxy: None,
         sandbox: None,
         thinking: None,
         system: shape.system,
@@ -559,6 +560,7 @@ impl CliCompactionCommand {
             proof_evidence,
         } = generation_preflight(
             GenerationPreflightInput {
+                proxy: self.args.proxy.clone(),
                 session_id: source_id,
                 confinement: &confinement,
                 effective: &effective,
@@ -617,8 +619,7 @@ impl CliCompactionCommand {
             sink: &sink,
             cancel: cancel.clone(),
         };
-        let http =
-            Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
+        let http = source.provider_http(Arc::clone(&ports));
         let runtime = GenerationRuntime {
             source: source.bind(http, cancel.clone(), run_deadline),
             policy_source,
