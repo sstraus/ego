@@ -2,6 +2,7 @@
 //!
 //! One AST supplies disclosure and conservative read-only evidence. Unknown syntax
 //! remains unknown; a display skeleton never substitutes for a call-bound permit.
+use base64::Engine as _;
 use serde::Serialize;
 use tree_sitter::{Node, Parser};
 
@@ -973,7 +974,8 @@ pub fn redact_credentials(text: &str) -> String {
             .starts_with(['\'', '"']);
         // A bare scheme plus an ordinary word is ambiguous prose, not a header.
         // Keep standalone token68-shaped values private when they contain more
-        // than letters; explicit headers and quoted values also hide short words.
+        // than letters or encode Basic user:password; explicit headers and quoted
+        // values also hide short words.
         let token_value = words.peek().is_some_and(|value| {
             let value = value.trim_matches(['\\', '\'', '"', '}', ']', ',']);
             !value.is_empty()
@@ -981,7 +983,11 @@ pub fn redact_credentials(text: &str) -> String {
                     c.is_ascii_alphanumeric()
                         || matches!(c, '-' | '.' | '_' | '~' | '+' | '/' | '=')
                 })
-                && value.chars().any(|c| !c.is_ascii_alphabetic())
+                && (value.chars().any(|c| !c.is_ascii_alphabetic())
+                    || (marker.eq_ignore_ascii_case("basic")
+                        && base64::engine::general_purpose::STANDARD
+                            .decode(value)
+                            .is_ok_and(|decoded| decoded.contains(&b':'))))
         });
         if (marker.eq_ignore_ascii_case("authorization") && word.contains(':'))
             || (scheme && (redact_next || quoted || token_value))
