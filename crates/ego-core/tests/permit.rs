@@ -457,8 +457,8 @@ mod permit {
         for op in [OpName::Read, OpName::List, OpName::Search] {
             let text = outside(op).to_string();
             assert!(
-                text.contains("'ego roots add --access read '/sibling/a b.md''")
-                    && text.contains("resume"),
+                text.contains("`ego roots add --access read '/sibling/a b.md'`")
+                    && text.contains("exit and resume"),
                 "{op}: {text}"
             );
         }
@@ -470,6 +470,41 @@ mod permit {
             "{write}"
         );
         assert!(!write.contains("--access read '"), "{write}");
+    }
+
+    /// regression case. Catches: a pasted read-root hint splits a path or executes
+    /// shell syntax instead of passing the exact path as one argument.
+    #[cfg(unix)]
+    #[test]
+    fn outside_read_roots_hint_round_trips_special_paths() {
+        let engine = in_default_mode("/ws");
+        let mut failures = Vec::new();
+        for path in [
+            "/sibling/plain.md",
+            "/sibling/a b.md",
+            "/sibling/owner's file; echo unsafe.md",
+        ] {
+            let denied = engine.classify_settled(read_call(path)).unwrap_err();
+            let text = denied.to_string();
+            let Some(command) = text.split('`').nth(1) else {
+                failures.push(format!("missing code-delimited command: {text}"));
+                continue;
+            };
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("ego() {{ printf '%s\\n' \"$@\"; }}; {command}"))
+                .output()
+                .expect("run the hinted command through a real shell");
+            let expected = format!("roots\nadd\n--access\nread\n{path}\n");
+            if !output.status.success()
+                || output.stdout != expected.as_bytes()
+                || !output.stderr.is_empty()
+                || !text.contains("exit and resume")
+            {
+                failures.push(format!("{text}: {output:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// regression case. Catches: a quoted filename turns the suggested write-root
