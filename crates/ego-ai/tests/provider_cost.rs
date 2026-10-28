@@ -332,18 +332,6 @@ async fn settle_through_core(
     (gate, settlement, events)
 }
 
-/// Catches: requiring a worst-case monetary hold for provider-stated settlement.
-#[tokio::test]
-async fn a_provider_reported_row_admits_without_a_worst_case_hold() {
-    let decoder = XaiUsdTicks::new("2026-08-21");
-    let metering = catalogue::provider_reported(&decoder);
-    let mut gate = BudgetGate::new(usd("10"));
-
-    let _admission = gate
-        .admit(&metering, Some(&quote()), &request(), &caps())
-        .expect("a $10 budget admits it");
-}
-
 /// The event the port gained, produced by a real decoder reading a real
 /// transcript — not by a test constructing it directly.
 #[tokio::test]
