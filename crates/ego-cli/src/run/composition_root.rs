@@ -26,6 +26,7 @@ pub struct CliPrepared {
     pub(super) schema_retries: u32,
     pub(super) retry: u32,
     pub(super) provider_recovery: bool,
+    pub(super) proxy: Option<ego_tools::http::ProviderProxy>,
     pub(super) fallbacks: Vec<ModelRef>,
     pub(super) max_turns: Option<u32>,
     pub(super) goal: Option<String>,
@@ -328,6 +329,7 @@ impl CliPrepared {
                 schema_retries,
                 retry,
                 provider_recovery: args.provider_recovery,
+                proxy: args.proxy.clone(),
                 fallbacks,
                 max_turns,
                 goal,
@@ -405,6 +407,7 @@ impl CliPrepared {
         let mut no_status = None;
         let preflight = generation_preflight(
             GenerationPreflightInput {
+                proxy: self.proxy.clone(),
                 session_id: self.session_id,
                 confinement: &self.confinement,
                 effective: &self.effective,
@@ -896,6 +899,7 @@ pub(super) async fn execution_preflight(
         proof_evidence,
     } = generation_preflight(
         GenerationPreflightInput {
+            proxy: args.proxy.clone(),
             session_id: SessionId::new(),
             confinement: &settings.confinement,
             effective: &settings.effective,

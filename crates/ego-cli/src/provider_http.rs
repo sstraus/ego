@@ -32,6 +32,7 @@ const COMMAND_EVIDENCE_CAPACITY: u64 = 64 * 1024 * 1024;
 /// The CLI-owned adapter joining provider authority to one run's raw ports.
 pub struct ProviderHttpAdapter {
     authority: ProviderHttpAuthority,
+    proxy: Option<ego_tools::http::ProviderProxy>,
 }
 
 #[derive(Clone)]
@@ -47,12 +48,22 @@ impl ProviderHttpAuthority {
             Self::Inference(ports) => ports.begin_call(),
         }
     }
-    fn guarded(&self) -> GuardedHttp {
+    fn guarded(&self, proxy: Option<&ego_tools::http::ProviderProxy>) -> GuardedHttp {
         match self {
-            Self::Run(ports) => GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle()),
-            Self::Inference(ports) => {
-                GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle())
-            }
+            Self::Run(ports) => GuardedHttp::new(
+                ports.resolver_handle(),
+                match proxy {
+                    Some(proxy) => ports.provider_proxy_handle(proxy.clone()),
+                    None => ports.one_hop_handle(),
+                },
+            ),
+            Self::Inference(ports) => GuardedHttp::new(
+                ports.resolver_handle(),
+                match proxy {
+                    Some(proxy) => ports.provider_proxy_handle(proxy.clone()),
+                    None => ports.one_hop_handle(),
+                },
+            ),
         }
     }
 }
@@ -61,12 +72,19 @@ impl ProviderHttpAdapter {
     pub fn new(ports: Arc<RunEffectPorts>) -> Self {
         Self {
             authority: ProviderHttpAuthority::Run(ports),
+            proxy: None,
         }
+    }
+
+    pub fn with_proxy(mut self, proxy: Option<ego_tools::http::ProviderProxy>) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     pub fn inference(ports: Arc<InferenceHttpPorts>) -> Self {
         Self {
             authority: ProviderHttpAuthority::Inference(ports),
+            proxy: None,
         }
     }
 }
@@ -79,9 +97,10 @@ impl Http for ProviderHttpAdapter {
         let (profile, route, connect, request) = call.into_parts();
         let authority = self.authority.clone();
         let deadline = authority.begin_call();
+        let proxy = self.proxy.clone();
         Box::pin(async move {
             let socket = authority
-                .guarded()
+                .guarded(proxy.as_ref())
                 .open_websocket_admitted(route.clone(), connect, request, deadline)
                 .await?;
             Ok(Box::new(ProviderWebSocket {
@@ -99,6 +118,7 @@ impl Http for ProviderHttpAdapter {
             deadline: self.authority.begin_call(),
             authority: self.authority.clone(),
             profile: None,
+            proxy: self.proxy.clone(),
         })
     }
 }
@@ -132,6 +152,7 @@ struct ProviderHttpCall {
     authority: ProviderHttpAuthority,
     deadline: Instant,
     profile: Option<HttpProfileFingerprint>,
+    proxy: Option<ego_tools::http::ProviderProxy>,
 }
 
 impl HttpCall for ProviderHttpCall {
@@ -153,9 +174,10 @@ impl HttpCall for ProviderHttpCall {
 
         let authority = self.authority.clone();
         let deadline = self.deadline;
+        let proxy = self.proxy.clone();
         Box::pin(async move {
             authority
-                .guarded()
+                .guarded(proxy.as_ref())
                 .execute_admitted(route, connect, request, deadline)
                 .await
         })

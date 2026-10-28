@@ -88,6 +88,10 @@ impl InferenceHttpPorts {
     pub fn one_hop_handle(&self) -> Arc<dyn OneHop> {
         self.transport.clone()
     }
+    pub fn provider_proxy_handle(&self, proxy: ProviderProxy) -> Arc<dyn OneHop> {
+        Arc::new(self.transport.with_proxy(proxy))
+    }
+
     pub fn begin_call(&self) -> Instant {
         self.transport.begin_call()
     }
@@ -95,12 +99,14 @@ impl InferenceHttpPorts {
 
 /// One run's HTTP effect boundary. Construction is restricted to
 /// [`crate::exec::RunEffectPorts`] or [`InferenceHttpPorts`].
+#[derive(Clone)]
 pub(crate) struct OneShotHttpTransport {
     resolver: Arc<dyn Resolver>,
     cancel: CancelToken,
     timeout: HttpCallTimeout,
     run_deadline: Option<Instant>,
     confinement: RunConfinement,
+    proxy: Option<ProviderProxy>,
 }
 
 impl OneShotHttpTransport {
@@ -117,7 +123,14 @@ impl OneShotHttpTransport {
             timeout,
             run_deadline,
             confinement,
+            proxy: None,
         }
+    }
+
+    pub(crate) fn with_proxy(&self, proxy: ProviderProxy) -> Self {
+        let mut transport = self.clone();
+        transport.proxy = Some(proxy);
+        transport
     }
 }
 
@@ -168,7 +181,9 @@ impl Resolver for OneShotHttpTransport {
     }
 }
 
+mod proxy;
 mod websocket;
+pub use proxy::ProviderProxy;
 
 impl OneHop for OneShotHttpTransport {
     fn open_websocket(
@@ -178,6 +193,13 @@ impl OneHop for OneShotHttpTransport {
         deadline: Instant,
     ) -> BoxFuture<'static, Result<Box<dyn ego_core::permit::WebSocketSession>, TransportError>>
     {
+        if self.proxy.is_some() {
+            return Box::pin(futures::future::ready(Err(definitely_unsent(
+                TransportFailure::InvalidRequest(
+                    "--proxy supports provider HTTPS, not WebSocket inference".to_owned(),
+                ),
+            ))));
+        }
         websocket::open(self, connect, request, deadline)
     }
 
@@ -207,6 +229,18 @@ impl OneHop for OneShotHttpTransport {
         request: HttpRequest,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        if self.proxy.is_some()
+            && (self.confinement.offline() || connect.route().scheme() != HttpScheme::Https)
+        {
+            let failure = if self.confinement.offline() {
+                TransportFailure::Offline
+            } else {
+                TransportFailure::InvalidRequest(
+                    "--proxy supports HTTPS provider requests only".to_owned(),
+                )
+            };
+            return Box::pin(futures::future::ready(Err(definitely_unsent(failure))));
+        }
         if self.confinement.offline() && !offline_connect_allowed(&connect) {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
                 TransportFailure::Offline,
@@ -229,9 +263,28 @@ impl OneHop for OneShotHttpTransport {
         }
 
         let cancel = self.cancel.clone();
-        let mut task = AbortOnDrop(
-            runtime_handle().spawn(execute_one_hop(connect, request, cancel, deadline)),
-        );
+        let transport = self.clone();
+        let mut task = AbortOnDrop(runtime_handle().spawn(async move {
+            let proxy = match &transport.proxy {
+                Some(proxy) => {
+                    let resolution = transport.resolve(proxy.target().clone(), deadline).await?;
+                    if resolution.target() != proxy.target() {
+                        return Err(definitely_unsent(TransportFailure::AuthorityMismatch));
+                    }
+                    let selected = resolution.addresses().first().copied().ok_or_else(|| {
+                        definitely_unsent(TransportFailure::Resolution(
+                            "proxy returned no addresses".to_owned(),
+                        ))
+                    })?;
+                    Some((
+                        proxy.clone(),
+                        SocketAddr::new(selected, proxy.target().port()),
+                    ))
+                }
+                None => None,
+            };
+            execute_one_hop(connect, request, cancel, deadline, proxy).await
+        }));
         Box::pin(async move {
             (&mut task.0).await.map_err(|error| {
                 possibly_sent(TransportFailure::Exchange(format!(
@@ -269,7 +322,15 @@ async fn execute_one_hop(
     request: HttpRequest,
     cancel: CancelToken,
     deadline: Instant,
+    proxy: Option<(ProviderProxy, SocketAddr)>,
 ) -> Result<OneHopResponse, TransportError> {
+    // Resolution can consume the entire call budget; do not open a socket then.
+    if cancel.is_cancelled() {
+        return Err(definitely_unsent(cancellation_failure(&cancel)));
+    }
+    if deadline <= Instant::now() {
+        return Err(definitely_unsent(TransportFailure::TimedOut));
+    }
     let route = connect.route();
     let scheme = match route.scheme() {
         HttpScheme::Http => "http",
@@ -283,13 +344,18 @@ async fn execute_one_hop(
     };
     let url = format!("{scheme}://{authority}{}", request.path());
     let selected = SocketAddr::new(connect.selected(), target.port());
-    let client = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .pool_max_idle_per_host(0)
         .dns_resolver(DenyFallbackResolver)
-        .resolve_to_addrs(target.host(), &[selected])
+        .resolve_to_addrs(target.host(), &[selected]);
+    let builder = match proxy {
+        Some((proxy, socket)) => proxy.configure(builder, socket)?,
+        None => builder,
+    };
+    let client = builder
         .build()
         .map_err(|error| definitely_unsent(TransportFailure::InvalidRequest(error.to_string())))?;
     let method = reqwest::Method::from_bytes(request.method().as_bytes())

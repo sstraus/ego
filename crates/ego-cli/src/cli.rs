@@ -877,6 +877,8 @@ pub struct Args {
     pub stdin: Stdin,
     pub model: Option<String>,
     pub offline: bool,
+    /// Explicit invocation-only provider HTTPS proxy.
+    pub proxy: Option<ego_tools::http::ProviderProxy>,
     /// Filesystem confinement, orthogonal to the permission mode. `None`
     /// leaves precedence resolution to config; the effective default is
     /// `workspace`.
@@ -953,6 +955,7 @@ pub struct ResumeAnswer {
 }
 
 mod commands;
+mod proxy;
 mod resume_seat;
 use commands::*;
 pub use commands::{AuthAction, AuthArgs};
@@ -2143,6 +2146,11 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
     // disagreeing about what these seven flags mean.
     let shape = SessionShape::from(flags.shape);
 
+    let proxy = proxy::load(
+        flags.proxy,
+        flags.proxy_ca,
+        flags.common.places.directory.as_deref(),
+    )?;
     Ok(Args {
         worktree: flags.worktree,
         read_only_dir: shape.read_only_dir,
@@ -2152,6 +2160,7 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         stdin,
         model: flags.model,
         offline: flags.offline,
+        proxy,
         sandbox: flags.sandbox,
         thinking: flags.thinking,
         system: shape.system,

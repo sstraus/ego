@@ -737,6 +737,14 @@ pub(super) struct Flags {
     #[arg(long)]
     pub(super) offline: bool,
 
+    /// Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery).
+    #[arg(long, value_name = "http://HOST[:PORT]")]
+    pub(super) proxy: Option<String>,
+
+    /// Additional PEM trust anchor for provider HTTPS through --proxy only.
+    #[arg(long, value_name = "FILE", requires = "proxy")]
+    pub(super) proxy_ca: Option<PathBuf>,
+
     /// Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included.
     #[arg(long)]
     pub(super) sandbox: Option<Confinement>,

@@ -25,7 +25,7 @@ pub(crate) async fn observed_host(
     args: &SetupArgs,
     confirmation: Option<&dyn Fn(String) -> bool>,
 ) -> Result<String, UsageError> {
-    observed_selection_host(workspace, args, confirmation, None).await
+    observed_selection_host(workspace, args, confirmation, None, None).await
 }
 
 pub(crate) async fn observed_selection_host(
@@ -33,6 +33,7 @@ pub(crate) async fn observed_selection_host(
     args: &SetupArgs,
     confirmation: Option<&dyn Fn(String) -> bool>,
     selection: Option<&ItemSelection<'_>>,
+    proxy: Option<ego_tools::http::ProviderProxy>,
 ) -> Result<String, UsageError> {
     let workspace = OsFs
         .canonicalize(&workspace)
@@ -48,7 +49,7 @@ pub(crate) async fn observed_selection_host(
     }
     let roots = crate::run::profile_roots::admit(&effective, &workspace).map_err(UsageError)?;
     let (selected_probes, interpretation) = if let Some(prompt) = &args.prompt {
-        match interpret(prompt, &effective, &workspace).await {
+        match interpret(prompt, &effective, &workspace, proxy).await {
             Ok(probes) => (
                 Some(probes),
                 format!(
@@ -314,6 +315,7 @@ async fn interpret(
     prompt: &str,
     effective: &ego_core::config::Effective,
     workspace: &ego_core::permit::CanonPath,
+    proxy: Option<ego_tools::http::ProviderProxy>,
 ) -> Result<Vec<Probe>, String> {
     use ego_ai::http::Http;
     use ego_core::event::id::GenerationId;
@@ -354,7 +356,8 @@ async fn interpret(
         cancel,
         ego_tools::exec::HttpCallTimeout::default(),
     ));
-    let http: Arc<dyn Http> = Arc::new(crate::provider_http::ProviderHttpAdapter::inference(ports));
+    let http: Arc<dyn Http> =
+        Arc::new(crate::provider_http::ProviderHttpAdapter::inference(ports).with_proxy(proxy));
     let hosted = crate::facts::supplied(&effective.ceilings).map_err(|error| error.to_string())?;
     // Observed subscription credentials never refresh, create locks or bootstrap.
     let credentials: Box<dyn ego_ai::provider::Credentials> = match config::ego_home() {

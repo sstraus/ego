@@ -1,5 +1,113 @@
 use super::*;
 
+// Catches: slash setup loses --proxy, or falls back to a direct provider dial after CONNECT fails.
+#[test]
+fn setup_slash_explicit_proxy_connect_failure_never_dials_provider() {
+    setup_slash_proxy_case("https");
+}
+
+// Catches: setup sends a prompt directly to an HTTP provider that the selected proxy cannot support.
+#[test]
+fn setup_slash_explicit_proxy_refuses_http_without_any_socket() {
+    setup_slash_proxy_case("http");
+}
+
+fn setup_slash_proxy_case(scheme: &str) {
+    use std::net::TcpListener;
+
+    let provider = TcpListener::bind("127.0.0.1:0").unwrap();
+    provider.set_nonblocking(true).unwrap();
+    let provider_address = provider.local_addr().unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let places = support::Places::new();
+    let original = "model='openai/gpt-6-luna'\nsandbox='off'\nroots=[]\n";
+    std::fs::write(places.home_path().join("config.toml"), original).unwrap();
+    let ego = Ego::at(places.home_path(), places.workspace_path(), None)
+        .conversing()
+        .args(["--proxy", &proxy_url, "--yolo", "--trust-workspace"])
+        .env("OPENAI_API_KEY", "fixture-key")
+        .env("OPENAI_BASE_URL", &format!("{scheme}://{provider_address}"));
+    let (session, mut input, reader) = PtySession::start(&ego, 32, 140, None);
+    let mut output = Vec::new();
+    until_prompt_from(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"/setup inspect task\r").unwrap();
+    input.flush().unwrap();
+
+    let mut connect = None;
+    let mut direct = false;
+    if scheme == "https" {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok((socket, _)) = provider.accept() {
+                direct = true;
+                drop(socket);
+                break;
+            }
+            if let Ok((mut socket, _)) = proxy.accept() {
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    bytes.push(byte[0]);
+                    assert!(bytes.len() <= 8192, "unbounded CONNECT header");
+                }
+                connect = Some(String::from_utf8(bytes).unwrap());
+                socket
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    until_normalized(&reader, &mut output, start, "Select setup proposal items");
+    input.write_all(b"\x1b").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "using deterministic inventory");
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+
+    assert!(
+        !direct,
+        "setup dialed the provider directly instead of the proxy"
+    );
+    assert!(
+        matches!(provider.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+        "direct provider fallback"
+    );
+    assert!(
+        matches!(proxy.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+        "unexpected extra proxy connection"
+    );
+    let report = normalized(&output[start..]);
+    assert!(report.contains("using deterministic inventory"), "{report}");
+    if scheme == "https" {
+        assert!(
+            connect
+                .expect("setup must send CONNECT")
+                .starts_with(&format!("CONNECT {provider_address} HTTP/1.1\r\n"))
+        );
+    } else {
+        assert!(
+            report.contains("HTTP request construction failed"),
+            "{report}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(places.home_path().join("config.toml")).unwrap(),
+        original
+    );
+}
+
 // Catches: slash setup bypasses its terminal confirmation or cannot publish a host-approved candidate.
 #[test]
 fn setup_slash_real_terminal_apply_preserves_captured_session_authority() {

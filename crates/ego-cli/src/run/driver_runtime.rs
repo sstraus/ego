@@ -120,7 +120,7 @@ async fn paste_image_limits(
     )
     .await
     .map_err(|error| format!("image paste could not check the model: {error:?}"))?;
-    let http = Arc::new(ProviderHttpAdapter::new(ports)) as Arc<dyn ego_ai::http::Http>;
+    let http = source.provider_http(ports);
     let profile = source
         .bind(http, paste_cancel, run_deadline)
         .resolve(GenerationModelRequest::new(GenerationRole::Main))
@@ -1211,6 +1211,7 @@ fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String 
 
 async fn run_interactive_setup(
     prompt: String,
+    proxy: Option<ego_tools::http::ProviderProxy>,
     selection: &model::GenerationSelection,
     root: &Path,
     status: Option<&InteractiveStatus>,
@@ -1293,6 +1294,7 @@ async fn run_interactive_setup(
             &setup_args,
             Some(&confirm),
             Some(&select),
+            proxy,
         ) => result,
     };
     drop(setup_cancel);
@@ -2009,7 +2011,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         skill_owner,
     } = input;
     let (ports, cancel, observation, probe_evidence) = effects;
-    let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
+    let http = source.provider_http(Arc::clone(ports));
     let runtime = GenerationRuntime {
         source: source.bind(http, cancel.clone(), run_deadline),
         policy_source: Arc::clone(policy_source),
@@ -2238,8 +2240,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
     )
     .await
     .map_err(compaction_termination)?;
-    let http =
-        Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
+    let http = source.provider_http(Arc::clone(&ports));
     let runtime = GenerationRuntime {
         source: source.bind(http, compaction_cancel.clone(), run_deadline),
         policy_source: Arc::clone(policy_source),
@@ -2741,6 +2742,7 @@ async fn dispatch_workspace_command<'session: 'a, 'a, 'store: 'session>(
     line: repl::Line,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
+        args,
         diagnostics,
         status,
         selection,
@@ -2822,7 +2824,15 @@ async fn dispatch_workspace_command<'session: 'a, 'a, 'store: 'session>(
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-            run_interactive_setup(prompt, selection, root, status.as_ref(), diagnostics).await;
+            run_interactive_setup(
+                prompt,
+                args.proxy.clone(),
+                selection,
+                root,
+                status.as_ref(),
+                diagnostics,
+            )
+            .await;
             Ok(CommandOutcome::Continue)
         }
         _ => unreachable!("only workspace commands are dispatched here"),

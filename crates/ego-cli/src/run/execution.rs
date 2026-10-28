@@ -731,6 +731,7 @@ async fn admit_run_phase<'store>(
 }
 
 async fn prepare_generation_phase(
+    proxy: Option<ego_tools::http::ProviderProxy>,
     host: &mut RunHost<'_>,
     cancel: &CancelToken,
     scoped: &ScopedInvocation,
@@ -754,6 +755,7 @@ async fn prepare_generation_phase(
                 proof_evidence,
             } = generation_preflight(
                 GenerationPreflightInput {
+                    proxy,
                     session_id: scoped.session_id,
                     confinement: &materialized.confinement,
                     effective: &materialized.effective,
@@ -928,8 +930,15 @@ pub(super) async fn execute<S: EventSink>(
         let resume = prepare_resume_phase(&args, &host, &scoped, &resolved)?;
         let mut materialized = materialize_run_phase(&args, &host, &scoped, &mut resolved, resume)?;
         let admitted = admit_run_phase(&host, &scoped, &mut resolved, &mut materialized).await?;
-        let (generation, policy_application) =
-            prepare_generation_phase(&mut host, &cancel, &scoped, &resolved, &materialized).await?;
+        let (generation, policy_application) = prepare_generation_phase(
+            args.proxy.clone(),
+            &mut host,
+            &cancel,
+            &scoped,
+            &resolved,
+            &materialized,
+        )
+        .await?;
         let activated = activate_session_phase(
             admitted,
             destination,
