@@ -10231,8 +10231,7 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
             assert!(checkpoints[0].get("latest_user_request").is_none());
         } else {
             assert_eq!(
-                checkpoints[0]["latest_user_request"],
-                "REGRESSION-MARKER",
+                checkpoints[0]["latest_user_request"], "REGRESSION-MARKER",
                 "{successor}"
             );
         }
