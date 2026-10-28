@@ -48,14 +48,10 @@ pub(super) fn analyze(
         // it. Shell and launcher diagnostics identify execution refusals.
         let launch_refusal = line.contains(": bad interpreter:")
             || line.starts_with("sandbox-exec: execvp() of '")
-            || line.split_once(": ").is_some_and(|(program, _)| {
-                matches!(
-                    Path::new(program)
-                        .file_name()
-                        .and_then(|name| name.to_str()),
-                    Some("sh" | "bash" | "zsh" | "dash" | "fish")
-                )
-            })
+            || (line
+                .split_once(": ")
+                .is_some_and(|(program, _)| is_shell(Path::new(program)))
+                && !explicit_script_read(spec, Path::new(printed)))
             || exec_target(spec).is_some_and(|target| target == Path::new(printed));
         if launch_refusal && executable(Path::new(printed)) {
             return Some(Denial {
@@ -185,6 +181,49 @@ fn refused_program(body: &str) -> Option<&str> {
         .strip_prefix("sandbox-exec: execvp() of '")?
         .strip_suffix("' failed")?;
     program.starts_with('/').then_some(program)
+}
+
+fn is_shell(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("sh" | "bash" | "zsh" | "dash" | "fish")
+    )
+}
+
+/// A direct `shell [--] script` opens the operand for reading. Do not infer
+/// this for `-c`, stdin or option-bearing invocations whose operand is unknown.
+fn explicit_script_read(spec: &SpawnSpec, printed: &Path) -> bool {
+    if !spec
+        .argv()
+        .first()
+        .is_some_and(|program| is_shell(Path::new(program)))
+    {
+        return false;
+    }
+    let mut args = spec.argv().iter().skip(1);
+    let Some(first) = args.next() else {
+        return false;
+    };
+    let operand = if first == "--" {
+        args.next()
+    } else {
+        Some(first)
+    };
+    let Some(operand) = operand.filter(|arg| !arg.to_string_lossy().starts_with('-')) else {
+        return false;
+    };
+    let operand = Path::new(operand);
+    let path = if operand.is_absolute() {
+        operand.to_path_buf()
+    } else if let Some(cwd) = spec.cwd() {
+        cwd.as_path().join(operand)
+    } else {
+        return false;
+    };
+    match (std::fs::canonicalize(path), std::fs::canonicalize(printed)) {
+        (Ok(operand), Ok(printed)) => operand == printed,
+        _ => false,
+    }
 }
 
 fn executable(path: &Path) -> bool {
