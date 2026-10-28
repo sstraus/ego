@@ -1067,3 +1067,7 @@ mod held_permission_receipt;
 #[cfg(all(test, unix))]
 #[path = "../../tests/live_surface_pty/image_symptoms.rs"]
 mod image_symptoms;
+
+#[cfg(all(test, unix))]
+#[path = "../../tests/live_surface_pty/modal_finish.rs"]
+pub(super) mod modal_finish;

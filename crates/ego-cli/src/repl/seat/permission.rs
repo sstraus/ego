@@ -685,6 +685,7 @@ mod tests {
             picker_keys: vec!["invalid-key".into(), "enter".into()],
             ..SurfaceStatus::default()
         }));
+        status.lock().unwrap().begin_activity();
         assert!(choose_permission_action(&mut editor, &phase, &status, true).is_none());
         assert_eq!(editor.current_buffer_contents(), "draft text");
         assert_eq!(editor.current_insertion_point(), 5);

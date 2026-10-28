@@ -4245,7 +4245,11 @@ fn read_interactive_command(
     seat: &dyn InteractiveSeat,
     status: Option<&InteractiveStatus>,
 ) -> repl::Line {
+    #[cfg(all(test, unix))]
+    let modal_idle_gate = super::interactive_driver::modal_finish::before_idle();
     seat.idle();
+    #[cfg(all(test, unix))]
+    super::interactive_driver::modal_finish::after_idle(modal_idle_gate);
     if let Some(status) = status
         && status.human
     {

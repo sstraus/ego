@@ -868,7 +868,7 @@ impl SurfacePhase {
     fn set_activity(&self, phase: EditPhase) {
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current != EditPhase::Modal as u8).then_some(phase as u8)
             });
     }
