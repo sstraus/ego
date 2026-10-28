@@ -3500,7 +3500,22 @@ where
                                         tracing::warn!(%error, "measured ACP config options could not be delivered");
                                     }
                                 }
-                                Err(error) => tracing::warn!(%error, "ACP confinement measurement failed after session/new"),
+                                Err(error) => {
+                                    tracing::warn!(%error, "ACP confinement measurement failed after session/new");
+                                    // Creation already answered. Complete the deferred offer
+                                    // without advertising authority that was not measured.
+                                    connection.send_notification(v1::SessionNotification::new(
+                                        id.clone(),
+                                        v1::SessionUpdate::ConfigOptionUpdate(
+                                            v1::ConfigOptionUpdate::new(Vec::new()).meta(
+                                                serde_json::Map::from_iter([(
+                                                    "ego".to_owned(),
+                                                    serde_json::json!({"error": control_error(&error)}),
+                                                )]),
+                                            ),
+                                        ),
+                                    ))?;
+                                }
                             }
                             Ok(())
                         }) {
