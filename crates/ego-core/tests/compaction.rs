@@ -2078,6 +2078,115 @@ fn over_window_compaction_fits_summarizer_instead_of_refusing() {
 // Catches: private compaction reports an unknown bill for a definitely-unsent
 // failure, or incorrectly waives a possibly-sent failure with missing usage.
 #[test]
+fn unpriced_compaction_announces_cost_anomaly_before_generation() {
+    use ego_core::budget::{PricingQuote, ResolvedRates, SettlementSource};
+    use ego_core::cost::{PricingRevision, ProviderCostRevision, RateSource};
+
+    // Catches: exact settlement hiding a missing admission-time cap warning,
+    // or a shared notice policy warning for bounded and policy-metered calls.
+    let mut failures = Vec::new();
+    for case in ["unpriced", "priced", "subscription", "unmetered"] {
+        let (mut compact, generator) = compaction_profile(
+            "summary",
+            ThinkingLevel::Low,
+            32_000,
+            4096,
+            false,
+            vec![
+                AiEvent::TextDelta { text: checkpoint() },
+                AiEvent::Usage(Usage {
+                    uncached_input_tokens: 17,
+                    output_tokens: 5,
+                    ..Usage::IDENTITY
+                }),
+                AiEvent::ProviderCost {
+                    cost: Money::new("0.01".parse().unwrap(), CurrencyCode::new("USD").unwrap()),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        );
+        compact.metering = match case {
+            "unpriced" | "priced" => Metering::Currency {
+                settlement: SettlementSource::ProviderReported {
+                    revision: ProviderCostRevision {
+                        provider: "domain-test".into(),
+                        field: "cost".into(),
+                        schema_revision: "1".into(),
+                    },
+                },
+            },
+            "subscription" => Metering::Subscription {
+                revision: MeteringRevision("test-subscription".into()),
+                equivalent: None,
+            },
+            _ => compact.metering,
+        };
+        if case == "priced" {
+            let rate = Some("0.000001".parse().unwrap());
+            compact.rates = Some(ResolvedRates {
+                source: RateSource::Operator,
+                quote: PricingQuote {
+                    web_search: None,
+                    revision: PricingRevision("test-rates".into()),
+                    currency: CurrencyCode::new("USD").unwrap(),
+                    uncached_input: rate,
+                    cache_read: rate,
+                    cache_write: rate,
+                    cache_write_extended: rate,
+                    output: rate,
+                },
+            });
+        }
+        let (main, _) =
+            compaction_profile("main", ThinkingLevel::Low, 32_000, 4096, false, Vec::new());
+        let source = CompactionSource::new([
+            (GenerationRole::Compaction, Ok(compact)),
+            (GenerationRole::Main, Ok(main)),
+        ]);
+        let (mut turn, store, _) = compaction_turn(source);
+        futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
+            .expect("compaction prepares with exact settlement");
+        assert_eq!(generator.calls().len(), 1);
+        let events = store.events();
+        let notices: Vec<_> = events.iter().enumerate().filter_map(|(index, event)| {
+            matches!(&event.kind, EventKind::CostAnomaly { model, estimated_upper_bound: None } if model == "summary").then_some(index)
+        }).collect();
+        let started = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::GenerationStarted {
+                        role: GenerationRole::Compaction,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        if case == "unpriced" {
+            if notices.len() != 1 || notices[0] >= started {
+                failures.push(format!("{case}: expected one cap-coverage notice before generation, got {notices:?}, generation={started}"));
+            }
+        } else if !notices.is_empty() {
+            failures.push(format!(
+                "{case}: unexpected missing-bound notices {notices:?}"
+            ));
+        }
+        assert!(
+            events.iter().any(|event| matches!(
+                event.kind,
+                EventKind::UsageUpdated {
+                    cost_delta: CostDelta::Known { .. },
+                    ..
+                }
+            )),
+            "{case}: actual cost settles exactly"
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn compaction_missing_usage_settles_from_delivery_evidence() {
     use ego_core::budget::{PricingQuote, ResolvedRates, SettlementSource};
     use ego_core::cost::{CostAttribution, PricingRevision, RateSource};

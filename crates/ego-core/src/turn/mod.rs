@@ -1053,18 +1053,14 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                     DeliveryCertainty::DefinitelyUnsent,
                 )
             })?;
-        if reservation.upper_bound().is_none()
-            && matches!(profile.metering, crate::budget::Metering::Currency { .. })
-        {
-            self.journal
-                .cost_anomaly(turn, &profile.identity.0, None)
-                .map_err(|error| {
-                    ToollessGenerationFailure::new(
-                        error.to_string(),
-                        DeliveryCertainty::DefinitelyUnsent,
-                    )
-                })?;
-        }
+        self.journal
+            .reservation_cost_anomaly(turn, &profile.identity.0, &profile.metering, &reservation)
+            .map_err(|error| {
+                ToollessGenerationFailure::new(
+                    error.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                )
+            })?;
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
@@ -2279,6 +2275,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     SharedBudgetError::Denied(error) => CompactionError::Budget(error),
                     error => CompactionError::Internal(error.to_string()),
                 })?;
+            self.journal.reservation_cost_anomaly(
+                turn,
+                &profile.identity.0,
+                &profile.metering,
+                &reservation,
+            )?;
             let attempt = GenerationAttempt::new(
                 GenerationId::new(),
                 reservation,
@@ -5554,11 +5556,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return self.refuse(turn, denied.to_string(), reason).map(Err);
             }
         };
-        if reservation.upper_bound().is_none()
-            && matches!(profile.metering, crate::budget::Metering::Currency { .. })
-        {
-            self.journal.cost_anomaly(turn, &profile.identity.0, None)?;
-        }
+        self.journal.reservation_cost_anomaly(
+            turn,
+            &profile.identity.0,
+            &profile.metering,
+            &reservation,
+        )?;
         let attempt = match GenerationAttempt::from_attempt(
             next_attempt,
             reservation,
