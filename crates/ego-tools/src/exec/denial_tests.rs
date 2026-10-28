@@ -512,3 +512,33 @@ fn shell_exec_denial_never_offers_binary_read_or_write() {
 fn refused_interpreter_chain_names_exec_recovery_and_read_root() {
     executable_refusal_fixture(true);
 }
+
+// Catches: selector EPERM is missed, or a non-denial, relative path or
+// trailing prose is accepted as a human authority proposal. The valid form
+// is recorded from the real xcode-select diagnostic fixture.
+#[test]
+fn xcode_select_parser_requires_the_recorded_absolute_denial_shape() {
+    let recorded = include_str!("../../tests/fixtures/xcode-select-denied.txt")
+        .lines()
+        .next()
+        .unwrap();
+    for (line, expected) in [
+        (recorded.to_owned(), Some("/var/select/developer_dir")),
+        (
+            recorded.replace("Operation not permitted", "Permission denied"),
+            Some("/var/select/developer_dir"),
+        ),
+        (
+            recorded.replace("Operation not permitted", "No such file or directory"),
+            None,
+        ),
+        (
+            recorded.replace("/var/select/developer_dir", "relative"),
+            None,
+        ),
+        (format!("{recorded} ignored"), None),
+        (recorded.replace("xcode-select: error:", "unrelated:"), None),
+    ] {
+        assert_eq!(printed_path(&line), expected, "{line}");
+    }
+}

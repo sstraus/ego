@@ -131,6 +131,15 @@ fn floor_refusal(printed: &str, policy: &RunConfinement) -> bool {
 /// permitted` both name the path between the last separator and the errno.
 fn printed_path(line: &str) -> Option<&str> {
     let line = line.trim_end();
+    if let Some(file) = line.strip_prefix("xcode-select: error: unable to read data link at '") {
+        return [
+            "', expected symbolic link (Operation not permitted)",
+            "', expected symbolic link (Permission denied)",
+        ]
+        .into_iter()
+        .find_map(|suffix| file.strip_suffix(suffix))
+        .filter(|path| path.starts_with('/'));
+    }
     if let Some((_, file)) = line.split_once(": can't open file '") {
         return [
             "': [Errno 1] Operation not permitted",

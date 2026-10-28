@@ -325,8 +325,13 @@ resume. Adding `exec_paths` cannot override a read-only root, including under
 adaptive confinement. MCP diagnostics do not expose child stderr,
 arguments, or environment values.
 On macOS an installed `/opt/homebrew` is also a default runtime root, including
-its `bin` symlinks, Cellar targets and libraries. Other installation prefixes
-must be listed explicitly. Git can also read existing `~/.gitconfig` and
+its `bin` symlinks, Cellar targets and libraries. Installed Apple developer tools
+at `/Applications/Xcode.app` and
+`/Library/Developer/CommandLineTools` are also runtime roots. Workspace confinement
+permits reads of the exact `/private/var/select/developer_dir` selector and `/Library/Preferences/com.apple.dt.Xcode.plist` license record so Apple
+launchers can locate those tools and check the accepted license. It does not open
+the surrounding `/var` or preferences directories.
+Other installation prefixes must be listed explicitly. Git can also read existing `~/.gitconfig` and
 `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) on macOS; this
 does not grant access to the rest of the home directory. Writes remain limited by `--sandbox`: workspace
 and private scratch for `workspace`, no writes for `ro`.
