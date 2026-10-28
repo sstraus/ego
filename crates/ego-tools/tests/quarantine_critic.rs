@@ -138,7 +138,7 @@ async fn attachment_case(replay: bool) {
         };
         assert!(other_connection.is_quarantined(id).unwrap());
         assert!(
-            matches!(result, Err(LifecycleError::UnknownSession)),
+            matches!(result, Err(LifecycleError::UnknownSession { .. })),
             "attachment escaped completed quarantine (load: {replay}): {result:?}"
         );
     }

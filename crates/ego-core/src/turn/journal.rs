@@ -177,6 +177,62 @@ impl<'s> SharedJournal<'s> {
             .map_err(Into::into)
     }
 
+    /// Validate and durably update pins under the session's sole state lock.
+    pub fn pins(
+        &self,
+        command: crate::compact::PinCommand,
+    ) -> Result<String, crate::compact::PinError> {
+        use crate::compact::{PinCommand, PinError};
+        let mut journal = self.lock().map_err(PinError::Journal)?;
+        if command == PinCommand::List {
+            return Ok(journal.state.constraints.listing());
+        }
+        if !journal.state.live_attempts.is_empty()
+            || !journal.state.unacknowledged_prompts().is_empty()
+            || journal.state.pending_question().is_some()
+        {
+            return Err(PinError::Invalid(
+                "cannot change pins while work is pending".into(),
+            ));
+        }
+        let constraints = journal
+            .state
+            .constraints
+            .changed(&command)
+            .map_err(PinError::Invalid)?;
+        journal
+            .append(
+                TurnId::new(),
+                None,
+                None,
+                EventKind::PinsChanged { constraints },
+            )
+            .map_err(|error| PinError::Journal(error.into()))?;
+        Ok(journal.state.constraints.listing())
+    }
+
+    /// Persist and publish the anomaly once, atomically with its replayed key.
+    pub fn cost_anomaly(
+        &self,
+        turn: TurnId,
+        model: &str,
+        estimated_upper_bound: Option<crate::cost::Money>,
+    ) -> Result<(), SharedJournalError> {
+        let mut journal = self.lock()?;
+        if !journal.state.cost_anomaly_models.contains(model) {
+            journal.append(
+                turn,
+                None,
+                None,
+                EventKind::CostAnomaly {
+                    model: model.to_owned(),
+                    estimated_upper_bound,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     /// Compare, append, and fold one lease-bound lifecycle event while the
     /// session's sole journal authority is locked.
     pub(crate) fn compare_and_append_lifecycle(

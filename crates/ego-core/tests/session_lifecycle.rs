@@ -662,23 +662,23 @@ fn a_quarantined_session_is_unknown_to_every_operation_and_its_neighbours_stay()
     );
     assert!(matches!(
         service.meta(refused),
-        Err(LifecycleError::UnknownSession)
+        Err(LifecycleError::UnknownSession { .. })
     ));
     assert!(matches!(
         futures::executor::block_on(service.load(refused, &root)),
-        Err(LifecycleError::UnknownSession)
+        Err(LifecycleError::UnknownSession { .. })
     ));
     assert!(matches!(
         futures::executor::block_on(service.resume(refused, &root)),
-        Err(LifecycleError::UnknownSession)
+        Err(LifecycleError::UnknownSession { .. })
     ));
     assert!(matches!(
         futures::executor::block_on(service.fork(refused)),
-        Err(LifecycleError::UnknownSession)
+        Err(LifecycleError::UnknownSession { .. })
     ));
     assert!(matches!(
         service.hold(refused),
-        Err(LifecycleError::UnknownSession)
+        Err(LifecycleError::UnknownSession { .. })
     ));
 }
 

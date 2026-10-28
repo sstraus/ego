@@ -85,6 +85,12 @@ pub enum AiEvent {
     /// hold is not "exactly one" but that the events **sum to the provider's
     /// final total**.
     Usage(Usage),
+    /// Explicit rate-limit levels from this provider response, not billable usage.
+    ProviderLimits {
+        provider: String,
+        model: String,
+        limits: Vec<crate::usage::ProviderLimit>,
+    },
     /// What the provider says it will charge for this request.
     ///
     /// A **total for the request**, not an increment — the opposite of
@@ -184,11 +190,10 @@ pub trait Generator: Send + Sync {
     /// signature rather than by convention: it can only be built from a
     /// [`Reservation`](crate::budget::Reservation), whose constructor is
     /// sealed inside [`crate::budget`], so the only source is
-    /// `BudgetGate::reserve` — which refuses when the cost cannot be
-    /// bounded. `ARCHITECTURE.md` §3.1 requires an unknown cost to fail
-    /// *closed*, and a check on the response cannot do that, because the
-    /// money is already spent by then. A generation that skipped the gate
-    /// does not compile.
+    /// `BudgetGate::reserve`, which enforces a configured cap on known and
+    /// estimable spend. Missing prices admit an explicitly unbounded attempt
+    /// with a durable anomaly notice. A generation that skipped the gate does
+    /// not compile.
     ///
     /// Taken **by value**, and handed back inside the returned
     /// [`AttemptStream`]. Not borrowed: a borrowed token stays usable for a

@@ -14,6 +14,10 @@
 
 mod support;
 
+#[cfg(target_os = "linux")]
+#[path = "../../ego-acp/tests/support/mod.rs"]
+mod acp_support;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -40,6 +44,14 @@ use support::{AcpHost, Ego, Plan, Reply, Stub, text, tool_call};
 #[test]
 #[ignore = "hosts the Landlock helper; not a test of its own"]
 fn __ego_internal_landlock_exec_v1() {
+    if std::env::args_os().nth(7).is_some_and(|workspace| {
+        Path::new(&workspace)
+            .join(".ego-test-helper-failure")
+            .exists()
+    }) {
+        eprintln!("injected capability helper execution failure");
+        std::process::exit(101);
+    }
     let refused = ego_tools::exec::dispatch_landlock_helper(std::env::args_os())
         .expect("libtest was handed the helper envelope but did not recognise it");
     panic!("the Landlock helper refused execution: {refused:?}");
@@ -103,6 +115,85 @@ fn isolated_adapter_test(name: &str) -> bool {
         .expect("isolated adapter process");
     assert!(output.status.success(), "{output:?}");
     true
+}
+
+// Catches: a real helper failure leaves an ACP host waiting forever for its config offer.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_filesystem_probe_publishes_terminal_acp_config_update() {
+    if isolated_adapter_test("failed_filesystem_probe_publishes_terminal_acp_config_update") {
+        return;
+    }
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let workspace = workspace_dir.path().canonicalize().unwrap();
+    let read_root = tempfile::tempdir().unwrap();
+    let home = std::env::var_os("EGO_HOME").unwrap();
+    // Read-only roots select Landlock rather than the host's available bwrap backend.
+    std::fs::write(
+        Path::new(&home).join("config.toml"),
+        format!(
+            "roots = [{{ path = {:?}, access = 'read' }}]\n",
+            read_root.path()
+        ),
+    )
+    .unwrap();
+    std::fs::write(workspace.join(".ego-test-helper-failure"), "fail helper").unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let store = Arc::new(JsonlStore::new(sessions.path(), &workspace, Box::new(OsIo)));
+    let controls = Arc::new(seat(Confinement::Workspace));
+    let admission = Arc::new(CliSessionConfinementAdmission::new(
+        store,
+        Arc::clone(&controls),
+        Confinement::Workspace,
+        CancelToken::new(),
+    ));
+    let fixture = acp_support::DurableAcpFixture::new();
+    let mut connection = acp_support::Connected::new(
+        fixture.router_with_confinement_and_controls(Some(controls), Some(admission)),
+    );
+    connection.initialize().await;
+    let opened = connection.new_session(workspace.to_str().unwrap()).await;
+    let session = opened["result"]["sessionId"].as_str().unwrap();
+    assert!(opened["result"].get("configOptions").is_none(), "{opened}");
+    let (prompt, notifications) = connection.request(
+        "session/prompt",
+        serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": "hello"}]}),
+    ).await;
+    assert_eq!(prompt["error"]["code"], -32603, "{prompt}");
+    assert!(
+        prompt["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("injected capability helper execution failure"),
+        "the real helper failure must reach admission: {prompt}"
+    );
+    assert_eq!(fixture.executor_effect_counts(), (0, 0, 0));
+    let update = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut frames = notifications.into_iter();
+        loop {
+            let frame = match frames.next() {
+                Some(frame) => frame,
+                None => connection.frame().await,
+            };
+            if frame["params"]["update"]["sessionUpdate"] == "config_option_update" {
+                break frame;
+            }
+        }
+    })
+    .await
+    .expect("failed probe left ACP config offer pending forever");
+    assert_eq!(update["params"]["sessionId"], session, "{update}");
+    let update = &update["params"]["update"];
+    assert_eq!(update["configOptions"], serde_json::json!([]), "{update}");
+    assert_eq!(update["_meta"]["ego"]["error"]["code"], -32603, "{update}");
+    assert!(
+        update["_meta"]["ego"]["error"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("injected capability helper execution failure"),
+        "the terminal update must explain the real measurement failure: {update}"
+    );
+    connection.abort().await;
 }
 
 #[tokio::test]

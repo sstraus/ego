@@ -141,13 +141,14 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
                     if name == ego_core::question::ASK_QUESTION_TOOL {
                         continue;
                     }
-                    let result = result.model_text();
+                    let text = result.model_text();
                     let record = tools.record(
                         &tool_row::Finished {
                             name,
                             args,
                             ok: *ok,
-                            result: &result,
+                            result: &text,
+                            result_blocks: Some(&result.content),
                             timing: timings.remove(&item),
                         },
                         capabilities.with_current_width(),
@@ -390,7 +391,7 @@ mod tests {
             let grid = capture(&replayed, width);
             assert_eq!(
                 grid,
-                "> first\n\nProse\n\n✓ read first · 1 line\n\nDone\n\n> second\n\nFinal"
+                "> first\n\nProse\n\n✓ read first · 1 line\n  … 1 more line · Option+O or /expand\n\nDone\n\n> second\n\nFinal"
             );
             println!("rhythm replay width={width} grid={grid:?}");
 

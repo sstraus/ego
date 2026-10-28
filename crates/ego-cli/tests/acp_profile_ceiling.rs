@@ -72,6 +72,18 @@ roots = [{{path = "{}", access = "read"}}]
         loop {
             let update = host.read_frame();
             if update["params"]["update"]["sessionUpdate"] == "config_option_update" {
+                // A terminal failure update must not masquerade as initialized controls.
+                assert!(
+                    update["params"]["update"]["_meta"]["ego"]["error"].is_null(),
+                    "{update}"
+                );
+                assert!(
+                    !update["params"]["update"]["configOptions"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty(),
+                    "{update}"
+                );
                 break;
             }
         }

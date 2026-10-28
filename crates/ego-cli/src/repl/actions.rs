@@ -23,6 +23,8 @@ pub enum ActionId {
     Sessions,
     Fork,
     Compact,
+    Pin,
+    Unpin,
     Refresh,
     Clear,
     Usage,
@@ -127,6 +129,7 @@ pub enum Dispatch {
     Mode(ego_core::config::Mode),
     Setup(String),
     Tasks(String),
+    Pins(ego_core::compact::PinCommand),
     Mcp(String),
     McpContext(McpContextCommand),
     Prompt,
@@ -547,6 +550,8 @@ impl ActionRegistry {
             enabled(Fork, "fork", "Create a copy of this session"),
             enabled(Compact, "compact", "Compact the active context")
                 .unavailable("the compaction service"),
+            enabled(Pin, "pin", "List or add standing user constraints — /pin [TEXT]"),
+            enabled(Unpin, "unpin", "Remove a standing user constraint — /unpin NUMBER"),
             enabled(Clear, "clear", "Clear composer and menu state"),
             enabled(Usage, "usage", "Show usage, context, cost and budget"),
             enabled(Statusline, "statusline", "Configure the native status line"),
@@ -937,15 +942,11 @@ impl ActionRegistry {
             return Vec::new();
         };
         capture
-            .descriptors()
-            .iter()
-            .filter(|spec| spec.descriptor().user_invocable && spec.name().starts_with(filter))
-            .map(|spec| {
-                (
-                    spec.name().to_owned(),
-                    spec.descriptor().description.clone(),
-                )
-            })
+            .core()
+            .announce_for_user()
+            .into_iter()
+            .filter(|descriptor| descriptor.name.starts_with(filter))
+            .map(|descriptor| (descriptor.name.clone(), descriptor.description.clone()))
             .collect()
     }
     pub fn select(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Option<ActionSelection> {
@@ -1238,6 +1239,27 @@ impl ActionRegistry {
                     }
                 };
             }
+            if name == "pin" && self.resolve_slash(name) == Some(ActionId::Pin) {
+                let text = command[boundary..]
+                    .strip_prefix(' ')
+                    .unwrap_or(raw_arguments);
+                return Dispatch::Pins(if text.trim().is_empty() || text == "list" {
+                    ego_core::compact::PinCommand::List
+                } else {
+                    ego_core::compact::PinCommand::Pin(text.to_owned())
+                });
+            }
+            if name == "unpin" && self.resolve_slash(name) == Some(ActionId::Unpin) {
+                let number = raw_arguments.trim();
+                return match number.parse::<u64>() {
+                    Ok(id) if id > 0 && number.bytes().all(|byte| byte.is_ascii_digit()) => {
+                        Dispatch::Pins(ego_core::compact::PinCommand::Unpin(id))
+                    }
+                    _ => Dispatch::Refused {
+                        reason: "usage: /unpin NUMBER (use /pin to list pins)",
+                    },
+                };
+            }
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
             }
@@ -1459,10 +1481,7 @@ fn admitted_skill_operation(
     name: &str,
     raw_arguments: &str,
 ) -> Option<AdmittedSkillOperation> {
-    capture
-        .descriptor(name)
-        .filter(|spec| spec.descriptor().user_invocable)
-        .map(|spec| AdmittedSkillOperation::invoke(spec.descriptor(), raw_arguments))
+    capture.core().user_command(name, raw_arguments)
 }
 
 #[cfg(test)]

@@ -7915,6 +7915,17 @@ mod turn {
         assert_eq!(source.seen.lock().unwrap().len(), 2);
         assert_eq!(fx.store.events().iter().filter(|event| matches!(&event.kind,
             EventKind::HostContextAppended { text } if text.starts_with("mdkb session warmup data"))).count(), 1);
+        // Catches: retry restoration mistakes a merged memory hint for missing
+        // host-state evidence and appends another copy to every request.
+        for request in fx.generator.calls() {
+            assert_eq!(
+                serde_json::to_string(&request.messages)
+                    .unwrap()
+                    .matches("One warmup entry")
+                    .count(),
+                1
+            );
+        }
     }
 
     // Catches: empty warmup resets mdkb's recall deduplication on every prompt.
@@ -8588,6 +8599,119 @@ mod turn {
             committed(&fx.gate.borrow()),
             Some(usd("0.0155925")),
             "an unknown cost charges the bound, never zero"
+        );
+    }
+
+    // Catches: missing cost silences the anomaly or prevents a later turn,
+    // and replay/second turns repeat a notice for the same session and model.
+    #[test]
+    fn missing_cost_continues_two_turns_and_notifies_once_per_session_model() {
+        for (capped, priced) in [(true, false), (false, false), (true, true)] {
+            let script = vec![
+                AiEvent::Usage(tokens(1_000, 0, 0, 200)),
+                AiEvent::Stop(StopReason::Stop),
+            ];
+            let fx = Fixture::new(vec![script.clone(), script]);
+            if !capped {
+                *fx.gate.borrow_mut() =
+                    SharedBudgetGate::new(BudgetGate::unlimited(CurrencyCode::new("USD").unwrap()));
+            }
+            let mut state = SessionState::default();
+            for _ in 0..2 {
+                let (exit, ok, after) = run_with(
+                    &fx,
+                    state,
+                    "hi",
+                    provider_reported(),
+                    priced.then(rates),
+                    None,
+                    config(),
+                );
+                assert_eq!(exit, ExitReason::Completed, "capped={capped}");
+                assert!(ok);
+                // Reopen from durable events, not a retained notification flag.
+                state = SessionState::default();
+                for event in fx.store.events() {
+                    state.apply(&event);
+                }
+                assert_eq!(state, after);
+            }
+            assert_eq!(fx.generator.calls().len(), 2);
+            let notices: Vec<_> = fx
+                .sink
+                .events()
+                .into_iter()
+                .map(|event| serde_json::to_value(event).unwrap())
+                .filter(|event| event["type"] == "cost_anomaly")
+                .collect();
+            assert_eq!(
+                notices.len(),
+                1,
+                "missing cost must be visible once, capped={capped}"
+            );
+            assert_eq!(
+                notices[0]["estimated_upper_bound"],
+                if priced {
+                    json!({"amount":"0.0155925","currency":"USD"})
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            let durable = fx
+                .store
+                .events()
+                .iter()
+                .filter(|event| serde_json::to_value(&event.kind).unwrap()["kind"] == "CostAnomaly")
+                .count();
+            assert_eq!(durable, 1, "notice is durable, not only terminal text");
+            assert!(
+                state.errors.is_empty(),
+                "an anomaly is not a provider failure"
+            );
+            if priced {
+                assert!(
+                    committed(&fx.gate.borrow()).unwrap().amount >= usd("0.031185").amount,
+                    "both missing actual costs must charge their reservation, not zero"
+                );
+            } else {
+                assert_eq!(committed(&fx.gate.borrow()), capped.then(|| usd("0")));
+            }
+        }
+    }
+
+    // Catches: one model's anomaly suppressing a different model's notice.
+    #[test]
+    fn cost_anomaly_deduplication_is_model_scoped_not_session_wide() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::Usage(tokens(100, 0, 0, 20)),
+                AiEvent::Stop(StopReason::Stop),
+            ];
+            3
+        ]);
+        let mut state = SessionState::default();
+        for model in ["test-model", "other-model", "test-model"] {
+            let mut settings = config();
+            settings.model = model.to_owned();
+            let (exit, ok, after) =
+                run_with(&fx, state, "hi", provider_reported(), None, None, settings);
+            assert_eq!(exit, ExitReason::Completed);
+            assert!(ok);
+            state = after;
+        }
+        let models: Vec<_> = fx
+            .sink
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                PublicEvent::CostAnomaly { model, .. } => Some(model),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(models, vec!["test-model", "other-model"]);
+        assert!(
+            state.cost.known().is_none(),
+            "anomalies cannot turn unknown actual spend into free spend"
         );
     }
 
@@ -10831,6 +10955,7 @@ mod turn {
                         .messages
                         .messages()
                         .iter()
+                        .rev()
                         .filter(|message| message.role == Role::User)
                         .flat_map(|message| &message.content)
                         .find_map(|block| match block {
@@ -10924,13 +11049,32 @@ mod turn {
                 TurnConfig {
                     cache: ego_core::generator::capabilities::CacheRetention::Short,
                     system: None,
-                    identity: None,
+                    identity: Some(ego_core::turn::AgentIdentity {
+                        version: "test".into(),
+                        sandbox: Confinement::Off,
+                        offline: false,
+                        host: None,
+                    }),
                     token_ceiling: None,
                     retry: 1,
                     fallbacks: vec![fallback.clone()],
                 },
             );
             assert!(ok, "the final fallback attempt completed");
+            // Catches: rebuilding a retry drops a just-admitted host observation
+            // or appends another copy, changing the already-sent cache prefix.
+            let requests = trace.requests.lock().unwrap();
+            assert_eq!(requests[0].messages, requests[1].messages);
+            assert_eq!(requests[0].cache, requests[1].cache);
+            assert_eq!(requests[2].messages, requests[3].messages);
+            assert_eq!(requests[2].cache, requests[3].cache);
+            assert!(
+                requests[2]
+                    .messages
+                    .messages()
+                    .starts_with(requests[0].messages.messages())
+            );
+            drop(requests);
 
             let events = fx.store.events();
             let started: Vec<_> = events
@@ -12733,6 +12877,7 @@ mod turn {
     struct SkillResourceGenerator {
         sent: AtomicBool,
         path: &'static str,
+        requests: Mutex<Vec<GenRequest>>,
     }
 
     impl Generator for SkillResourceGenerator {
@@ -12740,6 +12885,7 @@ mod turn {
             Ok(())
         }
         fn generate(&self, request: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+            self.requests.lock().unwrap().push(request.clone());
             let script = if self.sent.swap(true, Ordering::SeqCst) {
                 vec![AiEvent::Stop(StopReason::Stop)]
             } else {
@@ -12796,6 +12942,7 @@ mod turn {
             let generator = Arc::new(SkillResourceGenerator {
                 sent: AtomicBool::new(false),
                 path,
+                requests: Mutex::new(Vec::new()),
             });
             let evidence = SkillEvidence::new();
             let mut gate = fx.gate.borrow_mut();
@@ -12829,6 +12976,40 @@ mod turn {
             )
             .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
             block_on(turn.run_admitted_skill(operation)).unwrap();
+            // Catches: a tool continuation copies active skill authority again
+            // or changes its original provider-visible message boundary.
+            let requests = generator.requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                if denied { 1 } else { 2 },
+                "{path}, denied={denied}"
+            );
+            for pair in requests.windows(2) {
+                assert!(
+                    pair[1]
+                        .messages
+                        .messages()
+                        .starts_with(pair[0].messages.messages())
+                );
+            }
+            for request in requests.iter() {
+                assert_eq!(
+                    request
+                        .messages
+                        .messages()
+                        .iter()
+                        .flat_map(|message| &message.content)
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } =>
+                                Some(text.matches("Use the admitted resource").count()),
+                            _ => None,
+                        })
+                        .sum::<usize>(),
+                    1
+                );
+            }
+            drop(requests);
+
             let state = turn.state();
             let call = state
                 .items
@@ -12891,6 +13072,7 @@ mod turn {
             let generator = Arc::new(SkillResourceGenerator {
                 sent: AtomicBool::new(false),
                 path,
+                requests: Mutex::new(Vec::new()),
             });
             let evidence = SkillEvidence::new();
             let mut gate = fx.gate.borrow_mut();

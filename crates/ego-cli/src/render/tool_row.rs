@@ -53,6 +53,8 @@ pub struct Finished<'a> {
     pub ok: bool,
     /// The result text the model was given, or the failure message.
     pub result: &'a str,
+    /// Authoritative blocks, when the reduced item or replay supplies them.
+    pub result_blocks: Option<&'a [ego_core::permit::ToolContentBlock]>,
     pub timing: Option<ego_core::event::domain::ToolTiming>,
 }
 
@@ -116,15 +118,18 @@ fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
     let heading = header(call, &args, width);
 
+    let body = body(call, &args, width);
     let mut rows = vec![heading.clone()];
     if call.name == "exec" {
         rows.extend(tail(call, width));
+    } else if !body.is_empty() {
+        rows.push(hidden_lines(body.len(), width));
     }
 
     let shell_progress =
         (call.name == "exec" && call.ok && output_lines(call).is_empty()).then(|| heading.clone());
     let mut detail = vec![heading];
-    detail.extend(body(call, &args, width));
+    detail.extend(body);
     ToolRecord {
         shell_progress,
         rows: render(&rows, depth),
@@ -187,7 +192,17 @@ fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 
 /// `(added, removed)` lines of an edit, from the same line diff the expanded
 /// view draws, so the two cannot disagree.
-fn edit_stat(args: &Value) -> Option<(usize, usize)> {
+fn edit_stat(args: &Value, result: &str) -> Option<(usize, usize)> {
+    // Builtin receipts carry actual whole-file totals, including repeated
+    // substitutions sharing a line. Older receipts can still use the unique
+    // fragment below, but cannot establish replace_all totals.
+    if let Some((_, counts)) = result.lines().next().unwrap_or_default().rsplit_once(" (+")
+        && let Some(counts) = counts.strip_suffix(" lines)")
+        && let Some((added, removed)) = counts.split_once(" -")
+        && let (Ok(added), Ok(removed)) = (added.parse(), removed.parse())
+    {
+        return Some((added, removed));
+    }
     // One fragment cannot establish total changed lines across repeated matches.
     if args.get("replace_all").and_then(Value::as_bool) == Some(true) {
         return None;
@@ -236,7 +251,7 @@ fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
         ),
     };
     let stat = if call.ok && call.name == "edit" {
-        edit_stat(args).map(|(added, removed)| format!("+{added} -{removed}"))
+        edit_stat(args, call.result).map(|(added, removed)| format!("+{added} -{removed}"))
     } else {
         None
     };
@@ -484,7 +499,24 @@ fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
         );
     }
     let room = width.saturating_sub(2).max(1);
-    call.result
+    // Stream identity comes from evidence provenance, never from marker-like
+    // text a process may legitimately print. Without blocks, retain all text.
+    let visible = call
+        .result_blocks
+        .filter(|_| call.name == "exec")
+        .map(|blocks| {
+            ego_core::permit::ToolResult::new(
+                blocks
+                    .iter()
+                    .filter(|block| !block.backend_owned_pipe() || !block.text.trim().is_empty())
+                    .cloned()
+                    .collect(),
+            )
+            .model_text()
+        });
+    visible
+        .as_deref()
+        .unwrap_or(call.result)
         .lines()
         .flat_map(|line| Line::plain(printable_output(line)).wrap(room))
         .map(|line| {
@@ -513,6 +545,7 @@ mod tests {
             args,
             ok,
             result,
+            result_blocks: None,
             timing: Some(ego_core::event::domain::ToolTiming {
                 execution_ms: Some(1500),
                 approval_wait_ms: 0,
@@ -552,6 +585,67 @@ mod tests {
                 result.rows
             );
         }
+    }
+
+    // Catches: empty evidence streams grow labels, or marker-like process
+    // payloads are parsed as labels and disappear from expanded output.
+    #[test]
+    fn expanded_exec_labels_only_streams_with_visible_output() {
+        use ego_core::event::domain::{DomainEvent, EventKind};
+        let events: Vec<DomainEvent> =
+            serde_json::from_str(include_str!("../../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let recorded = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolCallCompleted { result, .. } => Some(result),
+                _ => None,
+            })
+            .unwrap();
+        for (stdout, stderr, diagnostic, expected) in [
+            ("out\n", "", None, "  [stdout]\n  out"),
+            ("", "warning\n", None, "  [stderr]\n  warning"),
+            ("", "", None, ""),
+            (
+                "",
+                "",
+                Some("process exited unsuccessfully with code Some(2)"),
+                "  process exited unsuccessfully with code Some(2)",
+            ),
+            ("[stderr]\n", "", None, "  [stdout]\n  [stderr]"),
+            (
+                "",
+                "\n[stdout]\n\n[stderr]\n",
+                None,
+                "  [stderr]\n\n  [stdout]\n\n  [stderr]",
+            ),
+        ] {
+            let mut result = recorded.clone();
+            result.content[0].text = stdout.to_owned();
+            result.content[1].text = stderr.to_owned();
+            if let Some(diagnostic) = diagnostic {
+                result
+                    .content
+                    .push(ego_core::permit::ToolContentBlock::builtin(diagnostic));
+            }
+            let text = result.model_text();
+            let rendered = record(
+                &Finished {
+                    result_blocks: Some(&result.content),
+                    ..call("exec", r#"{"argv":["x"]}"#, diagnostic.is_none(), &text)
+                },
+                at(120),
+            );
+            let body = rendered
+                .detail
+                .split_once('\n')
+                .map_or("", |(_, body)| body);
+            assert_eq!(body, expected, "stdout={stdout:?}, stderr={stderr:?}");
+        }
+        let raw = record(
+            &call("exec", r#"{"argv":["x"]}"#, true, "[stderr]"),
+            at(120),
+        );
+        assert!(raw.detail.ends_with("\n  [stderr]"), "{}", raw.detail);
     }
 
     // Catches: stderr becomes indistinguishable from stdout in a collapsed preview.
@@ -615,7 +709,7 @@ mod tests {
                 },
                 at(80),
             );
-            assert_eq!(record.rows, expected);
+            assert_eq!(header_of(&record), expected);
         }
     }
 
@@ -659,6 +753,101 @@ mod tests {
             }
             println!("exec timeout after: {}", rendered.rows);
         }
+    }
+
+    // Catches: a collapsed read counts source lines instead of hidden wrapped rows.
+    #[test]
+    fn collapsed_read_counts_wrapped_rows() {
+        let rendered = record(
+            &call("read", r#"{"path":"a.rs"}"#, true, &"界".repeat(80)),
+            at(42),
+        );
+        assert_eq!(
+            rendered.rows.lines().nth(1),
+            Some("  … 4 more lines · Option+O or /expand")
+        );
+        println!("read after:\n{}", rendered.rows);
+    }
+
+    // Catches: an edit hides the diff without naming its context and change rows.
+    #[test]
+    fn collapsed_edit_counts_diff_rows() {
+        let rendered = record(
+            &call(
+                "edit",
+                r#"{"path":"a.rs","old_string":"x\ny\n","new_string":"x\nz\nw\n"}"#,
+                true,
+                "replaced 1 occurrence in a.rs (+2 -1 lines)",
+            ),
+            at(80),
+        );
+        assert_eq!(
+            rendered.rows,
+            "✓ edit a.rs +2 -1 · 1.5s\n  … 4 more lines · Option+O or /expand"
+        );
+        assert!(rendered.detail.contains(" 2 -y"));
+        println!("edit after:\n{}", rendered.rows);
+    }
+
+    // Catches: a write confuses file lines with the receipt rows actually hidden.
+    #[test]
+    fn collapsed_write_counts_receipt_rows() {
+        let rendered = record(
+            &call(
+                "write",
+                r#"{"path":"a.rs","contents":"x\ny\nz\n"}"#,
+                true,
+                "wrote a.rs",
+            ),
+            at(80),
+        );
+        assert_eq!(
+            rendered.rows,
+            "✓ write a.rs · 3 lines · 1.5s\n  … 1 more line · Option+O or /expand"
+        );
+        assert!(rendered.detail.ends_with("  wrote a.rs"));
+        println!("write after:\n{}", rendered.rows);
+    }
+
+    // Catches: only builtins get counts, or empty results advertise nonexistent rows.
+    #[test]
+    fn collapsed_generic_counts_hidden_rows() {
+        for (result, hint) in [
+            (
+                "one\n\nthree\n",
+                Some("  … 3 more lines · Option+O or /expand"),
+            ),
+            ("", None),
+        ] {
+            let rendered = record(&call("mcp:server/tool", "{}", true, result), at(80));
+            assert_eq!(rendered.rows.lines().nth(1), hint);
+            println!("generic after:\n{}", rendered.rows);
+        }
+    }
+
+    // Catches: repeated substitutions on one line are multiplied into false totals.
+    #[test]
+    fn repeated_edit_uses_actual_changed_line_totals() {
+        let rendered = record(
+            &call(
+                "edit",
+                r#"{"path":"a.rs","old_string":"x","new_string":"y","replace_all":true}"#,
+                true,
+                "replaced 3 occurrences in a.rs (+1 -1 lines)\nwrite notice",
+            ),
+            at(100),
+        );
+        assert_eq!(
+            header_of(&rendered),
+            "✓ edit a.rs +1 -1 · all occurrences · 1.5s"
+        );
+        assert!(
+            rendered
+                .rows
+                .ends_with("  … 2 more lines · Option+O or /expand")
+        );
+        assert!(rendered.detail.contains("replaced 3 occurrences"));
+        println!("repeated edit after:\n{}", rendered.rows);
     }
 
     #[test]

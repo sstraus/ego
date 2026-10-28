@@ -327,6 +327,10 @@ pub enum ExportEvent {
         attempt: AttemptRef,
         outcome: Outcome,
     },
+    CostAnomaly {
+        model: String,
+        estimated_upper_bound: Option<crate::cost::Money>,
+    },
     UsageUpdated {
         usage: Usage,
         cost_delta: CostDelta,
@@ -350,6 +354,11 @@ pub enum ExportEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<u64>,
     },
+    ProviderLimitsObserved {
+        provider: String,
+        model: String,
+        limits: Vec<crate::usage::ProviderLimit>,
+    },
     TurnCompleted {
         ok: bool,
         exit_reason: ExitReason,
@@ -359,6 +368,7 @@ pub enum ExportEvent {
         source_seq: Seq,
         prompt_revision: u32,
     },
+    PinsChanged,
     Compacted,
     Forked {
         source: SessionId,
@@ -850,6 +860,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::GoalContinuation
         }
+        EventKind::PinsChanged { constraints: _ } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::PinsChanged
+        }
         EventKind::PlanUpdated { update: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::PlanUpdated
@@ -1101,6 +1115,13 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             attempt: *attempt,
             outcome: *outcome,
         },
+        EventKind::CostAnomaly {
+            model,
+            estimated_upper_bound,
+        } => ExportEvent::CostAnomaly {
+            model: model.clone(),
+            estimated_upper_bound: *estimated_upper_bound,
+        },
         EventKind::UsageUpdated {
             usage,
             cost_delta,
@@ -1128,6 +1149,15 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             provenance: *provenance,
             window: *window,
         },
+        EventKind::ProviderLimitsObserved {
+            provider,
+            model,
+            limits,
+        } => ExportEvent::ProviderLimitsObserved {
+            provider: provider.clone(),
+            model: model.clone(),
+            limits: limits.clone(),
+        },
         EventKind::TurnCompleted { ok, exit_reason } => ExportEvent::TurnCompleted {
             ok: *ok,
             exit_reason: *exit_reason,
@@ -1137,6 +1167,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             source_seq,
             prompt_revision,
             checkpoint: _,
+            constraints: _,
         } => {
             redactions.opaque_prose += 1;
             ExportEvent::CompactionSeeded {

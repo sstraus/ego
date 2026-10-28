@@ -158,11 +158,11 @@ permission mode does not remove a sandbox or an administrator's ceilings.
 
 ## Status and platforms
 
-Release `0.3.0` is being prepared locally; it is not published. See the
-[release notes](docs/release-notes/0.3.0.md) for changes since `0.2.0`. The version is
+Release `0.4.0` is being prepared locally; it is not published. See the
+[release notes](docs/release-notes/0.4.0.md) for changes since `0.3.0`. The version is
 defined once in
 `[workspace.package]` in `Cargo.toml`; all workspace packages inherit it and are
-not published. This release preparation selects `0.3.0`; normal landings increment
+not published. This release preparation selects `0.4.0`; normal landings increment
 the patch version by one (`0.0.1`). Run `ego --version` to identify an installed
 build. The command references describe this checkout, not a promise about a future release.
 
@@ -174,7 +174,9 @@ normalize the banner version. Do not rewrite these records for a version bump.
 macOS uses Seatbelt and Linux uses its confinement backends when the host can prove
 the requested guarantee. Windows transport and private-state support exist, but
 Windows `workspace`, `ro`, and `--offline` confinement remain unsupported.
-The final product proof remains open.
+The final product proof remains open; the
+[0.4.0 closure audit](ARCHITECTURE.md) separates
+release evidence from remaining operator and publication work.
 An unavailable confinement guarantee is refused rather than silently weakened.
 See [platforms and troubleshooting](docs/guides/troubleshooting.md) and
 [the roadmap](ARCHITECTURE.mdregression case-resolves-48).

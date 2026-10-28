@@ -462,8 +462,37 @@ mod permit {
                 "{op}: {text}"
             );
         }
+        // regression case: writes need an explicit write grant, not silence or a read grant.
         let write = outside(OpName::Write).to_string();
-        assert!(!write.contains("ego roots add"), "{write}");
+        assert!(
+            write.contains("`ego roots add --access read-write '/sibling/a b.md'`")
+                && write.contains("exit and resume"),
+            "{write}"
+        );
+        assert!(!write.contains("--access read '"), "{write}");
+    }
+
+    /// regression case. Catches: a quoted filename turns the suggested write-root
+    /// command into shell syntax, or credential writes receive an unsafe grant hint.
+    #[test]
+    fn outside_write_recovery_quotes_the_exact_path_and_omits_credentials() {
+        let path = CanonPath::new("/sibling/owner's file; echo unsafe.rs");
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Yolo, Ruleset::default());
+        let denied = engine
+            .classify_settled(write_call(path.as_path().to_str().unwrap()))
+            .expect_err("the write remains outside admitted roots");
+        let text = denied.to_string();
+        assert!(
+            text.contains(
+                "`ego roots add --access read-write '/sibling/owner'\\''s file; echo unsafe.rs'`"
+            ) && text.contains("ask the user")
+                && text.contains("exit and resume"),
+            "{text}"
+        );
+        for path in ["/sibling/.env", "/home/u/.ssh/id_rsa"] {
+            let denied = engine.classify_settled(write_call(path)).unwrap_err();
+            assert!(!denied.to_string().contains("roots add"), "{denied}");
+        }
     }
 
     /// regression. Plausible bug: the grant hint is attached to every refused

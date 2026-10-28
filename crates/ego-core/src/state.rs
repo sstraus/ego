@@ -1098,6 +1098,12 @@ impl QueuedPrompt {
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    /// Standing user registrations, reduced independently of model prose.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::compact::ConstraintLedger::is_default"
+    )]
+    pub constraints: crate::compact::ConstraintLedger,
     #[serde(default)]
     pub context_request: Option<crate::context::ContextRequest>,
     #[serde(default)]
@@ -1188,6 +1194,9 @@ pub struct SessionState {
     /// but it is unbounded over a session's life. The *lifecycle* state
     /// ([`Self::live_attempts`]) is the part bounded by live generations.
     pub charges: Vec<Charge>,
+    /// Models whose cost anomaly has already been durably announced.
+    #[serde(default)]
+    pub cost_anomaly_models: HashSet<String>,
     /// Every attempt that has settled, and the generation it settled under.
     ///
     /// This is what makes "a correction for an unknown attempt is refused"
@@ -1267,6 +1276,7 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            constraints: Default::default(),
             context_request: None,
             context_cooldown: 0,
             execution_observation: None,
@@ -1291,6 +1301,7 @@ impl Default for SessionState {
             generations: HashMap::default(),
             cost: CumulativeCost::default(),
             charges: Vec::default(),
+            cost_anomaly_models: HashSet::default(),
             settled_attempts: HashMap::default(),
             live_attempts: HashMap::default(),
             attribution_began: false,
@@ -1964,6 +1975,11 @@ impl SessionState {
         self.known_events.insert(ev.env.id);
 
         match &ev.kind {
+            EventKind::PinsChanged { constraints } => {
+                if constraints.validate().is_ok() {
+                    self.constraints = constraints.clone();
+                }
+            }
             EventKind::SessionTitleChanged { title } => self.title = title.clone(),
             EventKind::SessionDeleted => self.deleted = true,
             // Total like every other arm, and the transitions it will not make
@@ -2228,7 +2244,12 @@ impl SessionState {
                 self.execution_observation = Some(observation.clone());
             }
             EventKind::ExecutionMeasured { .. } => {}
-            EventKind::JudgeResponse { .. } | EventKind::SandboxResidualDecided { .. } => {}
+            EventKind::JudgeResponse { .. }
+            | EventKind::SandboxResidualDecided { .. }
+            | EventKind::ProviderLimitsObserved { .. } => {}
+            EventKind::CostAnomaly { model, .. } => {
+                self.cost_anomaly_models.insert(model.clone());
+            }
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
                 usage,
@@ -2265,7 +2286,9 @@ impl SessionState {
                 source_seq,
                 prompt_revision,
                 checkpoint,
+                constraints,
             } => {
+                self.constraints = constraints.clone();
                 self.prompt_snapshot = None;
                 self.lineage = Some(SessionLineage::Compaction {
                     source: *source,

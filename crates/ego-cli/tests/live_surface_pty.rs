@@ -977,6 +977,91 @@ fn resume_replay_contract(turns: usize, unrenderable: bool) {
     assert!(status.success(), "{shown}");
 }
 
+// Catches: one Meta-o press printing the recorded tool block more than once.
+#[test]
+fn recorded_stdout_only_exec_expands_once_in_pty() {
+    use ego_core::event::domain::DomainEvent;
+    use ego_core::event::id::{Seq, SessionId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# recorded expansion fixture\n");
+    let root = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let id: SessionId = support::FIXTURE_SESSION_ID.parse().unwrap();
+    store
+        .publish_empty_session(id, &root, Timestamp::from_millis(1))
+        .unwrap();
+    let events: Vec<DomainEvent> =
+        serde_json::from_str(include_str!("fixtures/expand-visible-streams.json")).unwrap();
+    let evidence = store.probe_evidence_store(id, 1024).unwrap();
+    let mut seq = Seq::ZERO;
+    for mut event in events {
+        if let ego_core::event::domain::EventKind::ToolCallCompleted { result, .. } = &event.kind {
+            for block in &result.content {
+                // This receipt is not truncated: seed the exact recorded bytes
+                // and verify their original content-addressed references.
+                let mut writer =
+                    ego_core::store::evidence::EvidenceStore::begin(&evidence).unwrap();
+                writer.append(block.text.as_bytes()).unwrap();
+                assert_eq!(Some(writer.commit().unwrap()), block.full_output);
+            }
+        }
+        // The fixture is an unchanged item subsequence from the real session.
+        // Renumber only the envelope sequence for this isolated store.
+        event.env.seq = seq.next();
+        store.append(&id, &event).unwrap();
+    }
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let (session, mut input, reader) = PtySession::start(&ego, 30, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, 0, "tuic-bg: you will get BG DONE;");
+    until_prompt_from(&reader, &mut output, 0);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(b"\x1bo").unwrap();
+    input.flush().unwrap();
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        "  tuic-bg: you will get BG DONE; end your turn now",
+    );
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let expanded = normalized(&output[start..]);
+    for marker in [
+        "✓ $ bash",
+        "tuic bg: pid=12345",
+        "log=/Users/",
+        "wake=/Users/",
+        "tuic-bg:",
+    ] {
+        assert_eq!(expanded.matches(marker).count(), 1, "{expanded}");
+    }
+    assert!(
+        stub.generations().is_empty(),
+        "display-only expansion generated a response"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success(), "{expanded}");
+}
+
 // Catches: /sessions remains a UTC table, loses search bursts, or activates the wrong writer.
 #[test]
 fn sessions_picker_filters_titles_and_resumes_selected_context_in_local_time() {
@@ -6132,7 +6217,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 33] = [
+    const COMMANDS: [&str; 35] = [
         "help",
         "model",
         "thinking",
@@ -6145,6 +6230,8 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "sessions",
         "fork",
         "compact",
+        "pin",
+        "unpin",
         "clear",
         "usage",
         "statusline",
@@ -6228,6 +6315,16 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("fork", None),
         // The inherited model permits a checkpoint request; its empty reply must fail.
         ("compact", Some("compaction failed")),
+        (
+            "pin REPORT-NAME-LOCK: keep for subsequent tasks",
+            Some("1: REPORT-NAME-LOCK: keep for subsequent tasks"),
+        ),
+        (
+            "pin",
+            Some("1: REPORT-NAME-LOCK: keep for subsequent tasks"),
+        ),
+        ("unpin 1", Some("No pinned user constraints.")),
+        ("unpin", Some("usage: /unpin")),
         ("clear", None),
         ("usage", Some("usage as of")),
         ("export", None),
@@ -7497,7 +7594,7 @@ fn read_edit_and_exec_each_leave_one_compact_row_and_no_raw_call_json() {
         rows[0]
     );
     assert!(
-        rows[1].starts_with("✓ edit calc.py +3 -1"),
+        rows[1].starts_with("✓ edit calc.py +2 -0"),
         "edit row: {:?}",
         rows[1]
     );

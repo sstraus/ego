@@ -578,6 +578,7 @@ mod acp_golden {
                 source_seq: Seq::default(),
                 prompt_revision: 0,
                 checkpoint: String::new(),
+                constraints: Default::default(),
             },
             EventKind::Compacted {
                 summary: String::new(),

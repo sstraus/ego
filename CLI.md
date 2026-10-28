@@ -745,7 +745,7 @@ and line that said it.
 | `-C`, `-c/--set`, `--profile` | **yes** | `--profile` is part of §3's general session shape, so `ego acp` takes it too. `-C` it already shared; `-c/--set` it does not take |
 | `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `ARCHITECTURE.md` §1 |
 | `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--allow`/`--deny` are part of §3's general session shape, so `ego acp` takes them too; `--mode` and its two spellings are not part of it. `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. All seven rule heads enforce: `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` — `net` matches `Op::Connect`/`Op::ProtocolConnect` and `tool` matches `Op::Opaque`, both of which this build now produces. This sentence is derived from `parse.rs`'s `OPERATIONS` table by `the_documents_name_the_rule_heads_the_parser_actually_enforces`, not maintained beside it. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; a matching `write(pattern)` allow covers its same-file replacement read without a separate `read(pattern)` allow. The glob still limits the target; explicit read/write denies, workspace boundaries, and plan mode still apply. A standalone read still needs read authorization; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
-| `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
+| `--sandbox` | **yes** | `ro\|workspace\|adaptive\|off`; fresh-config default `adaptive` on macOS and `workspace` elsewhere, independent of permission mode; effective configuration can override it. The measured platform backend enforces the selected level before a prepared process can launch; an unavailable required capability fails closed |
 | `-f`, `--file`, `--var` | **yes** | strict version-1 agent files load through the existing bounded YAML implementation, apply their configuration layer below flags, and substitute declared body variables. M4 extracts the shared envelope for skills and still owns the direct executable shebang end-to-end proof, not these flags' availability |
 | `--attach` | **yes** | repeatable local-path or HTTPS image input; bytes enter the durable session-blob/content path before model-specific projection and unsupported model/profile combinations refuse before acquisition |
 | `--mcp` | **yes** | repeatable ordered selection of effective `NAME` entries and strict invocation-scoped `@FILE` entries; the selected live admission is shared by dispatch, `/tools`, `/doctor`, and deterministic `mcp_errors` |
@@ -825,7 +825,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 16,
+  "v": 17,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -1357,7 +1357,7 @@ and their JSON argument schemas when the admitted runtime opens a prompt.
 
 Slash commands: `/help /model /thinking /fast on|off /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /resume [ID] /continue [ID] /fork [message-id]
-/compact /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
+/compact /pin /unpin /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
 /name /goal /tasks /tools /expand /skills /hooks /memory /init /retry /version`. These commands and aliases form the
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
@@ -1573,7 +1573,9 @@ later tool call replaces it as the expansion target.
 
 `/expand`, also `Alt-O`, prints the full result of the most recent tool call
 under its row: for `edit`, the line diff; for every other tool, the whole
-result text the model received, up to 256 KiB. Only the 16 most recent tool calls
+result text the model received, up to 256 KiB. Expanded process output omits
+labels for empty stdout and stderr streams; nonempty streams retain their labels.
+Only the 16 most recent tool calls
 and collapsed prompts of the session are kept, and only the latest can be shown. It runs between turns,
 like `/help`. Headless runs write each row to stderr, prefixed `εgo:`, and have
 no expand key.
@@ -1946,6 +1948,29 @@ permission, tool batch, or accepted prompt is active; saved drafts require
 confirmation and remain with the source. The complete decision and prompt
 contract are in
 `ARCHITECTURE.md`.
+
+#### Pinned standing user constraints
+
+`/pin TEXT` keeps the exact text as a standing user constraint outside the
+model-written summary. `/pin` or `/pin list` lists pins with stable numbers. `/unpin NUMBER`
+removes one. Numbers are not reused. To change a constraint, remove its old pin
+and add the replacement text. Text states its own scope; ego does not infer it.
+These are local commands, not model requests. Pasted or quoted examples do not
+execute them. Pins persist across replies, resume, and compaction successors;
+they are not global preferences.
+
+Pins are limited to 64 entries, 2,048 UTF-8 bytes per entry, and 16,384 total text
+bytes. Invalid or oversized operations leave existing pins unchanged. No pin is
+silently evicted, truncated, or summarized. Ordinary unmarked chat text is not
+automatically pinned. Workspace instructions retain their separately admitted
+system authority and are loaded again for a compaction target; they are not
+copied into the user pin ledger.
+
+Each checkpoint carries a typed copy of the ledger. Its Binding constraints
+and preferences section is rendered from pins rather than accepted from the
+model, including when the ledger is empty. Multiline pin text is indented in the
+Markdown view; the typed carrier preserves every text byte. The remaining
+summary is fallible historical context, not additional standing authority.
 
 #### Transition identity, output, and host parity
 
@@ -2340,8 +2365,8 @@ The builtin layer exists so that a machine with a configured credential and no
 files can run. It carries only release-pinned facts from each stated authority,
 cites the source and read date beside every provider's rows, and **states no
 prices**: a rate is the one fact whose staleness costs money instead of raising
-an error, so a run under a `--max-cost` ceiling with no operator rates still
-refuses with `NoPricingQuote`. Unknown price is not free price. It lists only
+an error. Missing operator and cached rates do not refuse generation: unknown
+price stays unknown, with a visible anomaly notice. It lists only
 the **current model generations** of each provider, generated from a pinned
 models.dev snapshot (`crates/ego-cli/catalogue/models.generated.toml`, rows with a
 provenance line each; the `model-catalogue-refresh` skill refreshes it). It ships
@@ -2601,8 +2626,8 @@ recovery does not depend on detecting a terminal's operator.
 positive integer. The same `max_output_tokens` key is accepted in configuration
 and named profiles. Each generated request uses the smaller of the configured
 cap and the model output maximum. Without a cap, ego uses the model output
-maximum, not the context window. A missing output maximum fails closed when a
-bounded reservation needs it. System output caps cannot be relaxed by lower
+maximum, not the context window. A missing output maximum leaves the monetary
+reservation unbounded and raises a cost anomaly notice. System output caps cannot be relaxed by lower
 configuration layers. `ego compact --budget LIMIT` uses the same spend grammar
 and admission gate as `run`.
 
@@ -2611,8 +2636,12 @@ message framing and tool schemas, capped by the model context window. Image
 and opaque reasoning inputs retain the full context-window bound because ego
 has no provider-independent maximum for those inputs. Input uses the dearest
 reachable rate, including cache creation; output uses the request cap. Actual
-provider usage settles the reservation after the response. Missing table
-prices fail closed and name the provider, model and required `chat` mode row.
+provider usage settles the reservation after the response. Missing, offline or
+unusable table prices do not refuse model resolution. One durable `cost_anomaly`
+notice per session/model states that any configured cap cannot cover unpriced
+spend. The notice is visible in text (including quiet mode), JSONL and ACP.
+Unknown actual cost charges the reserved upper bound when available, not a
+fabricated actual cost. Known and estimated spend remain subject to the cap.
 
 ### Checked session goals (2026-10-15)
 
@@ -2673,15 +2702,51 @@ its bounded stderr preview. An exec allow rule does not grant filesystem access:
 the evaluator script and its inputs must be readable under the run confinement.
 
 
-Usage report v3 is the current closed contract: its role lines are `main`,
+Usage report v4 is the current closed contract: its role lines are `main`,
 `judge`, `goal_check`, `compaction`, `subagent`, `hook`, and `total`.
-`goal_check` is required in v3 reports, including zero usage; no legacy-report
+`goal_check` is required in v4 reports, including zero usage; no legacy-report
 decoder or compatibility default is provided.
 Cost `known` and `unknown` describe monetary spend only. Display-only standard
 API estimates are separate `subscription_equivalent` totals by currency, with
 missing or overflowing estimates in `subscription_unknown`. The text view labels
 them `subscription-equivalent (standard API)` and never presents subscription
 accounting zero as known monetary spend.
+
+Usage JSON v4 adds optional observed limits. A session can contain
+`context_capacity: {tokens, source, observed_at}` from its latest
+`ContextWindowUpdated` event. The source is `context_window_updated` and the
+observation time is UTC epoch milliseconds. A missing or zero capacity is
+omitted; the command does not look up a denominator in a different model's
+catalogue or derive one from billed tokens.
+
+A session can also contain `provider_limits: {provider, model, observed_at,
+limits}` from response headers observed during its generations. Only an exact
+match with the session's reported model is eligible. Each limit has `kind`,
+`remaining`, and `source`, with optional `limit`, `used`, and `reset`. Numeric
+limit values are exact nonnegative decimal strings. The supported kinds are
+`requests`, `tokens`, `input_tokens`, `output_tokens`, and `usd`. Sources name
+the actual remaining header, for example
+`response_header:anthropic-ratelimit-input-tokens-remaining` or
+`response_header:x-ratelimit-remaining-tokens`. A reset is the provider's raw
+bounded reset value, not a predicted refill time. Headers are observations at
+one point in time, not a promise that a subsequent request is admitted.
+
+When an OpenRouter session is present, `--json` can also query the free
+OpenRouter `/api/v1/key` endpoint with the current environment credential.
+This lookup is bounded to five seconds, respects user-level offline
+configuration, and does not run credential commands or read a keychain. Its
+result is a top-level `provider_limits` array, not a historical session fact.
+The observation has `provider: "openrouter"` and no `model`. A `usd` limit uses
+`data.limit_remaining` directly; it does not subtract lifetime `usage` from a
+periodic `limit`. Its source is `openrouter_key:data.limit_remaining`. The
+optional `used` and `limit` values retain their distinct provider meanings.
+Consumers must not assign this current credential to a historical session or
+use it for another provider. Text output performs no key lookup.
+
+Missing headers, unlimited or absent key limits, missing credentials, offline
+configuration, lookup failures, invalid values, and timeouts produce no limit
+field. No zero, percentage, balance, reset, or fallback provider is inferred.
+The command makes no paid generation request for this information.
 
 ### Model-requested context changes
 
@@ -2745,6 +2810,12 @@ Optional strict YAML frontmatter accepts string `description` and `argument-hint
 `model`, `allowed-tools`, and all other behavioral fields are rejected visibly;
 they never silently grant foreign authority. Commands appear with admitted
 skills in help, completion, `/skills`, and ACP `available_commands_update`.
+ACP invokes each advertised skill or command by sending `/name args` as a text
+prompt. Plain skills use the same admitted instruction, argument substitution,
+policy, hook, and child-execution path as an explicit interactive invocation.
+Advertisement and selection use the same user-command catalogue; model-only
+skills are not advertised. Image and audio attachments are refused for these
+text-only invocations rather than silently discarded.
 See the [command contract](ARCHITECTURE.md)
 for bounds, ordering, and the distinction between atomic prompt publication and
 non-transactional shell side effects.
@@ -2933,8 +3004,9 @@ journal references them. Replay checks the reference and encoding again. Missing
 or corrupt blobs cause an explicit refusal; they are never fetched again or
 silently omitted. The operator must preserve the session blob store with its log.
 
-Audio-specific pricing is not represented by text-token quotes. Monetary ceilings
-fail closed for this model; no-ceiling runs can report unknown cost. No paid audio
+Audio-specific pricing is not represented by text-token quotes. Calls continue
+with unknown cost and a visible anomaly notice; a monetary cap cannot cover that
+unpriced spend. No paid audio
 acceptance probe is part of this feature's validation. Provider contract sources:
 <https://developers.openai.com/api/docs/models/gpt-audio-1.5.md> and
 <https://developers.openai.com/api/docs/guides/audio-chat-completions.md>, read

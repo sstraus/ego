@@ -359,6 +359,111 @@ mod report_service {
         }
     }
 
+    // Catches: publishing occupancy without its observed capacity, or inventing a missing ceiling.
+    #[test]
+    fn usage_capacity_is_observed_and_missing_capacity_stays_absent() {
+        for window in [Some(200_000), None] {
+            let session = SessionId::new();
+            let mut seq = Seq::default();
+            let store = FixtureStore {
+                entries: BTreeMap::from([(
+                    session,
+                    vec![SessionEntry::Event(event(
+                        &mut seq,
+                        1_500,
+                        EventKind::ContextWindowUpdated {
+                            used_tokens: 42,
+                            provenance: OccupancyProvenance::GenerationBoundary,
+                            window,
+                        },
+                    ))],
+                )]),
+                metadata: vec![meta(session, Some("provider/model"), 1_500)],
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let clock = CountingClock {
+                now: Timestamp::from_millis(2_000),
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let report = block_on(
+                UsageReportService::new(&store, &clock).report(&store.metadata, UsagePeriod::All),
+            )
+            .unwrap();
+            let json = serde_json::to_value(report).unwrap();
+            let capacity = &json["sessions"][0]["context_capacity"];
+            if window.is_some() {
+                assert_eq!(capacity["tokens"], 200_000);
+                assert_eq!(capacity["source"], "context_window_updated");
+                assert_eq!(capacity["observed_at"], 1_500);
+            } else {
+                assert!(json["sessions"][0].get("context_capacity").is_none());
+            }
+        }
+    }
+
+    // Catches: lending a judge/fallback provider's remaining limit to the displayed session model.
+    #[test]
+    fn usage_limits_keep_provider_model_and_observation_time_together() {
+        use ego_core::usage::{ProviderLimit, ProviderLimitKind};
+        let recorded: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ego-ai/tests/fixtures/usage_limits/openrouter-key.json"
+        ))
+        .unwrap();
+        let remaining = recorded["data"]["limit_remaining"]
+            .to_string()
+            .parse()
+            .unwrap();
+        for displayed in ["openrouter/vendor/model", "anthropic/model"] {
+            let session = SessionId::new();
+            let mut seq = Seq::default();
+            let store = FixtureStore {
+                entries: BTreeMap::from([(
+                    session,
+                    vec![SessionEntry::Event(event(
+                        &mut seq,
+                        1_500,
+                        EventKind::ProviderLimitsObserved {
+                            provider: "openrouter".into(),
+                            model: "openrouter/vendor/model".into(),
+                            limits: vec![ProviderLimit {
+                                kind: ProviderLimitKind::Usd,
+                                remaining,
+                                limit: None,
+                                used: None,
+                                reset: None,
+                                source: "openrouter_key:data.limit_remaining".into(),
+                            }],
+                        },
+                    ))],
+                )]),
+                metadata: vec![meta(session, Some(displayed), 1_500)],
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let clock = CountingClock {
+                now: Timestamp::from_millis(2_000),
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let report = block_on(
+                UsageReportService::new(&store, &clock).report(&store.metadata, UsagePeriod::All),
+            )
+            .unwrap();
+            let json = serde_json::to_value(report).unwrap();
+            if displayed.starts_with("openrouter/") {
+                assert_eq!(
+                    json["sessions"][0]["provider_limits"]["limits"][0]["remaining"],
+                    "73.123456789"
+                );
+                assert_eq!(json["sessions"][0]["provider_limits"]["observed_at"], 1_500);
+            } else {
+                assert!(json["sessions"][0].get("provider_limits").is_none());
+            }
+            assert!(
+                json.get("provider_limits").is_none(),
+                "core does not invent a current account"
+            );
+        }
+    }
+
     #[test]
     fn service_reads_one_clock_value_and_returns_the_frozen_report_shape() {
         let session = SessionId::new();

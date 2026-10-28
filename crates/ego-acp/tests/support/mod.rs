@@ -1726,6 +1726,16 @@ impl Connected {
         .0
     }
 
+    /// Read one wire frame, including deferred notifications without a request.
+    pub async fn frame(&mut self) -> serde_json::Value {
+        let line = self
+            .from_agent
+            .next()
+            .await
+            .expect("the agent is connected");
+        serde_json::from_str(&line).expect("the agent writes JSON-RPC")
+    }
+
     /// The next message the agent sends that is a *request* rather than a
     /// response or a notification, dropping everything before it.
     ///

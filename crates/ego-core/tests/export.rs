@@ -889,6 +889,13 @@ fn exporter_redacts_goal_fallback_and_permission_material_but_keeps_decisions() 
             source_seq: Seq::ZERO,
             prompt_revision: 1,
             checkpoint: secret.into(),
+            constraints: Default::default(),
+        },
+        EventKind::PinsChanged {
+            constraints: serde_json::from_value(
+                serde_json::json!({"next_id": 1, "entries": {"1": secret}}),
+            )
+            .unwrap(),
         },
         EventKind::Compacted {
             summary: secret.into(),
@@ -935,7 +942,7 @@ fn exporter_redacts_goal_fallback_and_permission_material_but_keeps_decisions() 
             )
         })
         .collect();
-    assert_eq!(ledger["opaque_prose"], 12);
+    assert_eq!(ledger["opaque_prose"], 13);
     assert_eq!(ledger["permission_material"], 4);
     assert_eq!(ledger["tool_material"], 1);
     assert_eq!(before, source_bytes(&fixture));

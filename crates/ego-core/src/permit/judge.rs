@@ -370,6 +370,7 @@ impl JudgeDecoder {
             | AiEvent::ReasoningState(_)
             | AiEvent::Usage(_)
             | AiEvent::ProviderCost { .. }
+            | AiEvent::ProviderLimits { .. }
             | AiEvent::ProviderFailure { .. }
             | AiEvent::DeliveryObserved(_) => {}
         }

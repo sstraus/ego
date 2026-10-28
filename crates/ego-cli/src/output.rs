@@ -1059,6 +1059,11 @@ impl EventSink for TextSink<'_> {
                             args: &started.args,
                             ok: *ok,
                             result: text.as_deref().unwrap_or(""),
+                            result_blocks: state
+                                .items
+                                .get(item)
+                                .and_then(|item| item.tool_result.as_ref())
+                                .map(|result| result.content.as_slice()),
                             timing: state.items.get(item).and_then(|item| item.tool_timing),
                         },
                         self.capabilities.with_current_width(),
@@ -1077,6 +1082,17 @@ impl EventSink for TextSink<'_> {
             // progress" — and a guarantee the operator asked for and did not
             // get is not progress. Suppressing it would put the flag's silence
             // back exactly where this arm removes it from.
+            PublicEvent::CostAnomaly {
+                model,
+                estimated_upper_bound,
+                ..
+            } => {
+                self.finish();
+                self.out.note(&ego_core::public::cost_anomaly_message(
+                    model,
+                    estimated_upper_bound.as_ref(),
+                ));
+            }
             PublicEvent::MeteringSelected { ceiling, rates, .. } => {
                 let mut last = self
                     .ceiling
@@ -1504,6 +1520,36 @@ mod tests {
             name: Some(name.to_owned()),
             text: Some(args.to_owned()),
         }
+    }
+
+    /// Catches: quiet mode hiding missing cost or estimates being called actual cost.
+    #[test]
+    fn cost_anomaly_remains_visible_in_quiet_mode_without_fabricating_actual_cost() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, true, Capabilities::plain());
+        let state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        for bound in [
+            None,
+            Some(ego_core::cost::Money {
+                amount: "0.25".parse().unwrap(),
+                currency: ego_core::cost::CurrencyCode::new("USD").unwrap(),
+            }),
+        ] {
+            sink.publish(
+                &PublicEvent::CostAnomaly {
+                    turn,
+                    model: "openrouter/fixture".into(),
+                    estimated_upper_bound: bound,
+                },
+                &state,
+            );
+        }
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("cap cannot cover this unpriced spend"));
+        assert!(notes[1].contains("reserved upper bound of 0.25 USD"));
+        assert!(notes[1].contains("actual cost remains unknown"));
     }
 
     /// Catches: successful cache hits adding a notice for every generation.
@@ -1969,7 +2015,11 @@ mod tests {
 
         let rows = out.rows.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].0 == "✓ read a.rs · 2 lines", "{:?}", rows[0].0);
+        assert!(
+            rows[0].0 == "✓ read a.rs · 2 lines\n  … 2 more lines · Option+O or /expand",
+            "{:?}",
+            rows[0].0
+        );
         assert!(!rows[0].0.contains('{'), "{:?}", rows[0].0);
         assert!(out.notes.lock().unwrap().is_empty());
     }
@@ -2066,6 +2116,33 @@ mod tests {
         let (sender, receiver) = crossbeam::channel::unbounded();
         let output = InteractiveOutput::new(SurfaceOutput::new(sender, CancelToken::new()));
         (output, receiver)
+    }
+
+    fn expand_recorded_exec() -> String {
+        let events: Vec<ego_core::event::domain::DomainEvent> =
+            serde_json::from_str(include_str!("../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let (output, rows) = interactive();
+        let sink = TextSink::new(&output, false, Capabilities::plain());
+        let mut state = SessionState::default();
+        for event in &events {
+            state.apply(event);
+            if let Some(public) = ego_core::public::project_public(event) {
+                sink.publish(&public, &state);
+            }
+        }
+        rows.try_iter().for_each(drop);
+        output.expand_last_tool();
+        rows.try_iter().collect::<String>()
+    }
+
+    // Catches: an empty stderr stream adding a dangling label to expanded output.
+    #[test]
+    fn recorded_stdout_only_exec_omits_empty_stderr() {
+        let expanded = expand_recorded_exec();
+        assert_eq!(
+            expanded,
+            include_str!("../tests/fixtures/expand-visible-streams.expected.txt")
+        );
     }
 
     #[test]

@@ -547,7 +547,8 @@ impl AttemptStream {
                 self.terminal.get_or_insert(*stop);
             }
 
-            AiEvent::ProviderContent { .. }
+            AiEvent::ProviderLimits { .. }
+            | AiEvent::ProviderContent { .. }
             | AiEvent::WebSearch { .. }
             | AiEvent::Citation { .. }
             | AiEvent::TextDelta { .. }

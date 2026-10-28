@@ -186,6 +186,19 @@ async fn measure_cached(
             if cancel.is_cancelled() {
                 return Err(ProcessError::Cancelled);
             }
+            // A control that the selected filesystem policy must allow has
+            // not measured absent authority when it cannot execute. Return
+            // before OnceCell commits so a later caller can measure again.
+            if let Some(failure) =
+                evidence.log.snapshot().iter().find(|record| {
+                    positive_filesystem_control(&record.suite) && record.outcome != "ok"
+                })
+            {
+                return Err(ProcessError::Backend(format!(
+                    "positive filesystem capability control {} failed: {}",
+                    failure.suite, failure.outcome
+                )));
+            }
             clear_scratch(scratch.as_path())?;
             Ok(Measurement {
                 capabilities,
@@ -1227,6 +1240,13 @@ async fn probe_network_denied(
         Err(reason) if reason == "exit 125" || reason == "exit 101")
 }
 
+fn positive_filesystem_control(suite: &str) -> bool {
+    matches!(
+        suite,
+        "read.workspace" | "read.runtime-root" | "write-scoped.workspace" | "write-scoped.scratch"
+    )
+}
+
 async fn probe_result(
     backend: Arc<dyn Backend>,
     evidence: ProbeEvidence,
@@ -1246,6 +1266,7 @@ async fn probe_result(
         limits,
         suite.cwd,
         argv,
+        positive_filesystem_control(suite.name),
     )
     .await;
     evidence.log.record(ProbeRecord {
@@ -1285,6 +1306,7 @@ async fn attempt(
     limits: ExecLimits,
     cwd: &CanonPath,
     argv: Vec<OsString>,
+    retain_stderr: bool,
 ) -> Result<(), String> {
     let Some(argv) = argv
         .into_iter()
@@ -1357,7 +1379,32 @@ async fn attempt(
         .execute(&policy, tool.as_ref(), authorized, None)
         .await
         .map(|_| ())
-        .map_err(|error| probe_outcome(&error))
+        .map_err(|error| {
+            let mut outcome = probe_outcome(&error);
+            if retain_stderr
+                && let ego_core::permit::ToolError::Process(
+                    ProcessError::Exit { result, .. } | ProcessError::Signal { result, .. },
+                ) = &error
+                && let Some(block) = result.content.iter().find(|block| {
+                    matches!(
+                        block.provenance(),
+                        ego_core::permit::ToolOutputProvenance::Process {
+                            stream: ego_core::permit::StreamProvenance::Stderr,
+                            ..
+                        }
+                    )
+                })
+                && !block.text.is_empty()
+            {
+                // Preserve a bounded preview before the disposable probe
+                // evidence store disappears. At most 1024 Unicode scalars
+                // (4096 UTF-8 bytes), independent of the child's output size.
+                let stderr = block.text.chars().take(1024).collect::<String>();
+                outcome.push_str("; stderr: ");
+                outcome.push_str(&stderr);
+            }
+            outcome
+        })
 }
 
 /// Negative production probes must stay outside every granted perimeter root.
@@ -1558,6 +1605,7 @@ mod tests {
             crate::exec::ExecLimits::default(),
             &cwd,
             vec![OsString::from("/bin/sleep"), OsString::from("3")],
+            false,
         ));
 
         assert!(

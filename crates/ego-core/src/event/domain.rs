@@ -242,8 +242,8 @@ pub struct ToolTiming {
 /// PermissionRequested | PermissionAmended | PermissionDecided |
 /// GenerationStarted | FallbackDecision | ExecutionObserved |
 /// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
-/// AttemptSettled | UsageUpdated | UsageCorrected | ContextWindowUpdated |
-/// TurnCompleted | CompactionSeeded | Compacted | Forked |
+/// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved |
+/// TurnCompleted | PinsChanged | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
 /// SubagentSettled | BackgroundTaskRequested | SubagentCompletionDelivered |
@@ -558,6 +558,12 @@ pub enum EventKind {
         attempt: AttemptRef,
         outcome: Outcome,
     },
+    /// Missing pricing or actual cost, announced once per session and model.
+    /// This is a notice, not an accounting booking or a provider failure.
+    CostAnomaly {
+        model: String,
+        estimated_upper_bound: Option<crate::cost::Money>,
+    },
     /// One attempt's usage was reported (added to the running totals),
     /// together with what it cost.
     ///
@@ -624,14 +630,29 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<u64>,
     },
+    /// Provider-reported levels from this generation's response headers.
+    ProviderLimitsObserved {
+        provider: String,
+        model: String,
+        limits: Vec<crate::usage::ProviderLimit>,
+    },
     /// A turn finished.
     TurnCompleted { ok: bool, exit_reason: ExitReason },
+    /// User-owned standing constraints changed through a local pin command.
+    PinsChanged {
+        constraints: crate::compact::ConstraintLedger,
+    },
     /// The first semantic fact in a clean checkpoint-seeded session.
     CompactionSeeded {
         source: SessionId,
         source_seq: Seq,
         prompt_revision: u32,
         checkpoint: String,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::compact::ConstraintLedger::is_default"
+        )]
+        constraints: crate::compact::ConstraintLedger,
     },
     /// The session log was compacted; `summary` replaces the compacted span.
     Compacted { summary: String },
@@ -874,10 +895,13 @@ impl EventKind {
             EventKind::JudgeResponse { .. } => "judge_response",
             EventKind::SandboxResidualDecided { .. } => "sandbox_residual_decided",
             EventKind::AttemptSettled { .. } => "attempt_settled",
+            EventKind::CostAnomaly { .. } => "cost_anomaly",
             EventKind::UsageUpdated { .. } => "usage_updated",
             EventKind::UsageCorrected { .. } => "usage_corrected",
             EventKind::ContextWindowUpdated { .. } => "context_window_updated",
+            EventKind::ProviderLimitsObserved { .. } => "provider_limits_observed",
             EventKind::TurnCompleted { .. } => "turn_completed",
+            EventKind::PinsChanged { .. } => "pins_changed",
             EventKind::CompactionSeeded { .. } => "compaction_seeded",
             EventKind::Compacted { .. } => "compacted",
             EventKind::Forked { .. } => "forked",

@@ -32,8 +32,8 @@ DetachedExecStarted | DetachedExecSettled | QuestionRequested |
 QuestionSettled | QuestionMemberSettled | PermissionRequested | PermissionAmended |
 PermissionDecided | GenerationStarted | FallbackDecision | ExecutionObserved |
 ExecutionMeasured | JudgeResponse | SandboxResidualDecided | AttemptSettled |
-UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
-CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
+CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved | TurnCompleted |
+PinsChanged | CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
 HookLifecycleReached | HookInvocationStarted | HookInvocationSettled |
 SubagentRequested | SubagentSpawned | SubagentSettled |
 BackgroundTaskRequested | SubagentCompletionDelivered |
@@ -41,9 +41,9 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-68 variants in the current schema, and this list is exhaustive by contract.
+71 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-68, including the session-metadata, pause and goal, question, detached-exec,
+70, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, background-task, skill, and clean-session compaction lifecycles.
 `SessionSelectionsSelected` records the admitted model, mode and sandbox so
 resume retains those selections unless the user passes explicit new flags.
@@ -90,13 +90,16 @@ independently.
 
 ## 2. Crate layout (resolves §4.1)
 
-The final layout has six crates in one workspace, and all six are present. M2
-added `ego-mcp` with its real client/server surface. Dependency arrows point
-inward toward consumer-owned ports.
+The current workspace has eight crates. M2 added `ego-mcp` with its real
+client/server surface; `ego-a2a` serves discovery and `ego-listen` owns the
+shared inbound listener. Dependency arrows point inward toward consumer-owned
+ports.
 
 ```
 ego          (bin)  CLI: interactive line UI, headless, subcommands, config
 ├── ego-acp         ACP server on agent-client-protocol 2.0
+├── ego-a2a         discovery-only A2A surface
+├── ego-listen      shared inbound endpoint admission and lifecycle
 ├── ego-mcp         current MCP client + `ego mcp-server` on a release-gated
 │                   rmcp 3.x
 ├── ego-tools       builtin tools + execution backends (the OS lives here);
@@ -120,10 +123,13 @@ depends on `ego-mcp` solely to implement its consumer-owned HTTP and duplex
 effect ports. The binary wires implementations in. The crate count is a
 consequence, not a requirement.
 
-The complete allowed workspace edge set is: `ego-core -> {}`;
-`ego-ai -> {ego-core}`; `ego-acp -> {ego-core}`;
+The current production workspace edge set is: `ego-core -> {}`;
+`ego-ai -> {ego-core}`; `ego-listen -> {ego-core}`;
+`ego-acp -> {ego-core, ego-listen}`; `ego-a2a -> {ego-core, ego-listen}`;
 `ego-mcp -> {ego-core}`; `ego-tools -> {ego-core, ego-mcp}`; and
-`ego-cli -> {ego-core, ego-ai, ego-tools, ego-acp, ego-mcp}`. In particular,
+`ego-cli -> {ego-core, ego-ai, ego-tools, ego-acp, ego-a2a, ego-listen, ego-mcp}`.
+The package manifests own these edges; listener I/O lives in `ego-listen`,
+separate from protocol semantics. In particular,
 `ego-mcp -> ego-tools` remains forbidden: protocol owns the narrow port and the
 outer OS crate implements it.
 
@@ -232,7 +238,11 @@ reasoning-state carryover, context/output ceilings, cancel semantics, cache
 behaviour, transport — is resolved per generation and persisted in the run
 manifest; fallback chains check conversation compatibility and explicitly
 transform or drop provider-private reasoning state before switching. Unknown
-cost fails the budget closed.
+cost stays unknown and raises one durable, visible notice per session and
+model. A configured cap applies to known and estimated spend only. Missing
+prices do not refuse generation; the notice states that the cap cannot cover
+unpriced spend. Missing provider cost charges the reserved upper bound when
+one exists, without recording that estimate as actual billed cost.
 
 M5 adds two public mappings without merging contracts: the OpenAI API-key row uses
 the public Responses endpoint, while `openai-codex` retains its distinct

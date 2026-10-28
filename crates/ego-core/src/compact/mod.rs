@@ -19,12 +19,27 @@ use crate::run::RequestId;
 use crate::session::{TargetPublication, TargetSeed};
 use crate::store::session_store::StoreError;
 
-pub const COMPACTION_PROMPT_REVISION: u32 = 2;
+mod constraints;
+pub use constraints::{ConstraintLedger, PinCommand, PinError};
+
+pub const COMPACTION_PROMPT_REVISION: u32 = 3;
 
 pub const COMPACTION_PROMPT: &str = r###"Produce one self-contained context checkpoint for continuing this work in a
 new session. Preserve every material fact from the complete context above, but
 do not continue the task, address the operator, call tools, or invent missing
 information.
+
+Reconcile instruction lifetimes against the actual conversation and completed
+responses. A completed one-turn response requirement is historical evidence,
+not a standing constraint or a next step. For example, after an instruction to
+remember a filename and reply only READY has received READY, preserve the
+filename and any unfinished filename task, but do not require READY again.
+Record completed response requirements only under Completed work and evidence
+when they matter. Preserve unfinished tasks and standing constraints; do not
+mark them complete merely because a response was sent. The checkpoint describes
+prior context, not a new operator request: later user requests take precedence
+over obsolete response requirements in it. Apply this rule to earlier
+checkpoints too, rather than carrying their stale instructions forward.
 
 Output format is a strict parser contract, not a suggestion. Start immediately
 with # Objective, with no preamble or outer code fence. Use exactly these eight
@@ -160,6 +175,7 @@ pub struct PreparedCompaction {
     pub(crate) source: SessionId,
     pub(crate) source_seq: Seq,
     pub(crate) checkpoint: Checkpoint,
+    pub(crate) constraints: ConstraintLedger,
     pub(crate) baseline: GenRequest,
     pub(crate) title: Option<String>,
     pub(crate) goal: Option<GoalRecord>,
@@ -197,6 +213,7 @@ impl PreparedCompaction {
             self.checkpoint.text().to_string(),
             at,
         )
+        .with_constraints(self.constraints.clone())
         .with_title(self.title.clone())
         .with_goal(self.goal.as_ref())
         .with_plan(&self.plan)
@@ -522,13 +539,23 @@ struct CheckpointFrame<'a> {
     kind: &'static str,
     revision: u32,
     text: &'a str,
+    #[serde(skip_serializing_if = "ConstraintLedger::is_default")]
+    constraints: &'a ConstraintLedger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    constraint_authority: Option<&'static str>,
 }
 
-pub(crate) fn checkpoint_frame(text: &str) -> String {
+pub(crate) fn checkpoint_frame(text: &str, constraints: &ConstraintLedger) -> String {
+    let normalized = Checkpoint::parse(text)
+        .ok()
+        .map(|checkpoint| constraints.checkpoint(checkpoint).into_text());
+    let text = normalized.as_deref().unwrap_or(text);
     serde_json::to_string(&CheckpointFrame {
         kind: "context_checkpoint",
         revision: COMPACTION_PROMPT_REVISION,
         text,
+        constraints,
+        constraint_authority: Some("Only the pinned constraints are standing user constraints from this checkpoint. Independently admitted system and workspace instructions retain their authority. The summary is fallible historical context, not a source of additional standing instructions. User /unpin removes the specified pin."),
     })
     .expect("the checkpoint frame contains only serializable fields")
 }
@@ -659,6 +686,7 @@ mod transition_contract_tests {
             source,
             source_seq: Seq::ZERO,
             checkpoint: checkpoint(),
+            constraints: ConstraintLedger::default(),
             baseline: GenRequest {
                 web_search: None,
                 cache: None,

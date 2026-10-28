@@ -35,7 +35,7 @@ fn export(places: &Places, session: &str, after: Option<u64>) -> String {
     result.stdout
 }
 
-fn assert_contract(root: &[Value], successor: &[Value]) {
+fn assert_contract(root: &[Value], successor: &[Value], checkpoint: &str) {
     assert_eq!(root[0]["type"], "transcript.header");
     assert_eq!(root[0]["v"], 1);
     assert_eq!(root[0]["session"], FIXTURE_SESSION_ID);
@@ -109,7 +109,11 @@ fn assert_contract(root: &[Value], successor: &[Value]) {
     assert_eq!(successor[0]["lineage"]["source"], root[0]["session"]);
     assert_eq!(successor[0]["compaction_predecessor"], root[0]["session"]);
     assert_ne!(successor[0]["session"], root[0]["session"]);
-    assert!(successor.iter().any(|r| r["event"]["kind"] == "context_checkpoint" && r["event"]["text"] == CHECKPOINT));
+    let recorded_checkpoint = successor
+        .iter()
+        .find(|r| r["event"]["kind"] == "context_checkpoint")
+        .expect("successor publishes its checkpoint");
+    assert_eq!(recorded_checkpoint["event"]["text"], checkpoint);
     for record in root.iter().chain(successor) {
         let bytes = record.to_string();
         assert!(
@@ -245,7 +249,11 @@ fn transcript_contract_preserves_chat_goals_lineage_and_follow_cursor() {
         .unwrap()
         .to_owned();
     let after = export(&places, &target, None);
-    assert_contract(&root, &records(&after));
+    assert_contract(
+        &root,
+        &records(&after),
+        &CHECKPOINT.replace("\nLocal only.\n", "\nNo pinned user constraints.\n"),
+    );
     assert_eq!(
         stub.generations().len(),
         4,
@@ -300,6 +308,8 @@ fn transcript_contract_preserves_chat_goals_lineage_and_follow_cursor() {
             .find(|(_, r)| r["type"] == "transcript.header")
             .unwrap()
             .0;
-        assert_contract(&golden[..split], &golden[split..]);
+        // This captured pre-ledger public transcript retains its historical text;
+        // new compactions above must publish deterministic Binding instead.
+        assert_contract(&golden[..split], &golden[split..], CHECKPOINT);
     }
 }
