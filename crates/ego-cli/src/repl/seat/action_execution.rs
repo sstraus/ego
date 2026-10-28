@@ -465,20 +465,18 @@ pub(super) fn surface_line(
                 dispatch
             };
             if phase.get() == EditPhase::Modal {
-                // Answers retain their grammar. Commands never become answers,
-                // and only inspections may cross an outstanding modal wait.
+                // Unknown slash text is modal data, including absolute paths.
+                // Registered commands never become answers, and only inspections
+                // may cross an outstanding modal wait.
                 let command = match dispatch {
-                    Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {
-                        return (line, failed);
-                    }
+                    Dispatch::Prompt
+                    | Dispatch::Immediate
+                    | Dispatch::InteractiveIngress
+                    | Dispatch::UnknownSlash(_) => return (line, failed),
                     Dispatch::Action(action) => Some(HostCommand::Action(action)),
                     Dispatch::Config(arguments) => Some(HostCommand::Config(arguments)),
                     Dispatch::Tasks(arguments) => Some(HostCommand::Tasks(arguments)),
                     Dispatch::Pins(command) => Some(HostCommand::Pins(command)),
-                    Dispatch::UnknownSlash(message) => {
-                        commit_to_transcript(status, &message);
-                        continue;
-                    }
                     Dispatch::Refused { reason } => {
                         commit_to_transcript(status, reason);
                         continue;

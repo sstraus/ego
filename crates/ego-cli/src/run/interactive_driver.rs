@@ -85,7 +85,30 @@ impl<'s> RunModelSwitchOwner<'s> {
         } else {
             None
         };
-        if let Err(message) = self.selection.install(target.clone(), thinking) {
+        let journal = self.hooks.hook_state().journal();
+        if let Err(message) = self
+            .selection
+            .install_with_commit(target.clone(), thinking, || {
+                let selections = journal
+                    .inspect(|state| {
+                        state
+                            .session_selections
+                            .clone()
+                            .unwrap_or_else(RunSelections::empty)
+                    })
+                    .map_err(|error| error.to_string())?
+                    .with_model_and_thinking(target.clone(), thinking);
+                journal
+                    .append(
+                        self.turn,
+                        None,
+                        pre.closure_event(),
+                        EventKind::SessionSelectionsSelected { selections },
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+        {
             return Err(RunModelSwitchError::Install {
                 message,
                 publication,

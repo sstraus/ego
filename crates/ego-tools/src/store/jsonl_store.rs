@@ -2720,8 +2720,17 @@ impl SessionStore for JsonlStore {
             // A manifest is only a projection: it cannot make a missing log
             // resumable. Returning that stale row makes lifecycle catalogue
             // replay refuse every session with "session not found".
-            if !self.io.exists(&dir.join("events.jsonl"))? {
-                continue;
+            match self.io.exists(&dir.join("events.jsonl")) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        dir = %dir.display(),
+                        reason = %error,
+                        "skipping session whose log existence could not be checked"
+                    );
+                    continue;
+                }
             }
             let manifest_path = dir.join("manifest.json");
             // A catalogue that dies on one bad directory is a worse failure

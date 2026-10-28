@@ -788,6 +788,18 @@ impl RunSelections {
         self.ceiling_profile.as_deref()
     }
 
+    /// Replace the active generation choice without changing session authority.
+    #[must_use]
+    pub fn with_model_and_thinking(
+        mut self,
+        model: ModelRef,
+        thinking: crate::generator::types::ThinkingLevel,
+    ) -> Self {
+        self.model = Some(model);
+        self.thinking = Some(thinking);
+        self
+    }
+
     fn with_model(&self, model: ModelRef) -> Self {
         let mut pinned = self.clone();
         pinned.model = Some(model);
