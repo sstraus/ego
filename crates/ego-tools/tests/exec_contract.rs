@@ -991,10 +991,79 @@ fn a_libtest_host_runs_only_the_landlock_helper_for_its_envelope() {
 #[test]
 #[ignore = "hosts the Landlock helper; not a test of its own"]
 fn __ego_internal_landlock_exec_v1() {
+    if std::env::args_os().nth(7).is_some_and(|workspace| {
+        std::path::Path::new(&workspace)
+            .join(".ego-test-helper-failure")
+            .exists()
+    }) {
+        eprintln!("injected capability helper execution failure");
+        std::process::exit(101);
+    }
     let refused = ego_tools::exec::dispatch_landlock_helper(std::env::args_os())
         .expect("libtest was handed the helper envelope but did not recognise it");
     // A refusal exits non-zero, which is what the paired probe looks for.
     panic!("the Landlock helper refused execution: {refused:?}");
+}
+
+// Catches: a helper execution failure becomes a successful zero-bit diagnostic
+// and poisons the capability cache even after the helper can execute again.
+#[cfg(target_os = "linux")]
+#[test]
+fn filesystem_probe_helper_failure_is_not_a_cached_capability_observation() {
+    const MARKER: &str = "EGO_TEST_FAILED_CAPABILITY_HELPER";
+    if let Some(marker) = std::env::var_os(MARKER) {
+        let workspace = std::path::Path::new(&marker).parent().unwrap();
+        let read_root = workspace.join("read-root");
+        std::fs::create_dir(&read_root).unwrap();
+        let policy = run_confinement(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(workspace.canonicalize().unwrap()),
+        )
+        .with_roots(vec![ego_core::permit::ProfileRoot::new(
+            CanonPath::new(read_root.canonicalize().unwrap()),
+            ego_core::permit::RootAccess::Read,
+        )]);
+        let failed = block_on(RunEffectPorts::diagnostic_capabilities(
+            &policy,
+            CancelToken::new(),
+            ExecLimits::default(),
+        ));
+        std::fs::remove_file(marker).unwrap();
+        let repaired = block_on(RunEffectPorts::diagnostic_capabilities(
+            &policy,
+            CancelToken::new(),
+            ExecLimits::default(),
+        ));
+        assert!(
+            failed.is_err(),
+            "probe execution failed but advertised {failed:?}; repaired helper measured {repaired:?}"
+        );
+        assert_eq!(
+            repaired.unwrap(),
+            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+            "a failed helper execution must not poison subsequent measurement"
+        );
+        return;
+    }
+    let fixture = tempfile::tempdir().unwrap();
+    let marker = fixture.path().join(".ego-test-helper-failure");
+    std::fs::write(&marker, "injected execution failure").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "filesystem_probe_helper_failure_is_not_a_cached_capability_observation",
+            "--nocapture",
+        ])
+        .env(MARKER, marker)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "diagnostic contract child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 // Catches: nested read roots abort backend admission, or the selected platform
