@@ -14,15 +14,39 @@ pub(super) fn home(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join("Library/pnpm"))
 }
 
-pub(super) fn roots(home: &Path, workspace: &Path) -> Result<[PathBuf; 2], ProcessError> {
-    let pnpm = super::adaptive::resolve(&self::home(home))?;
+pub(super) fn roots(home: &Path, workspace: &Path) -> Result<Vec<PathBuf>, ProcessError> {
+    let (locks, uid) = operation_locks();
+    roots_with_locks(home, workspace, &locks, uid)
+}
+
+pub(super) fn operation_locks() -> (PathBuf, u32) {
     let uid = nix::unistd::getuid().as_raw();
-    let locks = PathBuf::from(format!("/private/tmp/pnpm-store-operation-locks-{uid}"));
-    validate_operation_locks(&locks, uid)?;
-    for path in [&pnpm, &locks] {
-        super::adaptive::check_write_root(home, workspace, path, &[])?;
+    (
+        PathBuf::from(format!("/private/tmp/pnpm-store-operation-locks-{uid}")),
+        uid,
+    )
+}
+
+// Explicit filesystem input lets native tests use a private namespace, never
+// the operator's shared pnpm locks. Production always uses operation_locks().
+pub(super) fn roots_with_locks(
+    home: &Path,
+    workspace: &Path,
+    locks: &Path,
+    uid: u32,
+) -> Result<Vec<PathBuf>, ProcessError> {
+    let pnpm = super::adaptive::resolve(&self::home(home))?;
+    super::adaptive::check_write_root(home, workspace, &pnpm, &[])?;
+    let mut roots = vec![pnpm];
+    // This is optional pnpm authority, not a prerequisite for all execution.
+    // Unsafe metadata grants nothing; never repair or follow an unsafe root.
+    if validate_operation_locks(locks, uid)
+        .and_then(|()| super::adaptive::check_write_root(home, workspace, locks, &[]))
+        .is_ok()
+    {
+        roots.push(locks.to_path_buf());
     }
-    Ok([pnpm, locks])
+    Ok(roots)
 }
 
 fn validate_operation_locks(path: &Path, uid: u32) -> Result<(), ego_core::permit::ProcessError> {
@@ -112,6 +136,55 @@ mod tests {
         std::fs::write(&file, "not a directory").unwrap();
         assert!(validate_operation_locks(&file, uid).is_err());
         assert!(validate_operation_locks(&root.path().join("absent"), uid).is_ok());
+    }
+
+    // Catches: tolerating unsafe optional metadata accidentally grants it authority.
+    #[test]
+    fn unsafe_operation_locks_never_become_derived_write_roots() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let home = base.join("home");
+        let workspace = base.join("workspace");
+        let private = base.join("private");
+        let shared = base.join("shared");
+        for path in [&home, &workspace, &private, &shared] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let alias = base.join("alias");
+        symlink(&private, &alias).unwrap();
+        let dangling = base.join("dangling");
+        symlink(base.join("absent-target"), &dangling).unwrap();
+        let file = base.join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        let absent = base.join("absent");
+        let uid = nix::unistd::getuid().as_raw();
+        for (path, owner, admitted) in [
+            (&private, uid, true),
+            (&absent, uid, true),
+            (&private, uid + 1, false),
+            (&shared, uid, false),
+            (&alias, uid, false),
+            (&dangling, uid, false),
+            (&file, uid, false),
+        ] {
+            let roots = roots_with_locks(&home, &workspace, path, owner)
+                .expect("optional metadata must not abort root derivation");
+            assert_eq!(
+                roots.contains(path),
+                admitted,
+                "{} owner={owner}",
+                path.display()
+            );
+            assert_eq!(roots.len(), if admitted { 2 } else { 1 });
+        }
+        assert!(!absent.exists(), "root discovery must not create locks");
+        assert_eq!(
+            std::fs::metadata(shared).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
     }
 
     // Catches: config is executed or a configured external store is silently

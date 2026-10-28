@@ -24,7 +24,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v10-apple-developer-runtime";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v11-optional-pnpm-locks";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -60,6 +60,17 @@ impl SeatbeltBackend {
         private_scratch: &CanonPath,
         derived_runtime_roots: &[CanonPath],
     ) -> Result<Self, ProcessError> {
+        let (locks, uid) = super::pnpm::operation_locks();
+        Self::prepare_with_locks(policy, private_scratch, derived_runtime_roots, &locks, uid)
+    }
+
+    fn prepare_with_locks(
+        policy: &RunConfinement,
+        private_scratch: &CanonPath,
+        derived_runtime_roots: &[CanonPath],
+        locks: &Path,
+        uid: u32,
+    ) -> Result<Self, ProcessError> {
         prerequisite()?;
         validate_private_scratch(private_scratch.as_path())?;
 
@@ -80,7 +91,7 @@ impl SeatbeltBackend {
             let home = std::env::var_os("HOME")
                 .ok_or_else(|| ProcessError::Backend("pnpm runtime requires HOME".into()))?;
             let home = super::adaptive::resolve(Path::new(&home))?;
-            super::pnpm::roots(&home, policy.workspace().as_path())?.to_vec()
+            super::pnpm::roots_with_locks(&home, policy.workspace().as_path(), locks, uid)?
         } else {
             Vec::new()
         };
