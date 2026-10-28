@@ -1063,6 +1063,19 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
+    fn alphabetic_base64_basic_credential_cannot_cross_narrative_redaction() {
+        // Catches valid all-letter Basic credentials being mistaken for prose.
+        for input in [
+            "before Basic dXNlcjpwYXNz after",
+            "before basic dXNlcjpwYXNz after",
+        ] {
+            for output in [redact_credentials(input), redact_text(input)] {
+                assert!(!output.contains("dXNlcjpwYXNz"), "{output}");
+                assert!(output.starts_with("before ") && output.ends_with(" after"));
+            }
+        }
+    }
+    #[test]
     fn credential_redaction_preserves_basic_and_bearer_prose() {
         // Catches ordinary task words being treated as authorization schemes.
         let mut failures = Vec::new();
