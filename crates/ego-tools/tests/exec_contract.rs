@@ -1029,6 +1029,10 @@ fn filesystem_probe_helper_failure_is_not_a_cached_capability_observation() {
             CancelToken::new(),
             ExecLimits::default(),
         ));
+        let admission_refused = matches!(
+            open_policy(policy.clone(), 1024 * 1024, 1024),
+            Err(ProcessError::Backend(_))
+        );
         std::fs::remove_file(marker).unwrap();
         let repaired = block_on(RunEffectPorts::diagnostic_capabilities(
             &policy,
@@ -1038,6 +1042,17 @@ fn filesystem_probe_helper_failure_is_not_a_cached_capability_observation() {
         assert!(
             failed.is_err(),
             "probe execution failed but advertised {failed:?}; repaired helper measured {repaired:?}"
+        );
+        let ProcessError::Backend(detail) = failed.unwrap_err() else {
+            panic!("helper execution failure must remain an operational measurement error");
+        };
+        assert!(
+            detail.contains("injected capability helper execution failure"),
+            "the helper stderr must survive its temporary evidence store: {detail}"
+        );
+        assert!(
+            admission_refused,
+            "a failed capability control must construct no run effects"
         );
         assert_eq!(
             repaired.unwrap(),
