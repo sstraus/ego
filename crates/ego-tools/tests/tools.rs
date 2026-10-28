@@ -1615,6 +1615,78 @@ mod edit {
         );
     }
 
+    /// regression case. Catches: a linked checkout created after session admission
+    /// gets a bare write refusal that gives no operator-only recovery action.
+    #[test]
+    fn linked_worktree_edit_is_admitted_or_names_exact_write_grant() {
+        use ego_core::permit::{Confinement, ReadPerimeter, RunConfinement};
+
+        let mut ws = Workspace::in_mode(Mode::Yolo);
+        let confinement = RunConfinement::new(Confinement::Off, false, ws.cwd()).unwrap();
+        ws.policy = PolicyEngine::new(ws.cwd(), Mode::Yolo, Ruleset::default())
+            .with_read_perimeter(ReadPerimeter::from_confinement(&confinement));
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&ws.root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet"]);
+        ws.file("target.txt", "original");
+        git(&["add", "target.txt"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ]);
+        let sibling = TempDir::new().unwrap();
+        let checkout = sibling.path().join("linked checkout");
+        git(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            checkout.to_str().unwrap(),
+            "HEAD",
+        ]);
+        let target = fs::canonicalize(checkout.join("target.txt")).unwrap();
+        let params = json!({
+            "path": target,
+            "old_string": "original",
+            "new_string": "changed",
+        });
+        let call = ws.prepare("edit", params.clone()).unwrap();
+        match ws.authorize(call) {
+            Ok(_) => {
+                ws.call("edit", params).unwrap();
+                assert_eq!(fs::read_to_string(&target).unwrap(), "changed");
+            }
+            Err(denied) => {
+                assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+                let text = denied.to_string();
+                assert!(
+                    text.contains("ego roots add --access read-write")
+                        && text.contains(target.to_str().unwrap())
+                        && text.contains("resume")
+                        && text.contains("user"),
+                    "a refused linked-worktree edit must name an exact operator write grant and resume, not suggest an exec bypass: {text}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn plan_mode_refuses_an_edit_at_the_floor_and_never_asks() {
         let ws = Workspace::in_mode(Mode::Plan);
