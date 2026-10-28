@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_ego_global_optspecs
-    string join \n worktree= f/file= var= attach= m/model= offline sandbox= thinking= read-only-dir= system= bare append-system= output-style= instructions= tools= no-tools allow= deny= profile= trust-workspace session= session-id= ephemeral session-dir= C= output= artifact-dir= schema= schema-retries= retry= fallback= budget= max-output-tokens= goal= no-context-tool context-clear context-interval= goal-turns= goal-check-command= max-turns= timeout= mcp= mode= plan yolo c/set= q/quiet no-color plain vim h/help V/version
+    string join \n worktree= f/file= var= attach= m/model= offline proxy= proxy-ca= sandbox= thinking= read-only-dir= system= bare append-system= output-style= instructions= tools= no-tools allow= deny= profile= trust-workspace session= session-id= ephemeral session-dir= C= output= artifact-dir= schema= schema-retries= retry= fallback= budget= max-output-tokens= goal= no-context-tool context-clear context-interval= goal-turns= goal-check-command= max-turns= timeout= mcp= mode= plan yolo c/set= q/quiet no-color plain vim h/help V/version
 end
 
 function __fish_ego_needs_command
@@ -29,6 +29,8 @@ complete -c ego -n "__fish_ego_needs_command" -s f -l file -d 'Read the instruct
 complete -c ego -n "__fish_ego_needs_command" -l var -d 'Supply one declared agent-file template variable. Requires --file' -r
 complete -c ego -n "__fish_ego_needs_command" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
 complete -c ego -n "__fish_ego_needs_command" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
+complete -c ego -n "__fish_ego_needs_command" -l proxy -d 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)' -r
+complete -c ego -n "__fish_ego_needs_command" -l proxy-ca -d 'Additional PEM trust anchor for provider HTTPS through --proxy only' -r -F
 complete -c ego -n "__fish_ego_needs_command" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_needs_command" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
 complete -c ego -n "__fish_ego_needs_command" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
@@ -107,6 +109,8 @@ complete -c ego -n "__fish_ego_using_subcommand run" -s f -l file -d 'Read the i
 complete -c ego -n "__fish_ego_using_subcommand run" -l var -d 'Supply one declared agent-file template variable. Requires --file' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l proxy -d 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)' -r
+complete -c ego -n "__fish_ego_using_subcommand run" -l proxy-ca -d 'Additional PEM trust anchor for provider HTTPS through --proxy only' -r -F
 complete -c ego -n "__fish_ego_using_subcommand run" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
@@ -162,6 +166,8 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -s f -l file -d 'Read th
 complete -c ego -n "__fish_ego_using_subcommand resume" -l var -d 'Supply one declared agent-file template variable. Requires --file' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l proxy -d 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l proxy-ca -d 'Additional PEM trust anchor for provider HTTPS through --proxy only' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
@@ -218,6 +224,8 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -s f -l file -d 'Read 
 complete -c ego -n "__fish_ego_using_subcommand continue" -l var -d 'Supply one declared agent-file template variable. Requires --file' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -s m -l model -d 'provider/model slug, e.g. ollama/qwen3' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l proxy -d 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l proxy-ca -d 'Additional PEM trust anchor for provider HTTPS through --proxy only' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l sandbox -d 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l thinking -d 'off|minimal|low|medium|high|xhigh|max' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l read-only-dir -d 'Grant reads of one existing canonical absolute upload directory' -r -F
