@@ -327,6 +327,7 @@ impl ego_core::generation_model_source::GenerationModelSource for TestGeneration
                 metering: Metering::Unmetered {
                     revision: MeteringRevision("catalogue-test".to_owned()),
                 },
+                pricing_unavailable: None,
                 rates: None,
             },
         )))

@@ -330,6 +330,8 @@ pub enum ExportEvent {
     CostAnomaly {
         model: String,
         estimated_upper_bound: Option<crate::cost::Money>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<crate::cost::PricingUnavailable>,
     },
     UsageUpdated {
         usage: Usage,
@@ -1118,9 +1120,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         EventKind::CostAnomaly {
             model,
             estimated_upper_bound,
+            cause,
         } => ExportEvent::CostAnomaly {
             model: model.clone(),
             estimated_upper_bound: *estimated_upper_bound,
+            cause: *cause,
         },
         EventKind::UsageUpdated {
             usage,

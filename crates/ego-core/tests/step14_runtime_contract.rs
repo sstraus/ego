@@ -737,6 +737,7 @@ mod turn_execution_observation {
                 metering: Metering::Unmetered {
                     revision: MeteringRevision(String::from("test")),
                 },
+                pricing_unavailable: None,
                 rates: None,
             })))
         }

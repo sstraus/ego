@@ -72,6 +72,7 @@ pub struct GenerationProfile {
     pub capabilities: ModelCapabilities,
     pub metering: Metering,
     pub rates: Option<ResolvedRates>,
+    pub pricing_unavailable: Option<crate::cost::PricingUnavailable>,
 }
 
 impl GenerationProfile {

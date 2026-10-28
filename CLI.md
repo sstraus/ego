@@ -830,7 +830,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 17,
+  "v": 18,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
@@ -2649,7 +2649,10 @@ reachable rate, including cache creation; output uses the request cap. Actual
 provider usage settles the reservation after the response. Missing, offline or
 unusable table prices do not refuse model resolution. One durable `cost_anomaly`
 notice per session/model states that any configured cap cannot cover unpriced
-spend. The notice is visible in text (including quiet mode), JSONL and ACP.
+spend. When price discovery fails, its optional `cause` is a closed, credential-safe
+category with a recovery action, not raw source text. Offline empty/expired
+caches, fetch failures, invalid tables/rates and missing rows remain distinct.
+The notice is visible in text (including quiet mode), JSONL and ACP.
 Unknown actual cost charges the reserved upper bound when available, not a
 fabricated actual cost. Known and estimated spend remain subject to the cap.
 

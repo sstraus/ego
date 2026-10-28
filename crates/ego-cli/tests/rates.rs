@@ -20,9 +20,9 @@ use ego_ai::catalogue::{ResolvedModel, tabulated, unmetered};
 use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::ProviderRow;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
-use ego_cli::budget::TableSource;
+use ego_cli::budget::{NoRates, TableSource};
 use ego_core::budget::{BudgetGate, Ledger, Metering};
-use ego_core::cost::{CurrencyCode, Money, RateSource};
+use ego_core::cost::{CurrencyCode, Money, PricingUnavailable, RateSource};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
@@ -301,9 +301,9 @@ async fn an_offline_run_prices_a_ceiling_from_a_fresh_cache() {
     assert_eq!(wire.calls(), 0);
 }
 
-/// Catches: missing offline cache refusing generation or causing a forbidden fetch.
+/// Catches: an empty offline cache losing its recovery cause or causing a forbidden fetch.
 #[tokio::test]
-async fn offline_with_no_cached_table_continues_without_reaching_for_the_network() {
+async fn offline_empty_price_source_preserves_cause_without_a_fetch() {
     let fixture = Fixture::new();
     let wire = Wire::answering(200, TABLE, Some(ETAG));
     let http = transport(&wire);
@@ -311,8 +311,8 @@ async fn offline_with_no_cached_table_continues_without_reaching_for_the_network
         .source(&http, true)
         .rates(&model(tabulated()), &limited())
         .await
-        .unwrap();
-    assert!(rates.is_none());
+        .expect_err("source failure must retain its diagnostic for model admission");
+    assert_eq!(rates.cause(), PricingUnavailable::OfflineNoCache);
     assert_eq!(wire.calls(), 0);
 }
 
@@ -378,9 +378,9 @@ async fn a_first_priced_run_fetches_the_table_and_leaves_it_cached() {
     assert_eq!(quiet.calls(), 0, "fetched once, per §6's title");
 }
 
-/// Catches: price-fetch failure refusing a model whose provider remains reachable.
+/// Catches: a failed fetch losing the network recovery cause.
 #[tokio::test]
-async fn a_failed_fetch_with_no_cache_continues_without_a_quote() {
+async fn failed_price_fetch_preserves_the_network_recovery_cause() {
     let fixture = Fixture::new();
     let wire = Wire::silent();
     let http = transport(&wire);
@@ -388,14 +388,14 @@ async fn a_failed_fetch_with_no_cache_continues_without_a_quote() {
         .source(&http, false)
         .rates(&model(tabulated()), &limited())
         .await
-        .unwrap();
-    assert!(rates.is_none());
+        .expect_err("source failure must retain its diagnostic for model admission");
+    assert_eq!(rates.cause(), PricingUnavailable::FetchFailed);
     assert_eq!(wire.calls(), 1, "it was tried once");
 }
 
-// Catches: malformed cached prices refusing generation or triggering needless fetches.
+// Catches: malformed prices losing the invalid-rate cause or triggering needless fetches.
 #[tokio::test]
-async fn malformed_cached_prices_continue_without_a_quote_or_fetch() {
+async fn malformed_cached_prices_preserve_the_invalid_rate_cause_without_a_fetch() {
     let fixture = Fixture::new();
     fixture.cached(
         &TABLE.replace("1.25e-06", "\"not-a-price\""),
@@ -407,8 +407,8 @@ async fn malformed_cached_prices_continue_without_a_quote_or_fetch() {
         .source(&http, false)
         .rates(&model(tabulated()), &limited())
         .await
-        .unwrap();
-    assert!(rates.is_none());
+        .expect_err("source failure must retain its diagnostic for model admission");
+    assert_eq!(rates.cause(), PricingUnavailable::InvalidRate);
     assert_eq!(wire.calls(), 0);
 }
 
@@ -498,9 +498,9 @@ async fn openrouter_cached_table_completes_only_standard_missing_cache_prices() 
     assert!(generic.cache_write.is_none());
 }
 
-// Catches: a missing table row aborting model resolution before the permissive budget gate.
+// Catches: a missing table row losing the update-or-configure diagnostic.
 #[tokio::test]
-async fn missing_catalogue_row_does_not_refuse_a_capped_generation() {
+async fn missing_catalogue_row_preserves_the_update_or_configure_cause() {
     let fixture = Fixture::new();
     fixture.cached(TABLE, Duration::ZERO);
     let wire = Wire::silent();
@@ -511,62 +511,166 @@ async fn missing_catalogue_row_does_not_refuse_a_capped_generation() {
         .source(&http, false)
         .rates(&absent, &limited())
         .await
-        .expect("missing price must continue to admission with an anomaly, not refuse resolution");
-    assert!(
-        rates.is_none(),
-        "do not invent a quote for an unlisted model"
-    );
+        .expect_err("a missing row retains its diagnostic without inventing a quote");
+    assert_eq!(rates.cause(), PricingUnavailable::MissingRow);
 }
 
 mod support;
 
-// Catches: unavailable cached pricing aborting the real CLI before generation.
+// Catches: unavailable pricing losing its safe source cause or refusing real CLI generation.
 #[test]
-fn real_run_with_missing_cached_model_price_sends_and_notifies() {
+fn missing_price_notice_preserves_sanitized_source_cause() {
     use ego_core::event::time::Clock;
-    let places = support::Places::new();
-    let stub = support::Stub::start(support::Plan::default());
-    PricingCache::new(&OsIo, places.home_path())
-        .publish(
-            b"{}",
-            ETAG,
-            ego_tools::clock::SystemClock.now(),
-            std::process::id(),
-            &|pid| pid == std::process::id(),
-        )
-        .unwrap();
-    let result = places
-        .ego(&stub)
-        .env("ANTHROPIC_API_KEY", "fixture-not-a-secret")
-        .args([
-            "--model",
-            "anthropic/claude-haiku-5-5",
-            "--sandbox",
-            "off",
-            "--budget",
-            "1$",
-            "--max-output-tokens",
-            "32",
-            "--no-tools",
-            "hello",
-        ])
-        .run();
-    let mut evidence = result.stderr.clone();
-    for entry in std::fs::read_dir(places.home_path().join("sessions"))
-        .into_iter()
-        .flatten()
-    {
-        evidence.push_str(
-            &std::fs::read_to_string(entry.unwrap().path().join("events.jsonl")).unwrap(),
+    for (table, cause, message) in [
+        ("{}", "missing_row", "price table has no matching model row"),
+        (
+            r#"{"claude-haiku-5-5":{"litellm_provider":"anthropic","mode":"chat","input_cost_per_token":"https://user:fixture-secret@proxy.invalid/?token=fixture-secret"}}"#,
+            "invalid_rate",
+            "price table contains an invalid rate",
+        ),
+    ] {
+        let places = support::Places::new();
+        let stub = support::Stub::start(support::Plan::default());
+        PricingCache::new(&OsIo, places.home_path())
+            .publish(
+                table.as_bytes(),
+                ETAG,
+                ego_tools::clock::SystemClock.now(),
+                std::process::id(),
+                &|pid| pid == std::process::id(),
+            )
+            .unwrap();
+        let result = places
+            .ego(&stub)
+            .env("ANTHROPIC_API_KEY", "fixture-not-a-secret")
+            .args([
+                "--model",
+                "anthropic/claude-haiku-5-5",
+                "--sandbox",
+                "off",
+                "--budget",
+                "1$",
+                "--max-output-tokens",
+                "32",
+                "--no-tools",
+                "hello",
+            ])
+            .run();
+        let mut evidence = result.stderr.clone();
+        for entry in std::fs::read_dir(places.home_path().join("sessions"))
+            .into_iter()
+            .flatten()
+        {
+            evidence.push_str(
+                &std::fs::read_to_string(entry.unwrap().path().join("events.jsonl")).unwrap(),
+            );
+        }
+        assert!(
+            evidence.contains("CostAnomaly") && evidence.contains("anthropic/claude-haiku-5-5"),
+            "{}\n{evidence}",
+            result.stderr
+        );
+        assert!(
+            !stub.generations().is_empty(),
+            "missing pricing must not prevent send"
+        );
+        assert!(
+            evidence.contains(&format!("\"cause\":\"{cause}\"")) && result.stderr.contains(message),
+            "missing pricing must preserve its actionable source cause: {evidence}"
+        );
+        assert!(
+            !evidence.contains("fixture-secret"),
+            "raw price source data leaked"
         );
     }
-    assert!(
-        evidence.contains("CostAnomaly") && evidence.contains("anthropic/claude-haiku-5-5"),
-        "{}\n{evidence}",
-        result.stderr
-    );
-    assert!(
-        !stub.generations().is_empty(),
-        "missing pricing must not prevent send"
-    );
+}
+
+/// Catches: a stale offline cache being diagnosed as an absent cache.
+#[tokio::test]
+async fn offline_stale_prices_keep_the_refresh_action_without_a_fetch() {
+    let fixture = Fixture::new();
+    fixture.cached(TABLE, Duration::from_secs(8 * 24 * 60 * 60));
+    let wire = Wire::silent();
+    let http = transport(&wire);
+    let error = fixture
+        .source(&http, true)
+        .rates(&model(tabulated()), &limited())
+        .await
+        .expect_err("expired prices retain the refresh reason");
+    assert_eq!(error.cause(), PricingUnavailable::OfflineStaleCache);
+    assert_eq!(wire.calls(), 0);
+}
+
+/// Catches: arbitrary URLs, error bodies and paths leaking through pricing diagnostics.
+#[test]
+fn pricing_source_causes_exclude_raw_credentials_and_bound_the_notice() {
+    use ego_ai::pricing::{FetchError, TableError};
+    use ego_tools::pricing::CacheError;
+    let secret = "https://user:fixture-secret@proxy.invalid/?token=fixture-secret";
+    for (error, expected) in [
+        (
+            NoRates::Offline {
+                cache: CacheError::Corrupt {
+                    message: secret.into(),
+                },
+            },
+            PricingUnavailable::OfflineInvalidCache,
+        ),
+        (
+            NoRates::Fetch {
+                source: FetchError::Unreachable {
+                    endpoint: secret.into(),
+                    message: secret.repeat(1000),
+                },
+            },
+            PricingUnavailable::FetchFailed,
+        ),
+        (
+            NoRates::Fetch {
+                source: FetchError::NotATable {
+                    source: TableError::NotATable {
+                        message: secret.into(),
+                    },
+                },
+            },
+            PricingUnavailable::InvalidTable,
+        ),
+        (
+            NoRates::Fetch {
+                source: FetchError::Unidentified { header: "etag" },
+            },
+            PricingUnavailable::UnidentifiedTable,
+        ),
+        (
+            NoRates::MissingRow {
+                provider: secret.into(),
+                model: secret.into(),
+            },
+            PricingUnavailable::MissingRow,
+        ),
+        (
+            NoRates::Table {
+                source: TableError::Contradiction {
+                    model: secret.into(),
+                    keys: vec![secret.into()],
+                },
+            },
+            PricingUnavailable::ConflictingRates,
+        ),
+        (
+            NoRates::Cache {
+                source: CacheError::Io(std::io::Error::other(secret)),
+            },
+            PricingUnavailable::CacheUnavailable,
+        ),
+    ] {
+        assert_eq!(error.cause(), expected);
+        let notice = error.to_string();
+        assert!(notice.len() <= 160, "unbounded source diagnostic: {notice}");
+        assert!(!notice.contains("fixture-secret"), "raw source data leaked");
+        assert!(
+            notice.contains("configure a quote"),
+            "missing recovery action: {notice}"
+        );
+    }
 }

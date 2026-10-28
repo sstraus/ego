@@ -56,6 +56,33 @@ mod public_golden {
 
     use super::*;
 
+    /// Catches: pricing causes lost in public JSON or old anomaly records failing replay.
+    #[test]
+    fn cost_anomaly_projects_safe_cause_and_replays_records_without_one() {
+        let old = serde_json::json!({
+            "kind": "CostAnomaly", "model": "openai/gpt-5",
+            "estimated_upper_bound": null
+        });
+        for (record, expected) in [
+            (old.clone(), None),
+            (
+                {
+                    let mut record = old;
+                    record["cause"] = serde_json::json!("offline_no_cache");
+                    record
+                },
+                Some("offline_no_cache"),
+            ),
+        ] {
+            let kind: EventKind = serde_json::from_value(record).expect("durable anomaly record");
+            let event = ev(Seq::default().next(), TurnId::new(), None, kind);
+            let public = project_public(&event).expect("visible anomaly");
+            let wire = serde_json::to_value(&public).unwrap();
+            assert_eq!(wire.get("cause").and_then(|cause| cause.as_str()), expected);
+            assert_eq!(wire["model"], "openai/gpt-5");
+        }
+    }
+
     #[test]
     fn detached_exec_settlement_does_not_impersonate_a_user_message() {
         let id = ego_core::event::id::DetachedExecId::new();

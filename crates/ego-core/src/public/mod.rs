@@ -48,10 +48,15 @@ use crate::state::Usage;
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
 // Version 17 adds the durable cost anomaly notice.
-pub const PUBLIC_EVENT_VERSION: u32 = 17;
+// Version 18 adds the closed pricing-source cause to cost anomalies.
+pub const PUBLIC_EVENT_VERSION: u32 = 18;
 
 /// Shared warning text for terminal and ACP projections of the same notice.
-pub fn cost_anomaly_message(model: &str, estimated_upper_bound: Option<&Money>) -> String {
+pub fn cost_anomaly_message(
+    model: &str,
+    estimated_upper_bound: Option<&Money>,
+    cause: Option<crate::cost::PricingUnavailable>,
+) -> String {
     let detail = match estimated_upper_bound {
         Some(bound) => format!(
             "the reserved upper bound of {} {} counts against any configured cap; actual cost remains unknown",
@@ -60,7 +65,10 @@ pub fn cost_anomaly_message(model: &str, estimated_upper_bound: Option<&Money>) 
         None => "no usable price is available; any configured cap cannot cover this unpriced spend"
             .to_owned(),
     };
-    format!("Cost anomaly for {model}: {detail}. Continuing.")
+    let cause = cause
+        .map(|cause| format!(" Price source: {cause}."))
+        .unwrap_or_default();
+    format!("Cost anomaly for {model}: {detail}.{cause} Continuing.")
 }
 
 /// The structured question payload shared by JSON completion and public
@@ -396,6 +404,8 @@ pub enum PublicEvent {
         turn: TurnId,
         model: String,
         estimated_upper_bound: Option<Money>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<crate::cost::PricingUnavailable>,
     },
     /// Incremental usage was reported.
     ///
@@ -715,10 +725,12 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         EventKind::CostAnomaly {
             model,
             estimated_upper_bound,
+            cause,
         } => Some(PublicEvent::CostAnomaly {
             turn,
             model: model.clone(),
             estimated_upper_bound: *estimated_upper_bound,
+            cause: *cause,
         }),
         EventKind::UsageUpdated {
             usage, cost_delta, ..

@@ -252,6 +252,7 @@ impl GenerationModelSource for SingleGenerationSource {
             generator: self.profile.generator.clone(),
             capabilities: self.profile.capabilities.clone(),
             metering: self.profile.metering.clone(),
+            pricing_unavailable: self.profile.pricing_unavailable,
             rates: self.profile.rates.clone(),
         };
         Box::pin(future::ready(Ok(profile)))
@@ -501,6 +502,7 @@ async fn turn_over_http_with_question(
                     generator,
                     capabilities: resolved.capabilities.clone(),
                     metering: resolved.metering.clone(),
+                    pricing_unavailable: None,
                     rates: resolved.rates.clone(),
                 },
             }),

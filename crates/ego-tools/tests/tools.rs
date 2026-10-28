@@ -2531,6 +2531,7 @@ mod end_to_end {
                 generator: self.generator.clone(),
                 capabilities: caps(),
                 metering: metering(),
+                pricing_unavailable: None,
                 rates: Some(ResolvedRates {
                     quote: quote(),
                     source: RateSource::Operator,

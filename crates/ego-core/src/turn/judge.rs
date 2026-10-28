@@ -79,6 +79,7 @@ impl JudgeGeneration<'_, '_, '_> {
             &profile.identity.0,
             &profile.metering,
             &reservation,
+            profile.pricing_unavailable,
         )?;
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
@@ -161,8 +162,12 @@ impl JudgeGeneration<'_, '_, '_> {
         };
         failure.map_or(Ok(()), Err)?;
         if !settlement.reconciled.exact {
-            self.journal
-                .cost_anomaly(turn, &profile.identity.0, settlement.reconciled.charged)?;
+            self.journal.cost_anomaly(
+                turn,
+                &profile.identity.0,
+                settlement.reconciled.charged,
+                profile.pricing_unavailable,
+            )?;
         }
         self.journal.append(
             turn,

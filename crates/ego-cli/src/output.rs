@@ -1085,12 +1085,14 @@ impl EventSink for TextSink<'_> {
             PublicEvent::CostAnomaly {
                 model,
                 estimated_upper_bound,
+                cause,
                 ..
             } => {
                 self.finish();
                 self.out.note(&ego_core::public::cost_anomaly_message(
                     model,
                     estimated_upper_bound.as_ref(),
+                    *cause,
                 ));
             }
             PublicEvent::MeteringSelected { ceiling, rates, .. } => {
@@ -1541,6 +1543,9 @@ mod tests {
                     turn,
                     model: "openrouter/fixture".into(),
                     estimated_upper_bound: bound,
+                    cause: bound
+                        .is_none()
+                        .then_some(ego_core::cost::PricingUnavailable::OfflineNoCache),
                 },
                 &state,
             );
@@ -1548,6 +1553,7 @@ mod tests {
         let notes = out.notes.lock().unwrap();
         assert_eq!(notes.len(), 2);
         assert!(notes[0].contains("cap cannot cover this unpriced spend"));
+        assert!(notes[0].contains("offline with no cached price table"));
         assert!(notes[1].contains("reserved upper bound of 0.25 USD"));
         assert!(notes[1].contains("actual cost remains unknown"));
     }

@@ -592,6 +592,7 @@ mod codex_real_recovery {
                     generator: self.0.clone(),
                     capabilities: capabilities(),
                     metering: ego_ai::catalogue::unmetered(),
+                    pricing_unavailable: None,
                     rates: None,
                 })
             })

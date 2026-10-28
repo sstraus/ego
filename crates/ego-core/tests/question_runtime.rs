@@ -370,6 +370,7 @@ impl GenerationModelSource for FixedSource {
             metering: Metering::Unmetered {
                 revision: MeteringRevision("question-runtime".into()),
             },
+            pricing_unavailable: None,
             rates: None,
         })))
     }

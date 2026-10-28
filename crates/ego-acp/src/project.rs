@@ -686,10 +686,15 @@ fn project_v1_with_root(
             turn,
             model,
             estimated_upper_bound,
+            cause,
         } => Some(v1::SessionUpdate::AgentMessageChunk(
             v1::ContentChunk::new(
-                ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref())
-                    .into(),
+                ego_core::public::cost_anomaly_message(
+                    model,
+                    estimated_upper_bound.as_ref(),
+                    *cause,
+                )
+                .into(),
             )
             .message_id(Some(v1::MessageId::new(format!(
                 "cost-anomaly-{turn:?}-{model}"
@@ -916,8 +921,10 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
             turn,
             model,
             estimated_upper_bound,
+            cause,
         } => Some(v2::SessionUpdate::AgentMessageChunk(v2::ContentChunk::new(
-            ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref()).into(),
+            ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref(), *cause)
+                .into(),
             format!("cost-anomaly-{turn:?}-{model}"),
         ))),
 

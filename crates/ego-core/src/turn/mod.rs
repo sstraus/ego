@@ -1054,7 +1054,13 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                 )
             })?;
         self.journal
-            .reservation_cost_anomaly(turn, &profile.identity.0, &profile.metering, &reservation)
+            .reservation_cost_anomaly(
+                turn,
+                &profile.identity.0,
+                &profile.metering,
+                &reservation,
+                profile.pricing_unavailable,
+            )
             .map_err(|error| {
                 ToollessGenerationFailure::new(
                     error.to_string(),
@@ -1161,7 +1167,12 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
         let delivery = settlement.outcome.delivery();
         if !settlement.reconciled.exact {
             self.journal
-                .cost_anomaly(turn, &profile.identity.0, settlement.reconciled.charged)
+                .cost_anomaly(
+                    turn,
+                    &profile.identity.0,
+                    settlement.reconciled.charged,
+                    profile.pricing_unavailable,
+                )
                 .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?;
         }
         let observed = usage.unwrap_or(Usage::IDENTITY);
@@ -2275,6 +2286,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 &profile.identity.0,
                 &profile.metering,
                 &reservation,
+                profile.pricing_unavailable,
             )?;
             let attempt = GenerationAttempt::new(
                 GenerationId::new(),
@@ -5507,8 +5519,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             )?;
         }
         if !settlement.reconciled.exact {
-            self.journal
-                .cost_anomaly(turn, &profile.identity.0, settlement.reconciled.charged)?;
+            self.journal.cost_anomaly(
+                turn,
+                &profile.identity.0,
+                settlement.reconciled.charged,
+                profile.pricing_unavailable,
+            )?;
         }
         let terminal = self.journal.append(
             turn,
@@ -5552,6 +5568,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             &profile.identity.0,
             &profile.metering,
             &reservation,
+            profile.pricing_unavailable,
         )?;
         let attempt = match GenerationAttempt::from_attempt(
             next_attempt,

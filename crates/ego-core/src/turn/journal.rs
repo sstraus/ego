@@ -218,11 +218,12 @@ impl<'s> SharedJournal<'s> {
         model: &str,
         metering: &crate::budget::Metering,
         reservation: &crate::budget::Reservation,
+        cause: Option<crate::cost::PricingUnavailable>,
     ) -> Result<(), SharedJournalError> {
         if reservation.upper_bound().is_none()
             && matches!(metering, crate::budget::Metering::Currency { .. })
         {
-            self.cost_anomaly(turn, model, None)?;
+            self.cost_anomaly(turn, model, None, cause)?;
         }
         Ok(())
     }
@@ -233,6 +234,7 @@ impl<'s> SharedJournal<'s> {
         turn: TurnId,
         model: &str,
         estimated_upper_bound: Option<crate::cost::Money>,
+        cause: Option<crate::cost::PricingUnavailable>,
     ) -> Result<(), SharedJournalError> {
         let mut journal = self.lock()?;
         if !journal.state.cost_anomaly_models.contains(model) {
@@ -243,6 +245,7 @@ impl<'s> SharedJournal<'s> {
                 EventKind::CostAnomaly {
                     model: model.to_owned(),
                     estimated_upper_bound,
+                    cause,
                 },
             )?;
         }
