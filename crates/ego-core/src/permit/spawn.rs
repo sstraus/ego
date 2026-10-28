@@ -816,10 +816,15 @@ impl ExecObservation {
 
     pub fn changes_from(&self, old: &Self) -> String {
         let mut changes = Vec::new();
-        if self.backend != old.backend {
+        if self.backend.name() != old.backend.name() {
             changes.push(format!(
                 "backend measurement {} -> {}",
                 old.backend.name(),
+                self.backend.name()
+            ));
+        } else if self.backend.revision() != old.backend.revision() {
+            changes.push(format!(
+                "backend measurement {} revision changed",
                 self.backend.name()
             ));
         }

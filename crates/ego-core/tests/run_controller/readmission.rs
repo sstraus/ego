@@ -342,6 +342,91 @@ fn readmission_cases() {
     }
 }
 
+// Catches: revision-only backend changes ask for consent with an indistinguishable name transition.
+#[test]
+fn readmission_names_same_backend_revision_change() {
+    for (backend, revision, expected) in [
+        (
+            "seatbelt",
+            "2",
+            "backend measurement seatbelt revision changed",
+        ),
+        ("other", "1", "backend measurement seatbelt -> other"),
+        ("other", "2", "backend measurement seatbelt -> other"),
+    ] {
+        let store = Arc::new(RecordingSessionStore::default());
+        let executor = Arc::new(ScriptedRunExecutor::default());
+        executor.allow_effects();
+        let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+        let root = fixture_root("revision-policy");
+        let policy = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(root.as_path()),
+        )
+        .unwrap();
+        let caps = Confinement::Workspace.required_caps();
+        let before = observation(&policy, "seatbelt", caps, "1");
+        let after = ExecObservation::new(
+            BackendIdentity::new(backend, revision),
+            caps,
+            before.policy_digest().clone(),
+        )
+        .with_policy(ExecutionPolicy::capture(&policy, Vec::new()));
+        let first = admitted_start(
+            &controller,
+            StartRequest::new(
+                RequestId::session_id(super::request(950)),
+                root,
+                super::request(950),
+                digest("first"),
+                selections().with_sandbox_observation(Confinement::Workspace, before),
+                "first",
+            ),
+        );
+        let run = first.run_id();
+        execute(&controller, first.into_execution());
+        let revision = store
+            .transactions(run.session_id())
+            .last()
+            .unwrap()
+            .revision();
+        *executor.execution_observation.lock().unwrap() = Some(after);
+        let human = Arc::new(Human {
+            allow: true,
+            questions: Mutex::new(0),
+        });
+        let result = futures::executor::block_on(controller.continue_run(
+            ContinueRequest::new(
+                run,
+                super::request(951),
+                digest("second"),
+                revision,
+                "second",
+            ),
+            bindings().with_human(human.clone()),
+        ));
+        assert!(result.is_ok());
+        assert_eq!(*human.questions.lock().unwrap(), 1);
+        let entries = store.entries.lock().unwrap();
+        let reason = entries[&run.session_id()]
+            .iter()
+            .find_map(|entry| match entry {
+                SessionEntry::Event(event) => match &event.kind {
+                    ego_core::event::domain::EventKind::PermissionDecided { reason, .. } => {
+                        reason.as_deref()
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("backend identity change must persist its human consent prompt");
+        assert!(reason.contains(expected), "{reason}");
+        assert!(reason.contains("Approval is required"), "{reason}");
+        assert!(!reason.contains("seatbelt -> seatbelt"), "{reason}");
+    }
+}
+
 // Catches: forged readmission selections bypass integrity checks during replay.
 #[test]
 fn forged_readmission_transitions_are_rejected_before_any_effect() {

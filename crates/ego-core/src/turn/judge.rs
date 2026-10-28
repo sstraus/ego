@@ -74,16 +74,13 @@ impl JudgeGeneration<'_, '_, '_> {
                     return Ok(JudgeGenerationResult::Ended(reason));
                 }
             };
-        if reservation.upper_bound().is_none()
-            && matches!(profile.metering, crate::budget::Metering::Currency { .. })
-        {
-            self.journal.cost_anomaly(
-                turn,
-                &profile.identity.0,
-                None,
-                profile.pricing_unavailable,
-            )?;
-        }
+        self.journal.reservation_cost_anomaly(
+            turn,
+            &profile.identity.0,
+            &profile.metering,
+            &reservation,
+            profile.pricing_unavailable,
+        )?;
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
             reservation,

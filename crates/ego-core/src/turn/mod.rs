@@ -1053,18 +1053,20 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                     DeliveryCertainty::DefinitelyUnsent,
                 )
             })?;
-        if reservation.upper_bound().is_none()
-            && matches!(profile.metering, crate::budget::Metering::Currency { .. })
-        {
-            self.journal
-                .cost_anomaly(turn, &profile.identity.0, None, profile.pricing_unavailable)
-                .map_err(|error| {
-                    ToollessGenerationFailure::new(
-                        error.to_string(),
-                        DeliveryCertainty::DefinitelyUnsent,
-                    )
-                })?;
-        }
+        self.journal
+            .reservation_cost_anomaly(
+                turn,
+                &profile.identity.0,
+                &profile.metering,
+                &reservation,
+                profile.pricing_unavailable,
+            )
+            .map_err(|error| {
+                ToollessGenerationFailure::new(
+                    error.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                )
+            })?;
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
@@ -2027,12 +2029,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         constraints.validate().map_err(CompactionError::Internal)?;
         let title = self.state().title.clone();
         let goal = self.state().goal.clone();
-        let (history, repairs) =
-            conversation_from_with_blobs(&self.state(), self.tools.blob_store())
-                .map_err(CompactionError::History)?;
-        let history = self
-            .with_ancestor(history)
-            .map_err(CompactionError::History)?;
+        let (history, repairs) = self.rebuild_history().map_err(CompactionError::History)?;
         if !repairs.is_empty() {
             tracing::warn!(?repairs, "source history was repaired for compaction");
         }
@@ -2284,6 +2281,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     SharedBudgetError::Denied(error) => CompactionError::Budget(error),
                     error => CompactionError::Internal(error.to_string()),
                 })?;
+            self.journal.reservation_cost_anomaly(
+                turn,
+                &profile.identity.0,
+                &profile.metering,
+                &reservation,
+                profile.pricing_unavailable,
+            )?;
             let attempt = GenerationAttempt::new(
                 GenerationId::new(),
                 reservation,
@@ -4750,11 +4754,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         // here — the log is never rewritten, so the run ends visibly at the
         // provider's exit code rather than resuming a session with a hole in
         // it (ADR §6).
-        let rebuilt = conversation_from_with_blobs(&self.state(), self.tools.blob_store())
-            .and_then(|(history, repairs)| {
-                self.with_ancestor(history)
-                    .map(|history| (history, repairs))
-            });
+        let rebuilt = self.rebuild_history();
         let (history, repairs) = match rebuilt {
             Ok(rebuilt) => rebuilt,
             // `Provider` is the exit even though the history on disk is what
@@ -5563,16 +5563,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return self.refuse(turn, denied.to_string(), reason).map(Err);
             }
         };
-        if reservation.upper_bound().is_none()
-            && matches!(profile.metering, crate::budget::Metering::Currency { .. })
-        {
-            self.journal.cost_anomaly(
-                turn,
-                &profile.identity.0,
-                None,
-                profile.pricing_unavailable,
-            )?;
-        }
+        self.journal.reservation_cost_anomaly(
+            turn,
+            &profile.identity.0,
+            &profile.metering,
+            &reservation,
+            profile.pricing_unavailable,
+        )?;
         let attempt = match GenerationAttempt::from_attempt(
             next_attempt,
             reservation,
@@ -5959,21 +5956,42 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         Ok(messages)
     }
 
-    /// Prefix target-local history with its already-validated ancestor history.
-    fn with_ancestor(
+    /// Compose verified ancestors and the local suffix with one ledger owner.
+    fn rebuild_history(
         &self,
-        history: Conversation,
-    ) -> Result<Conversation, crate::generator::types::HistoryError> {
-        let ancestor = match &self.ancestor {
-            Some(AncestorHistory::Replayed(replayed)) => {
-                replayed.conversation_with_constraints(&self.state().constraints)?
+    ) -> Result<
+        (Conversation, Vec<crate::generator::history::Repair>),
+        crate::generator::types::HistoryError,
+    > {
+        let state = self.state();
+        let (ancestor, ancestor_owns_constraints) = match &self.ancestor {
+            Some(AncestorHistory::Replayed(replayed))
+                if !replayed.conversation().messages().is_empty() =>
+            {
+                (
+                    Some(replayed.conversation_with_constraints(&state.constraints)?),
+                    true,
+                )
             }
-            Some(AncestorHistory::Conversation(ancestor)) => ancestor.clone(),
-            None => return Ok(history),
+            Some(AncestorHistory::Conversation(ancestor)) => (Some(ancestor.clone()), false),
+            // Compaction lineage has no fork prefix. In particular, do not
+            // synthesize a second ledger ahead of the local checkpoint.
+            _ => (None, false),
+        };
+        let (history, repairs) = if ancestor_owns_constraints {
+            crate::generator::history::conversation_from_without_constraint_frame(
+                &state,
+                self.tools.blob_store(),
+            )?
+        } else {
+            conversation_from_with_blobs(&state, self.tools.blob_store())?
+        };
+        let Some(ancestor) = ancestor else {
+            return Ok((history, repairs));
         };
         let mut messages: Vec<Message> = ancestor.into();
         messages.extend(Vec::<Message>::from(history));
-        Conversation::new(messages)
+        Conversation::new(messages).map(|history| (history, repairs))
     }
 
     /// Turn one generation's stream into log entries.

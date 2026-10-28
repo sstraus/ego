@@ -179,7 +179,26 @@ impl Fs for OsFs {
                 });
             }
         }
-        let file = fs::File::open(path.as_path()).map_err(|e| Self::error(path.as_path(), &e))?;
+        // A FIFO must be rejected before open: checking the handle afterwards
+        // is too late, because opening it can wait indefinitely for a writer.
+        if !fs::metadata(path.as_path())
+            .map_err(|e| Self::error(path.as_path(), &e))?
+            .is_file()
+        {
+            return Err(FsError::NotAFile { path: path.clone() });
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Close the regular-file -> FIFO race between metadata and open.
+            // O_NONBLOCK has no effect on regular files; recheck the handle below.
+            options.custom_flags(nix::libc::O_NONBLOCK);
+        }
+        let file = options
+            .open(path.as_path())
+            .map_err(|e| Self::error(path.as_path(), &e))?;
         if !file
             .metadata()
             .map_err(|e| Self::error(path.as_path(), &e))?
@@ -188,14 +207,11 @@ impl Fs for OsFs {
             return Err(FsError::NotAFile { path: path.clone() });
         }
         let mut bytes = Vec::new();
-        file.take(limit as u64 + 1)
+        file.take((limit as u64).saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|e| Self::error(path.as_path(), &e))?;
         if bytes.len() > limit {
-            return Err(FsError::Io {
-                path: path.clone(),
-                message: "file exceeds import byte limit".into(),
-            });
+            return Err(FsError::ByteLimitExceeded { path: path.clone() });
         }
         Ok(bytes)
     }

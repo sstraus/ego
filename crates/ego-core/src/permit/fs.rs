@@ -45,6 +45,10 @@ pub enum FsError {
     NotAFile {
         path: CanonPath,
     },
+    /// A bounded read found more bytes than its caller admitted.
+    ByteLimitExceeded {
+        path: CanonPath,
+    },
     /// A traversal was rooted at something that is not a directory.
     ///
     /// The mirror of [`FsError::NotAFile`], and the two are not
@@ -73,6 +77,7 @@ impl FsError {
         match self {
             FsError::NotFound { path }
             | FsError::NotAFile { path }
+            | FsError::ByteLimitExceeded { path }
             | FsError::NotADirectory { path }
             | FsError::Loop { path }
             | FsError::Io { path, .. } => path,
@@ -85,6 +90,7 @@ impl fmt::Display for FsError {
         match self {
             FsError::NotFound { path } => write!(f, "{path}: no such file or directory"),
             FsError::NotAFile { path } => write!(f, "{path}: not a file"),
+            FsError::ByteLimitExceeded { path } => write!(f, "{path}: file exceeds byte limit"),
             FsError::NotADirectory { path } => write!(f, "{path}: not a directory"),
             FsError::Loop { path } => write!(f, "{path}: too many levels of symbolic links"),
             FsError::Io { path, message } => write!(f, "{path}: {message}"),
@@ -118,14 +124,13 @@ pub trait Fs: PathResolver {
 
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError>;
 
-    /// A bounded import read. OS adapters must bound the read before allocation.
+    /// Read a regular file within `limit`, or return `ByteLimitExceeded`.
+    /// OS adapters must reject special files before a potentially blocking open
+    /// and bound the read before allocation (one sentinel byte may detect overflow).
     fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, FsError> {
         let bytes = self.read(path)?;
         if bytes.len() > limit {
-            return Err(FsError::Io {
-                path: path.clone(),
-                message: "file exceeds import byte limit".into(),
-            });
+            return Err(FsError::ByteLimitExceeded { path: path.clone() });
         }
         Ok(bytes)
     }
@@ -174,11 +179,7 @@ pub trait GuardedIo<'s>: Send + Sync {
     fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, IoDenied> {
         let bytes = self.read(path)?;
         if bytes.len() > limit {
-            return Err(FsError::Io {
-                path: path.clone(),
-                message: "file exceeds import byte limit".into(),
-            }
-            .into());
+            return Err(FsError::ByteLimitExceeded { path: path.clone() }.into());
         }
         Ok(bytes)
     }
@@ -899,13 +900,15 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
             // unreadable file in a tree is a fact about that file, and
             // abandoning the whole search over it would make grep unusable in
             // any directory containing a socket or a root-owned log.
-            let Ok(bytes) = self.fs.read(&fresh) else {
-                continue;
+            let limit = usize::try_from(budget).unwrap_or(usize::MAX);
+            let bytes = match self.fs.read_bounded(&fresh, limit) {
+                Ok(bytes) => bytes,
+                Err(FsError::ByteLimitExceeded { .. }) => {
+                    truncated = true;
+                    break;
+                }
+                Err(_) => continue,
             };
-            if bytes.len() as u64 > budget {
-                truncated = true;
-                break;
-            }
             budget -= bytes.len() as u64;
 
             let Ok(bytes) = credential_keys(&fresh, bytes) else {

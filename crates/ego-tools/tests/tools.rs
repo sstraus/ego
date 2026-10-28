@@ -1941,6 +1941,117 @@ mod glob {
 mod grep {
     use super::*;
 
+    // Catches: a single-file fallback opens a FIFO and waits forever for a writer.
+    #[test]
+    fn single_file_search_rejects_fifo_without_blocking() {
+        const CHILD: &str = "EGO_REGRESSION_FIFO_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let ws = Workspace::new();
+            let fifo = ws.root.join("pipe");
+            nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+            let content = ws.call("grep", json!({"query": ".", "path": "pipe"}));
+            assert!(content.is_err() || content.unwrap().contains("no line"));
+            return;
+        }
+
+        // Isolate the real blocking syscall so a regression is killed and reaped,
+        // rather than leaving a blocked test thread or requiring a FIFO writer.
+        let scratch = TempDir::new().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "grep::single_file_search_rejects_fifo_without_blocking",
+            ])
+            .env(CHILD, "1")
+            // Parent ownership also removes the child's fixture after a kill.
+            .env("TMPDIR", scratch.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "FIFO search child failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("single-file search blocked on a FIFO without a writer");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    // Catches: search calls the unbounded read port before checking max_bytes.
+    #[test]
+    fn single_file_search_enforces_read_byte_budget() {
+        use ego_core::permit::{Fs, FsError, PathResolver, Scan};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct MeasuredFs {
+            unbounded: AtomicUsize,
+        }
+        impl PathResolver for MeasuredFs {
+            fn canonicalize(&self, path: &std::path::Path) -> Result<CanonPath, FsError> {
+                OsFs.canonicalize(path)
+            }
+        }
+        impl Fs for MeasuredFs {
+            fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError> {
+                self.unbounded.fetch_add(1, Ordering::SeqCst);
+                OsFs.read(path)
+            }
+            fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, FsError> {
+                OsFs.read_bounded(path, limit)
+            }
+            fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), FsError> {
+                OsFs.write(path, bytes)
+            }
+            fn scan(&self, req: &ScanRequest) -> Result<Scan, FsError> {
+                OsFs.scan(req)
+            }
+        }
+
+        let ws = Workspace::new();
+        ws.file("target.txt", "hit\nhit\n");
+        let measured = MeasuredFs::default();
+        for (budget, hits, truncated) in [(0, 0, true), (7, 0, true), (8, 2, false), (9, 2, false)]
+        {
+            let granted = ws
+                .authorize(
+                    ws.prepare("grep", json!({"query": "hit", "path": "target.txt"}))
+                        .unwrap(),
+                )
+                .unwrap();
+            let (_, permit) = granted.into_parts();
+            let guarded = GuardedEffects::new(
+                permit,
+                &measured,
+                &ws.process,
+                &ws.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            );
+            let mut req = ScanRequest::new(CanonPath::new(ws.root.join("target.txt")));
+            req.limits.max_bytes = budget;
+            let found = guarded.search(&req, &|line: &str| line == "hit").unwrap();
+            assert_eq!(
+                (found.matches.len(), found.truncated),
+                (hits, truncated),
+                "budget={budget}"
+            );
+        }
+        assert_eq!(
+            measured.unbounded.load(Ordering::SeqCst),
+            0,
+            "a search must use the bounded OS read, never read the whole file first"
+        );
+    }
+
     // Catches: directory-only search validation and widening a file search to siblings.
     #[test]
     fn grep_searches_a_single_file_without_searching_its_siblings() {

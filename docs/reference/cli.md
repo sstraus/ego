@@ -69,6 +69,8 @@ Run an agent, from one command line.
 - `--plain` — Append plain output without terminal styling or live retry updates Default: `false`.
 - `--plan` — Shorthand for --mode plan Default: `false`.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
+- `--proxy <http://HOST[:PORT]>` — Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+- `--proxy-ca <FILE>` — Additional PEM trust anchor for provider HTTPS through --proxy only
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected Default: `false`.
 - `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
@@ -130,6 +132,8 @@ Run an agent from a prompt, headless.
 - `--plain` — Append plain output without terminal styling or live retry updates Default: `false`.
 - `--plan` — Shorthand for --mode plan Default: `false`.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
+- `--proxy <http://HOST[:PORT]>` — Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+- `--proxy-ca <FILE>` — Additional PEM trust anchor for provider HTTPS through --proxy only
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected Default: `false`.
 - `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
@@ -173,7 +177,7 @@ Continue a stored session.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
-- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
@@ -182,7 +186,7 @@ Continue a stored session.
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
 - `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
-- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
@@ -192,6 +196,8 @@ Continue a stored session.
 - `--plain` — Append plain output without terminal styling or live retry updates Default: `false`.
 - `--plan` — Shorthand for --mode plan Default: `false`.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
+- `--proxy <http://HOST[:PORT]>` — Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+- `--proxy-ca <FILE>` — Additional PEM trust anchor for provider HTTPS through --proxy only
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected Default: `false`.
 - `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
@@ -264,7 +270,7 @@ Continue a stored session.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
-- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
@@ -273,7 +279,7 @@ Continue a stored session.
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
 - `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
-- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
@@ -283,6 +289,8 @@ Continue a stored session.
 - `--plain` — Append plain output without terminal styling or live retry updates Default: `false`.
 - `--plan` — Shorthand for --mode plan Default: `false`.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
+- `--proxy <http://HOST[:PORT]>` — Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+- `--proxy-ca <FILE>` — Additional PEM trust anchor for provider HTTPS through --proxy only
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected Default: `false`.
 - `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate

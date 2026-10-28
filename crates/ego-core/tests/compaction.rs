@@ -2079,6 +2079,115 @@ fn over_window_compaction_fits_summarizer_instead_of_refusing() {
 // Catches: private compaction reports an unknown bill for a definitely-unsent
 // failure, or incorrectly waives a possibly-sent failure with missing usage.
 #[test]
+fn unpriced_compaction_announces_cost_anomaly_before_generation() {
+    use ego_core::budget::{PricingQuote, ResolvedRates, SettlementSource};
+    use ego_core::cost::{PricingRevision, ProviderCostRevision, RateSource};
+
+    // Catches: exact settlement hiding a missing admission-time cap warning,
+    // or a shared notice policy warning for bounded and policy-metered calls.
+    let mut failures = Vec::new();
+    for case in ["unpriced", "priced", "subscription", "unmetered"] {
+        let (mut compact, generator) = compaction_profile(
+            "summary",
+            ThinkingLevel::Low,
+            32_000,
+            4096,
+            false,
+            vec![
+                AiEvent::TextDelta { text: checkpoint() },
+                AiEvent::Usage(Usage {
+                    uncached_input_tokens: 17,
+                    output_tokens: 5,
+                    ..Usage::IDENTITY
+                }),
+                AiEvent::ProviderCost {
+                    cost: Money::new("0.01".parse().unwrap(), CurrencyCode::new("USD").unwrap()),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        );
+        compact.metering = match case {
+            "unpriced" | "priced" => Metering::Currency {
+                settlement: SettlementSource::ProviderReported {
+                    revision: ProviderCostRevision {
+                        provider: "domain-test".into(),
+                        field: "cost".into(),
+                        schema_revision: "1".into(),
+                    },
+                },
+            },
+            "subscription" => Metering::Subscription {
+                revision: MeteringRevision("test-subscription".into()),
+                equivalent: None,
+            },
+            _ => compact.metering,
+        };
+        if case == "priced" {
+            let rate = Some("0.000001".parse().unwrap());
+            compact.rates = Some(ResolvedRates {
+                source: RateSource::Operator,
+                quote: PricingQuote {
+                    web_search: None,
+                    revision: PricingRevision("test-rates".into()),
+                    currency: CurrencyCode::new("USD").unwrap(),
+                    uncached_input: rate,
+                    cache_read: rate,
+                    cache_write: rate,
+                    cache_write_extended: rate,
+                    output: rate,
+                },
+            });
+        }
+        let (main, _) =
+            compaction_profile("main", ThinkingLevel::Low, 32_000, 4096, false, Vec::new());
+        let source = CompactionSource::new([
+            (GenerationRole::Compaction, Ok(compact)),
+            (GenerationRole::Main, Ok(main)),
+        ]);
+        let (mut turn, store, _) = compaction_turn(source);
+        futures::executor::block_on(turn.prepare_compaction(None, Vec::new()))
+            .expect("compaction prepares with exact settlement");
+        assert_eq!(generator.calls().len(), 1);
+        let events = store.events();
+        let notices: Vec<_> = events.iter().enumerate().filter_map(|(index, event)| {
+            matches!(&event.kind, EventKind::CostAnomaly { model, estimated_upper_bound: None } if model == "summary").then_some(index)
+        }).collect();
+        let started = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::GenerationStarted {
+                        role: GenerationRole::Compaction,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        if case == "unpriced" {
+            if notices.len() != 1 || notices[0] >= started {
+                failures.push(format!("{case}: expected one cap-coverage notice before generation, got {notices:?}, generation={started}"));
+            }
+        } else if !notices.is_empty() {
+            failures.push(format!(
+                "{case}: unexpected missing-bound notices {notices:?}"
+            ));
+        }
+        assert!(
+            events.iter().any(|event| matches!(
+                event.kind,
+                EventKind::UsageUpdated {
+                    cost_delta: CostDelta::Known { .. },
+                    ..
+                }
+            )),
+            "{case}: actual cost settles exactly"
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn compaction_missing_usage_settles_from_delivery_evidence() {
     use ego_core::budget::{PricingQuote, ResolvedRates, SettlementSource};
     use ego_core::cost::{CostAttribution, PricingRevision, RateSource};
@@ -2680,6 +2789,180 @@ fn constraint_ledger_fork_rerenders_ancestor_checkpoint_after_unpin() {
         binding_section(prepared.checkpoint().text()),
         "No pinned user constraints."
     );
+}
+
+// Catches: composing a fork duplicates its ledger, including empty and chained ledgers.
+#[test]
+fn fork_request_contains_one_constraint_ledger() {
+    use ego_core::session::{
+        PreparedFork, ReplayContext, ReplaySource, ReplaySourceError, SessionBlobSource,
+        SessionLineage,
+    };
+    #[derive(Default)]
+    struct Source(std::collections::HashMap<SessionId, Vec<DomainEvent>>);
+    impl ReplaySource for Source {
+        fn lineage(&self, id: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
+            Ok(self
+                .0
+                .get(id)
+                .and_then(|events| SessionState::replay(events.clone()).lineage))
+        }
+        fn entries(&self, id: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+            Ok(self
+                .0
+                .get(id)
+                .map(|events| events.iter().cloned().map(SessionEntry::Event).collect()))
+        }
+    }
+    impl SessionBlobSource for Source {
+        fn read(
+            &self,
+            _: &SessionId,
+            _: &ego_core::store::blob::BlobRef,
+        ) -> Result<Vec<u8>, ego_core::store::blob::BlobError> {
+            panic!("text-only lineage must not read blobs")
+        }
+    }
+    fn append(events: &mut Vec<DomainEvent>, mut next: DomainEvent) {
+        next.env.seq = seq(events.len() as u64 + 1);
+        events.push(next);
+    }
+    let mut failures = Vec::new();
+    for checkpointed in [false, true] {
+        for removed in [false, true] {
+            for chained in [false, true] {
+                let mut state = SessionState::default();
+                register_constraint(&mut state, "ANCESTOR-PIN");
+                let mut events = if checkpointed {
+                    prepare_constraint_summary(state, &checkpoint())
+                        .target_seed(Timestamp::from_millis(1_000))
+                        .events()
+                        .cloned()
+                        .collect()
+                } else {
+                    vec![event(EventKind::PinsChanged {
+                        constraints: state.constraints,
+                    })]
+                };
+                append(
+                    &mut events,
+                    seeded_event(EventKind::UserPrompt {
+                        text: "ORDINARY-ANCESTOR-HISTORY".into(),
+                        audio: Vec::new(),
+                        images: Vec::new(),
+                        queued_prompt: None,
+                    }),
+                );
+                let root = SessionId::new();
+                let mut source = Source::default();
+                source.0.insert(root, events.clone());
+                let fork = PreparedFork::new(
+                    root,
+                    &SessionState::replay(events),
+                    Timestamp::from_millis(1_001),
+                )
+                .unwrap();
+                let mut child_events: Vec<_> = fork.seed().events().cloned().collect();
+                let mut child = SessionState::replay(child_events.clone());
+                pin_command(&mut child, PinCommand::Unpin(1)).unwrap();
+                const EXACT: &str = "CURRENT-PIN: preserve \r\n  exact \"bytes\" and λ";
+                if !removed {
+                    register_constraint(&mut child, EXACT);
+                }
+                append(
+                    &mut child_events,
+                    event(EventKind::PinsChanged {
+                        constraints: child.constraints.clone(),
+                    }),
+                );
+                let (lineage, child) = if chained {
+                    let id = SessionId::new();
+                    let fork = PreparedFork::new(
+                        id,
+                        &SessionState::replay(child_events.clone()),
+                        Timestamp::from_millis(1_002),
+                    )
+                    .unwrap();
+                    source.0.insert(id, child_events);
+                    (
+                        fork.seed().lineage(),
+                        SessionState::replay(fork.seed().events().cloned()),
+                    )
+                } else {
+                    (fork.seed().lineage(), SessionState::replay(child_events))
+                };
+                let replay = ReplayContext::new(&source, &source)
+                    .replay_lineage(lineage)
+                    .unwrap();
+                let (compact, recorder) = compaction_profile(
+                    "summary-model",
+                    ThinkingLevel::Low,
+                    32_000,
+                    4_096,
+                    false,
+                    vec![
+                        AiEvent::TextDelta { text: checkpoint() },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                );
+                let (main, _) = compaction_profile(
+                    "main-model",
+                    ThinkingLevel::Low,
+                    32_000,
+                    4_096,
+                    false,
+                    Vec::new(),
+                );
+                let models = CompactionSource::new([
+                    (GenerationRole::Compaction, Ok(compact)),
+                    (GenerationRole::Main, Ok(main)),
+                ]);
+                let (turn, _, _) = compaction_turn_with_state(models, child);
+                let mut turn = turn.with_replayed_context(&replay);
+                futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+                let calls = recorder.calls();
+                let texts: Vec<_> = calls[0]
+                    .messages
+                    .messages()
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .filter_map(|block| match block {
+                        ego_core::generator::types::ContentBlock::Text { text } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let ledgers: Vec<serde_json::Value> = texts
+                    .iter()
+                    .filter_map(|text| serde_json::from_str(text).ok())
+                    .filter(|frame: &serde_json::Value| frame["constraints"].is_object())
+                    .collect();
+                let case =
+                    format!("checkpoint={checkpointed}, removed={removed}, chained={chained}");
+                if ledgers.len() != 1 {
+                    failures.push(format!(
+                        "{case}: expected one ledger, got {}",
+                        ledgers.len()
+                    ));
+                }
+                for ledger in ledgers {
+                    let expected = if removed {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::json!({"2": EXACT})
+                    };
+                    assert_eq!(ledger["constraints"]["entries"], expected, "{case}");
+                }
+                assert!(texts.contains(&"ORDINARY-ANCESTOR-HISTORY"), "{case}");
+                assert!(
+                    !texts.iter().any(|text| text.contains("ANCESTOR-PIN")),
+                    "{case}"
+                );
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 fn completed_ready_boundary_binding(text: &str) -> &str {

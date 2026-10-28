@@ -82,7 +82,7 @@ const TORN: &str = "the tool call did not complete: the session ended before its
 pub fn conversation_from(
     state: &SessionState,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
-    conversation_from_inner(state, None, &state.constraints)
+    conversation_from_inner(state, None, &state.constraints, true)
 }
 
 /// Rebuild and hydrate every durable image through the session blob port.
@@ -98,7 +98,7 @@ pub(crate) fn conversation_from_with_blob_reader(
     state: &SessionState,
     read_blob: &BlobReader<'_>,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
-    conversation_from_inner(state, Some(read_blob), &state.constraints)
+    conversation_from_inner(state, Some(read_blob), &state.constraints, true)
 }
 
 pub(crate) fn conversation_from_with_constraints(
@@ -106,20 +106,35 @@ pub(crate) fn conversation_from_with_constraints(
     read_blob: &BlobReader<'_>,
     constraints: &crate::compact::ConstraintLedger,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
-    conversation_from_inner(state, Some(read_blob), constraints)
+    conversation_from_inner(state, Some(read_blob), constraints, true)
+}
+
+/// Rebuild a local fork suffix whose verified ancestor owns the current ledger.
+pub(crate) fn conversation_from_without_constraint_frame(
+    state: &SessionState,
+    blobs: &dyn BlobStore,
+) -> Result<(Conversation, Vec<Repair>), HistoryError> {
+    conversation_from_inner(
+        state,
+        Some(&|reference| blobs.read(reference)),
+        &state.constraints,
+        false,
+    )
 }
 
 fn conversation_from_inner(
     state: &SessionState,
     read_blob: Option<&BlobReader<'_>>,
     constraints: &crate::compact::ConstraintLedger,
+    standalone_constraints: bool,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
     let mut items: Vec<&ItemState> = state.items.values().collect();
     // By `seq`, not by `ItemId` — see `ItemState::seq`.
     items.sort_by_key(|item| item.seq);
 
     let mut messages: Vec<Message> = Vec::new();
-    if !constraints.is_default()
+    if standalone_constraints
+        && !constraints.is_default()
         && !items
             .iter()
             .any(|item| item.kind == ItemKind::ContextCheckpoint)

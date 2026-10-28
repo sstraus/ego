@@ -378,9 +378,7 @@ async fn explicit_proxy_without_ca_rejects_untrusted_tls_before_provider_request
     )
     .await;
     let server_result = server.join().unwrap();
-    let error = result
-        .err()
-        .expect("untrusted provider certificate must be rejected");
+    let error = result.expect_err("untrusted provider certificate must be rejected");
     assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
     assert!(
         matches!(error.failure(), TransportFailure::Connect(_)),

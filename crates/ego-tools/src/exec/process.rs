@@ -52,6 +52,9 @@ type TrackedExec<'a> = (
 
 type BackgroundWake = Arc<dyn Fn() + Send + Sync>;
 
+#[cfg(test)]
+type ForegroundReleaseHook = fn(&RunProcessContext, DetachedExecId);
+
 type WidenedBackend = (Vec<SandboxGrant>, Vec<CanonPath>, Arc<dyn Backend>);
 
 /// Process state captured once and shared by the run's normal and duplex
@@ -67,6 +70,8 @@ pub(crate) struct RunProcessContext {
     background_changed: Arc<Condvar>,
     background_waker: Arc<Mutex<Option<BackgroundWake>>>,
     foreground: Mutex<Option<DetachedExecId>>,
+    #[cfg(test)]
+    before_foreground_release: Mutex<Option<ForegroundReleaseHook>>,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
     /// The session desk that puts Adaptive write refusals to the judge.
     residual: Option<Arc<ResidualWriteDesk>>,
@@ -142,6 +147,8 @@ impl RunProcessContext {
             background_changed: Arc::new(Condvar::new()),
             background_waker: Arc::new(Mutex::new(None)),
             foreground: Mutex::new(None),
+            #[cfg(test)]
+            before_foreground_release: Mutex::new(None),
             sandbox_grants,
             residual: None,
             widened: Mutex::new(None),
@@ -284,24 +291,41 @@ impl RunProcessContext {
                 .get(&id)
                 .is_some_and(|entry| entry.promoted);
             if promoted {
-                break Ok(ToolResult::builtin(format!("background exec id: {id}")));
+                break None;
             }
             if self.cancel.is_cancelled() {
                 owner.cancel_background(id)?;
             }
             tokio::select! {
-                result = &mut answer => break result.map_err(|error| {
+                result = &mut answer => break Some(result.map_err(|error| {
                     ProcessError::Backend(format!("process task failed: {error}"))
-                })?,
+                })?),
                 _ = tick.tick() => {},
             }
         };
+        // Let tests admit promotion after the completion reply wins, without
+        // depending on thread timing or changing the real child outcome.
+        #[cfg(test)]
+        if let Some(hook) = self
+            .before_foreground_release
+            .lock()
+            .expect("foreground release hook lock")
+            .take()
+        {
+            hook(owner, id);
+        }
         *self.foreground.lock().expect("foreground exec lock") = None;
         let mut entries = owner.background.lock().expect("background exec lock");
-        if entries.get(&id).is_some_and(|entry| !entry.promoted) {
+        // Decide ownership and release the foreground entry under the same
+        // lock as detach_foreground: an admitted promotion must return its ID,
+        // even when the completion reply won the select above. Once removed,
+        // a late promotion is rejected instead of admitting an orphan handle.
+        if entries.get(&id).is_some_and(|entry| entry.promoted) {
+            Ok(ToolResult::builtin(format!("background exec id: {id}")))
+        } else {
             entries.remove(&id);
+            result.expect("foreground completion reply")
         }
-        result
     }
 
     pub(crate) fn background_status(
@@ -2015,6 +2039,52 @@ mod sandbox_question_tests {
             !rig.cancel.is_cancelled(),
             "command cancellation must not cancel the run"
         );
+    }
+
+    /// Catches: completion wins the reply race after promotion was admitted,
+    /// leaving a retained handle that the model never receives.
+    #[test]
+    fn simultaneous_promotion_and_completion_returns_background_handle() {
+        let mut failures = Vec::new();
+        for code in [0, 7] {
+            let rig = rig(Arc::new(NullBackend), false);
+            let context = Arc::new(rig.context);
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&wakes);
+            context.set_background_waker(Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }));
+            *context.before_foreground_release.lock().unwrap() = Some(|owner, id| {
+                assert!(owner.background_status(id).unwrap().outcome.is_some());
+                owner.detach_foreground(id).expect("promotion admitted");
+            });
+            let spec = SpawnSpec::new(
+                vec!["/bin/sh".into(), "-c".into(), format!("exit {code}").into()],
+                rig.spec.cwd().cloned(),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .unwrap();
+            let result = block_on(context.execute_promotable(&context, &spec));
+            let id = *context.background.lock().unwrap().keys().next().unwrap();
+            let expected = format!("background exec id: {id}");
+            if !matches!(&result, Ok(result) if result.content.len() == 1 && result.content[0].text == expected)
+            {
+                failures.push(format!("exit {code}: admitted {id}, returned {result:?}"));
+            }
+            assert!(matches!(
+                context.background_status(id).unwrap().outcome,
+                Some(DetachedExecOutcome::Exited { code: actual, .. }) if actual == code
+            ));
+            assert_eq!(wakes.load(Ordering::SeqCst), 1);
+            assert!(context.foreground_exec().is_none());
+
+            // A later ordinary completion must still release its registry entry.
+            let ordinary = block_on(context.execute_promotable(&context, &spec));
+            assert_eq!(ordinary.is_ok(), code == 0);
+            assert_eq!(context.background.lock().unwrap().len(), 1);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// Catches: an explicitly background exec inherits terminal grant authority

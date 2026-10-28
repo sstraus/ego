@@ -638,10 +638,11 @@ impl fmt::Display for PolicyDenied {
                 // grant, because the model otherwise falls back to `cat`.
                 // Not for credentials: the defaults keep denying those.
                 if self.is_unreachable_read() && !Ruleset::is_credential_path(path) {
+                    let quoted_path = path.to_string().replace('\'', "'\\''");
                     write!(
                         f,
-                        "; ask the user to run 'ego roots add --access read '{path}''. \
-                         Saved changes apply when you resume the session"
+                        "; ask the user to run `ego roots add --access read '{quoted_path}'`, \
+                         then exit and resume the session"
                     )?;
                 } else if *op == OpName::Write && !Ruleset::is_credential_path(path) {
                     let quoted_path = path.to_string().replace('\'', "'\\''");
