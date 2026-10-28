@@ -10,6 +10,7 @@ publish.workspace = true
 # reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
 # not by discipline.
 [dependencies]
+base64 = "0.22.1"
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
 futures = "0.3.34"
