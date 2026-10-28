@@ -92,12 +92,12 @@ fn resume_machine_signals_keep_the_headless_driver() {
             .chain(flags.iter().copied())
             .map(str::to_owned)
             .collect();
-        assert!(
-            matches!(
-                cli::parse(argv).unwrap().with_terminal(true, true),
-                Invocation::Resume(_)
-            ),
-            "{flags:?}"
+        let Invocation::Resume(args) = cli::parse(argv).unwrap().with_terminal(true, true) else {
+            panic!("machine resume acquired a human seat: {flags:?}");
+        };
+        assert_eq!(
+            args.retry, 0,
+            "machine resume must not inherit recovery: {flags:?}"
         );
     }
     for (stdin, stdout) in [(false, true), (true, false), (false, false)] {
