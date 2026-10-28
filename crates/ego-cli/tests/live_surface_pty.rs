@@ -35,6 +35,8 @@ mod metadata_refusal;
 mod missing_program;
 #[path = "live_surface_pty/mode_picker.rs"]
 mod mode_picker;
+#[path = "live_surface_pty/modal_answers.rs"]
+mod modal_answers;
 #[path = "live_surface_pty/notice_wrap.rs"]
 mod notice_wrap;
 #[path = "live_surface_pty/permission_receipts.rs"]
