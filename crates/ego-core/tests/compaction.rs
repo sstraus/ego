@@ -2790,6 +2790,180 @@ fn constraint_ledger_fork_rerenders_ancestor_checkpoint_after_unpin() {
     );
 }
 
+// Catches: composing a fork duplicates its ledger, including empty and chained ledgers.
+#[test]
+fn fork_request_contains_one_constraint_ledger() {
+    use ego_core::session::{
+        PreparedFork, ReplayContext, ReplaySource, ReplaySourceError, SessionBlobSource,
+        SessionLineage,
+    };
+    #[derive(Default)]
+    struct Source(std::collections::HashMap<SessionId, Vec<DomainEvent>>);
+    impl ReplaySource for Source {
+        fn lineage(&self, id: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
+            Ok(self
+                .0
+                .get(id)
+                .and_then(|events| SessionState::replay(events.clone()).lineage))
+        }
+        fn entries(&self, id: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+            Ok(self
+                .0
+                .get(id)
+                .map(|events| events.iter().cloned().map(SessionEntry::Event).collect()))
+        }
+    }
+    impl SessionBlobSource for Source {
+        fn read(
+            &self,
+            _: &SessionId,
+            _: &ego_core::store::blob::BlobRef,
+        ) -> Result<Vec<u8>, ego_core::store::blob::BlobError> {
+            panic!("text-only lineage must not read blobs")
+        }
+    }
+    fn append(events: &mut Vec<DomainEvent>, mut next: DomainEvent) {
+        next.env.seq = seq(events.len() as u64 + 1);
+        events.push(next);
+    }
+    let mut failures = Vec::new();
+    for checkpointed in [false, true] {
+        for removed in [false, true] {
+            for chained in [false, true] {
+                let mut state = SessionState::default();
+                register_constraint(&mut state, "ANCESTOR-PIN");
+                let mut events = if checkpointed {
+                    prepare_constraint_summary(state, &checkpoint())
+                        .target_seed(Timestamp::from_millis(1_000))
+                        .events()
+                        .cloned()
+                        .collect()
+                } else {
+                    vec![event(EventKind::PinsChanged {
+                        constraints: state.constraints,
+                    })]
+                };
+                append(
+                    &mut events,
+                    seeded_event(EventKind::UserPrompt {
+                        text: "ORDINARY-ANCESTOR-HISTORY".into(),
+                        audio: Vec::new(),
+                        images: Vec::new(),
+                        queued_prompt: None,
+                    }),
+                );
+                let root = SessionId::new();
+                let mut source = Source::default();
+                source.0.insert(root, events.clone());
+                let fork = PreparedFork::new(
+                    root,
+                    &SessionState::replay(events),
+                    Timestamp::from_millis(1_001),
+                )
+                .unwrap();
+                let mut child_events: Vec<_> = fork.seed().events().cloned().collect();
+                let mut child = SessionState::replay(child_events.clone());
+                pin_command(&mut child, PinCommand::Unpin(1)).unwrap();
+                const EXACT: &str = "CURRENT-PIN: preserve \r\n  exact \"bytes\" and λ";
+                if !removed {
+                    register_constraint(&mut child, EXACT);
+                }
+                append(
+                    &mut child_events,
+                    event(EventKind::PinsChanged {
+                        constraints: child.constraints.clone(),
+                    }),
+                );
+                let (lineage, child) = if chained {
+                    let id = SessionId::new();
+                    let fork = PreparedFork::new(
+                        id,
+                        &SessionState::replay(child_events.clone()),
+                        Timestamp::from_millis(1_002),
+                    )
+                    .unwrap();
+                    source.0.insert(id, child_events);
+                    (
+                        fork.seed().lineage(),
+                        SessionState::replay(fork.seed().events().cloned()),
+                    )
+                } else {
+                    (fork.seed().lineage(), SessionState::replay(child_events))
+                };
+                let replay = ReplayContext::new(&source, &source)
+                    .replay_lineage(lineage)
+                    .unwrap();
+                let (compact, recorder) = compaction_profile(
+                    "summary-model",
+                    ThinkingLevel::Low,
+                    32_000,
+                    4_096,
+                    false,
+                    vec![
+                        AiEvent::TextDelta { text: checkpoint() },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                );
+                let (main, _) = compaction_profile(
+                    "main-model",
+                    ThinkingLevel::Low,
+                    32_000,
+                    4_096,
+                    false,
+                    Vec::new(),
+                );
+                let models = CompactionSource::new([
+                    (GenerationRole::Compaction, Ok(compact)),
+                    (GenerationRole::Main, Ok(main)),
+                ]);
+                let (turn, _, _) = compaction_turn_with_state(models, child);
+                let mut turn = turn.with_replayed_context(&replay);
+                futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+                let calls = recorder.calls();
+                let texts: Vec<_> = calls[0]
+                    .messages
+                    .messages()
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .filter_map(|block| match block {
+                        ego_core::generator::types::ContentBlock::Text { text } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let ledgers: Vec<serde_json::Value> = texts
+                    .iter()
+                    .filter_map(|text| serde_json::from_str(text).ok())
+                    .filter(|frame: &serde_json::Value| frame["constraints"].is_object())
+                    .collect();
+                let case =
+                    format!("checkpoint={checkpointed}, removed={removed}, chained={chained}");
+                if ledgers.len() != 1 {
+                    failures.push(format!(
+                        "{case}: expected one ledger, got {}",
+                        ledgers.len()
+                    ));
+                }
+                for ledger in ledgers {
+                    let expected = if removed {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::json!({"2": EXACT})
+                    };
+                    assert_eq!(ledger["constraints"]["entries"], expected, "{case}");
+                }
+                assert!(texts.contains(&"ORDINARY-ANCESTOR-HISTORY"), "{case}");
+                assert!(
+                    !texts.iter().any(|text| text.contains("ANCESTOR-PIN")),
+                    "{case}"
+                );
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 fn completed_ready_boundary_binding(text: &str) -> &str {
     text.split_once("# Binding constraints and preferences\n")
         .unwrap()
