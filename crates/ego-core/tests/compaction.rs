@@ -2150,7 +2150,7 @@ fn unpriced_compaction_announces_cost_anomaly_before_generation() {
         assert_eq!(generator.calls().len(), 1);
         let events = store.events();
         let notices: Vec<_> = events.iter().enumerate().filter_map(|(index, event)| {
-            matches!(&event.kind, EventKind::CostAnomaly { model, estimated_upper_bound: None } if model == "summary").then_some(index)
+            matches!(&event.kind, EventKind::CostAnomaly { model, estimated_upper_bound: None, .. } if model == "summary").then_some(index)
         }).collect();
         let started = events
             .iter()
