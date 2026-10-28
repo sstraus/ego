@@ -1547,8 +1547,8 @@ resets that audit.
 through the same interactive owner as the answer and never through the
 ephemeral status row. The row is drawn when the call finishes, because it needs
 the outcome and the duration: `✓ read calc.py · 2 lines · 75ms`, `✓ edit
-calc.py +3 -1 · 12ms`, `✓ $ seq 1 20 · exit 0 · 0.4s`, `✗ $ make · exit 2 ·
-1.2s`, `✗ read gone.py · …no such file or directory · 3ms`. `✓` and `✗` are the
+calc.py +3 -1 · 12ms`, `✓ $ seq 1 20 · exit 0 · (timeout 2m) · 0.4s`, `✗ $ make · exit 2 ·
+(timeout 2m) · 1.2s`, `✗ read gone.py · …no such file or directory · 3ms`. `✓` and `✗` are the
 outcome and a failed call never carries `✓`. An `exec` row is followed by the
 last three lines of its output, and a line saying how many earlier lines were
 left out. Execution (or preparation that fails before execution) and human
@@ -1560,6 +1560,15 @@ A row is cut to the terminal width at the moment
 it is drawn (a resize applies to later rows): the target gives way first, the
 mark, verb, outcome and duration last. Text from a tool result is shown with
 control characters replaced, never passed to the terminal.
+
+Foreground `exec` calls default to a two-minute process lifetime. The model can
+set `timeout_ms` from 1 through 600000 (ten minutes); omitted or null uses the
+default. The row shows the effective limit as `(timeout 2m)` or the selected
+value. Longer work uses `background=true`: omitted or null then means no
+deadline, and an explicit lifetime remains supported. Promoting a running
+foreground command with Ctrl+B retains its original lifetime limit. On expiry,
+the existing process boundary terminates the child and its descendants and
+reports a timeout. Time while ego is suspended does not count toward the limit.
 
 A submitted prompt that exceeds three terminal rows shows its first three rows
 and a count of hidden rows. Short prompts keep their normal echo. This changes
