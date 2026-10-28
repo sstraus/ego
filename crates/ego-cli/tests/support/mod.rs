@@ -275,6 +275,8 @@ pub struct Plan {
     /// list runs out, so a test that does not care how many turns happen does
     /// not have to count them.
     pub completions: Vec<Reply>,
+    /// Independent sequences selected by exact first user text, for concurrent children.
+    pub prompt_completions: Vec<(String, Vec<Reply>)>,
     /// A status and body for `/api/tags` in place of the installed list.
     ///
     /// The control plane otherwise always succeeds, so the only provider
@@ -296,6 +298,7 @@ impl Default for Plan {
             installed: vec![MODEL.to_string()],
             context_length: Some(32_768),
             completions: vec![Reply::Sse(text("It is done."))],
+            prompt_completions: Vec::new(),
             tags_refusal: None,
             models_response: None,
             key_response: None,
@@ -610,11 +613,40 @@ fn serve(
         }
         "/api/chat" => json(&mut stream, &serde_json::json!({ "done_reason": "load" })),
         _ => {
-            let reply = plan
-                .completions
-                .get(generation.fetch_add(1, Ordering::SeqCst))
-                .or_else(|| plan.completions.last())
-                .cloned()
+            let first_user = |body: &str| {
+                let request: serde_json::Value = serde_json::from_str(body).ok()?;
+                request["messages"]
+                    .as_array()?
+                    .iter()
+                    .find(|message| message["role"] == "user")?
+                    .get("content")?
+                    .as_str()
+                    .map(str::to_owned)
+            };
+            let routed = first_user(&body).and_then(|prompt| {
+                plan.prompt_completions
+                    .iter()
+                    .find(|(name, _)| *name == prompt)
+                    .map(|(_, replies)| {
+                        let index = seen
+                            .lock()
+                            .expect("request log")
+                            .iter()
+                            .filter(|request| {
+                                first_user(&request.body).as_deref() == Some(prompt.as_str())
+                            })
+                            .count()
+                            .saturating_sub(1);
+                        replies.get(index).or_else(|| replies.last()).cloned()
+                    })
+            });
+            let reply = routed
+                .unwrap_or_else(|| {
+                    plan.completions
+                        .get(generation.fetch_add(1, Ordering::SeqCst))
+                        .or_else(|| plan.completions.last())
+                        .cloned()
+                })
                 .unwrap_or(Reply::Status(500));
             sse(&mut stream, reply, &path)
         }

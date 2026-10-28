@@ -1935,6 +1935,13 @@ fn child_activity_rows_keep_identity_counters_width_and_cleanup() {
             "plain child row contains escapes: {row:?}"
         );
     }
+    shared.lock().unwrap().width = 12;
+    let narrow = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+    assert!(
+        narrow.contains("○ Inspect"),
+        "foreground narrow fallback lost the name: {narrow}"
+    );
+    shared.lock().unwrap().width = 80;
     {
         let mut status = shared.lock().unwrap();
         status.observe_generation_progress(&PublicEvent::ItemCompleted {

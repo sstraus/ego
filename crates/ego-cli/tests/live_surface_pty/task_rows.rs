@@ -192,3 +192,153 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
         screen.screen().contents()
     );
 }
+
+// Catches: the durable runtime has no seat relay, or parent idle clears its child row.
+#[test]
+fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
+    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-STREAM");
+    struct ReleaseOnDrop(Arc<ReleaseGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    let stub = Stub::start_concurrent(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "task644",
+                "task",
+                r#"{"name":"Inspect durable","prompt":"REGRESSION-MARKER","background":true}"#,
+            )),
+            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+        ],
+        prompt_completions: vec![(
+            "REGRESSION-MARKER".into(),
+            vec![
+                Reply::Sse(tool_call("read644", "read", r#"{"path":"ledger.txt"}"#)),
+                reply,
+            ],
+        )],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "off",
+            "--mode",
+            "yolo",
+        ]);
+    ego.file("AGENTS.md", "# durable activity fixture\n");
+    ego.file("ledger.txt", "usage ledger\n");
+    let program = std::env::var_os("EGO_REGRESSION_BIN");
+    let command = program.as_ref().map_or_else(
+        || ego.pty_command(),
+        |path| ego.pty_command_with_program(path),
+    );
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let child = pair.slave.spawn_command(command).unwrap();
+    let (mut input, responder, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().unwrap(),
+        responder,
+        Some((24, 100)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_post_trust_prompt(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"launch durable task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
+    until_normalized(&reader, &mut output, start, "qwen3 · off · yolo");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 4 && Instant::now() < deadline {
+        if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(100)) {
+            output.extend(bytes);
+        }
+    }
+    // Child progress is deliberately not parent transcript. Probe with editing input
+    // to obtain the latest owner-painted frame without depending on provider order.
+    input.write_all(b"REGRESSION-MARKER").unwrap();
+    input.flush().unwrap();
+    drain_until_quiet(&reader, &mut output);
+    let live = output.clone();
+    // Always release the provider before assertions so a failed RED cannot leak a child.
+    gate.release();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(100)) {
+            output.extend(bytes);
+        }
+        let visible = screen_rows(&output, 24, 100).join("\n");
+        if !visible.contains("○ Inspect durable") || Instant::now() >= deadline {
+            break;
+        }
+    }
+    let settled = output.clone();
+    input.write_all(b"\x15/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(bounded_exit(child).success());
+    drop(input);
+    drop(pair);
+    reader_join.join().unwrap();
+    writer_join.join().unwrap();
+    if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("live.ansi"), &live).unwrap();
+        std::fs::write(directory.join("settled.ansi"), &settled).unwrap();
+        std::fs::write(
+            directory.join("geometry.json"),
+            b"{\"rows\":24,\"cols\":100}",
+        )
+        .unwrap();
+    }
+    let mut screen = vt100::Parser::new(24, 100, 0);
+    screen.process(&live);
+    let visible = screen.screen().contents();
+    let rows: Vec<_> = visible.lines().collect();
+    let index = rows
+        .iter()
+        .position(|row| row.contains("○ Inspect durable"))
+        .expect(&visible);
+    assert!(
+        rows[index].contains("Responding") && rows[index].contains("↓ 4 tokens"),
+        "{visible}"
+    );
+    assert!(
+        rows[index].contains('[') && rows[index].contains(']'),
+        "missing child identity: {visible}"
+    );
+    assert!(visible.contains("> REGRESSION-MARKER"), "{visible}");
+    assert!(
+        !visible.contains("Working"),
+        "parent must be idle: {visible}"
+    );
+    assert_eq!(
+        screen.screen().cell(index as u16, 0).unwrap().fgcolor(),
+        vt100::Color::Rgb(0, 255, 255)
+    );
+    screen.process(&settled[live.len()..]);
+    assert!(
+        !screen.screen().contents().contains("○ Inspect durable"),
+        "{}",
+        screen.screen().contents()
+    );
+    assert!(screen.screen().contents().contains("> REGRESSION-MARKER"));
+}
