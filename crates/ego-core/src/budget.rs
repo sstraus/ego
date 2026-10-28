@@ -792,13 +792,6 @@ pub enum BudgetDenied {
     CostUnknown(UnknownCost),
     /// The bound fits in the representation but not in the budget.
     WouldExceed(Box<Overrun>),
-    /// The quote prices in a currency the budget is not denominated in.
-    /// Refused rather than converted: a gate is the wrong place to invent an
-    /// exchange rate.
-    CurrencyMismatch {
-        limit: CurrencyCode,
-        quote: CurrencyCode,
-    },
     /// The reservation was minted by a different gate. Settling it here
     /// would release a hold this gate never took, handing it headroom it
     /// never reserved.
@@ -823,9 +816,6 @@ pub enum BudgetDenied {
     /// rates can carry a genuine revision label, and only recomputing the
     /// bound notices.
     QuoteChanged { authorised: Money, presented: Money },
-    /// A generation this gate settled cost more than the bound that admitted
-    /// it, so the gate's bounds are not bounds. It admits nothing further.
-    BoundBreached(BoundBreach),
 }
 
 impl fmt::Display for BudgetDenied {
@@ -842,10 +832,6 @@ impl fmt::Display for BudgetDenied {
                 overrun.requested.amount,
                 overrun.limit.amount,
                 overrun.limit.currency
-            ),
-            BudgetDenied::CurrencyMismatch { limit, quote } => write!(
-                f,
-                "budget denied: the budget is in {limit} but the quote prices in {quote}"
             ),
             BudgetDenied::WrongGate {
                 minted_by,
@@ -877,14 +863,6 @@ impl fmt::Display for BudgetDenied {
                 "budget denied: the presented quote bounds this generation at {} {}, \
                  not the {} that was authorised",
                 presented.amount, presented.currency, authorised.amount
-            ),
-            BudgetDenied::BoundBreached(breach) => write!(
-                f,
-                "budget denied: a settled generation cost {} against a {} bound \
-                 (over by {}), so this gate's bounds are not bounds",
-                breach.charged.amount,
-                breach.bound.amount,
-                breach.excess().amount
             ),
         }
     }

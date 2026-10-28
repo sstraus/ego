@@ -24,6 +24,10 @@ pub use constraints::{ConstraintLedger, PinCommand, PinError};
 
 pub const COMPACTION_PROMPT_REVISION: u32 = 4;
 
+/// The model preserves contextual constraints in its draft checkpoint. After
+/// parsing, `ConstraintLedger::checkpoint` replaces the entire Binding section
+/// with the explicit pin ledger, even when empty; model text cannot create
+/// standing authority. The other sections retain relevant historical context.
 pub const COMPACTION_PROMPT: &str = r###"Produce one self-contained context checkpoint for continuing this work in a
 new session. Preserve every material fact from the complete context above, but
 do not continue the task, address the operator, call tools, or invent missing

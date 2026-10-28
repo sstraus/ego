@@ -34,10 +34,11 @@ pub(super) fn fit(
         return Ok(request.clone());
     }
 
-    // An oversized request must not retain opaque reasoning, media, tool
-    // schemas or call/result relations after dropping history. Render source
-    // data as a text transcript instead; it is never executed. The durable
-    // source and ordinary in-window cache-preserving path remain unchanged.
+    // An oversized request or any request containing media takes this
+    // conservative transcript path: media tokens cannot be bounded by encoded
+    // bytes. Do not retain opaque reasoning, media, tool schemas or call/result
+    // relations after dropping history. The transcript is never executed. The
+    // durable source and in-window text-only cache-preserving path are unchanged.
     let mut fitted = request.clone();
     fitted.cache = None;
     fitted.tools.clear();

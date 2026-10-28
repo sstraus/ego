@@ -43,7 +43,7 @@ Error
 
 71 variants in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-70, including the session-metadata, pause and goal, question, detached-exec,
+71, including the session-metadata, pause and goal, question, detached-exec,
 hook, subagent, background-task, skill, and clean-session compaction lifecycles.
 `SessionSelectionsSelected` records the admitted model, mode and sandbox so
 resume retains those selections unless the user passes explicit new flags.
