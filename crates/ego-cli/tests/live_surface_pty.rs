@@ -10211,8 +10211,31 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         assert!(session.quit(input).success());
         let requests = stub.generations();
         assert_eq!(requests.len(), if clear { 3 } else { 4 }, "{action}");
-        let successor = requests[if clear { 1 } else { 2 }].to_string();
-        assert!(!successor.contains("REGRESSION-MARKER"), "{successor}");
+        let successor_request = &requests[if clear { 1 } else { 2 }];
+        let successor = successor_request.to_string();
+        let messages = successor_request["messages"].as_array().unwrap();
+        let checkpoints: Vec<serde_json::Value> = messages
+            .iter()
+            .filter_map(|message| serde_json::from_str(message["content"].as_str()?).ok())
+            .filter(|frame: &serde_json::Value| frame["kind"] == "context_checkpoint")
+            .collect();
+        assert_eq!(checkpoints.len(), 1, "{successor}");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != "REGRESSION-MARKER"),
+            "source prompt must not be replayed as a new request: {successor}"
+        );
+        if clear {
+            assert!(!successor.contains("REGRESSION-MARKER"), "{successor}");
+            assert!(checkpoints[0].get("latest_user_request").is_none());
+        } else {
+            assert_eq!(
+                checkpoints[0]["latest_user_request"],
+                "REGRESSION-MARKER",
+                "{successor}"
+            );
+        }
         assert!(
             successor.contains(if clear {
                 "REGRESSION-MARKER"
