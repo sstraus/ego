@@ -1166,6 +1166,45 @@ mod store {
         }
     }
 
+    /// Inject one existence error; every other operation uses the real filesystem.
+    struct FailingExistsIo {
+        fail_path: PathBuf,
+    }
+
+    impl StoreIo for FailingExistsIo {
+        fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
+            OsIo.append_line(path, line)
+        }
+        fn fsync(&self, path: &std::path::Path) -> std::io::Result<()> {
+            OsIo.fsync(path)
+        }
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            OsIo.read(path)
+        }
+        fn exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
+            if path == self.fail_path {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "session log existence probe denied",
+                ))
+            } else {
+                OsIo.exists(path)
+            }
+        }
+        fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+            OsIo.replace_atomic(path, bytes)
+        }
+        fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
+            OsIo.truncate(path, len)
+        }
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            OsIo.remove_file(path)
+        }
+        fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            OsIo.list_dirs(path)
+        }
+    }
+
     /// A store I/O adapter that writes a record and then fails its requested
     /// durability barrier.  The queue contract treats that as rejection: the
     /// caller must not clear the composer, request interruption, or begin a
@@ -2153,6 +2192,94 @@ mod store {
             Timestamp::from_millis(3_000),
             "the turn boundary must rewrite the manifest"
         );
+    }
+
+    // Catches: one existence-probe error aborting the catalogue for readable neighbors.
+    #[test]
+    fn session_catalogue_skips_unreadable_log_entry() {
+        let dir = tempdir().unwrap();
+        let good = SessionId::new();
+        let bad = SessionId::new();
+        let writer = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
+        for id in [good, bad] {
+            writer
+                .append(
+                    &id,
+                    &ev(
+                        Seq::ZERO,
+                        TurnId::new(),
+                        EventKind::AssistantMessage {
+                            text: "hello".into(),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        let store = JsonlStore::new(
+            dir.path(),
+            "/ws",
+            Box::new(FailingExistsIo {
+                fail_path: log_path(dir.path(), &bad),
+            }),
+        );
+        let metas = store
+            .list()
+            .expect("one denied log must not abort the catalogue");
+        assert_eq!(metas.iter().map(|meta| meta.id).collect::<Vec<_>>(), [good]);
+    }
+
+    // Catches: swallowing a store-wide enumeration error as an empty catalogue.
+    #[test]
+    fn session_catalogue_retains_root_enumeration_errors() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("not-a-directory");
+        std::fs::write(&root, b"file").unwrap();
+        assert!(OsIo.list_dirs(&root).is_err());
+        let store = JsonlStore::new(&root, "/ws", Box::new(OsIo));
+        assert!(matches!(store.list(), Err(StoreError::Io(_))));
+    }
+
+    // Catches: the real OsIo permission error hiding readable neighboring sessions.
+    #[cfg(unix)]
+    #[test]
+    fn session_catalogue_skips_unsearchable_session_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir().unwrap();
+        let good = SessionId::new();
+        let bad = SessionId::new();
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
+        for id in [good, bad] {
+            store
+                .append(
+                    &id,
+                    &ev(
+                        Seq::ZERO,
+                        TurnId::new(),
+                        EventKind::AssistantMessage {
+                            text: "hello".into(),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        let bad_log = log_path(dir.path(), &bad);
+        let bad_dir = bad_log.parent().unwrap();
+        let permissions = std::fs::metadata(bad_dir).unwrap().permissions();
+        std::fs::set_permissions(bad_dir, std::fs::Permissions::from_mode(0)).unwrap();
+        let probe = OsIo.exists(&bad_log);
+        let result = store.list();
+        std::fs::set_permissions(bad_dir, permissions).unwrap();
+        // Privileged identities can bypass mode bits; the deterministic case still runs.
+        if matches!(probe, Ok(true)) {
+            return;
+        }
+        assert_eq!(
+            probe.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let metas = result.expect("one unsearchable directory must not abort the catalogue");
+        assert_eq!(metas.iter().map(|meta| meta.id).collect::<Vec<_>>(), [good]);
     }
 
     #[test]
