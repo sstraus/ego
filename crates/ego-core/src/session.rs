@@ -301,6 +301,10 @@ impl ReplayedContext {
         .map(|(conversation, _)| conversation)
     }
 
+    pub(crate) fn latest_user_request(&self) -> Option<&str> {
+        self.state.latest_user_request()
+    }
+
     pub fn session_pins(&self) -> &[SessionId] {
         &self.session_pins
     }
@@ -526,6 +530,7 @@ impl TargetSeed {
                     source_seq,
                     prompt_revision,
                     checkpoint,
+                    latest_user_request: None,
                     constraints: Default::default(),
                 },
             },
@@ -536,6 +541,17 @@ impl TargetSeed {
                 prompt_revision,
             },
         }
+    }
+
+    pub(crate) fn with_latest_user_request(mut self, text: Option<String>) -> Self {
+        if let EventKind::CompactionSeeded {
+            latest_user_request,
+            ..
+        } = &mut self.event.kind
+        {
+            *latest_user_request = text;
+        }
+        self
     }
 
     pub(crate) fn with_constraints(

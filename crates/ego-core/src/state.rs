@@ -434,6 +434,9 @@ pub struct ItemState {
     /// Message and reasoning text, plus any still-streaming tool delta. A
     /// completed tool's semantic result lives in [`Self::tool_result`].
     pub text: String,
+    /// Verbatim source request carried only by a context checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_user_request: Option<String>,
     /// Ordered durable image metadata for a user prompt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageRef>,
@@ -491,6 +494,7 @@ impl ItemState {
             tool_name: None,
             args: String::new(),
             text: String::new(),
+            latest_user_request: None,
             images: Vec::new(),
             audio: Vec::new(),
             tool_result: None,
@@ -1333,6 +1337,22 @@ impl Default for SessionState {
 }
 
 impl SessionState {
+    /// Most recent admitted user text or its exact compaction carrier.
+    pub(crate) fn latest_user_request(&self) -> Option<&str> {
+        self.items
+            .values()
+            .filter_map(|item| match item.kind {
+                ItemKind::UserPrompt => Some((item.seq, item.text.as_str())),
+                ItemKind::ContextCheckpoint => item
+                    .latest_user_request
+                    .as_deref()
+                    .map(|text| (item.seq, text)),
+                _ => None,
+            })
+            .max_by_key(|(seq, _)| *seq)
+            .map(|(_, text)| text)
+    }
+
     fn refresh_synopsis(&mut self, turn: TurnId) {
         let prompt = self
             .items
@@ -2286,6 +2306,7 @@ impl SessionState {
                 source_seq,
                 prompt_revision,
                 checkpoint,
+                latest_user_request,
                 constraints,
             } => {
                 self.constraints = constraints.clone();
@@ -2297,6 +2318,7 @@ impl SessionState {
                 });
                 if let Some(item) = self.item_mut(ev, ItemKind::ContextCheckpoint) {
                     item.text = checkpoint.clone();
+                    item.latest_user_request = latest_user_request.clone();
                     item.completed = true;
                     item.ok = Some(true);
                 }

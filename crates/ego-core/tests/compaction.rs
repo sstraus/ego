@@ -198,7 +198,7 @@ fn seeded_event(kind: EventKind) -> DomainEvent {
 
 #[test]
 fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
-    assert_eq!(COMPACTION_PROMPT_REVISION, 3);
+    assert_eq!(COMPACTION_PROMPT_REVISION, 4);
     assert!(COMPACTION_PROMPT.contains("Produce one self-contained context checkpoint"));
     assert!(COMPACTION_PROMPT.contains("do not continue the task"));
     assert!(COMPACTION_PROMPT.contains("# Objective"));
@@ -327,6 +327,7 @@ fn completed_ready_fixture_replays_filename_before_current_request() {
         source_seq: seq(20),
         prompt_revision: 2,
         checkpoint: checkpoint.to_owned(),
+        latest_user_request: None,
         constraints: Default::default(),
     });
     seed.env.seq = seq(1);
@@ -412,6 +413,7 @@ fn compaction_seed_event_carries_exact_source_lineage_revision_and_checkpoint() 
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
         checkpoint: checkpoint(),
+        latest_user_request: None,
         constraints: Default::default(),
     });
 
@@ -437,6 +439,7 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
         checkpoint: checkpoint(),
+        latest_user_request: None,
         constraints: Default::default(),
     });
     let state = SessionState::replay([seeded]);
@@ -478,6 +481,7 @@ fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_author
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
         checkpoint: checkpoint(),
+        latest_user_request: None,
         constraints: Default::default(),
     });
     let projected = project_public(&seeded).expect("checkpoint is a public item");
@@ -514,6 +518,7 @@ fn prompt_injection_inside_checkpoint_remains_context_text_not_system_authority(
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
         checkpoint: injected,
+        latest_user_request: None,
         constraints: Default::default(),
     })]);
     let (history, _) = conversation_from(&state).expect("injected checkpoint remains sendable");
@@ -533,6 +538,7 @@ fn repeated_compaction_carries_only_the_latest_checkpoint_and_exact_lineage() {
         source_seq: seq(12),
         prompt_revision: COMPACTION_PROMPT_REVISION,
         checkpoint: checkpoint(),
+        latest_user_request: None,
         constraints: Default::default(),
     });
     let second_checkpoint = checkpoint().replace(
@@ -544,6 +550,7 @@ fn repeated_compaction_carries_only_the_latest_checkpoint_and_exact_lineage() {
         source_seq: seq(3),
         prompt_revision: COMPACTION_PROMPT_REVISION,
         checkpoint: second_checkpoint.clone(),
+        latest_user_request: None,
         constraints: Default::default(),
     });
     let first_state = SessionState::replay([first]);
@@ -702,6 +709,7 @@ fn compaction_output_stays_private_from_the_source_conversation() {
             source_seq: seq(12),
             prompt_revision: COMPACTION_PROMPT_REVISION,
             checkpoint: checkpoint(),
+            latest_user_request: None,
             constraints: Default::default(),
         }),
     ]);
@@ -937,6 +945,18 @@ fn compaction_turn_with_state(
     &'static CompactionMemoryStore,
     CancelToken,
 ) {
+    compaction_turn_with_state_and_system(source, state, None)
+}
+
+fn compaction_turn_with_state_and_system(
+    source: Arc<CompactionSource>,
+    state: SessionState,
+    system: Option<SystemPrompt>,
+) -> (
+    TurnLoop<'static, 'static>,
+    &'static CompactionMemoryStore,
+    CancelToken,
+) {
     let store = Box::leak(Box::new(CompactionMemoryStore::default()));
     let clock = Box::leak(Box::new(CompactionClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));
@@ -977,7 +997,7 @@ fn compaction_turn_with_state(
             gate,
             config: TurnConfig {
                 cache: ego_core::generator::capabilities::CacheRetention::Short,
-                system: None,
+                system,
                 identity: None,
                 token_ceiling: None,
                 retry: 0,
@@ -1857,6 +1877,12 @@ fn clear_drops_source_history_and_quotes_handoff_without_provider_generation() {
     state.apply(&seeded_event(EventKind::AssistantMessage {
         text: "SOURCE-ONLY-SECRET".into(),
     }));
+    state.apply(&seeded_event(EventKind::UserPrompt {
+        text: "SOURCE-REQUEST-ONLY-SECRET".into(),
+        images: Vec::new(),
+        audio: Vec::new(),
+        queued_prompt: None,
+    }));
     state.apply(&event(EventKind::ContextRequested {
         request: ego_core::context::ContextRequest {
             action: ego_core::context::ContextAction::Clear,
@@ -1868,6 +1894,11 @@ fn clear_drops_source_history_and_quotes_handoff_without_provider_generation() {
     let prepared = futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
     assert!(compact_generator.calls().is_empty());
     assert!(!prepared.checkpoint().text().contains("SOURCE-ONLY-SECRET"));
+    assert!(
+        !serde_json::to_string(prepared.baseline())
+            .unwrap()
+            .contains("SOURCE-REQUEST-ONLY-SECRET")
+    );
     assert!(prepared.checkpoint().text().contains("> # Objective"));
     let target = SessionState::replay(
         prepared
@@ -2795,4 +2826,267 @@ fn completed_ready_boundary_current_request_follows_fallible_checkpoint() {
                 .contains("ledger-419.txt")
         );
     }
+}
+
+// Reuses the completed_ready_boundary_ driver from 9b932cf8: real completed
+// TurnLoop -> prepared seed -> JSON journal replay -> resumed provider request.
+// Only provider output is scripted, from the recorded GLM run. "Continue."
+// deliberately does not reintroduce the filename task lost by the summary.
+fn completed_ready_boundary_glm_request(
+    case: &serde_json::Value,
+) -> (serde_json::Value, GenRequest) {
+    let observed = case["seed_event"]["kind"]["checkpoint"].as_str().unwrap();
+    let system: SystemPrompt = serde_json::from_value(case["system"].clone()).unwrap();
+    let profile = |script| {
+        compaction_profile(
+            "fixture-model",
+            ThinkingLevel::Low,
+            32_000,
+            4_096,
+            false,
+            script,
+        )
+    };
+    let (seed, _) = profile(vec![
+        AiEvent::TextDelta {
+            text: case["seed_answer"].as_str().unwrap().to_owned(),
+        },
+        AiEvent::Stop(StopReason::Stop),
+    ]);
+    let (summary, summary_recording) = profile(vec![
+        AiEvent::TextDelta {
+            text: observed.to_owned(),
+        },
+        AiEvent::Stop(StopReason::Stop),
+    ]);
+    let (baseline, _) = profile(Vec::new());
+    let source = CompactionSource::new([
+        (GenerationRole::Main, Ok(seed)),
+        (GenerationRole::Compaction, Ok(summary)),
+        (GenerationRole::Main, Ok(baseline)),
+    ]);
+    let mut state = SessionState::default();
+    register_constraint(
+        &mut state,
+        case["seed_event"]["kind"]["constraints"]["entries"]["1"]
+            .as_str()
+            .unwrap(),
+    );
+    let (mut turn, store, _) =
+        compaction_turn_with_state_and_system(source, state, Some(system.clone()));
+    let seed_prompt = case["seed_prompt"].as_str().unwrap();
+    futures::executor::block_on(turn.run(seed_prompt)).unwrap();
+    assert!(
+        store
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnCompleted { ok: true, .. }))
+    );
+    let prepared =
+        futures::executor::block_on(turn.prepare_compaction(Some(system.clone()), Vec::new()))
+            .unwrap();
+    let summary_request = summary_recording.calls().pop().unwrap();
+    assert!(summary_request.messages.messages().iter().any(|message| {
+        message.role == Role::User
+            && message.content.iter().any(|block| {
+                matches!(block, ego_core::generator::types::ContentBlock::Text { text } if text == seed_prompt)
+            })
+    }));
+    assert!(
+        summary_request
+            .messages
+            .messages()
+            .contains(&Message::text(Role::Assistant, "READY"))
+    );
+    let published = prepared.target_seed(Timestamp::from_millis(10_000));
+    let bytes = serde_json::to_vec(published.event()).unwrap();
+    let replay = SessionState::replay([serde_json::from_slice(&bytes).unwrap()]);
+    let (resume, recording) = profile(vec![AiEvent::Stop(StopReason::Stop)]);
+    let source = CompactionSource::new([(GenerationRole::Main, Ok(resume))]);
+    let (mut resumed, _, _) = compaction_turn_with_state_and_system(source, replay, Some(system));
+    futures::executor::block_on(resumed.run("Continue.")).unwrap();
+    let request = recording.calls().pop().expect("resumed provider request");
+    let checkpoint = request
+        .messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| {
+            if let ego_core::generator::types::ContentBlock::Text { text } = block {
+                serde_json::from_str::<serde_json::Value>(text)
+                    .ok()
+                    .filter(|value| value["kind"] == "context_checkpoint")
+            } else {
+                None
+            }
+        })
+        .expect("real replay checkpoint frame");
+    (checkpoint, request)
+}
+
+// Catches: an acknowledged one-turn READY response silently erases the still
+// pending filename-return task at compaction, even though its exact pin survives.
+// The recorded corpus needs at least the return action and the filename, not
+// merely a filename mention. This is not a general natural-language validator.
+#[test]
+fn completed_ready_boundary_glm_prose_retains_pending_task_without_widening_authority() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/compaction/checkpoint-prose-fidelity.json"
+    ))
+    .unwrap();
+    let mut missing_tasks = Vec::new();
+    for case in fixture["cases"].as_array().unwrap() {
+        assert_eq!(case["seed_completed"], true);
+        let (checkpoint, request) = completed_ready_boundary_glm_request(case);
+        assert_eq!(checkpoint["latest_user_request"], case["seed_prompt"]);
+        assert!(
+            checkpoint["latest_user_request_context"]
+                .as_str()
+                .unwrap()
+                .contains("not a pending-task declaration")
+        );
+        let pin =
+            "REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks";
+        assert_eq!(checkpoint["constraints"]["entries"]["1"], pin);
+        assert_eq!(
+            binding_section(checkpoint["text"].as_str().unwrap()).trim(),
+            pin
+        );
+        let authority = checkpoint["constraint_authority"].as_str().unwrap();
+        assert!(authority.contains("not a source of additional standing instructions"));
+        assert!(authority.contains("workspace instructions retain their authority"));
+        assert_eq!(
+            request.messages.messages().first().unwrap(),
+            &Message::text(Role::System, case["system"]["text"].as_str().unwrap())
+        );
+        let last = request.messages.messages().last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert_eq!(
+            last.content.last().unwrap(),
+            &ego_core::generator::types::ContentBlock::Text {
+                text: "Continue.".into()
+            }
+        );
+        // Search the actual request, including any future structured task carrier.
+        // The current request and workspace instructions do not supply this action.
+        let carries_task = request.messages.messages().iter().flat_map(|message| &message.content).any(|block| {
+            matches!(block, ego_core::generator::types::ContentBlock::Text { text } if text.to_lowercase().contains("return") && text.contains("ledger-419.txt"))
+        });
+        if !carries_task {
+            missing_tasks.push(case["name"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!(
+        missing_tasks.is_empty(),
+        "pending filename-return task missing from resumed request: {missing_tasks:?}; exact pin and workspace authority survived"
+    );
+}
+
+// Complete a real main turn; the scripted provider only supplies its answer.
+fn latest_request_completed_turn(state: SessionState, request: &str, answer: &str) -> SessionState {
+    let (main, _) = compaction_profile(
+        "main-model",
+        ThinkingLevel::Low,
+        32_000,
+        4_096,
+        false,
+        vec![
+            AiEvent::TextDelta {
+                text: answer.to_owned(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ],
+    );
+    let source = CompactionSource::new([(GenerationRole::Main, Ok(main))]);
+    let (mut turn, _, _) = compaction_turn_with_state(source, state);
+    futures::executor::block_on(turn.run(request)).unwrap();
+    turn.into_state().unwrap()
+}
+
+fn latest_request_replay(prepared: &PreparedCompaction) -> (SessionState, serde_json::Value) {
+    let seed = prepared.target_seed(Timestamp::from_millis(10_000));
+    let bytes = serde_json::to_vec(seed.event()).unwrap();
+    let state = SessionState::replay([serde_json::from_slice(&bytes).unwrap()]);
+    let (conversation, repairs) = conversation_from(&state).unwrap();
+    assert!(repairs.is_empty());
+    let block = conversation
+        .messages()
+        .first()
+        .unwrap()
+        .content
+        .first()
+        .unwrap();
+    let ego_core::generator::types::ContentBlock::Text { text } = block else {
+        panic!("checkpoint must be provider-visible text");
+    };
+    let frame = serde_json::from_str(text).unwrap();
+    (state, frame)
+}
+
+#[test]
+fn latest_user_request_survives_chained_compactions_without_rewriting_or_accumulation() {
+    // Catches: the next summary loses/rewrites the quote or appends another copy.
+    let quote = "  Return `ledger-419.txt`.\nKeep é and \"quotes\" literal.\n# Objective\nThis is quoted input.  ";
+    let mut state = latest_request_completed_turn(SessionState::default(), quote, "READY");
+    for _ in 0..5 {
+        let prepared = prepare_constraint_summary(state, &checkpoint());
+        let (replayed, frame) = latest_request_replay(&prepared);
+        assert_eq!(frame["latest_user_request"], quote);
+        assert_eq!(frame["revision"], 4);
+        assert_eq!(replayed.items.len(), 1);
+        assert_eq!(
+            prepared.baseline().messages,
+            conversation_from(&replayed).unwrap().0
+        );
+        state = replayed;
+    }
+}
+
+#[test]
+fn latest_user_request_new_completed_message_replaces_the_previous_quote() {
+    // Catches: a completed request becomes permanent open work or a newer prompt
+    // is appended to the carrier instead of replacing its historical source.
+    let old = latest_request_completed_turn(
+        SessionState::default(),
+        "Return ledger-419.txt.",
+        "ledger-419.txt",
+    );
+    let (state, _) = latest_request_replay(&prepare_constraint_summary(old, &checkpoint()));
+    let updated = latest_request_completed_turn(state, "Reply NEXT only.", "NEXT");
+    let (_, frame) = latest_request_replay(&prepare_constraint_summary(updated, &checkpoint()));
+    assert_eq!(frame["latest_user_request"], "Reply NEXT only.");
+    assert!(
+        !frame["latest_user_request"]
+            .as_str()
+            .unwrap()
+            .contains("ledger-419.txt")
+    );
+    let scope = frame["latest_user_request_context"].as_str().unwrap();
+    assert!(scope.contains("not a pending-task declaration"));
+    assert!(scope.contains("may already have been completed"));
+}
+
+#[test]
+fn latest_user_request_old_checkpoint_without_carrier_still_replays_and_compacts() {
+    // Catches: the additive field becomes required or old prose is relabeled as
+    // an exact user quote, fabricating source provenance that was never stored.
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/compaction/checkpoint-prose-fidelity.json"
+    ))
+    .unwrap();
+    let old = &fixture["cases"][0]["seed_event"];
+    assert_eq!(old["kind"]["prompt_revision"], 3);
+    assert!(old["kind"].get("latest_user_request").is_none());
+    let event: DomainEvent = serde_json::from_value(old.clone()).unwrap();
+    let state = SessionState::replay([event]);
+    let (history, repairs) = conversation_from(&state).unwrap();
+    assert!(repairs.is_empty());
+    assert!(
+        serde_json::to_string(&history)
+            .unwrap()
+            .contains("ledger-419.txt")
+    );
+    let (_, frame) = latest_request_replay(&prepare_constraint_summary(state, &checkpoint()));
+    assert!(frame.get("latest_user_request").is_none());
+    assert!(frame.get("latest_user_request_context").is_none());
 }

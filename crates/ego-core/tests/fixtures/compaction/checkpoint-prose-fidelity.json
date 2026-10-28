@@ -1,0 +1,101 @@
+{
+  "provenance": {
+    "run": "20000102T120000Z-00000005",
+    "evidence_root": "/home/example/workspace",
+    "observer": "/home/example/workspace",
+    "driver_commit": "0000000000000000000000000000000000000005",
+    "integrity_basis": "seed_event_sha256 hashes compact UTF-8 JSON of the synthetic seed_event; original whole-journal hashes are not retained."
+  },
+  "cases": [
+    {
+      "name": "GLM1",
+      "target_session": "00000000-0000-4000-8000-00000001009d",
+      "journal_line": 2,
+      "seed_event": {
+        "env": {
+          "seq": 1,
+          "id": "00000000-0000-4000-8000-000000010080",
+          "turn": "00000000-0000-4000-8000-000000010081",
+          "item": "00000000-0000-4000-8000-000000010082",
+          "parent": null,
+          "ts": 949829093809,
+          "producer": "Main"
+        },
+        "kind": {
+          "kind": "CompactionSeeded",
+          "source": "00000000-0000-4000-8000-0000000100a8",
+          "source_seq": 17,
+          "prompt_revision": 3,
+          "checkpoint": "# Objective\nRemember the chosen report filename ledger-419.txt. The only outstanding request is to keep this filename unchanged for subsequent tasks. No other operational work has begun.\n\n# Binding constraints and preferences\n    REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks\n# Completed work and evidence\n- Received instruction to remember the report filename ledger-419.txt.\n- Issued response \"READY\" in acknowledgment.\n- No further operations have been performed.\n\n# Work in progress\nNone. The filename has been recorded and the acknowledgment sent.\n\n# Decisions and rationale\n- Adhered strictly to the standing constraint to preserve the filename.\n- No tool invocations or additional actions were taken because the instruction did not require them.\n\n# Blockers and uncertainty\nNone.\n\n# Ordered next steps\nNone specified beyond respecting the REPORT-NAME-LOCK constraint.\n\n# Critical references\n- Standing constraint: REPORT-NAME-LOCK (applies to this session and its compaction successors until explicitly removed).",
+          "constraints": {
+            "next_id": 1,
+            "entries": {
+              "1": "REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks"
+            }
+          }
+        }
+      },
+      "seed_prompt": "Remember the chosen report filename ledger-419.txt. Our next task is to return that filename. Reply READY only.",
+      "seed_answer": "READY",
+      "seed_completed": true,
+      "system": {
+        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /home/example/workspace\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
+        "sources": [
+          {
+            "path": "/home/example/workspace",
+            "sha256": "298ac7eba811b28bf533fff2198975914ed1a9a3914854adc3387ce5c0649aa0",
+            "bytes": 173,
+            "scope": ".",
+            "source": "explicit"
+          }
+        ]
+      },
+      "seed_event_sha256": "1277b656acf6eff715bfb4c065bd0f3029ead0c0caefc40cdbdaef12e23babf5"
+    },
+    {
+      "name": "GLM3",
+      "target_session": "00000000-0000-4000-8000-0000000100a0",
+      "journal_line": 2,
+      "seed_event": {
+        "env": {
+          "seq": 1,
+          "id": "00000000-0000-4000-8000-000000010083",
+          "turn": "00000000-0000-4000-8000-000000010084",
+          "item": "00000000-0000-4000-8000-000000010085",
+          "parent": null,
+          "ts": 949829139724,
+          "producer": "Main"
+        },
+        "kind": {
+          "kind": "CompactionSeeded",
+          "source": "00000000-0000-4000-8000-000000010096",
+          "source_seq": 17,
+          "prompt_revision": 3,
+          "checkpoint": "# Objective\nReturn the chosen report filename ledger-419.txt in subsequent interactions, preserving the standing constraint REPORT-NAME-LOCK.\n\n# Binding constraints and preferences\n    REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks\n# Completed work and evidence\n- Prior instruction: remember filename ledger-419.txt and reply READY only\n- Evidence: Prior response \"READY\" was sent, fulfilling the one‑turn response requirement. The filename ledger-419.txt is preserved as per REPORT-NAME-LOCK.\n\n# Work in progress\n- No active work or ongoing tasks. The filename ledger-419.txt is remembered and must be returned in future turns, per REPORT-NAME-LOCK.\n\n# Decisions and rationale\n- Report filename to be used in future interactions: ledger-419.txt\n- No constraints on tool use or posture change; only the filename must be preserved and returned.\n\n# Blockers and uncertainty\n- None identified.\n\n# Ordered next steps\n- Return the filename ledger-419.txt if requested; otherwise preserve it pending future instructions.\n\n# Critical references\n- Prior response: READY (evidence of completed one‑turn requirement)\n- Standing constraint: REPORT-NAME-LOCK\n- Filename: ledger-419.txt",
+          "constraints": {
+            "next_id": 1,
+            "entries": {
+              "1": "REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks"
+            }
+          }
+        }
+      },
+      "seed_prompt": "Remember the chosen report filename ledger-419.txt. Our next task is to return that filename. Reply READY only.",
+      "seed_answer": "READY",
+      "seed_completed": true,
+      "system": {
+        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /home/example/workspace\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
+        "sources": [
+          {
+            "path": "/home/example/workspace",
+            "sha256": "298ac7eba811b28bf533fff2198975914ed1a9a3914854adc3387ce5c0649aa0",
+            "bytes": 173,
+            "scope": ".",
+            "source": "explicit"
+          }
+        ]
+      },
+      "seed_event_sha256": "f1cb582b691afb7831f80a0edcf8874ae3f8afb345b0c85e789b8f2078fc93ac"
+    }
+  ]
+}

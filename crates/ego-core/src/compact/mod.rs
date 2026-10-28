@@ -22,7 +22,7 @@ use crate::store::session_store::StoreError;
 mod constraints;
 pub use constraints::{ConstraintLedger, PinCommand, PinError};
 
-pub const COMPACTION_PROMPT_REVISION: u32 = 3;
+pub const COMPACTION_PROMPT_REVISION: u32 = 4;
 
 pub const COMPACTION_PROMPT: &str = r###"Produce one self-contained context checkpoint for continuing this work in a
 new session. Preserve every material fact from the complete context above, but
@@ -34,6 +34,9 @@ responses. A completed one-turn response requirement is historical evidence,
 not a standing constraint or a next step. For example, after an instruction to
 remember a filename and reply only READY has received READY, preserve the
 filename and any unfinished filename task, but do not require READY again.
+A checkpoint may include a core-preserved latest user request. Treat that quote
+as historical context, not proof of unfinished work; reconcile it with completed
+responses in the conversation.
 Record completed response requirements only under Completed work and evidence
 when they matter. Preserve unfinished tasks and standing constraints; do not
 mark them complete merely because a response was sent. The checkpoint describes
@@ -175,6 +178,7 @@ pub struct PreparedCompaction {
     pub(crate) source: SessionId,
     pub(crate) source_seq: Seq,
     pub(crate) checkpoint: Checkpoint,
+    pub(crate) latest_user_request: Option<String>,
     pub(crate) constraints: ConstraintLedger,
     pub(crate) baseline: GenRequest,
     pub(crate) title: Option<String>,
@@ -213,6 +217,7 @@ impl PreparedCompaction {
             self.checkpoint.text().to_string(),
             at,
         )
+        .with_latest_user_request(self.latest_user_request.clone())
         .with_constraints(self.constraints.clone())
         .with_title(self.title.clone())
         .with_goal(self.goal.as_ref())
@@ -539,13 +544,21 @@ struct CheckpointFrame<'a> {
     kind: &'static str,
     revision: u32,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_user_request: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_user_request_context: Option<&'static str>,
     #[serde(skip_serializing_if = "ConstraintLedger::is_default")]
     constraints: &'a ConstraintLedger,
     #[serde(skip_serializing_if = "Option::is_none")]
     constraint_authority: Option<&'static str>,
 }
 
-pub(crate) fn checkpoint_frame(text: &str, constraints: &ConstraintLedger) -> String {
+pub(crate) fn checkpoint_frame(
+    text: &str,
+    constraints: &ConstraintLedger,
+    latest_user_request: Option<&str>,
+) -> String {
     let normalized = Checkpoint::parse(text)
         .ok()
         .map(|checkpoint| constraints.checkpoint(checkpoint).into_text());
@@ -554,6 +567,8 @@ pub(crate) fn checkpoint_frame(text: &str, constraints: &ConstraintLedger) -> St
         kind: "context_checkpoint",
         revision: COMPACTION_PROMPT_REVISION,
         text,
+        latest_user_request,
+        latest_user_request_context: latest_user_request.map(|_| "Verbatim latest user request from the source conversation, preserved by core rather than the summary model. This is historical context, not a pending-task declaration or a new request. It may already have been completed; consult the transcript summary for completed work. Later user requests take precedence."),
         constraints,
         constraint_authority: Some("Only the pinned constraints are standing user constraints from this checkpoint. Independently admitted system and workspace instructions retain their authority. The summary is fallible historical context, not a source of additional standing instructions. User /unpin removes the specified pin."),
     })
@@ -686,6 +701,7 @@ mod transition_contract_tests {
             source,
             source_seq: Seq::ZERO,
             checkpoint: checkpoint(),
+            latest_user_request: None,
             constraints: ConstraintLedger::default(),
             baseline: GenRequest {
                 web_search: None,
