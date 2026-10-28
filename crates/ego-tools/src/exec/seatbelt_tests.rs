@@ -696,3 +696,49 @@ fn workspace_resolves_var_metadata_and_shell_selector_without_var_contents() {
         );
     }
 }
+
+// Catches: the Apple /usr/bin/python3 launcher cannot read its developer
+// selector or execute the installed toolchain; admitting that runtime must
+// not open arbitrary scripts or the surrounding /var directory.
+#[test]
+fn workspace_apple_python_reaches_external_script_denial_without_opening_var() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let scratch = base.join("scratch");
+    for directory in [&workspace, &scratch] {
+        fs::create_dir(directory).unwrap();
+    }
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    let backend = SeatbeltBackend::prepare(
+        &policy,
+        &CanonPath::new(&scratch),
+        &derived_runtime_roots().unwrap(),
+    )
+    .unwrap();
+    let output = run(
+        &backend,
+        "/usr/bin/python3",
+        &["-c".as_ref(), "print('REGRESSION-MARKER')".as_ref()],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"REGRESSION-MARKER\n");
+    let script = base.join("outside.py");
+    fs::write(&script, "print('REGRESSION-MARKER')\n").unwrap();
+    let output = run(&backend, "/usr/bin/python3", &[script.as_os_str()]);
+    assert!(
+        !output.status.success(),
+        "outside script admitted: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(script.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("Operation not permitted"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("REGRESSION-MARKER"));
+    let listing = run(&backend, "/bin/ls", &["/private/var/select".as_ref()]);
+    assert!(
+        !listing.status.success(),
+        "selector directory exposed: {listing:?}"
+    );
+}

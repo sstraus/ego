@@ -59,6 +59,9 @@ async fn resolve_invocation_phase(
                         if resumed.model.is_none() {
                             resumed.model = selections.model().map(|model| model.0.clone());
                         }
+                        if resumed.thinking.is_none() {
+                            resumed.thinking = selections.thinking();
+                        }
                         if resumed.mode.is_none() {
                             resumed.mode = selections.mode();
                         }

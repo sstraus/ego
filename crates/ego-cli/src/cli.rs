@@ -916,7 +916,8 @@ pub struct Args {
     pub schema_retries: u32,
     /// Additional delivery-safe attempts allowed for each model candidate.
     pub retry: u32,
-    /// Interactive default recovery; an explicit --retry keeps finite ownership.
+    /// Implicit interactive recovery; resume resolves it with its terminal seat.
+    /// An explicit --retry keeps finite ownership.
     pub(crate) provider_recovery: bool,
     /// Ordered model candidates used after a safely-unsent failure or refusal.
     pub fallbacks: Vec<ModelRef>,
@@ -2042,7 +2043,11 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     } else {
         0
     };
+    // Preserve implicit retry authority until terminal/profile resolution chooses
+    // the seat, even when an initial prompt provisionally selects headless defaults.
+    let implicit_retry = flags.retry.is_none();
     let mut args = into_args(RunCommand { prompt, flags }, retry_default)?;
+    args.provider_recovery = implicit_retry;
     args.session = SessionChoice::Resume(id);
     args.answers = answers;
     Ok(args)

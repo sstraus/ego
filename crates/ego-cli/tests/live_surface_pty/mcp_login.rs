@@ -350,7 +350,52 @@ impl Drop for OAuthServer {
     }
 }
 
+// Catches: accepted sockets inherit nonblocking mode on macOS, so delayed
+// headers or a split body panic with WouldBlock instead of using the timeout.
+#[test]
+fn oauth_fixture_waits_for_delayed_request_bytes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut socket, _) = listener.accept().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    // Reproduce macOS accept inheritance on every Unix test host.
+    socket.set_nonblocking(true).unwrap();
+    let (finished, result) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        finished.send(oauth_request(&mut socket)).unwrap();
+    });
+    let pending = || {
+        assert!(
+            matches!(
+                result.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "OAuth request reader must wait for the remaining request bytes"
+        );
+    };
+    pending();
+    client
+        .write_all(b"POST /token HTTP/1.1\r\nContent-Len")
+        .unwrap();
+    pending();
+    client.write_all(b"gth: 6\r\n\r\nabc").unwrap();
+    pending();
+    client.write_all(b"def").unwrap();
+    let (path, headers, body) = result.recv_timeout(Duration::from_secs(5)).unwrap();
+    reader.join().unwrap();
+    assert_eq!(path, "/token");
+    assert_eq!(headers, "POST /token HTTP/1.1\r\nContent-Length: 6\r\n\r\n");
+    assert_eq!(body, b"abcdef");
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock,
+        "request reads must not change the listener's shutdown polling mode"
+    );
+}
+
 fn oauth_request(socket: &mut TcpStream) -> (String, String, Vec<u8>) {
+    // macOS inherits the listener's nonblocking mode on accepted sockets.
+    socket.set_nonblocking(false).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();

@@ -370,10 +370,21 @@ impl GenerationSelection {
 
     /// Install the selection committed by the interactive picker.
     pub fn install(&self, identity: ModelRef, thinking: ThinkingLevel) -> Result<(), String> {
+        self.install_with_commit(identity, thinking, || Ok(()))
+    }
+
+    /// Hold the installation authority until its durable commit has succeeded.
+    pub(crate) fn install_with_commit(
+        &self,
+        identity: ModelRef,
+        thinking: ThinkingLevel,
+        commit: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         let mut current = self
             .current
             .write()
             .map_err(|_| "the model selection lock is poisoned".to_string())?;
+        commit()?;
         *current = Some(MainSelection {
             identity,
             thinking,

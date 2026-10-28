@@ -1908,6 +1908,38 @@ mod sandbox_question_tests {
         }
     }
 
+    // Catches: xcode-select's quoted path and parenthesized errno bypass the
+    // production sandbox question flow. Fixture is real R3 stderr, 2026-10-28.
+    #[test]
+    fn xcode_select_denial_reaches_the_existing_question_flow() {
+        let mut rig = rig(Arc::new(Widening), false);
+        let target = rig.spec.argv()[3].to_str().unwrap();
+        let diagnostic = include_str!("../../tests/fixtures/xcode-select-denied.txt")
+            .replace("/var/select/developer_dir", target);
+        rig.spec = SpawnSpec::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '%s' \"$0\" >&2; exit 1".into(),
+                diagnostic.into(),
+            ],
+            rig.spec.cwd().cloned(),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let outcome = block_on(rig.context.execute(&rig.spec));
+        assert!(
+            matches!(outcome, Err(ProcessError::Exit { .. })),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            rig.seat.asked.load(Ordering::SeqCst),
+            MAX_SANDBOX_QUESTIONS,
+            "recorded xcode-select EPERM must reach the live question port"
+        );
+    }
+
     /// Catches: on a backend that cannot widen after admission (Landlock) the
     /// person is asked, answers yes, and is told a grant is in force although
     /// the retry runs under the same confinement.

@@ -33,6 +33,8 @@ mod mcp_login;
 mod metadata_refusal;
 #[path = "live_surface_pty/missing_program.rs"]
 mod missing_program;
+#[path = "live_surface_pty/modal_answers.rs"]
+mod modal_answers;
 #[path = "live_surface_pty/mode_picker.rs"]
 mod mode_picker;
 #[path = "live_surface_pty/notice_wrap.rs"]

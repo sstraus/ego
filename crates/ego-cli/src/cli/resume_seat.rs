@@ -18,6 +18,9 @@ impl Invocation {
             && args.agent_file.is_none()
             && args.profile.as_deref() != Some("ci")
         {
+            if args.provider_recovery {
+                args.retry = super::INTERACTIVE_PROVIDER_RETRIES;
+            }
             Self::Interactive(args)
         } else {
             // Only an implicit interactive default enables recovery; an explicit
@@ -43,30 +46,79 @@ mod tests {
     }
 
     #[test]
+    fn prompted_interactive_resume_keeps_implicit_provider_recovery() {
+        // Catches: a positional brief promotes resume to a human seat with zero retries.
+        let mut failures = Vec::new();
+        for tokens in [
+            vec!["resume", "continue the task"],
+            vec!["continue", "continue the task"],
+            vec![
+                "resume",
+                "00000000-0000-7000-8000-000000020002",
+                "continue the task",
+            ],
+            // The managed tuic-spawn.sh --resume argv shape from the live case.
+            vec![
+                "resume",
+                "00000000-0000-7000-8000-000000020002",
+                "--thinking",
+                "medium",
+                "--sandbox",
+                "off",
+                "--yolo",
+                "--trust-workspace",
+                "--mcp",
+                "tuic",
+                "continue the managed task",
+                "--model",
+                "openai-codex/gpt-6.1-sol",
+            ],
+        ] {
+            let Invocation::Interactive(args) = crate::cli::parse(argv_slice(&tokens))
+                .unwrap()
+                .with_terminal(true, true)
+            else {
+                panic!("prompted human resume: {tokens:?}");
+            };
+            if args.retry != 6 || !args.provider_recovery {
+                failures.push(format!(
+                    "{tokens:?}: retry={}, recovery={}",
+                    args.retry, args.provider_recovery
+                ));
+            }
+            assert!(args.prompt.is_some(), "the initial brief must survive");
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
     fn headless_resume_does_not_inherit_interactive_retry_recovery() {
         // Catches: seat conversion keeps six retries and a 24-hour recovery horizon.
         let mut failures = Vec::new();
-        for (flags, stdin, stdout) in [
-            (vec!["--output", "json"], true, true),
-            (vec!["--output=text"], true, true),
-            (vec!["--profile", "ci"], true, true),
-            (vec![], false, true),
-            (vec![], true, false),
-            (vec![], false, false),
-        ] {
-            let mut tokens = vec!["resume"];
-            tokens.extend_from_slice(&flags);
-            let Invocation::Resume(args) = crate::cli::parse(argv_slice(&tokens))
-                .unwrap()
-                .with_terminal(stdin, stdout)
-            else {
-                panic!("headless resume: {tokens:?}");
-            };
-            if args.retry != 0 || args.provider_recovery {
-                failures.push(format!(
-                    "{tokens:?}, terminal=({stdin}, {stdout}): retry={}, recovery={}",
-                    args.retry, args.provider_recovery
-                ));
+        for prompt in [None, Some("resume task")] {
+            for (flags, stdin, stdout) in [
+                (vec!["--output", "json"], true, true),
+                (vec!["--output=text"], true, true),
+                (vec!["--profile", "ci"], true, true),
+                (vec![], false, true),
+                (vec![], true, false),
+                (vec![], false, false),
+            ] {
+                let mut tokens = vec!["resume"];
+                tokens.extend(prompt);
+                tokens.extend_from_slice(&flags);
+                let Invocation::Resume(args) = crate::cli::parse(argv_slice(&tokens))
+                    .unwrap()
+                    .with_terminal(stdin, stdout)
+                else {
+                    panic!("headless resume: {tokens:?}");
+                };
+                if args.retry != 0 || args.provider_recovery {
+                    failures.push(format!(
+                        "{tokens:?}, terminal=({stdin}, {stdout}): retry={}, recovery={}",
+                        args.retry, args.provider_recovery
+                    ));
+                }
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -75,27 +127,31 @@ mod tests {
     #[test]
     fn resume_seat_resolution_preserves_explicit_retry_limits_and_human_recovery() {
         // Catches: clearing headless defaults also clears an explicit finite allowance.
-        for (flags, stdin, stdout, interactive) in [
-            (vec![], true, true, true),
-            (vec!["--output", "json"], true, true, false),
-            (vec!["--profile", "ci"], true, true, false),
-            (vec![], false, false, false),
-        ] {
-            for (value, expected) in [("0", 0), ("2", 2), ("6", 6)] {
-                let mut tokens = vec!["resume", "--retry", value];
-                tokens.extend_from_slice(&flags);
-                let invocation = crate::cli::parse(argv_slice(&tokens))
-                    .unwrap()
-                    .with_terminal(stdin, stdout);
-                assert_eq!(
-                    matches!(invocation, Invocation::Interactive(_)),
-                    interactive
-                );
-                let (Invocation::Resume(args) | Invocation::Interactive(args)) = invocation else {
-                    panic!("resume seat");
-                };
-                assert_eq!(args.retry, expected, "{tokens:?}");
-                assert!(!args.provider_recovery, "{tokens:?}");
+        for prompt in [None, Some("resume task")] {
+            for (flags, stdin, stdout, interactive) in [
+                (vec![], true, true, true),
+                (vec!["--output", "json"], true, true, false),
+                (vec!["--profile", "ci"], true, true, false),
+                (vec![], false, false, false),
+            ] {
+                for (value, expected) in [("0", 0), ("2", 2), ("6", 6)] {
+                    let mut tokens = vec!["resume", "--retry", value];
+                    tokens.extend(prompt);
+                    tokens.extend_from_slice(&flags);
+                    let invocation = crate::cli::parse(argv_slice(&tokens))
+                        .unwrap()
+                        .with_terminal(stdin, stdout);
+                    assert_eq!(
+                        matches!(invocation, Invocation::Interactive(_)),
+                        interactive
+                    );
+                    let (Invocation::Resume(args) | Invocation::Interactive(args)) = invocation
+                    else {
+                        panic!("resume seat");
+                    };
+                    assert_eq!(args.retry, expected, "{tokens:?}");
+                    assert!(!args.provider_recovery, "{tokens:?}");
+                }
             }
         }
         let Invocation::Interactive(args) = crate::cli::parse(argv_slice(&["resume"]))

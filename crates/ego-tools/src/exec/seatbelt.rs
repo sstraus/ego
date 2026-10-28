@@ -24,7 +24,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v9-descendant-signals";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v10-apple-developer-runtime";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -430,17 +430,24 @@ pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
     })
     .collect::<Result<BTreeSet<_>, _>>()
     .and_then(|mut roots| {
-        // Homebrew's stable prefix contains its symlinked binaries, Cellar
-        // targets and runtime libraries. An absent installation adds no grant.
-        match fs::canonicalize("/opt/homebrew") {
-            Ok(root) => {
-                roots.insert(root);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(ProcessError::Backend(format!(
-                    "cannot resolve Homebrew runtime root /opt/homebrew: {error}"
-                )));
+        // Standard installed toolchains supply binaries and their libraries.
+        // An absent installation adds no grant; never open /Applications or /Library.
+        for path in [
+            "/opt/homebrew",
+            "/Applications/Xcode.app",
+            "/Library/Developer/CommandLineTools",
+        ] {
+            match fs::canonicalize(path) {
+                Ok(root) if root.is_dir() => {
+                    roots.insert(root);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ProcessError::Backend(format!(
+                        "cannot resolve toolchain runtime root {path}: {error}"
+                    )));
+                }
             }
         }
         // Git reads global configuration even for `git --version`. Admit

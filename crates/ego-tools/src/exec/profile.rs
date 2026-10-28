@@ -93,12 +93,13 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
         );
     }
     if input.level == Confinement::Workspace {
-        // macOS /bin/sh consults this selector; Node package managers stat
-        // /var before choosing a temporary directory. Exact metadata and one
-        // selector link are runtime prerequisites, not access to /var data.
+        // Apple launchers and /bin/sh consult these selectors; Node package
+        // managers stat /var before choosing a temporary directory. Exact
+        // metadata and selector links do not open the surrounding /var data.
         profile.push_str(concat!(
             "(allow file-read-metadata (literal \"/var\") (literal \"/private/var\") (literal \"/private/var/select\"))\n",
-            "(allow file-read* (literal \"/private/var/select/sh\"))\n",
+            "(allow file-read* (literal \"/private/var/select/sh\") (literal \"/private/var/select/developer_dir\"))\n",
+            "(allow file-read* (literal \"/Library/Preferences/com.apple.dt.Xcode.plist\"))\n",
         ));
     }
     match input.level {
@@ -478,7 +479,8 @@ mod tests {
                 "(allow signal (target same-sandbox))\n",
                 "(allow system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\"))\n",
                 "(allow file-read-metadata (literal \"/var\") (literal \"/private/var\") (literal \"/private/var/select\"))\n",
-                "(allow file-read* (literal \"/private/var/select/sh\"))\n",
+                "(allow file-read* (literal \"/private/var/select/sh\") (literal \"/private/var/select/developer_dir\"))\n",
+                "(allow file-read* (literal \"/Library/Preferences/com.apple.dt.Xcode.plist\"))\n",
                 "(allow process-exec*\n",
                 "  (subpath \"/work\")\n",
                 ")\n",
