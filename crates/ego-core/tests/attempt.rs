@@ -139,9 +139,9 @@ mod attempt {
 /// settlement, and what happens when nobody does.
 ///
 /// See `plans/m0b-vertical-slice.md` Steps 4-5. The claim under test is that
-/// a `Reservation` can no longer be borrowed twice, settled by the wrong
-/// gate, or quietly abandoned — and that the hold it represents is released
-/// exactly once, against the gate that took it.
+/// a `GenerationAdmission` can no longer be borrowed twice, settled by the wrong
+/// gate, or quietly abandoned — and that real response spend is recorded
+/// exactly once, against the gate that admitted it.
 mod lifecycle {
     use std::sync::{Arc, Mutex};
 
@@ -234,12 +234,6 @@ mod lifecycle {
         request_for("claude-opus-5")
     }
 
-    /// The bound the standard fixture reserves: a 200k context at the
-    /// dearest input rate ($3.75/MTok cache write) plus 1024 output tokens.
-    fn bound() -> Money {
-        usd("0.76536")
-    }
-
     fn tokens(uncached_input: u64, output: u64) -> Usage {
         Usage {
             uncached_input_tokens: uncached_input,
@@ -254,18 +248,18 @@ mod lifecycle {
 
     /// A gate holding exactly one attempt's worth of budget.
     ///
-    /// There is no shortcut here and that is the point: `Reservation`'s
+    /// There is no shortcut here and that is the point: `GenerationAdmission`'s
     /// constructor is sealed, `GenerationAttempt` is the only thing that can
     /// hold one, and `generate` will not accept anything else. Reaching this
     /// call at all is the proof the gate cannot be routed around.
     fn gate_and_attempt() -> (BudgetGate, GenerationAttempt) {
         let mut gate = BudgetGate::new(usd("10"));
-        let reservation = gate
-            .reserve(&metered(), Some(&quote()), &request(), &caps())
+        let admission = gate
+            .admit(&metered(), Some(&quote()), &request(), &caps())
             .expect("a $10 budget admits an ordinary request");
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
-            reservation,
+            admission,
             &metered(),
             Some(&quote()),
             &request(),
@@ -291,24 +285,24 @@ mod lifecycle {
 
     // --- admission --------------------------------------------------------
 
-    /// `Reservation::authorises` finally has a caller, and this is the right
+    /// `GenerationAdmission::authorises` finally has a caller, and this is the right
     /// place for it: the request, the capabilities and the quote are all
     /// still in hand here, and none of them are once the stream is running.
     #[test]
     fn an_attempt_refuses_a_reservation_that_does_not_authorise_the_request() {
         let mut gate = BudgetGate::new(usd("10"));
-        let reservation = gate
-            .reserve(&metered(), Some(&quote()), &request(), &caps())
+        let admission = gate
+            .admit(&metered(), Some(&quote()), &request(), &caps())
             .unwrap();
         let denied = GenerationAttempt::new(
             GenerationId::new(),
-            reservation,
+            admission,
             &metered(),
             Some(&quote()),
             &request_for("some-other-model"),
             &caps(),
         )
-        .expect_err("this reservation authorised claude-opus-5");
+        .expect_err("this admission authorised claude-opus-5");
         assert!(
             denied.to_string().contains("some-other-model"),
             "the denial names the substitution: {denied}"
@@ -335,14 +329,11 @@ mod lifecycle {
         assert!(stream.settle(&mut gate).is_ok());
     }
 
-    // --- the hold ---------------------------------------------------------
+    // --- settlement lifecycle ----------------------------------------------
 
-    /// The property the wrapper exists for. The hold is still held while the
-    /// stream is mid-flight, and released only by `settle` — and it cannot
-    /// be otherwise, because the attempt is inside the stream and there is
-    /// no way to reach it except by consuming both.
+    /// Catches: charging before the response is settled.
     #[test]
-    fn the_hold_survives_until_the_stream_ends() {
+    fn streaming_does_not_charge_before_settlement() {
         let fake = FakeGenerator::new(vec![vec![
             AiEvent::TextDelta {
                 text: "one".to_string(),
@@ -353,37 +344,22 @@ mod lifecycle {
             AiEvent::Stop(StopReason::Stop),
         ]]);
         let (mut gate, attempt) = gate_and_attempt();
-        assert_eq!(
-            *gate.outstanding().expect("a limited gate keeps totals"),
-            bound()
-        );
 
         let mut stream = fake.generate(request(), attempt);
         for _ in 0..3 {
             let event = futures::executor::block_on(stream.next());
             assert!(event.is_some());
-            assert_eq!(
-                *gate.outstanding().expect("a limited gate keeps totals"),
-                bound(),
-                "the hold must not be released part-way through a stream"
-            );
+            assert_eq!(gate.committed(), Some(&usd("0")));
         }
 
         let settled = stream.settle(&mut gate).expect("its own gate");
-        assert!(
-            gate.outstanding()
-                .expect("a limited gate keeps totals")
-                .amount
-                .is_zero(),
-            "and must be released exactly once, at settlement"
-        );
         assert_eq!(settled.outcome.stop(), StopReason::Stop);
     }
 
     /// Settling twice is a compile error, not a runtime check: `settle`
     /// consumes the stream, which owns the attempt, which owns the sole
-    /// non-`Clone` `Reservation`. This test pins the runtime half — that one
-    /// settlement really does release the whole hold and charge once.
+    /// non-`Clone` `GenerationAdmission`. This test pins the runtime half — that one
+    /// settlement really does record the response and charge once.
     #[test]
     fn an_attempt_settles_exactly_once() {
         let (gate, settled) = run(vec![
@@ -396,40 +372,23 @@ mod lifecycle {
             *gate.committed().expect("a limited gate keeps totals"),
             usd("0.006")
         );
-        assert!(
-            gate.outstanding()
-                .expect("a limited gate keeps totals")
-                .amount
-                .is_zero()
-        );
     }
 
-    /// Dropping an unsettled attempt cannot release the hold — `Drop` has no
-    /// way to reach a `&mut BudgetGate` — so the two things that must be
-    /// true are that it is loud, and that what it leaves behind fails
-    /// *closed*: the budget stays narrowed, never widened.
+    /// Catches: silently losing actual-cost settlement when an attempt is dropped.
     #[test]
-    fn dropping_an_unsettled_attempt_is_loud_and_leaves_the_hold_in_place() {
-        let (gate, logged) = {
+    fn dropping_an_unsettled_attempt_reports_unrecorded_cost() {
+        let (_gate, logged) = {
             let (gate, attempt) = gate_and_attempt();
             let captured = capture_logs(|| drop(attempt));
             (gate, captured)
         };
 
-        assert!(
-            gate.outstanding()
-                .expect("a limited gate keeps totals")
-                .amount
-                == bound().amount,
-            "a leaked hold must stay held: narrowing the budget is safe, \
-             releasing it silently is not"
-        );
         let complaint = logged
             .iter()
             .find(|line| line.contains("dropped without settling"))
             .unwrap_or_else(|| panic!("a leaked attempt must say so; got {logged:?}"));
         assert!(complaint.starts_with("ERROR"), "and at ERROR: {complaint}");
-        for field in ["generation", "attempt", "gate", "bound"] {
+        for field in ["generation", "attempt", "gate"] {
             assert!(
                 complaint.contains(field),
                 "the complaint must name {field} so the leak is traceable: {complaint}"
@@ -477,15 +436,8 @@ mod lifecycle {
             StopReason::Aborted,
             StopReason::Deferred,
         ] {
-            let (gate, settled) = run(vec![AiEvent::Stop(stop)]);
+            let (_gate, settled) = run(vec![AiEvent::Stop(stop)]);
             assert_eq!(settled.outcome.stop(), stop);
-            assert!(
-                gate.outstanding()
-                    .expect("a limited gate keeps totals")
-                    .amount
-                    .is_zero(),
-                "{stop:?} must still release its hold"
-            );
         }
     }
 
@@ -541,12 +493,6 @@ mod lifecycle {
         let settled = stream.settle(&mut gate).expect("its own gate");
         assert_eq!(settled.outcome.stop(), StopReason::Aborted);
         assert!(
-            gate.outstanding()
-                .expect("a limited gate keeps totals")
-                .amount
-                .is_zero()
-        );
-        assert!(
             !settled.outcome.retry_is_safe(),
             "the provider already answered, so a retry would be billed twice"
         );
@@ -590,12 +536,12 @@ mod lifecycle {
             (metered(), None, None),
         ] {
             let mut gate = BudgetGate::new(usd("10"));
-            let reservation = gate
-                .reserve(&metering, Some(&quote()), &request(), &caps())
+            let admission = gate
+                .admit(&metering, Some(&quote()), &request(), &caps())
                 .expect("reserve");
             let attempt = GenerationAttempt::new(
                 GenerationId::new(),
-                reservation,
+                admission,
                 &metering,
                 Some(&quote()),
                 &request(),
@@ -617,7 +563,7 @@ mod lifecycle {
             assert_eq!(settled.reconciled.exact, expected.is_some(), "{metering:?}");
             assert_eq!(
                 *gate.committed().expect("limited gate"),
-                usd(expected.unwrap_or("0.76536")),
+                usd(expected.unwrap_or("0")),
                 "{metering:?}"
             );
         }
@@ -651,7 +597,6 @@ mod lifecycle {
         // 1000 x $0.000003 + 200 x $0.000015
         assert_eq!(settled.reconciled.charged, Some(usd("0.006")));
         assert!(settled.reconciled.exact);
-        assert!(settled.reconciled.over_bound.is_none());
         assert_eq!(
             *gate.committed().expect("a limited gate keeps totals"),
             usd("0.006")
@@ -661,13 +606,13 @@ mod lifecycle {
     /// "Reported nothing" and "reported zero" settle differently, which is
     /// exactly why `UsageReport` is an enum rather than an `Option`.
     #[test]
-    fn a_missing_usage_report_charges_the_bound_while_a_reported_zero_charges_nothing() {
+    fn missing_usage_is_unknown_while_reported_zero_is_a_known_zero() {
         let (_, missing) = run(vec![
             AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
             AiEvent::Stop(StopReason::Stop),
         ]);
         assert_eq!(missing.outcome.usage(), UsageReport::Missing);
-        assert_eq!(missing.reconciled.charged, Some(bound()));
+        assert_eq!(missing.reconciled.charged, None);
         assert!(!missing.reconciled.exact);
 
         let (_, zero) = run(vec![
@@ -691,32 +636,14 @@ mod lifecycle {
             .settle(&mut theirs)
             .expect_err("this attempt belongs to another gate");
 
-        assert!(
-            theirs
-                .outstanding()
-                .expect("a limited gate keeps totals")
-                .amount
-                .is_zero()
-        );
-        assert_eq!(
-            *mine.outstanding().expect("a limited gate keeps totals"),
-            bound(),
-            "still held by the real gate"
-        );
         // The authorisation is not lost — it travels inside the refusal, so
         // the caller can settle it where it belongs.
         assert!(
             mine.reconcile(
-                denied.reservation,
+                denied.admission,
                 &CostDelta::Unknown(ego_core::cost::UnknownCost::ProviderReportedNoUsage)
             )
             .is_ok()
-        );
-        assert!(
-            mine.outstanding()
-                .expect("a limited gate keeps totals")
-                .amount
-                .is_zero()
         );
     }
 

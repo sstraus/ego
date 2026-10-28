@@ -449,7 +449,7 @@ async fn rates_that_are_already_resolved_are_not_replaced_by_the_table() {
 // Catches: the cached-table path bypasses OpenRouter's absent-cache policy,
 // or applies it to providers whose cache-write premium is not known.
 #[tokio::test]
-async fn openrouter_cached_table_completes_only_standard_missing_cache_prices() {
+async fn openrouter_cached_table_preserves_missing_tariffs_without_reservation_defaults() {
     let fixture = Fixture::new();
     let capture: serde_json::Value = serde_json::from_str(include_str!(
         "../../ego-ai/tests/goldens/openrouter/cache-prices-2026-10-27.json"
@@ -478,8 +478,8 @@ async fn openrouter_cached_table_completes_only_standard_missing_cache_prices() 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(rates.quote.cache_read.unwrap().to_string(), "0.0000000605");
-    assert_eq!(rates.quote.cache_write.unwrap().to_string(), "0.0000000605");
+    assert!(rates.quote.cache_read.is_none());
+    assert!(rates.quote.cache_write.is_none());
     assert!(rates.quote.cache_write_extended.is_none());
     assert!(matches!(rates.source, RateSource::Table { .. }));
     assert_eq!(wire.calls(), 0);

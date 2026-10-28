@@ -86,7 +86,7 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
     };
     let (sender, receiver) = futures::channel::oneshot::channel();
     let reservation = root
-        .reserve(&metering, None, &request, &caps)
+        .admit(&metering, None, &request, &caps)
         .expect("root reservation");
     let first_gate = reservation.gate();
     let attempt = GenerationAttempt::new(
@@ -113,7 +113,7 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
     ));
 
     let second = root
-        .reserve(&metering, None, &request, &caps)
+        .admit(&metering, None, &request, &caps)
         .expect("independent owner can reserve while provider is pending");
     assert_eq!(first_gate, root.id());
     assert_eq!(second.gate(), root.id());
@@ -173,7 +173,7 @@ fn admitted_stream(root: &SharedBudgetGate, model: &str) -> (AttemptStream, Gate
         default_reasoning_effort: None,
     };
     let reservation = root
-        .reserve(&metering, None, &request, &caps)
+        .admit(&metering, None, &request, &caps)
         .expect("reservation is admitted");
     let gate = reservation.gate();
     let attempt = GenerationAttempt::new(

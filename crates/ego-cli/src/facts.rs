@@ -26,13 +26,12 @@
 //! **No prices in the builtin layer**, and that is not caution about staleness
 //! — it is §1 of `2026-08-21-what-a-model-resolves-to.md` unchanged. A rate
 //! this repository wrote down is a number the budget gate would trust and
-//! nothing could check. A run with a money ceiling and no operator rates still
-//! refuses with `NoPricingQuote`; an unknown price is not a free one.
+//! nothing could check. Missing operator rates do not refuse generation;
+//! an unknown response cost stays unknown and is not a free one.
 //!
 //! **The project and project-local layers are not read here, in any posture.**
 //! A repository that could state its own model's price could state a low one,
-//! and a low rate mints a reservation below what the provider will really
-//! charge — the precise budget unsoundness the ADR was written to prevent. It
+//! and a low rate would undercount real spend against a configured cap. It
 //! is a stronger rule than the trust gate, so it is not expressed through it.
 //!
 //! It is a separate file rather than a `[model."…"]` table inside
@@ -168,8 +167,8 @@ struct Supplied {
 /// files.
 ///
 /// Every category is optional and none defaults: `None` is *unpriced* and
-/// makes `upper_bound` refuse, which is the correct answer for a category an
-/// operator did not state. A missing field must never read as free.
+/// makes observed usage in that category unpriceable. A missing field must
+/// never read as free.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Quote {

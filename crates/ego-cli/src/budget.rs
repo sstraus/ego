@@ -317,11 +317,7 @@ impl TableSource<'_> {
         match table.quote(model.row.id(), &model.model) {
             Ok(entry) => {
                 let rates = table_rates(entry.into_quote(revision.clone()));
-                Ok(Some(if model.row.id() == "openrouter" {
-                    ego_ai::catalogue::openrouter_admission_rates(rates)
-                } else {
-                    rates
-                }))
+                Ok(Some(rates))
             }
             // Model resolution carries this cause into the durable anomaly notice
             // while leaving admission to the permissive budget gate.

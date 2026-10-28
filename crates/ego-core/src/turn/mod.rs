@@ -1046,23 +1046,9 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
                 )
             })?;
         let quote = profile.rates.as_ref().map(|rates| &rates.quote);
-        let reservation = self
+        let admission = self
             .gate
-            .reserve(&profile.metering, quote, &request, &profile.capabilities)
-            .map_err(|error| {
-                ToollessGenerationFailure::new(
-                    error.to_string(),
-                    DeliveryCertainty::DefinitelyUnsent,
-                )
-            })?;
-        self.journal
-            .reservation_cost_anomaly(
-                turn,
-                &profile.identity.0,
-                &profile.metering,
-                &reservation,
-                profile.pricing_unavailable,
-            )
+            .admit(&profile.metering, quote, &request, &profile.capabilities)
             .map_err(|error| {
                 ToollessGenerationFailure::new(
                     error.to_string(),
@@ -1071,7 +1057,7 @@ impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
             })?;
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
-            reservation,
+            admission,
             &profile.metering,
             quote,
             &request,
@@ -2271,9 +2257,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 .map_err(|error| CompactionError::Store(error.into()))?;
 
             let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-            let reservation = self
+            let admission = self
                 .gate
-                .reserve(
+                .admit(
                     &profile.metering,
                     quote.as_ref(),
                     request,
@@ -2283,16 +2269,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     SharedBudgetError::Denied(error) => CompactionError::Budget(error),
                     error => CompactionError::Internal(error.to_string()),
                 })?;
-            self.journal.reservation_cost_anomaly(
-                turn,
-                &profile.identity.0,
-                &profile.metering,
-                &reservation,
-                profile.pricing_unavailable,
-            )?;
             let attempt = GenerationAttempt::new(
                 GenerationId::new(),
-                reservation,
+                admission,
                 &profile.metering,
                 quote.as_ref(),
                 request,
@@ -4977,15 +4956,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             ))?;
 
             let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-            let attempt = match self.reserve_generation_attempt(
-                turn,
-                &profile,
-                &request,
-                walk.next_attempt,
-            )? {
-                Ok(attempt) => attempt,
-                Err(ended) => return Ok(std::ops::ControlFlow::Break(ended)),
-            };
+            let attempt =
+                match self.admit_generation_attempt(turn, &profile, &request, walk.next_attempt)? {
+                    Ok(attempt) => attempt,
+                    Err(ended) => return Ok(std::ops::ControlFlow::Break(ended)),
+                };
             let reference = attempt.attempt();
             walk.next_attempt = reference.retry();
             self.admit_generation(&profile, reference, self.generation_role, &request.tools)?;
@@ -5540,7 +5515,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         Ok(terminal)
     }
 
-    fn reserve_generation_attempt(
+    fn admit_generation_attempt(
         &mut self,
         turn: TurnId,
         profile: &GenerationProfile,
@@ -5548,13 +5523,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         next_attempt: AttemptRef,
     ) -> Result<Result<GenerationAttempt, Generated>, StoreError> {
         let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-        let reservation = match self.gate.reserve(
+        let admission = match self.gate.admit(
             &profile.metering,
             quote.as_ref(),
             request,
             &profile.capabilities,
         ) {
-            Ok(reservation) => reservation,
+            Ok(admission) => admission,
             Err(denied) => {
                 tracing::warn!(%denied, "the budget gate refused a generation attempt");
                 let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
@@ -5565,16 +5540,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return self.refuse(turn, denied.to_string(), reason).map(Err);
             }
         };
-        self.journal.reservation_cost_anomaly(
-            turn,
-            &profile.identity.0,
-            &profile.metering,
-            &reservation,
-            profile.pricing_unavailable,
-        )?;
         let attempt = match GenerationAttempt::from_attempt(
             next_attempt,
-            reservation,
+            admission,
             &profile.metering,
             quote.as_ref(),
             request,
@@ -5582,7 +5550,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         ) {
             Ok(attempt) => attempt,
             Err(denied) => {
-                tracing::error!(%denied, "a reservation did not authorise its attempt");
+                tracing::error!(%denied, "a admission did not authorise its attempt");
                 return self
                     .refuse(turn, denied.to_string(), ExitReason::Internal)
                     .map(Err);
@@ -5654,7 +5622,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     ///
     /// Every caller is a refusal *ego* made — a history that cannot be rebuilt,
     /// a request the model does not accept, a gate that would not authorise, a
-    /// reservation that does not cover the request it was minted for, a
+    /// admission that does not cover the request it was minted for, a
     /// settlement the gate rejected. None of them is something a provider said,
     /// and most happen before a socket exists, which is why the kind is
     /// `Unclassified` here rather than chosen five times: `ErrorKind`

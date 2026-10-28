@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ego_core::budget::{
-    BudgetGate, Metering, PricingQuote, Reservation, SettlementSource, SharedBudgetGate,
+    BudgetGate, GenerationAdmission, Metering, PricingQuote, SettlementSource, SharedBudgetGate,
 };
 use ego_core::ceiling::Budget;
 use ego_core::config::{
@@ -1022,7 +1022,7 @@ struct Executor {
     calls: Mutex<Vec<&'static str>>,
     prompts: Mutex<Vec<String>>,
     settlement: Mutex<RunSettlement>,
-    reservations: Mutex<Vec<Reservation>>,
+    reservations: Mutex<Vec<GenerationAdmission>>,
 }
 
 impl Executor {
@@ -1160,7 +1160,7 @@ impl RunExecutor for Executor {
         let reservation = bindings
             .budget_gate()
             .expect("the execution binding owns the shared live budget gate")
-            .reserve(
+            .admit(
                 &generation_metering(),
                 Some(&generation_quote()),
                 &generation_request(prompt.text()),
@@ -2653,10 +2653,35 @@ fn background_task_budget_exhaustion_does_not_start_an_unfunded_child() {
         futures::executor::block_on(first.wait()).expect("first child settles"),
         ChildWaitResult::Returned { .. }
     ));
+    // Settle the first child's real response through the ordinary stream boundary.
+    let admission = harness.executor.reservations.lock().unwrap().pop().unwrap();
+    let attempt = ego_core::generator::attempt::GenerationAttempt::new(
+        ego_core::event::id::GenerationId::new(),
+        admission,
+        &generation_metering(),
+        Some(&generation_quote()),
+        &generation_request("first response"),
+        &generation_capabilities(),
+    )
+    .unwrap();
+    let mut response = ego_core::generator::attempt::AttemptStream::new(
+        attempt,
+        Box::pin(stream::iter([
+            ego_core::generator::port::AiEvent::Usage(ego_core::state::Usage {
+                uncached_input_tokens: 10_000,
+                ..ego_core::state::Usage::IDENTITY
+            }),
+            ego_core::generator::port::AiEvent::Stop(ego_core::generator::types::StopReason::Stop),
+        ])),
+    );
+    futures::executor::block_on(async {
+        while futures::StreamExt::next(&mut response).await.is_some() {}
+    });
+    gate.settle(response).expect("record actual child spend");
     assert!(matches!(
         gate.snapshot().expect("shared gate snapshot").ledger(),
-        ego_core::budget::Ledger::Limited { outstanding, .. }
-            if !outstanding.amount.is_zero()
+        ego_core::budget::Ledger::Limited { committed, .. }
+            if committed.amount == "0.03".parse::<Amount>().unwrap()
     ));
     let second_result = futures::executor::block_on(service.host_launch(second.invocation()));
     assert!(matches!(
@@ -2664,7 +2689,11 @@ fn background_task_budget_exhaustion_does_not_start_an_unfunded_child() {
         Err(ego_core::subagent::ChildServiceError::Controller { diagnostic })
             if diagnostic.contains("budget reservation denied")
     ));
-    assert_eq!(harness.executor.reservation_count(), 1);
+    assert_eq!(
+        harness.executor.reservation_count(),
+        0,
+        "the first response settled and the second never generated"
+    );
     assert!(
         authority.calls() >= 2,
         "both children pass the authority owner"

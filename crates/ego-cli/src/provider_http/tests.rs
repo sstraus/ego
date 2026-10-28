@@ -132,7 +132,7 @@ fn capabilities() -> ModelCapabilities {
 
 fn attempt(gate: &mut BudgetGate, request: &GenRequest, metering: &Metering) -> GenerationAttempt {
     let reservation = gate
-        .reserve(metering, None, request, &capabilities())
+        .admit(metering, None, request, &capabilities())
         .expect("unlimited test budget");
     GenerationAttempt::new(
         GenerationId::new(),

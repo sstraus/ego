@@ -1368,7 +1368,7 @@ mod tests {
             };
             let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").unwrap());
             let reservation = gate
-                .reserve(&profile.metering, None, &req, &profile.capabilities)
+                .admit(&profile.metering, None, &req, &profile.capabilities)
                 .unwrap();
             let attempt = GenerationAttempt::new(
                 GenerationId::new(),

@@ -108,27 +108,6 @@ fn only_user_conversation_messages_may_contain_audio() {
     ));
 }
 
-// Catches text-token prices being treated as a complete bound on audio spending.
-#[test]
-fn text_token_quote_cannot_authorize_audio_spend() {
-    use ego_core::budget::PricingQuote;
-    use ego_core::cost::{Amount, CurrencyCode, PricingRevision, UnknownCost};
-    let quote = PricingQuote {
-        revision: PricingRevision("text-only".into()),
-        currency: CurrencyCode::new("USD").unwrap(),
-        web_search: None,
-        uncached_input: Some(Amount::ZERO),
-        cache_read: Some(Amount::ZERO),
-        cache_write: Some(Amount::ZERO),
-        cache_write_extended: None,
-        output: Some(Amount::ZERO),
-    };
-    assert_eq!(
-        quote.upper_bound(&request(), &caps()),
-        Err(UnknownCost::AudioPricingUnavailable)
-    );
-}
-
 // Catches pending queue replay/GC losing audio before the queued prompt is consumed.
 #[test]
 fn queued_audio_metadata_and_gc_roots_survive_event_roundtrip() {

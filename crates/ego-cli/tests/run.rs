@@ -1752,11 +1752,14 @@ fn a_model_the_daemon_does_not_serve_exits_two() {
     assert!(finished.stderr.contains("llama4"), "{}", finished.stderr);
 }
 
-/// Exit 5, the money half: the gate refuses the generation *before* it is paid
-/// for, which is the only place a spending cap can be.
+/// Catches: worst-case admission blocking the first response, or a schema
+/// retry starting after actual monetary spend crosses the cap.
 #[test]
-fn a_money_budget_smaller_than_the_generation_exits_five() {
-    let stub = Stub::start(Plan::default());
+fn a_money_budget_stops_the_next_request_after_real_response_spend_crosses_it() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(costing("prose, not json", 1000, 1000))],
+        ..Plan::default()
+    });
     let ego = Ego::against(&stub);
     ego.home_file("models.toml", ANTHROPIC_FACTS);
     let finished = ego
@@ -1768,6 +1771,10 @@ fn a_money_budget_smaller_than_the_generation_exits_five() {
             support::FIXTURE_SESSION_ID,
             "--budget",
             "0.01$",
+            "--schema",
+            r#"{"type":"object"}"#,
+            "--schema-retries",
+            "5",
             "--output",
             "json",
             "Ask",
@@ -1776,9 +1783,10 @@ fn a_money_budget_smaller_than_the_generation_exits_five() {
 
     assert_eq!(finished.code, Some(5), "stderr: {}", finished.stderr);
     assert_eq!(finished.report()["exit_reason"], "budget");
-    assert!(
-        stub.generations().is_empty(),
-        "the request was sent despite being refused"
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "first response costs USD 0.01125; the next request must not be sent"
     );
 }
 

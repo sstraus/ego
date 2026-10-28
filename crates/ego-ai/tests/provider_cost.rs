@@ -305,12 +305,12 @@ async fn settle_through_core(
 ) -> (BudgetGate, Settlement, Vec<AiEvent>) {
     let metering = catalogue::provider_reported(decoder.as_ref());
     let mut gate = BudgetGate::new(usd("10"));
-    let reservation = gate
-        .reserve(&metering, Some(&quote()), &request(), &caps())
-        .expect("the reservation quote bounds it, whatever settles it");
+    let admission = gate
+        .admit(&metering, Some(&quote()), &request(), &caps())
+        .expect("admission does not reserve a monetary upper bound");
     let attempt = GenerationAttempt::new(
         GenerationId::new(),
-        reservation,
+        admission,
         &metering,
         Some(&quote()),
         &request(),
@@ -330,29 +330,6 @@ async fn settle_through_core(
     let events: Vec<AiEvent> = stream.by_ref().collect().await;
     let settlement = stream.settle(&mut gate).expect("its own gate settles it");
     (gate, settlement, events)
-}
-
-/// The reservation is not excused by the settlement. A stated cost arrives
-/// after the tokens are spent; if it could stand in for the bound, the gate
-/// would be admitting requests on a figure that does not exist yet.
-#[tokio::test]
-async fn a_provider_reported_row_is_still_bounded_by_its_table_before_it_runs() {
-    let decoder = XaiUsdTicks::new("2026-08-21");
-    let metering = catalogue::provider_reported(&decoder);
-    let mut gate = BudgetGate::new(usd("10"));
-
-    let reservation = gate
-        .reserve(&metering, Some(&quote()), &request(), &caps())
-        .expect("a $10 budget admits it");
-    // 200_000 cache-write tokens at $3.75/MTok plus 1_024 output at $15/MTok.
-    assert_eq!(
-        *reservation.upper_bound().expect("a bounded reservation"),
-        usd("0.76536")
-    );
-    assert_eq!(
-        *gate.outstanding().expect("a limited gate keeps totals"),
-        usd("0.76536")
-    );
 }
 
 /// The event the port gained, produced by a real decoder reading a real
@@ -399,23 +376,7 @@ async fn two_unrelated_wire_conventions_settle_through_the_identical_core_path()
     // properties, from the same `reconcile`.
     for settled in [&xai, &openrouter] {
         assert!(settled.reconciled.exact, "a stated total is not a guess");
-        assert!(settled.reconciled.over_bound.is_none());
     }
-    assert!(
-        xai_gate
-            .outstanding()
-            .expect("a limited gate keeps totals")
-            .amount
-            .is_zero()
-    );
-    assert!(
-        or_gate
-            .outstanding()
-            .expect("a limited gate keeps totals")
-            .amount
-            .is_zero()
-    );
-    assert!(xai_gate.breached().is_none() && or_gate.breached().is_none());
 
     // And neither is the table's answer. The transcript reports 1000 prompt
     // tokens and 250 output, which the quote prices at $0.00675 — orders of
@@ -484,17 +445,17 @@ async fn each_settlement_is_attributed_to_the_contract_that_produced_it() {
     assert_ne!(from_xai, from_openrouter);
 }
 
-/// A row that declared it states a cost, and then did not, settles at the
-/// reserved bound and says which of the two silences it was.
+/// A row that declared it states a cost, and then did not, stays unknown
+/// and says which of the two silences it was.
 ///
 /// The distinction matters: `ProviderReportedNoUsage` means no token counts
 /// arrived, which is a quote-settled row's problem. This is a provider that
 /// broke its own cost contract, and reading it as free would be a silent
 /// under-bill on every generation.
 #[tokio::test]
-async fn a_provider_that_states_no_cost_settles_at_the_bound_and_names_why() {
+async fn a_provider_that_states_no_cost_stays_unknown_and_names_why() {
     const NO_COST: &str = r#"{"prompt_tokens":1000,"completion_tokens":250,"total_tokens":1250}"#;
-    let (gate, settled, events) =
+    let (_gate, settled, events) =
         settle_through_core("xai", Arc::new(XaiUsdTicks::new("2026-08-21")), NO_COST).await;
 
     assert!(
@@ -504,20 +465,12 @@ async fn a_provider_that_states_no_cost_settles_at_the_bound_and_names_why() {
         "nothing was stated, so nothing may be reported: {events:?}"
     );
     assert_eq!(
-        settled.reconciled.charged,
-        Some(usd("0.76536")),
-        "the bound"
+        settled.reconciled.charged, None,
+        "missing actual cost is not an estimated bill"
     );
     assert!(
         !settled.reconciled.exact,
-        "the committed total is an overestimate and must not claim otherwise"
-    );
-    assert!(
-        gate.outstanding()
-            .expect("a limited gate keeps totals")
-            .amount
-            .is_zero(),
-        "the hold is released"
+        "the actual cost is unknown and must not claim otherwise"
     );
 
     assert_eq!(
@@ -550,12 +503,12 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
         settlement: SettlementSource::Quote,
     };
     let mut gate = BudgetGate::new(usd("10"));
-    let reservation = gate
-        .reserve(&metering, Some(&quote()), &request(), &caps())
+    let admission = gate
+        .admit(&metering, Some(&quote()), &request(), &caps())
         .expect("a $10 budget admits it");
     let attempt = GenerationAttempt::new(
         GenerationId::new(),
-        reservation,
+        admission,
         &metering,
         Some(&quote()),
         &request(),
@@ -689,7 +642,7 @@ const TOLLGATE_USAGE: &str = r#"{"prompt_tokens":1000,"completion_tokens":250,
 /// back to the quote fails here rather than looking correct.
 #[tokio::test]
 async fn a_decoder_written_outside_this_crate_settles_without_touching_the_near_side() {
-    let (gate, settled, events) = settle_through_core(
+    let (_gate, settled, events) = settle_through_core(
         "openrouter",
         Arc::new(TollgateStated::new("2026-08-22")),
         TOLLGATE_USAGE,
@@ -707,15 +660,6 @@ async fn a_decoder_written_outside_this_crate_settles_without_touching_the_near_
         settled.reconciled.exact,
         "a stated total is not a guess, whoever stated it"
     );
-    assert!(settled.reconciled.over_bound.is_none());
-    assert!(
-        gate.outstanding()
-            .expect("a limited gate keeps totals")
-            .amount
-            .is_zero(),
-        "the hold is released"
-    );
-    assert!(gate.breached().is_none());
 }
 
 /// The stranger's settlement is attributed to the stranger's own contract.

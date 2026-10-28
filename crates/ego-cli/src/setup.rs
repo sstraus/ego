@@ -402,7 +402,7 @@ async fn interpret(
         .unwrap_or(ego_core::cost::CurrencyCode::new("USD").expect("USD"));
     let mut gate = crate::budget::gate(&effective.ceilings, effective.clamped.money, currency);
     let reservation = gate
-        .reserve(
+        .admit(
             &resolved.metering,
             resolved.rates.as_ref().map(|rates| &rates.quote),
             &request,

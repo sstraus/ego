@@ -7,21 +7,19 @@
 //! Two sources, and the split is the whole design. A **hosted** model's
 //! pricing and capabilities are *supplied* — this repository writes down no
 //! price it cannot verify, because a stale rate does not merely mislead a
-//! report, it mints a reservation below what the provider will actually
-//! charge. A **local** model's are *discovered* from the daemon, because
+//! report, it also undercounts recorded spend against a configured cap. A **local** model's are *discovered* from the daemon, because
 //! `CLI.md` says local daemons are "catalogued live from the daemon" and
 //! because the number that matters most cannot be written down at all: the
 //! context Ollama serves depends on a server-side setting no API exposes.
 //!
-//! Nothing here guesses. A fact the daemon does not state stays unstated and
-//! the budget gate refuses, naming what was missing.
+//! Nothing here guesses. A fact the daemon does not state stays unstated;
+//! capability validation names required missing facts. Unknown response cost
+//! remains unknown and cannot become a fabricated charge.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-
-pub use crate::openrouter::admission_rates as openrouter_admission_rates;
 
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{MeteringRevision, RateSource};
@@ -79,14 +77,8 @@ pub const OLLAMA: &str = "ollama";
 /// (`ARCHITECTURE.md` §4).
 pub const LOCAL_UNMETERED: &str = "ego/builtin/ollama-local-unmetered/v1";
 
-/// Everything a generation needs to know about the model it is about to run.
-///
-/// One value rather than three lookups, because the three are only correct
-/// *together*: capabilities bound the reservation that the rates price, and
-/// both are resolved against the row the request is then sent to. A caller
-/// that could fetch them separately could mix a quote with another model's
-/// ceilings, which is the confusion `BudgetBinding` exists to catch one layer
-/// down.
+/// Model capabilities, billing arrangement and optional actual-usage rates
+/// resolved together for one provider row.
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
     /// The model id as the wire format must spell it — the part after the
@@ -131,7 +123,7 @@ pub struct HostedModel {
     /// Optional, and **not** a reason to reach for `Metering::Unmetered`. An
     /// OpenAI row is metered in currency whether or not this build holds
     /// rates for it — the provider will charge — and spelling ignorance as
-    /// "nobody is charging" would under-reserve every metered row the moment
+    /// "nobody is charging" would misreport every metered row the moment
     /// somebody did ask for a ceiling.
     pub rates: Option<ResolvedRates>,
 }
@@ -1014,9 +1006,8 @@ impl From<MissingCredential> for ResolveError {
 /// Takes no currency, and losing that parameter is the point. The old
 /// all-zero [`PricingQuote`] had to be denominated in something because a
 /// price list is denominated in something; this states that there is no price
-/// list, so the only currency in sight is the one the budget gate mints its
-/// zero reservation in — which is the gate's own limit currency, the only
-/// currency the zero could be compared against.
+/// list. The attributable zero charge is denominated in the session's
+/// settlement currency, not in a fabricated price list.
 ///
 /// It is still a claim, and still only ever built for a model the daemon
 /// reports as served locally — never for a provider id. What changed is that
@@ -1038,8 +1029,8 @@ pub fn unmetered() -> Metering {
 /// supply a [`HostedModel`] — the "explicitly operator-supplied, pinned
 /// source" slot of `ARCHITECTURE.md` §7.
 ///
-/// What it buys them: the gate reserves zero, so a *monetary* `--budget`
-/// admits every generation and says so through
+/// This policy produces zero real per-token spend. A *monetary* `--budget`
+/// cannot constrain that row's own charges and says so through
 /// [`PublicEvent::MeteringSelected`](ego_core::public::PublicEvent::MeteringSelected)
 /// rather than appearing to cap something. The *token* form of `--budget`
 /// binds such a row exactly as it binds any other.
@@ -1120,7 +1111,7 @@ pub fn table_rates(quote: PricingQuote) -> ResolvedRates {
 /// is now legal and useful: with no ceiling configured it runs unbounded and
 /// still settles exactly, from the figure that will appear on the invoice.
 /// What it cannot do is bound a ceiling, and that requirement now lives at
-/// `BudgetGate::reserve`, which refuses a `Limited` ledger with no rates
+/// `BudgetGate::admit`, which refuses a `Limited` ledger with no rates
 /// whatever the settlement source is.
 ///
 /// The [`ProviderCostRevision`](ego_core::cost::ProviderCostRevision) is

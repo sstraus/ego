@@ -211,23 +211,6 @@ impl<'s> SharedJournal<'s> {
         Ok(journal.state.constraints.listing())
     }
 
-    /// Warn before generation when currency metering has no usable cost bound.
-    pub(crate) fn reservation_cost_anomaly(
-        &self,
-        turn: TurnId,
-        model: &str,
-        metering: &crate::budget::Metering,
-        reservation: &crate::budget::Reservation,
-        cause: Option<crate::cost::PricingUnavailable>,
-    ) -> Result<(), SharedJournalError> {
-        if reservation.upper_bound().is_none()
-            && matches!(metering, crate::budget::Metering::Currency { .. })
-        {
-            self.cost_anomaly(turn, model, None, cause)?;
-        }
-        Ok(())
-    }
-
     /// Persist and publish the anomaly once, atomically with its replayed key.
     pub fn cost_anomaly(
         &self,

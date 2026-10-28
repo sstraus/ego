@@ -58,12 +58,12 @@ impl JudgeGeneration<'_, '_, '_> {
                 .map_or(&RateSource::None, |rates| &rates.source),
         ))?;
         let quote = profile.rates.as_ref().map(|rates| &rates.quote);
-        let reservation =
+        let admission =
             match self
                 .gate
-                .reserve(&profile.metering, quote, &request, &profile.capabilities)
+                .admit(&profile.metering, quote, &request, &profile.capabilities)
             {
-                Ok(reservation) => reservation,
+                Ok(admission) => admission,
                 Err(denied) => {
                     tracing::warn!(%denied, "the budget gate refused the judge generation");
                     let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
@@ -74,16 +74,9 @@ impl JudgeGeneration<'_, '_, '_> {
                     return Ok(JudgeGenerationResult::Ended(reason));
                 }
             };
-        self.journal.reservation_cost_anomaly(
-            turn,
-            &profile.identity.0,
-            &profile.metering,
-            &reservation,
-            profile.pricing_unavailable,
-        )?;
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
-            reservation,
+            admission,
             &profile.metering,
             quote,
             &request,
@@ -91,7 +84,7 @@ impl JudgeGeneration<'_, '_, '_> {
         ) {
             Ok(attempt) => attempt,
             Err(denied) => {
-                tracing::error!(%denied, "the judge reservation did not authorise its request");
+                tracing::error!(%denied, "the judge admission did not authorise its request");
                 return Ok(JudgeGenerationResult::Ended(ExitReason::Internal));
             }
         };

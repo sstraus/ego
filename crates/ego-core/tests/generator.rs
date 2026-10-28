@@ -133,7 +133,7 @@ mod generator {
     /// A reservation minted by a real [`BudgetGate`] against a generous
     /// limit.
     ///
-    /// There is deliberately no shortcut: `Reservation`'s constructor is
+    /// There is deliberately no shortcut: `GenerationAdmission`'s constructor is
     /// sealed inside `ego_core::budget`, so even a test cannot fabricate
     /// one, and going through `reserve` is the only way to call `generate`
     /// at all. That is the budget gate's whole enforcement mechanism, and
@@ -142,7 +142,7 @@ mod generator {
         let mut gate = BudgetGate::new(usd("1000"));
         let caps = capabilities(ReasoningCarryover::Portable);
         let reservation = gate
-            .reserve(&metered(), Some(&quote()), &gen_request(), &caps)
+            .admit(&metered(), Some(&quote()), &gen_request(), &caps)
             .expect("a generous budget admits an ordinary request");
         let attempt = GenerationAttempt::new(
             GenerationId::new(),

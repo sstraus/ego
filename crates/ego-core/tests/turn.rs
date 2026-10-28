@@ -1713,13 +1713,6 @@ mod turn {
         }
     }
 
-    fn outstanding(gate: &SharedBudgetGate) -> Option<Money> {
-        match gate.snapshot().expect("budget snapshot").ledger() {
-            Ledger::Unlimited => None,
-            Ledger::Limited { outstanding, .. } => Some(*outstanding),
-        }
-    }
-
     struct NoProcess;
 
     impl ProcessExecutor for NoProcess {
@@ -6661,11 +6654,6 @@ mod turn {
             "a stream nobody finished draining aborted, whatever it was about to say"
         );
         drop(turn);
-        assert_eq!(
-            outstanding(&gate),
-            Some(usd("0")),
-            "the reservation was released, not leaked"
-        );
     }
 
     #[test]
@@ -6999,8 +6987,28 @@ mod turn {
     #[test]
     fn a_refused_budget_stops_the_turn_without_starting_a_generation() {
         let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
-        // A gate too small to admit the upper bound of any request.
-        let mut gate = SharedBudgetGate::new(BudgetGate::new(usd("0.0000001")));
+        // A prior response crossed the cap; new requests must not start.
+        let mut spent = BudgetGate::new(usd("0.0000001"));
+        let req = GenRequest {
+            model: "prior".into(),
+            messages: ego_core::generator::types::Conversation::new(vec![
+                ego_core::generator::types::Message::text(Role::User, "prior"),
+            ])
+            .unwrap(),
+            tools: Vec::new(),
+            thinking: ThinkingLevel::Off,
+            max_output_tokens: Some(1),
+            parallel_tool_calls: false,
+            cache: None,
+            web_search: None,
+        };
+        let admission = spent
+            .admit(&metering(), Some(&quote()), &req, &caps())
+            .unwrap();
+        spent
+            .reconcile(admission, &quote().price(&tokens(1, 0, 0, 0)))
+            .unwrap();
+        let mut gate = SharedBudgetGate::new(spent);
         let tools = Tools::new(
             &fx.registry,
             ToolEffectPorts::new(
@@ -7486,11 +7494,6 @@ mod turn {
             "the in-memory state must describe exactly what reached the log"
         );
         drop(turn);
-        assert_eq!(
-            outstanding(&gate),
-            Some(usd("0")),
-            "an abandoned turn still settles the attempt it had in flight"
-        );
     }
 
     /// The decisive property of the preflight, and the reason it sits where it
@@ -7546,11 +7549,6 @@ mod turn {
         assert_eq!(outcome.exit_reason, ExitReason::Usage);
         assert!(!outcome.ok);
         drop(turn);
-        assert_eq!(
-            outstanding(&gate),
-            Some(usd("0")),
-            "the gate reserved anyway"
-        );
         assert_eq!(committed(&gate), Some(usd("0")), "the gate settled anyway");
         assert!(
             fx.generator.calls().is_empty(),
@@ -8172,24 +8170,24 @@ mod turn {
             }]
         );
 
-        // Before the gate is asked, and the falsifiable form of that is a
-        // gate that refuses: an operator whose `--budget` denies the very
-        // first generation still has to be told which metering was about to
-        // be charged, or the denial is unreadable.
-        let denied = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
-        *denied.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::new(usd("0.01")));
-        let (exit, ok, _) = run(&denied, SessionState::default(), "hi");
+        // A real first response crosses the cap; the next attempt must still
+        // announce metering before admission refuses it, without a new call.
+        let denied = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(1000, 0, 0, 200)),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        *denied.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::new(usd("0.001")));
+        let (exit, ok, state) = run(&denied, SessionState::default(), "first");
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok);
+        let (exit, ok, _) = run(&denied, state, "next");
         assert_eq!(exit, ExitReason::Budget);
-        assert!(!ok, "a cent cannot admit this generation");
+        assert!(!ok, "recorded USD 0.006 exceeds the USD 0.001 cap");
+        assert_eq!(metering_events(&denied).len(), 2);
         assert_eq!(
-            metering_events(&denied).len(),
+            denied.generator.calls().len(),
             1,
-            "a refused generation was still metered: {:?}",
-            denied.sink.events()
-        );
-        assert!(
-            denied.generator.calls().is_empty(),
-            "and the provider was never reached, so this is genuinely pre-gate"
+            "no call after the cap is crossed"
         );
     }
 
@@ -8417,11 +8415,10 @@ mod turn {
         }
     }
 
-    /// A subscription reserves nothing, so a monetary limit smaller than any
-    /// currency bound still admits the generation. This is the gate actually
-    /// behaving differently, not just a label on a log line.
+    /// Catches: worst-case reservation denying a cheap currency generation,
+    /// or subscription settlement being replaced by per-token rates.
     #[test]
-    fn a_subscription_generation_is_admitted_by_a_budget_no_currency_row_could_pass() {
+    fn currency_and_subscription_admit_small_caps_and_record_distinct_real_spend() {
         let script = || {
             vec![vec![
                 AiEvent::Usage(tokens(1_000, 0, 0, 200)),
@@ -8429,12 +8426,13 @@ mod turn {
             ]]
         };
 
-        // A cent could not cover the $0.76536 worst case of the currency row.
+        // A cent covers the actual response, without a worst-case hold.
         let currency = Fixture::new(script());
         *currency.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::new(usd("0.01")));
         let (exit, ok, _) = run(&currency, SessionState::default(), "hi");
-        assert_eq!(exit, ExitReason::Budget);
-        assert!(!ok, "a cent cannot admit a currency-metered generation");
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok, "a small cap does not reserve the worst case");
+        assert_eq!(committed(&currency.gate.borrow()), Some(usd("0.006")));
 
         let flat = Fixture::new(script());
         *flat.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::new(usd("0.01")));
@@ -8573,9 +8571,9 @@ mod turn {
 
     /// A provider that declared it states a cost and then did not: the money
     /// is unknown, named as *that* silence rather than the usage one, and the
-    /// gate charges the full reserved bound.
+    /// gate records no fabricated charge.
     #[test]
-    fn a_missing_stated_cost_settles_at_the_bound_and_not_at_zero() {
+    fn a_missing_stated_cost_is_unknown_and_does_not_invent_spend() {
         let fx = Fixture::new(vec![vec![
             AiEvent::Usage(tokens(1_000, 0, 0, 200)),
             AiEvent::Stop(StopReason::Stop),
@@ -8598,8 +8596,8 @@ mod turn {
         );
         assert_eq!(
             committed(&fx.gate.borrow()),
-            Some(usd("0.0155925")),
-            "an unknown cost charges the bound, never zero"
+            Some(usd("0")),
+            "unknown cost cannot become a fabricated bill"
         );
     }
 
@@ -8650,14 +8648,7 @@ mod turn {
                 1,
                 "missing cost must be visible once, capped={capped}"
             );
-            assert_eq!(
-                notices[0]["estimated_upper_bound"],
-                if priced {
-                    json!({"amount":"0.0155925","currency":"USD"})
-                } else {
-                    serde_json::Value::Null
-                }
-            );
+            assert_eq!(notices[0]["estimated_upper_bound"], serde_json::Value::Null);
             let durable = fx
                 .store
                 .events()
@@ -8669,14 +8660,7 @@ mod turn {
                 state.errors.is_empty(),
                 "an anomaly is not a provider failure"
             );
-            if priced {
-                assert!(
-                    committed(&fx.gate.borrow()).unwrap().amount >= usd("0.031185").amount,
-                    "both missing actual costs must charge their reservation, not zero"
-                );
-            } else {
-                assert_eq!(committed(&fx.gate.borrow()), capped.then(|| usd("0")));
-            }
+            assert_eq!(committed(&fx.gate.borrow()), capped.then(|| usd("0")));
         }
     }
 
@@ -9999,7 +9983,6 @@ mod turn {
                         .any(|kind| kind == "generation_started")
                 );
                 assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
-                assert_eq!(outstanding(&gate), Some(usd("0")));
                 assert_eq!(committed(&gate), Some(usd("0")));
             }
         }
@@ -10107,7 +10090,6 @@ mod turn {
                     .any(|event| matches!(event, PublicEvent::MeteringSelected { .. }))
             );
             assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
-            assert_eq!(outstanding(&gate), Some(usd("0")));
             assert_eq!(committed(&gate), Some(usd("0")));
             let recovered =
                 block_on(turn.run("recover first")).expect("recovered stream is durable");
@@ -10236,8 +10218,7 @@ mod turn {
                     ..
                 }
             )));
-            assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.03205875")));
+            assert_eq!(committed(&gate), Some(usd("0")));
         }
 
         #[test]
@@ -10308,7 +10289,6 @@ mod turn {
                     .iter()
                     .any(|kind| kind == "generation_started")
             );
-            assert_eq!(outstanding(&gate), Some(usd("0")));
             assert_eq!(committed(&gate), Some(usd("0")));
         }
 
@@ -10564,8 +10544,7 @@ mod turn {
                     }
                 )));
                 drop(turn);
-                assert_eq!(outstanding(&gate), Some(usd("0")));
-                assert_eq!(committed(&gate), Some(usd("0.03205875")));
+                assert_eq!(committed(&gate), Some(usd("0")));
             }
         }
 
@@ -10673,8 +10652,7 @@ mod turn {
                     ..
                 }
             )));
-            assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.03205875")));
+            assert_eq!(committed(&gate), Some(usd("0")));
             assert!(cache.0.lock().unwrap().is_empty());
         }
 
@@ -10789,8 +10767,7 @@ mod turn {
                 }
             )));
             drop(turn);
-            assert_eq!(outstanding(&gate), Some(usd("0")));
-            assert_eq!(committed(&gate), Some(usd("0.03205875")));
+            assert_eq!(committed(&gate), Some(usd("0")));
         }
 
         /// The occupancy report names the window of the model that produced

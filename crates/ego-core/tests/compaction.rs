@@ -2079,7 +2079,7 @@ fn over_window_compaction_fits_summarizer_instead_of_refusing() {
 // Catches: private compaction reports an unknown bill for a definitely-unsent
 // failure, or incorrectly waives a possibly-sent failure with missing usage.
 #[test]
-fn unpriced_compaction_announces_cost_anomaly_before_generation() {
+fn exact_compaction_cost_does_not_require_reservation_notices() {
     use ego_core::budget::{PricingQuote, ResolvedRates, SettlementSource};
     use ego_core::cost::{PricingRevision, ProviderCostRevision, RateSource};
 
@@ -2152,25 +2152,9 @@ fn unpriced_compaction_announces_cost_anomaly_before_generation() {
         let notices: Vec<_> = events.iter().enumerate().filter_map(|(index, event)| {
             matches!(&event.kind, EventKind::CostAnomaly { model, estimated_upper_bound: None, .. } if model == "summary").then_some(index)
         }).collect();
-        let started = events
-            .iter()
-            .position(|event| {
-                matches!(
-                    event.kind,
-                    EventKind::GenerationStarted {
-                        role: GenerationRole::Compaction,
-                        ..
-                    }
-                )
-            })
-            .unwrap();
-        if case == "unpriced" {
-            if notices.len() != 1 || notices[0] >= started {
-                failures.push(format!("{case}: expected one cap-coverage notice before generation, got {notices:?}, generation={started}"));
-            }
-        } else if !notices.is_empty() {
+        if !notices.is_empty() {
             failures.push(format!(
-                "{case}: unexpected missing-bound notices {notices:?}"
+                "{case}: exact actual cost must not warn about a removed reservation: {notices:?}"
             ));
         }
         assert!(
