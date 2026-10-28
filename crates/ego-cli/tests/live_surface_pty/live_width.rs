@@ -1,8 +1,42 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // Catches: completed tool rows retain launch width after a PTY grows or shrinks.
 #[test]
 fn tool_rows_follow_real_pty_growth_and_shrink() {
+    width_fixture(false);
+}
+
+// Catches: a late cursor reply abandons the admitted prompt before generation.
+#[test]
+fn late_cursor_reply_does_not_drop_width_submit() {
+    width_fixture(true);
+}
+
+struct LateCursorReply {
+    writer: Box<dyn Write + Send>,
+    delay_next: Arc<AtomicBool>,
+}
+
+impl Write for LateCursorReply {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.starts_with(b"\x1b[")
+            && bytes.ends_with(b"R")
+            && self.delay_next.swap(false, Ordering::SeqCst)
+        {
+            // Fault injection, not a readiness wait: exceed Crossterm's 2000 ms
+            // CPR budget while still delivering the real terminal's reply.
+            thread::sleep(Duration::from_millis(2500));
+        }
+        self.writer.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+fn width_fixture(late_reply: bool) {
     let command = format!("printf '%s' {}", "regression_case-".repeat(20));
     let args = serde_json::json!({"argv": ["/bin/sh", "-c", command]}).to_string();
     let mut completions = Vec::new();
@@ -39,7 +73,12 @@ fn tool_rows_follow_real_pty_growth_and_shrink() {
         })
         .unwrap();
     let child = pair.slave.spawn_command(ego.pty_command()).unwrap();
-    let (mut input, responder, writer_join) = writer_owner(pair.master.take_writer().unwrap());
+    let delay_next = Arc::new(AtomicBool::new(false));
+    let writer = LateCursorReply {
+        writer: pair.master.take_writer().unwrap(),
+        delay_next: Arc::clone(&delay_next),
+    };
+    let (mut input, responder, writer_join) = writer_owner(Box::new(writer));
     let size = Arc::new(Mutex::new((40, 80)));
     let (reader, reader_join) = stream_with_resizable_screen(
         pair.master.try_clone_reader().unwrap(),
@@ -57,6 +96,7 @@ fn tool_rows_follow_real_pty_growth_and_shrink() {
     let mut captures = Vec::new();
     for (index, width) in [80, 200, 60].into_iter().enumerate() {
         drain_until_quiet(&reader, &mut output);
+        let resize_start = output.len();
         *size.lock().unwrap() = (40, width);
         session
             .pair
@@ -68,6 +108,12 @@ fn tool_rows_follow_real_pty_growth_and_shrink() {
                 pixel_height: 0,
             })
             .unwrap();
+        if late_reply && index == 2 {
+            // Isolate the admission query from the resize's own cursor queries.
+            until_prompt_from(&reader, &mut output, resize_start);
+            drain_until_quiet(&reader, &mut output);
+            delay_next.store(true, Ordering::SeqCst);
+        }
         let start = output.len();
         input.write_all(b"run the width fixture\r").unwrap();
         input.flush().unwrap();

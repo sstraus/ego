@@ -2602,9 +2602,10 @@ fn own_terminal(
             let (request, answer) = super::ImageRequest::new(draft.clone(), operation);
             // Retire the suspended prompt before draining output. Resuming it
             // without retiring its footprint can leave a second visible draft.
-            if editor.erase_last_prompt().is_err()
-                || inspections.send(HostCommand::Images(request)).is_err()
-            {
+            // A late cursor report must not abandon admission. Erasure is
+            // best-effort; accept_buffer still repaints the accepted prompt.
+            let _ = editor.erase_last_prompt();
+            if inspections.send(HostCommand::Images(request)).is_err() {
                 break;
             }
             inspection_waker.wake();
