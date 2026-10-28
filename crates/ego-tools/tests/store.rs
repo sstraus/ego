@@ -2266,7 +2266,7 @@ mod store {
         let bad_log = log_path(dir.path(), &bad);
         let bad_dir = bad_log.parent().unwrap();
         let permissions = std::fs::metadata(bad_dir).unwrap().permissions();
-        std::fs::set_permissions(bad_dir, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(bad_dir, std::fs::Permissions::from_mode(0o0)).unwrap();
         let probe = OsIo.exists(&bad_log);
         let result = store.list();
         std::fs::set_permissions(bad_dir, permissions).unwrap();
