@@ -2519,6 +2519,7 @@ mod image_admission_tests {
             images: retained_draft(),
             ..SurfaceStatus::default()
         }));
+        status.lock().unwrap().begin_activity();
         let before = status.lock().unwrap().images.labels();
         let phase = SurfacePhase::new(EditPhase::Busy);
         let asked = AtomicBool::new(false);
