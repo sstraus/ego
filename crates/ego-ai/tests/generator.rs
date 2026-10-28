@@ -185,12 +185,12 @@ fn credential_with_base_override(row: &ProviderRow) -> ResolvedCredential {
 
 /// Mints a real attempt through the only door there is.
 ///
-/// `Reservation`'s constructor is sealed in `ego_core::budget`, so this has to
-/// go through `BudgetGate::reserve` — the same fact `tests/skeleton.rs` leans
+/// `GenerationAdmission`'s constructor is sealed in `ego_core::budget`, so this has to
+/// go through `BudgetGate::admit` — the same fact `tests/skeleton.rs` leans
 /// on, and the reason a generator cannot route around the gate.
 fn attempt_for(gate: &mut BudgetGate, req: &GenRequest) -> GenerationAttempt {
     let reservation = gate
-        .reserve(&metered(), Some(&quote()), req, &caps())
+        .admit(&metered(), Some(&quote()), req, &caps())
         .expect("a $10 budget admits an ordinary request");
     GenerationAttempt::new(
         GenerationId::new(),
@@ -474,7 +474,7 @@ fn a_locally_refused_generation_still_settles_and_releases_the_hold() {
         "nothing was sent, so retrying cannot double-bill"
     );
     assert!(
-        gate.outstanding()
+        gate.committed()
             .expect("a limited gate keeps totals")
             .amount
             .is_zero()

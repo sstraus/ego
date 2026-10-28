@@ -936,7 +936,7 @@ fn resolve_openrouter_quote(
 
 // Catches: absent OpenRouter cache prices deny reservation or underprice cached usage.
 #[test]
-fn openrouter_absent_cache_prices_admit_reservation_at_prompt_rate() {
+fn openrouter_absent_cache_prices_admit_without_fabricating_tariffs() {
     use ego_core::budget::BudgetGate;
     use ego_core::cost::{CostDelta, CurrencyCode, Money};
     use ego_core::state::Usage;
@@ -946,12 +946,7 @@ fn openrouter_absent_cache_prices_admit_reservation_at_prompt_rate() {
     ))
     .unwrap();
     let mut failures = Vec::new();
-    for (row, expected) in capture["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(["0.000121", "0.0001428"])
-    {
+    for row in capture["data"].as_array().unwrap() {
         let model = row["id"].as_str().unwrap();
         let resolved = resolve_openrouter_quote(model, captured_openrouter_quote(row));
         let quote = &resolved.rates.as_ref().unwrap().quote;
@@ -959,7 +954,7 @@ fn openrouter_absent_cache_prices_admit_reservation_at_prompt_rate() {
             "2".parse().unwrap(),
             CurrencyCode::new("USD").unwrap(),
         ));
-        if let Err(error) = gate.reserve(
+        if let Err(error) = gate.admit(
             &resolved.metering,
             Some(quote),
             &request(model, vec![]),
@@ -976,10 +971,9 @@ fn openrouter_absent_cache_prices_admit_reservation_at_prompt_rate() {
             reasoning_tokens: None,
             web_search_requests: 0,
         });
-        if !matches!(cost, CostDelta::Known { amount, .. } if amount.amount == expected.parse().unwrap())
-        {
+        if !matches!(cost, CostDelta::Unknown(_)) {
             failures.push(format!(
-                "{model}: cached price {cost:?}, expected USD {expected}"
+                "{model}: absent cache tariff must remain unknown, got {cost:?}"
             ));
         }
     }
@@ -1014,18 +1008,14 @@ fn openrouter_absent_base_prices_admit_without_fabricating_a_price() {
             "2".parse().unwrap(),
             CurrencyCode::new("USD").unwrap(),
         ));
-        let reservation = gate
-            .reserve(
+        let _admission = gate
+            .admit(
                 &resolved.metering,
                 resolved.rates.as_ref().map(|r| &r.quote),
                 &request(model, vec![]),
                 &resolved.capabilities,
             )
             .expect("missing base prices must still admit generation");
-        assert!(
-            reservation.upper_bound().is_none(),
-            "do not invent a base price"
-        );
     }
 }
 

@@ -577,7 +577,6 @@ fn a_money_ceiling_becomes_the_ledger_and_a_clamp_is_carried_into_it() {
             limit: usd_money("5"),
             clamped_from: None,
             committed: usd_money("0"),
-            outstanding: usd_money("0"),
         }
     );
 
@@ -595,7 +594,6 @@ fn a_money_ceiling_becomes_the_ledger_and_a_clamp_is_carried_into_it() {
             limit: usd_money("5"),
             clamped_from: Some(usd_money("20")),
             committed: usd_money("0"),
-            outstanding: usd_money("0"),
         }
     );
 }

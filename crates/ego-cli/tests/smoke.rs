@@ -134,7 +134,7 @@ fn pessimistic_quote() -> PricingQuote {
 ///
 /// A smoke does not resolve a model — resolution is what the *product* does,
 /// and this file is about the bytes — so the context window here is only what
-/// `BudgetGate::reserve` needs to compute an upper bound.
+/// `BudgetGate::admit` needs to compute an upper bound.
 ///
 /// The output ceiling is the **largest** any smoke request asks for, not the
 /// smallest: `budget::ceilings` takes `requested.min(max)`, so a capability
@@ -172,7 +172,7 @@ fn bounded(req: &GenRequest, metering: &Metering) {
         _ => Some(quote),
     };
     let mut gate = BudgetGate::new(usd("0.05"));
-    gate.reserve(metering, quote.as_ref(), req, &caps())
+    gate.admit(metering, quote.as_ref(), req, &caps())
         .unwrap_or_else(|refused| {
             panic!("a smoke request must fit in five cents, and this one does not: {refused:?}")
         });
@@ -275,7 +275,7 @@ fn attempt_for(gate: &mut BudgetGate, req: &GenRequest, metering: &Metering) -> 
         _ => Some(pessimistic_quote()),
     };
     let reservation = gate
-        .reserve(metering, quote.as_ref(), req, &caps())
+        .admit(metering, quote.as_ref(), req, &caps())
         .unwrap_or_else(|err| panic!("smoke request was not admitted: {err:?}"));
     GenerationAttempt::new(
         ego_core::event::id::GenerationId::new(),

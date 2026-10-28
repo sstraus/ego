@@ -107,16 +107,15 @@ unknown and fails closed where needed. Image bytes enter session blobs before
 provider-specific encoding; selecting a model without image support refuses them.
 
 Subscription metering, local unmetered work, and known API pricing are different.
-Unknown monetary cost does not become USD 0. With a monetary cap, unpriced
-generations can run while cap headroom remains. The cap covers known and
-estimable spend only; without a usable price there is no monetary reservation
-and no finite monetary bound for that work. Admission still stops when
-committed spend plus outstanding reservations reaches the cap.
+Unknown monetary cost does not become USD 0. Monetary admission checks recorded
+response spend only and refuses a new request after that spend exceeds the cap.
+There are no worst-case reservations. A sequential stream can overshoot by one
+request; concurrent requests already in flight on the shared parent/child gate
+may still settle after the cap is crossed. Equality still admits a request.
 
 A durable cost-anomaly notice appears once per session/model, including after
-resume. If actual cost is unknown but a reserved estimate exists, that estimate
-counts against the cap without being reported as known actual cost. A later
-known actual cost from an unpriced generation also counts against the cap.
+resume. Unknown actual cost adds no invented estimate to spend. A later known
+response cost still counts against the cap. Unpriced work is not covered by it.
 Subscription and local metering remain distinct from unknown API prices;
 a token ceiling does not invent a monetary quote. See
 [configuration](../reference/configuration.md) for every model/pricing field.

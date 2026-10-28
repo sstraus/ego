@@ -189,7 +189,7 @@ pub enum ItemKind {
 ///
 /// The three ways ego is paid for, and the reason a monetary budget binds
 /// only the first: the other two have no per-token currency charge to
-/// reserve against. Deliberately not carrying the rates — a public event
+/// count against. Deliberately not carrying the rates — a public event
 /// says how a run is billed, not what a provider's table contains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,8 +225,7 @@ pub enum CeilingEffect {
         clamped_from: Option<Money>,
     },
     /// A monetary ceiling was configured against a row no monetary ceiling
-    /// can bind: every reservation on a flat-fee row is zero, so the gate
-    /// admits until the provider refuses.
+    /// can bind: its actual per-token currency charge is zero.
     Inapplicable {
         limit: Money,
         metering: MeteringKind,
@@ -295,8 +294,7 @@ pub enum PublicEvent {
     /// usage off a turn-level event.
     ///
     /// It exists because a monetary `--budget` bounds nothing on a row that
-    /// is not metered in currency: every reservation there is zero, so the
-    /// gate admits until the provider refuses. The operator asked for a
+    /// is not metered in currency: its actual per-token currency charge is zero. The operator asked for a
     /// ceiling and has to be told it does not bind — a silently vacuous flag
     /// is not an acceptable way to deliver that. The *token* form of
     /// `--budget` is unaffected and constrains such a row exactly as it
@@ -505,8 +503,7 @@ impl PublicEvent {
                     }
                 } else {
                     // A monetary ceiling cannot reach a row with no per-token
-                    // currency charge: the metering mints a zero reservation,
-                    // so the limit admits everything. Said outright rather
+                    // currency charge: this row adds no monetary spend. Said outright rather
                     // than left for the operator to infer from a limit that
                     // never fires.
                     CeilingEffect::Inapplicable {

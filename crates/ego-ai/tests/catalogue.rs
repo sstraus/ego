@@ -23,7 +23,7 @@ use ego_ai::resolver::{OllamaDaemon, Supplied};
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::{ProviderCost, XaiUsdTicks};
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
-use ego_core::cost::{CurrencyCode, MeteringRevision, PricingRevision, RateSource, UnknownCost};
+use ego_core::cost::{CurrencyCode, MeteringRevision, PricingRevision, RateSource};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
@@ -256,13 +256,6 @@ fn a_hosted_row_with_capabilities_and_no_rates_resolves() {
         "it is still billed in money"
     );
     assert_eq!(resolved.rates, None);
-    assert_eq!(
-        resolved
-            .metering
-            .upper_bound(None, &request(), &resolved.capabilities, usd()),
-        Ok(None),
-        "with no rates there is no bound to compute, and that is not an error"
-    );
 }
 
 #[test]
@@ -286,21 +279,6 @@ fn a_hosted_model_is_not_quietly_free() {
         )
         .expect("it was supplied");
 
-    let bound = resolved
-        .metering
-        .upper_bound(
-            resolved.rates.as_ref().map(|rates| &rates.quote),
-            &request(),
-            &resolved.capabilities,
-            usd(),
-        )
-        .expect("a fully priced model with stated ceilings can be bounded")
-        .expect("and rates were supplied, so there is a bound");
-
-    assert!(
-        !bound.amount.is_zero(),
-        "a hosted generation that bounds to nothing is a table that forgot to charge"
-    );
     // Two spellings of "not the local policy", and both are needed. The
     // variant check is the one the type system now makes possible: a hosted
     // row that came out `Unmetered` would bound to zero whatever its
@@ -643,36 +621,8 @@ fn an_unmetered_local_model_needs_no_output_ceiling_to_bound_zero_spend() {
         ..request()
     };
 
-    assert_eq!(
-        resolved
-            .metering
-            .upper_bound(None, &uncapped, &resolved.capabilities, usd()),
-        Ok(Some(ego_core::cost::Money::zero(usd()))),
-        "an unmetered request reserves zero without inventing an output cap"
-    );
     assert_eq!(uncapped.max_output_tokens, None);
     assert_eq!(resolved.capabilities.max_output_tokens, None);
-
-    // The same missing output ceiling must still refuse currency metering:
-    // no finite paid output reservation can be proved without it.
-    assert_eq!(
-        tabulated().upper_bound(
-            Some(&hosted_quote()),
-            &uncapped,
-            &resolved.capabilities,
-            usd()
-        ),
-        Err(UnknownCost::UnstatedCeiling {
-            ceiling: ego_core::cost::Ceiling::Output
-        })
-    );
-
-    let bound = resolved
-        .metering
-        .upper_bound(None, &request(), &resolved.capabilities, usd())
-        .expect("a capped request against an unmetered model")
-        .expect("an unmetered row bounds at zero, it does not go unbounded");
-    assert!(bound.amount.is_zero());
 }
 
 // --- the two rows nobody charges per token ---
@@ -705,13 +655,6 @@ fn a_row_with_no_per_token_price_carries_no_rates_at_all_rather_than_zeroed_ones
     let resolved =
         block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http)).expect("resolved");
     assert_eq!(resolved.metering, metering, "the resolver mints that row");
-
-    let bound = resolved
-        .metering
-        .upper_bound(None, &request(), &resolved.capabilities, usd())
-        .expect("no category can be unpriced when there are no categories")
-        .expect("an unmetered row bounds at zero, it does not go unbounded");
-    assert!(bound.amount.is_zero());
 }
 
 #[test]
@@ -771,15 +714,6 @@ fn a_subscription_hosted_row_resolves_to_the_subscription_that_was_supplied() {
         resolved.rates, None,
         "a flat fee has no per-token rates to carry"
     );
-    let bound = resolved
-        .metering
-        .upper_bound(None, &request(), &resolved.capabilities, usd())
-        .expect("stated ceilings, and no per-token charge to bound")
-        .expect("a flat fee bounds at zero, it does not go unbounded");
-    assert!(
-        bound.amount.is_zero(),
-        "a flat fee is not spent per request, so there is nothing to reserve"
-    );
 }
 
 #[test]
@@ -815,16 +749,20 @@ fn a_built_in_subscription_row_cannot_be_repriced_as_currency() {
 /// model with an unknown context window" is not something anyone can check
 /// later.
 #[test]
-fn a_subscription_with_no_stated_context_window_is_still_refused() {
-    let no_window = ModelCapabilities {
+fn subscription_admission_does_not_require_a_context_reservation() {
+    let mut gate = ego_core::budget::BudgetGate::new(ego_core::cost::Money::zero(usd()));
+    let caps = ModelCapabilities {
         max_context_tokens: None,
         ..hosted_caps()
     };
-    assert_eq!(
-        subscription("acme/pro-plan/2026-08").upper_bound(None, &request(), &no_window, usd()),
-        Err(UnknownCost::UnstatedCeiling {
-            ceiling: ego_core::cost::Ceiling::Context
-        })
+    assert!(
+        gate.admit(
+            &subscription("acme/pro-plan/2026-08"),
+            None,
+            &request(),
+            &caps
+        )
+        .is_ok()
     );
 }
 
@@ -864,21 +802,6 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
         )
         .expect("it was supplied");
     assert_eq!(resolved.metering, metering);
-    assert!(
-        !resolved
-            .metering
-            .upper_bound(
-                resolved.rates.as_ref().map(|rates| &rates.quote),
-                &request(),
-                &resolved.capabilities,
-                usd(),
-            )
-            .expect("the quote bounds it")
-            .expect("and rates were supplied, so there is a bound")
-            .amount
-            .is_zero(),
-        "a stated cost settles the charge; it does not excuse the reservation"
-    );
 }
 
 /// And the case §1 made legal: the same row with no rates at all. It settles
@@ -886,7 +809,7 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
 /// `ProviderReported` settlement is the one arrangement where that is a
 /// genuinely complete accounting rather than a gap.
 #[test]
-fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
+fn a_provider_reported_row_with_no_rates_is_not_an_error() {
     let decoder = XaiUsdTicks::new("2026-08-21");
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "anthropic/claude-opus-5",
@@ -905,13 +828,13 @@ fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
         )
         .expect("it was supplied");
 
-    assert_eq!(
-        resolved
-            .metering
-            .upper_bound(None, &request(), &resolved.capabilities, usd()),
-        Ok(None),
-        "no rates is no bound, not a refusal"
-    );
+    assert_eq!(resolved.rates, None);
+    assert!(matches!(
+        resolved.metering,
+        Metering::Currency {
+            settlement: SettlementSource::ProviderReported { .. }
+        }
+    ));
 }
 
 // --- the row decides what resolves it ---

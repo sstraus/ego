@@ -577,7 +577,7 @@ accept `--worktree` or create a hidden second checkout.
     --schema S          JSON Schema (@file or inline): the final answer MUST
                         validate; ego re-prompts on mismatch, fails code 1 after
                         --schema-retries N (default 2)
-    --budget B          hard cap: '2.5$' or '400k' tokens → exit 5 when hit
+    --budget B          spend cap: '2.5$' or '400k' tokens → exit 5 after exceeded
     --max-turns N       cap agent turns
     --timeout DUR       wall clock: '90s', '10m' → exit 124
     --retry N           provider retries, delivery-certainty-aware: a
@@ -699,7 +699,7 @@ Each repeatable `--fallback P/M` is an ordered
 candidate that is re-resolved from current facts and attempted only after
 capability and request-expressibility checks preserve tools, images, schemas,
 limits, and reasoning state. A possibly-sent attempt that showed visible or
-unknown-effect output stops automatic retry, and any possibly-sent attempt stops fallback. Every attempt has a fresh ID, reservation, request digest, settlement,
+unknown-effect output stops automatic retry, and any possibly-sent attempt stops fallback. Every attempt has a fresh ID, admission, request digest, settlement,
 usage, and cost; output totals fold them without hiding failed or charged work.
 See the accepted attempt-ownership ADR.
 
@@ -2630,31 +2630,32 @@ an interactive active-session transition. Ephemeral sources cannot compact.
 Human terminal sessions use the same automatic policy as managed terminals, so
 recovery does not depend on detecting a terminal's operator.
 
-### Request output and reservation bounds
+### Request output and response spend
 
 `ego run` and `ego compact` accept `--max-output-tokens N`, where `N` is a
 positive integer. The same `max_output_tokens` key is accepted in configuration
-and named profiles. Each generated request uses the smaller of the configured
-cap and the model output maximum. Without a cap, ego uses the model output
-maximum, not the context window. A missing output maximum leaves the monetary
-reservation unbounded and raises a cost anomaly notice. System output caps cannot be relaxed by lower
-configuration layers. `ego compact --budget LIMIT` uses the same spend grammar
-and admission gate as `run`.
+and named profiles. Each request uses the smaller of the configured output cap
+and the model output maximum. Without a cap, ego uses the model output maximum,
+not the context window. System output caps cannot be relaxed by lower layers.
+These output controls are provider request limits, not monetary reservations.
+`ego compact --budget LIMIT` uses the same spend grammar and gate as `run`.
 
-Currency admission bounds text input by serialized UTF-8 bytes, including
-message framing and tool schemas, capped by the model context window. Image
-and opaque reasoning inputs retain the full context-window bound because ego
-has no provider-independent maximum for those inputs. Input uses the dearest
-reachable rate, including cache creation; output uses the request cap. Actual
-provider usage settles the reservation after the response. Missing, offline or
-unusable table prices do not refuse model resolution. One durable `cost_anomaly`
-notice per session/model states that any configured cap cannot cover unpriced
-spend. When price discovery fails, its optional `cause` is a closed, credential-safe
-category with a recovery action, not raw source text. Offline empty/expired
-caches, fetch failures, invalid tables/rates and missing rows remain distinct.
-The notice is visible in text (including quiet mode), JSONL and ACP.
-Unknown actual cost charges the reserved upper bound when available, not a
-fabricated actual cost. Known and estimated spend remain subject to the cap.
+A monetary budget checks only recorded response spend. It admits while that
+spend is less than or equal to the cap, then refuses the next request once spend
+exceeds it. Actual provider cost, or actual usage priced against the captured
+quote, is added after each response. There is no full-context or maximum-output
+monetary hold and no reservation setting or compatibility flag.
+
+A sequential stream can overshoot by one request. Concurrent parent and child
+requests share the gate without serialization: requests already in flight when
+the cap is crossed may still settle, but no new request is admitted afterward.
+This is not a strict invoice ceiling.
+
+Missing, offline, or unusable prices do not refuse generation. Unknown actual
+cost stays unknown and adds no invented estimate to recorded spend. One durable
+`cost_anomaly` notice per session/model states that the cap cannot cover unpriced
+spend. Its optional `cause` is a closed, credential-safe source-failure category
+with a recovery action. The notice is visible in text, JSONL, and ACP.
 
 ### Checked session goals (2026-10-15)
 

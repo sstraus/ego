@@ -81,7 +81,7 @@ pub enum AiEvent {
     /// More than one is legal, and sometimes better. A wire that states its
     /// input tokens before generating can report them the moment they arrive,
     /// so a stream cut before any output settles against a real figure
-    /// instead of `UsageReport::Missing` and its pessimistic bound. What must
+    /// instead of `UsageReport::Missing` and an unknown cost. What must
     /// hold is not "exactly one" but that the events **sum to the provider's
     /// final total**.
     Usage(Usage),
@@ -181,27 +181,27 @@ pub trait Generator: Send + Sync {
     /// Prove locally that the adapter can encode this exact request.
     ///
     /// This performs no I/O. It is required, with no default, so a new adapter
-    /// cannot silently opt out of the proof callers need before reservation.
+    /// cannot silently opt out of the proof callers need before admission.
     fn ensure_expressible(&self, req: &GenRequest) -> Result<(), RequestExpressibilityError>;
 
     /// Generate the next assistant turn.
     ///
     /// The [`GenerationAttempt`] is the budget gate, enforced in the
     /// signature rather than by convention: it can only be built from a
-    /// [`Reservation`](crate::budget::Reservation), whose constructor is
+    /// [`GenerationAdmission`](crate::budget::GenerationAdmission), whose constructor is
     /// sealed inside [`crate::budget`], so the only source is
-    /// `BudgetGate::reserve`, which enforces a configured cap on known and
-    /// estimable spend. Missing prices admit an explicitly unbounded attempt
-    /// with a durable anomaly notice. A generation that skipped the gate does
-    /// not compile.
+    /// `BudgetGate::admit`, which refuses new requests once recorded real
+    /// spend exceeds a configured cap. Missing response cost remains unknown
+    /// and receives a durable anomaly notice. A generation that skipped
+    /// admission does not compile.
     ///
     /// Taken **by value**, and handed back inside the returned
     /// [`AttemptStream`]. Not borrowed: a borrowed token stays usable for a
     /// second generation. Not consumed and discarded either — settling needs
     /// `&mut BudgetGate`, which no implementor of this trait has, so an
     /// attempt that did not come back out could never be settled by anyone.
-    /// Riding inside the stream is what makes "the hold survives until the
-    /// stream ends" a fact about ownership rather than a rule to remember.
+    /// The admission remains owned until settlement, rather than being
+    /// reusable by a caller while the stream is running.
     ///
     /// Implementors build the return value with [`AttemptStream::new`]; they
     /// do not need to touch the attempt otherwise.

@@ -3,7 +3,7 @@
 //! See `ARCHITECTURE.md`.
 //!
 //! A *generation* is one logical request plan. An *attempt* is one journey to
-//! the wire, with its own reservation and settlement.
+//! the wire, with its own admission and settlement.
 //! They are separate identities because a retry is the same logical plan
 //! reaching the provider again, while usage, cost, evidence and settlement
 //! remain attributable to each distinct wire journey.
@@ -16,8 +16,8 @@
 //!
 //! ## Who owns the authorisation, and why it is not the provider
 //!
-//! [`GenerationAttempt`] owns the [`Reservation`] from admission to
-//! settlement. That is the piece `&Reservation` could not express:
+//! [`GenerationAttempt`] owns the [`GenerationAdmission`] from admission to
+//! settlement. That is the piece `&GenerationAdmission` could not express:
 //! consuming it at `generate` left nobody to reconcile, and borrowing it
 //! left the token reusable for a second generation.
 //!
@@ -31,7 +31,7 @@
 //!
 //! So the attempt rides *inside* the stream. [`AttemptStream`] owns both the
 //! attempt and the provider's stream and is itself a `Stream<Item =
-//! AiEvent>`, so "the hold survives until the stream ends" is structural
+//! AiEvent>`, so "the admission survives until settlement" is structural
 //! rather than caller discipline: the attempt cannot be dropped without
 //! dropping the stream, and [`AttemptStream::settle`] is the only exit.
 //!
@@ -52,8 +52,8 @@ use super::capabilities::ModelCapabilities;
 use super::port::AiEvent;
 use super::types::{GenRequest, StopReason};
 use crate::budget::{
-    BudgetDenied, BudgetGate, Metering, PricingQuote, ReconcileDenied, Reconciled, Reservation,
-    SettlementSource,
+    BudgetDenied, BudgetGate, GenerationAdmission, Metering, PricingQuote, ReconcileDenied,
+    Reconciled, SettlementSource,
 };
 use crate::cost::{CostAttribution, CostDelta, CurrencyCode, Money, UnknownCost};
 use crate::event::id::{AttemptId, GenerationId};
@@ -221,37 +221,37 @@ impl Outcome {
 
 /// One generation's authorisation, owned until it settles.
 ///
-/// Holds the [`Reservation`] and the [`Metering`] it was minted under, so the
+/// Holds the [`GenerationAdmission`] and the [`Metering`] it was minted under, so the
 /// same metering that authorised the generation also settles what it actually
 /// cost — the invariant `crate::budget`'s module doc states, now enforced by
 /// the type rather than by the caller passing the right `CostDelta`.
 ///
-/// Not `Clone`, for the reason `Reservation` is not: one authorisation must
+/// Not `Clone`, for the reason `GenerationAdmission` is not: one authorisation must
 /// not become two.
-#[must_use = "an unsettled attempt holds budget that nothing else will release"]
+#[must_use = "an unsettled attempt has unrecorded cost"]
 pub struct GenerationAttempt {
     attempt: AttemptRef,
     metering: Metering,
-    /// The rates that priced the reservation, when any were resolved. Carried
+    /// The rates captured for actual settlement, when any were resolved. Carried
     /// beside the metering rather than inside it for the reason
     /// `2026-08-21-a-run-with-no-ceiling.md` §3 gives: the arrangement and
     /// our knowledge of its prices are different facts.
     rates: Option<PricingQuote>,
     /// Taken by [`AttemptStream::settle`]. While it is `Some`, this attempt
-    /// still holds budget, which is exactly what [`Drop`] reports on.
-    reservation: Option<Reservation>,
+    /// still needs settlement, which is exactly what [`Drop`] reports on.
+    admission: Option<GenerationAdmission>,
 }
 
 impl GenerationAttempt {
-    /// Take ownership of a reservation for one generation, refusing it if it
+    /// Take ownership of an admission for one generation, refusing it if it
     /// does not authorise this request.
     ///
-    /// This is where [`Reservation::authorises`] finally has a caller, and
+    /// This is where [`GenerationAdmission::authorises`] finally has a caller, and
     /// it is the right place: `req`, `caps`, the metering and the rates are
     /// all still in hand here, and they are not once the stream is running.
     pub fn new(
         generation: GenerationId,
-        reservation: Reservation,
+        admission: GenerationAdmission,
         metering: &Metering,
         rates: Option<&PricingQuote>,
         req: &GenRequest,
@@ -259,7 +259,7 @@ impl GenerationAttempt {
     ) -> Result<Self, BudgetDenied> {
         Self::from_attempt(
             AttemptRef::first(generation),
-            reservation,
+            admission,
             metering,
             rates,
             req,
@@ -267,21 +267,21 @@ impl GenerationAttempt {
         )
     }
 
-    /// Take ownership of a reservation for an already-minted attempt identity.
+    /// Take ownership of an admission for an already-minted attempt identity.
     pub fn from_attempt(
         attempt: AttemptRef,
-        reservation: Reservation,
+        admission: GenerationAdmission,
         metering: &Metering,
         rates: Option<&PricingQuote>,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Self, BudgetDenied> {
-        reservation.authorises(metering, rates, req, caps)?;
+        admission.authorises(metering, rates, req, caps)?;
         Ok(Self {
             attempt,
             metering: metering.clone(),
             rates: rates.cloned(),
-            reservation: Some(reservation),
+            admission: Some(admission),
         })
     }
 
@@ -300,42 +300,26 @@ impl GenerationAttempt {
     pub fn attempt(&self) -> AttemptRef {
         self.attempt
     }
-
-    /// The bound this attempt is holding against its gate, when it holds one.
-    pub fn bound(&self) -> Option<&crate::cost::Money> {
-        self.reservation.as_ref().and_then(Reservation::upper_bound)
-    }
 }
 
 impl std::fmt::Debug for GenerationAttempt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GenerationAttempt")
             .field("attempt", &self.attempt)
-            .field("settled", &self.reservation.is_none())
+            .field("settled", &self.admission.is_none())
             .finish()
     }
 }
 
 impl Drop for GenerationAttempt {
-    /// Loud, but not fatal.
-    ///
-    /// `Drop` cannot release the hold: [`BudgetGate::reconcile`] needs
-    /// `&mut BudgetGate` and there is no way to reach one from here. So the
-    /// honest options were to log or to panic, and panicking is wrong on
-    /// every count — it cannot reconcile either, it turns ordinary async
-    /// cancellation into a process failure, and a panic while unwinding
-    /// aborts. What is left behind is a hold that is never released, which
-    /// narrows the budget until the process ends: it fails *closed*, so
-    /// loudly reporting it is the proportionate response.
+    /// Report lost settlement evidence without inventing a monetary hold.
     fn drop(&mut self) {
-        if let Some(reservation) = &self.reservation {
+        if let Some(admission) = &self.admission {
             tracing::error!(
                 generation = ?self.attempt.generation(),
                 attempt = ?self.attempt.attempt(),
-                gate = ?reservation.gate(),
-                bound = reservation.upper_bound().map(|bound| bound.amount.to_string()),
-                "generation attempt dropped without settling; its hold is \
-                 never released and the gate's budget stays narrowed"
+                gate = ?admission.gate(),
+                "generation attempt dropped without settling; actual cost is not recorded"
             );
         }
     }
@@ -459,14 +443,14 @@ pub struct CachePrefix {
 ///
 /// The reason for the wrapper rather than two independently owned values:
 /// an attempt that can be dropped while its stream is still running makes
-/// "the hold survives until the stream ends" a rule the caller must
+/// "the admission survives until settlement" a rule the caller must
 /// remember. Here it is a consequence of ownership — the only way to reach
 /// the attempt is [`settle`](Self::settle), which consumes both.
 ///
 /// It also folds what the stream says as it passes: delivery certainty
 /// (monotonically), incremental usage (by addition), and the first terminal
 /// stop reason. That is why `settle` needs no arguments beyond the gate.
-#[must_use = "dropping the stream drops an unsettled attempt, leaking its hold"]
+#[must_use = "dropping the stream loses actual-cost settlement"]
 pub struct AttemptStream {
     attempt: GenerationAttempt,
     inner: BoxStream<'static, AiEvent>,
@@ -615,7 +599,7 @@ impl AttemptStream {
         }
     }
 
-    /// Release the hold and charge what the attempt actually cost.
+    /// Record what the attempt actually cost.
     ///
     /// One method rather than a `settle`/`cancel` pair. Settling *is* the
     /// end of the generation — it consumes the stream — so calling it before
@@ -623,8 +607,8 @@ impl AttemptStream {
     /// the outcome says so with [`StopReason::Aborted`]. A second method
     /// would only add a way to get the same thing wrong.
     ///
-    /// A refusal (the gate did not mint this reservation) propagates with
-    /// the reservation inside it, so the authorisation is not lost — this
+    /// A refusal (the gate did not mint this admission) propagates with
+    /// the admission inside it, so the authorisation is not lost — this
     /// attempt's `Drop` stays quiet precisely because the token now lives in
     /// the error, not because it was dropped on the floor.
     pub fn settle(mut self, gate: &mut BudgetGate) -> Result<Settlement, Box<ReconcileDenied>> {
@@ -637,12 +621,12 @@ impl AttemptStream {
             gate.currency(),
             outcome.delivery(),
         );
-        let reservation = self
+        let admission = self
             .attempt
-            .reservation
+            .admission
             .take()
             .expect("an AttemptStream is consumed by settle, so this runs at most once");
-        let reconciled = gate.reconcile(reservation, &actual)?;
+        let reconciled = gate.reconcile(admission, &actual)?;
         Ok(Settlement {
             attempt: self.attempt.attempt(),
             outcome,

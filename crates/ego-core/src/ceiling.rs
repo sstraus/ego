@@ -32,11 +32,8 @@ use crate::state::Usage;
 
 /// The currency `$` is shorthand for.
 ///
-/// A fixed alias and not a configurable one, because the notation is only
-/// safe *because* it is fixed: [`BudgetGate::reserve`](crate::budget::
-/// BudgetGate::reserve) refuses a ceiling in a currency the quote is not in
-/// rather than converting it, so a EUR-priced row under a `$` ceiling fails
-/// loudly at the first reservation instead of being silently rebased.
+/// A fixed alias, never an implicit exchange-rate conversion. A response cost
+/// in another currency stays unknown to a USD ledger rather than being rebased.
 const DOLLAR: &str = "USD";
 
 /// What one `budget` value was understood to mean.

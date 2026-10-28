@@ -239,10 +239,13 @@ behaviour, transport — is resolved per generation and persisted in the run
 manifest; fallback chains check conversation compatibility and explicitly
 transform or drop provider-private reasoning state before switching. Unknown
 cost stays unknown and raises one durable, visible notice per session and
-model. A configured cap applies to known and estimated spend only. Missing
-prices do not refuse generation; the notice states that the cap cannot cover
-unpriced spend. Missing provider cost charges the reserved upper bound when
-one exists, without recording that estimate as actual billed cost.
+model. A configured monetary cap checks recorded response spend only. Admission
+refuses the next request once that spend exceeds the cap; equality still admits.
+No pre-request worst-case monetary reservation exists. A sequential stream can
+overshoot by one request; a shared concurrent gate can additionally receive all
+charges from requests already in flight when the cap is crossed. Unknown cost
+is not added as zero or as an estimate. Missing prices do not refuse generation;
+the notice states that the cap cannot cover unpriced spend.
 
 M5 adds two public mappings without merging contracts: the OpenAI API-key row uses
 the public Responses endpoint, while `openai-codex` retains its distinct
@@ -279,7 +282,7 @@ ordered fallback re-resolves current catalogue facts and
 must prove capability and request expressibility before a fresh attempt.
 Possibly-sent work that showed output never retries, and possibly-sent work
 never falls back automatically. Each attempt
-keeps its own identity, reservation, digest, settlement, usage, and cost; the
+keeps its own identity, admission, digest, settlement, usage, and cost; the
 turn folds them without rewriting history. The complete failure contract is
 `ARCHITECTURE.md`.
 

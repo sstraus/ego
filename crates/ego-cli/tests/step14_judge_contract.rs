@@ -822,16 +822,15 @@ fn truncated_judge_stream_escalates_after_one_settled_attempt() {
 }
 
 #[test]
-fn judge_reservation_uses_the_shared_budget_gate_and_budget_exits_before_judge_call() {
-    // The first response reports a real settled cost of USD 0.25 input
-    // plus USD 0.00004 output. The main hold fits USD 1.40, but that
-    // committed spend plus the judge's USD 1.28 output hold cannot fit.
+fn judge_uses_shared_real_spend_and_stops_after_main_response_exceeds_cap() {
+    // Catches: a judge starting after the main response exceeds the shared cap.
+    // Two million prompt tokens cost USD 2.50 plus output, above USD 1.40.
     let mut replies = plan(
         judge_response("allow", "this response must never be requested"),
         Some(Reply::Sse(text("done"))),
     );
     if let Reply::Sse(response) = &mut replies.completions[0] {
-        *response = response.replace("\"prompt_tokens\":10", "\"prompt_tokens\":200000");
+        *response = response.replace("\"prompt_tokens\":10", "\"prompt_tokens\":2000000");
     }
     let stub = Stub::start(replies);
     let finished = run_without_durable_analysis(hosted_auto_run(&stub));
