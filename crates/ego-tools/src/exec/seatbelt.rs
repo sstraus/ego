@@ -24,7 +24,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v10-apple-developer-runtime";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v11-optional-pnpm-locks";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -91,7 +91,7 @@ impl SeatbeltBackend {
             let home = std::env::var_os("HOME")
                 .ok_or_else(|| ProcessError::Backend("pnpm runtime requires HOME".into()))?;
             let home = super::adaptive::resolve(Path::new(&home))?;
-            super::pnpm::roots_with_locks(&home, policy.workspace().as_path(), locks, uid)?.to_vec()
+            super::pnpm::roots_with_locks(&home, policy.workspace().as_path(), locks, uid)?
         } else {
             Vec::new()
         };
