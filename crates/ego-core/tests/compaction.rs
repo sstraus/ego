@@ -937,6 +937,18 @@ fn compaction_turn_with_state(
     &'static CompactionMemoryStore,
     CancelToken,
 ) {
+    compaction_turn_with_state_and_system(source, state, None)
+}
+
+fn compaction_turn_with_state_and_system(
+    source: Arc<CompactionSource>,
+    state: SessionState,
+    system: Option<SystemPrompt>,
+) -> (
+    TurnLoop<'static, 'static>,
+    &'static CompactionMemoryStore,
+    CancelToken,
+) {
     let store = Box::leak(Box::new(CompactionMemoryStore::default()));
     let clock = Box::leak(Box::new(CompactionClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));
@@ -977,7 +989,7 @@ fn compaction_turn_with_state(
             gate,
             config: TurnConfig {
                 cache: ego_core::generator::capabilities::CacheRetention::Short,
-                system: None,
+                system,
                 identity: None,
                 token_ceiling: None,
                 retry: 0,
