@@ -962,24 +962,39 @@ fn known_credential(word: &str) -> Option<String> {
 /// unrecognized high-entropy words otherwise remain unchanged.
 pub fn redact_credentials(text: &str) -> String {
     let mut redact_next = false;
-    text.split_whitespace()
-        .map(|word| {
-            // Quotes and JSON delimiters can surround a marker in pasted prose.
-            let marker = word.trim_matches(['\\', '\'', '"', '{', '}', '[', ']', ',', ':']);
-            if marker.eq_ignore_ascii_case("bearer")
-                || marker.eq_ignore_ascii_case("basic")
-                || (marker.eq_ignore_ascii_case("authorization") && word.contains(':'))
-            {
-                redact_next = true;
-                return "<header:authorization>".into();
-            }
-            if std::mem::take(&mut redact_next) {
-                return "<secret:context-value>".into();
-            }
-            known_credential(word).unwrap_or_else(|| word.to_owned())
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut words = text.split_whitespace().peekable();
+    let mut redacted = Vec::new();
+    while let Some(word) = words.next() {
+        // Quotes and JSON delimiters can surround a marker in pasted prose.
+        let marker = word.trim_matches(['\\', '\'', '"', '{', '}', '[', ']', ',', ':']);
+        let scheme = marker.eq_ignore_ascii_case("bearer") || marker.eq_ignore_ascii_case("basic");
+        let quoted = word
+            .trim_start_matches(['\\', '{', '['])
+            .starts_with(['\'', '"']);
+        // A bare scheme plus an ordinary word is ambiguous prose, not a header.
+        // Keep standalone token68-shaped values private when they contain more
+        // than letters; explicit headers and quoted values also hide short words.
+        let token_value = words.peek().is_some_and(|value| {
+            let value = value.trim_matches(['\\', '\'', '"', '}', ']', ',']);
+            !value.is_empty()
+                && value.chars().all(|c| {
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, '-' | '.' | '_' | '~' | '+' | '/' | '=')
+                })
+                && value.chars().any(|c| !c.is_ascii_alphabetic())
+        });
+        if (marker.eq_ignore_ascii_case("authorization") && word.contains(':'))
+            || (scheme && (redact_next || quoted || token_value))
+        {
+            redact_next = true;
+            redacted.push("<header:authorization>".into());
+        } else if std::mem::take(&mut redact_next) {
+            redacted.push("<secret:context-value>".into());
+        } else {
+            redacted.push(known_credential(word).unwrap_or_else(|| word.to_owned()));
+        }
+    }
+    redacted.join(" ")
 }
 
 /// Apply shell evidence policy after shared narrative credential redaction.
@@ -1029,8 +1044,8 @@ mod tests {
             "Authorization: Basic",
             "authorization: bearer",
             "AUTHORIZATION: BASIC",
-            "Bearer",
-            "Basic",
+            "'Bearer'",
+            "'Basic'",
             "Authorization:",
             "Authorization: Bearer Bearer",
         ] {
@@ -1048,6 +1063,26 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
+    fn credential_redaction_preserves_basic_and_bearer_prose() {
+        // Catches ordinary task words being treated as authorization schemes.
+        let mut failures = Vec::new();
+        for text in [
+            "add a basic test for the parser",
+            "the bearer carries the document",
+            "Basic tests cover the parser",
+            "inspect BASIC behavior and BEARER semantics",
+            "basic",
+            "Bearer",
+            "use basic and bearer terminology",
+        ] {
+            let output = redact_credentials(text);
+            if output != text {
+                failures.push(format!("{text:?} -> {output:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
     fn credential_only_policy_preserves_diagnostic_identifiers_and_assignments() {
         // Catches accidental reuse of shell assignment/entropy/URL policy in diagnostics.
         let text = "invalid_function_parameters tools.0.function.parameters.properties param=value abcDEF0123456789zyxWVUT9876543210 https://example.com/schema";
@@ -1060,6 +1095,8 @@ mod tests {
         for input in [
             r#"before "Authorization: Bearer quoted.secret-==" after"#,
             "before 'Bearer quoted.secret-==' after",
+            "before Bearer quoted.secret-== after",
+            "before Basic quoted.secret-== after",
             r#"before {"Authorization": "Basic quoted.secret-=="} after"#,
             "before 'authorization:' 'bearer' quoted.secret-== after",
             "before sk-ant-private after",
@@ -1086,7 +1123,7 @@ mod tests {
             );
         }
         assert_eq!(redact_credentials(""), "");
-        assert_eq!(redact_credentials("Bearer"), "<header:authorization>");
+        assert_eq!(redact_credentials("Bearer"), "Bearer");
         assert_eq!(redact_credentials("ordinary prose"), "ordinary prose");
     }
     #[test]
