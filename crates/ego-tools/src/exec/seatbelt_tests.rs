@@ -742,3 +742,78 @@ fn workspace_apple_python_reaches_external_script_denial_without_opening_var() {
         "selector directory exposed: {listing:?}"
     );
 }
+
+// Catches: child-mutable optional pnpm metadata disables every later backend.
+#[test]
+fn unsafe_pnpm_lock_namespace_does_not_disable_unrelated_confined_exec() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let scratch = base.join("scratch");
+    let locks = base.join("locks");
+    for path in [&workspace, &scratch, &locks] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let home =
+        super::super::adaptive::resolve(Path::new(&std::env::var_os("HOME").unwrap())).unwrap();
+    let uid = nix::unistd::getuid().as_raw();
+    let runtime = derived_runtime_roots().unwrap();
+    for level in [Confinement::Workspace, Confinement::Adaptive] {
+        fs::set_permissions(&locks, fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = || {
+            let writable = super::super::pnpm::roots_with_locks(&home, &workspace, &locks, uid)
+                .expect("unsafe optional locks must not disable perimeter capture")
+                .into_iter()
+                .map(CanonPath::new)
+                .collect();
+            RunConfinement::new(level, false, CanonPath::new(&workspace))
+                .unwrap()
+                .with_adaptive_perimeter(AdaptivePerimeter {
+                    home: CanonPath::new(&home),
+                    writable,
+                    credentials: vec![],
+                    controls: vec![],
+                })
+        };
+        let backend = SeatbeltBackend::prepare_with_locks(
+            &policy(),
+            &CanonPath::new(&scratch),
+            &runtime,
+            &locks,
+            uid,
+        )
+        .unwrap();
+        let chmod = run(
+            &backend,
+            "/bin/chmod",
+            &["0777".as_ref(), locks.as_os_str()],
+        );
+        assert!(chmod.status.success(), "{level}: {chmod:?}");
+        assert_eq!(
+            fs::metadata(&locks).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
+        let backend = SeatbeltBackend::prepare_with_locks(
+            &policy(),
+            &CanonPath::new(&scratch),
+            &runtime,
+            &locks,
+            uid,
+        )
+        .expect("unsafe optional locks must not disable unrelated confined exec");
+        let echo = run(&backend, "/bin/echo", &["UNRELATED-EXEC".as_ref()]);
+        assert!(echo.status.success(), "{level}: {echo:?}");
+        assert_eq!(echo.stdout, b"UNRELATED-EXEC\n");
+        let write = run(
+            &backend,
+            "/usr/bin/touch",
+            &[locks.join("must-not-write").as_os_str()],
+        );
+        assert!(
+            !write.status.success(),
+            "unsafe locks regained write authority: {level}: {write:?}"
+        );
+        assert!(!locks.join("must-not-write").exists());
+    }
+}

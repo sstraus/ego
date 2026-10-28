@@ -15,14 +15,32 @@ pub(super) fn home(home: &Path) -> PathBuf {
 }
 
 pub(super) fn roots(home: &Path, workspace: &Path) -> Result<[PathBuf; 2], ProcessError> {
-    let pnpm = super::adaptive::resolve(&self::home(home))?;
+    let (locks, uid) = operation_locks();
+    roots_with_locks(home, workspace, &locks, uid)
+}
+
+pub(super) fn operation_locks() -> (PathBuf, u32) {
     let uid = nix::unistd::getuid().as_raw();
-    let locks = PathBuf::from(format!("/private/tmp/pnpm-store-operation-locks-{uid}"));
-    validate_operation_locks(&locks, uid)?;
-    for path in [&pnpm, &locks] {
+    (
+        PathBuf::from(format!("/private/tmp/pnpm-store-operation-locks-{uid}")),
+        uid,
+    )
+}
+
+// Explicit filesystem input lets native tests use a private namespace, never
+// the operator's shared pnpm locks. Production always uses operation_locks().
+pub(super) fn roots_with_locks(
+    home: &Path,
+    workspace: &Path,
+    locks: &Path,
+    uid: u32,
+) -> Result<[PathBuf; 2], ProcessError> {
+    let pnpm = super::adaptive::resolve(&self::home(home))?;
+    validate_operation_locks(locks, uid)?;
+    for path in [pnpm.as_path(), locks] {
         super::adaptive::check_write_root(home, workspace, path, &[])?;
     }
-    Ok([pnpm, locks])
+    Ok([pnpm, locks.to_path_buf()])
 }
 
 fn validate_operation_locks(path: &Path, uid: u32) -> Result<(), ego_core::permit::ProcessError> {
