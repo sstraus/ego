@@ -11340,6 +11340,93 @@ mod turn {
             block_on(turn.run("are you there?")).expect("the store accepted every append")
         }
 
+        fn regression_case_narration() -> Vec<AiEvent> {
+            include_str!("../../ego-cli/tests/fixtures/710-narration-body-failure.jsonl")
+                .lines()
+                .filter_map(|line| {
+                    let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    let kind: EventKind =
+                        serde_json::from_value(record["payload"]["event"]["kind"].clone()).ok()?;
+                    match kind {
+                        EventKind::AssistantDelta { text } => Some(AiEvent::TextDelta { text }),
+                        EventKind::ReasoningState { state } => Some(AiEvent::ReasoningState(state)),
+                        EventKind::Error { message, kind } => {
+                            Some(AiEvent::Error { message, kind })
+                        }
+                        EventKind::AttemptSettled { outcome, .. } => {
+                            Some(AiEvent::Stop(outcome.stop()))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+
+        // Catches: visible narration stalls the seat, or failed text leaks into the retry request.
+        #[test]
+        fn regression_case_narration_failure_retries_without_resending_partial_text() {
+            let trace = GenerationTrace::default();
+            let source = Arc::new(
+                ScriptedGenerationSource::new([
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        regression_case_narration(),
+                        &trace,
+                        Some(1_024),
+                    )),
+                    Ok(profile(
+                        "ollama/primary-model",
+                        false,
+                        vec![
+                            AiEvent::TextDelta {
+                                text: "Recovered.".into(),
+                            },
+                            AiEvent::Stop(StopReason::Stop),
+                        ],
+                        &trace,
+                        Some(1_024),
+                    )),
+                ])
+                .with_trace(trace.clone()),
+            );
+            let fx = Fixture::new(vec![]);
+            let pause = Arc::new(RecordedPause::default());
+            let (_ingress, mut control) = ego_core::turn::interactive_control();
+            let outcome = run_retrying_controlled(
+                &fx,
+                source,
+                6,
+                pause.clone(),
+                CancelToken::new(),
+                Some(&mut control),
+                None,
+            );
+            assert!(
+                outcome.ok,
+                "narration-only body failure must recover, not stop: {:?}",
+                outcome.exit_reason
+            );
+            let requests = trace.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[0].messages, requests[1].messages,
+                "partial narration and opaque state must not be resent"
+            );
+            assert_eq!(requests[0].cache, requests[1].cache);
+            assert_eq!(pause.delays.lock().unwrap().len(), 1);
+            let events = fx.store.events();
+            assert!(events.iter().any(|event| matches!(&event.kind,
+                EventKind::AssistantMessage { text } if text.starts_with("All four pages") && text.ends_with("[interrupted]"))));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::AttemptSettled { .. }))
+                    .count(),
+                2
+            );
+        }
+
         // Recorded events, not invented provider fixtures: regression case retained the live JSONL slices.
         fn regression_case_attempts() -> Vec<(&'static str, Vec<AiEvent>)> {
             [
