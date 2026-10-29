@@ -2073,8 +2073,10 @@ mod tests {
     }
 
     fn expand_recorded_exec() -> String {
-        let events: Vec<ego_core::event::domain::DomainEvent> =
-            serde_json::from_str(include_str!("../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let events: Vec<ego_core::event::domain::DomainEvent> = serde_json::from_str(include_str!(
+            "../tests/fixtures/expand-visible-streams.json"
+        ))
+        .unwrap();
         let (output, rows) = interactive();
         let sink = TextSink::new(&output, false, Capabilities::plain());
         let mut state = SessionState::default();

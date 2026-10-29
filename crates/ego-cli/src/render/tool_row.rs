@@ -812,8 +812,10 @@ mod tests {
     #[test]
     fn expanded_exec_labels_only_streams_with_visible_output() {
         use ego_core::event::domain::{DomainEvent, EventKind};
-        let events: Vec<DomainEvent> =
-            serde_json::from_str(include_str!("../../tests/fixtures/expand-visible-streams.json")).unwrap();
+        let events: Vec<DomainEvent> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/expand-visible-streams.json"
+        ))
+        .unwrap();
         let recorded = events
             .iter()
             .find_map(|event| match &event.kind {
