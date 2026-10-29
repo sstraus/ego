@@ -637,8 +637,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                     } else {
                         'epoch: loop {
                             let resumed_turn = resumed.take();
-                            let queued = !state.unacknowledged_prompts().is_empty();
-                            let asked = if resumed_turn.is_some() || queued {
+                            let queued =
+                                has_admitted_interactive_input(resumed_turn.as_ref(), &state);
+                            let asked = if queued {
                                 None
                             } else if let Some(input) = take_pending_checkpoint(
                                 &mut checkpoint_pending,
@@ -1000,6 +1001,11 @@ fn epoch_child_bindings(
         );
     }
     child_bindings
+}
+
+fn has_admitted_interactive_input(resumed: Option<&RuntimeResume>, state: &SessionState) -> bool {
+    // Durable work precedes checkpoint recovery and a fresh terminal read.
+    resumed.is_some() || !state.unacknowledged_prompts().is_empty()
 }
 
 fn take_pending_checkpoint(
@@ -1474,12 +1480,7 @@ async fn select_session_transition<'store>(
 ) -> Option<EpochTransition<'store>> {
     let (clock, diagnostics) = journal_ports;
     if !seat.has_human() {
-        match crate::catalogue::saved_sessions(store.as_ref(), diagnostics) {
-            Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
-            Err(error) => diagnostics.note(&format!(
-                "the saved session list could not be read: {error}"
-            )),
-        }
+        report_saved_sessions(store, diagnostics);
         return None;
     }
     if pending_work {
@@ -1532,6 +1533,15 @@ async fn select_session_transition<'store>(
         return None;
     }
     open_selected_session(seat, store, root, meta, clock, diagnostics)
+}
+
+fn report_saved_sessions(store: &JsonlStore, diagnostics: &dyn Diagnostics) {
+    match crate::catalogue::saved_sessions(store, diagnostics) {
+        Ok(metas) => diagnostics.note(&crate::catalogue::table(&metas, false).join("\n")),
+        Err(error) => diagnostics.note(&format!(
+            "the saved session list could not be read: {error}"
+        )),
+    }
 }
 
 fn open_selected_session<'store>(
@@ -3096,9 +3106,15 @@ async fn dispatch_session_resources<'session: 'a, 'a, 'store: 'session>(
     line: repl::Line,
     posture: (bool, bool, bool),
 ) -> Result<CommandOutcome<'store>, RunTermination> {
+    if matches!(
+        line,
+        repl::Line::HostCommand(repl::HostCommand::Skills(
+            repl::actions::SkillSurfaceAction::Rescan
+        ))
+    ) {
+        return rescan_skill_command(input, posture.0);
+    }
     let InteractiveCommand {
-        args,
-        seat,
         last,
         state,
         diagnostics,
@@ -3109,10 +3125,6 @@ async fn dispatch_session_resources<'session: 'a, 'a, 'store: 'session>(
         status,
         selection,
         skills,
-        effective,
-        jsonl_store,
-        exec_environment,
-        registry,
         session_hooks,
         session_hook_ports,
         task_owner,
@@ -3189,25 +3201,6 @@ async fn dispatch_session_resources<'session: 'a, 'a, 'store: 'session>(
             render_skill_catalogue(skills.as_deref(), true, false, diagnostics);
             Ok(CommandOutcome::Continue)
         }
-        repl::Line::HostCommand(repl::HostCommand::Skills(
-            repl::actions::SkillSurfaceAction::Rescan,
-        )) => {
-            match rescan_session_skills(
-                pending_work,
-                skills.as_deref(),
-                seat.as_ref(),
-                (args, effective, jsonl_store, exec_environment.clone()),
-                diagnostics,
-            ) {
-                Ok(Some(next_registry)) => *registry = next_registry,
-                Ok(None) => {}
-                Err(termination) => {
-                    last.termination = termination;
-                    return Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)));
-                }
-            }
-            Ok(CommandOutcome::Continue)
-        }
         repl::Line::HostCommand(repl::HostCommand::Hooks) => {
             render_session_hooks(&session_hooks.state, diagnostics);
             Ok(CommandOutcome::Continue)
@@ -3234,6 +3227,39 @@ async fn dispatch_session_resources<'session: 'a, 'a, 'store: 'session>(
         }
         _ => unreachable!("only matching session commands are dispatched here"),
     }
+}
+
+fn rescan_skill_command<'store>(
+    input: InteractiveCommand<'_, '_, 'store>,
+    pending_work: bool,
+) -> Result<CommandOutcome<'store>, RunTermination> {
+    let InteractiveCommand {
+        args,
+        seat,
+        last,
+        skills,
+        effective,
+        jsonl_store,
+        exec_environment,
+        registry,
+        diagnostics,
+        ..
+    } = input;
+    match rescan_session_skills(
+        pending_work,
+        skills.as_deref(),
+        seat.as_ref(),
+        (args, effective, jsonl_store, exec_environment.clone()),
+        diagnostics,
+    ) {
+        Ok(Some(next_registry)) => *registry = next_registry,
+        Ok(None) => {}
+        Err(termination) => {
+            last.termination = termination;
+            return Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)));
+        }
+    }
+    Ok(CommandOutcome::Continue)
 }
 
 async fn dispatch_session_inspection<'session: 'a, 'a, 'store: 'session>(
