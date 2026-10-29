@@ -4872,6 +4872,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut candidate_conversation = walk.conversation.clone();
         let mut additional_attempts = 0_u32;
         let mut unrun_retry_used = false;
+        let mut narration_retry_used = false;
 
         loop {
             if self
@@ -5070,14 +5071,19 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             )
             .then(|| ProviderFailure {
                 cause: cause.clone(),
-                effect_known: !drained.replay_unsafe || reported.is_some(),
+                effect_known: !(drained.replay_unsafe || drained.visible_text)
+                    || reported.is_some(),
             });
-            // maintainer decision 2026-10-25: opaque reasoning and parsed calls
-            // have no local effect until ToolUse dispatch. Recover once, but
-            // never replay visible output or provider content of unknown effect.
+            // maintainer decisions 2026-10-25 and 2026-10-29: opaque/unrun output
+            // may recover once. Interactive/ACP narration may also recover once,
+            // but never when mixed with tools, visible reasoning or server effects.
             let retryable = stop == StopReason::Error
                 && drained.error_kind == Some(ErrorKind::Transient)
                 && !drained.replay_unsafe
+                && (!drained.visible_text
+                    || (self.control.is_some()
+                        && drained.pending.is_empty()
+                        && !narration_retry_used))
                 && (!drained.unrun_output || !unrun_retry_used);
             if retryable {
                 // Close before publishing/waiting for a retry, including when
@@ -5097,6 +5103,28 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             {
                 RetryProgress::Retry => {
                     unrun_retry_used |= drained.unrun_output;
+                    narration_retry_used |= drained.visible_text;
+                    if let Some(item) = drained.message {
+                        // The delta reaches append-only ACP clients too; the
+                        // assembled replacement keeps resumed transcripts exact.
+                        let marker = "\n\n[interrupted]";
+                        self.journal.append(
+                            turn,
+                            Some(item),
+                            Some(generation),
+                            EventKind::AssistantDelta {
+                                text: marker.into(),
+                            },
+                        )?;
+                        self.journal.append(
+                            turn,
+                            Some(item),
+                            Some(generation),
+                            EventKind::AssistantMessage {
+                                text: format!("{}{marker}", drained.private_text),
+                            },
+                        )?;
+                    }
                     continue;
                 }
                 RetryProgress::Cancelled => {
@@ -6022,6 +6050,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut accounting_booked = false;
         let mut private_tool_use = false;
         let mut replay_unsafe = false;
+        let mut visible_text = false;
         let mut unrun_output = false;
         let mut provider_failure = None;
         let settlement_currency = self.settlement_currency;
@@ -6087,10 +6116,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             };
             replay_unsafe |= matches!(
                 event,
-                AiEvent::ProviderContent { .. }
-                    | AiEvent::TextDelta { .. }
-                    | AiEvent::ReasoningDelta { .. }
+                AiEvent::ProviderContent { .. } | AiEvent::ReasoningDelta { .. }
             );
+            visible_text |= matches!(event, AiEvent::TextDelta { .. });
             unrun_output |= matches!(event, AiEvent::ReasoningState(_) | AiEvent::ToolCall { .. });
             let appended = match event {
                 AiEvent::WebSearch { .. } | AiEvent::Citation { .. } => {
@@ -6430,6 +6458,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             private_tool_use,
             accounting_booked,
             replay_unsafe,
+            visible_text,
+            message,
             unrun_output,
             provider_failure,
         }
@@ -8251,9 +8281,13 @@ struct Drained {
     private_tool_use: bool,
     /// Whether this drain appended at least one charge for the attempt.
     accounting_booked: bool,
-    /// Visible output or provider content whose effects are not proven absent.
+    /// Visible reasoning or provider content whose effects are not proven absent.
     /// Neither is safe to replay, even if delivery is claimed definitely unsent.
     replay_unsafe: bool,
+    /// Text is recoverable only on interactive/ACP seats and without parsed tools.
+    visible_text: bool,
+    /// The final text item, retained so a recovered partial answer can be marked.
+    message: Option<ItemId>,
     /// Opaque reasoning or parsed tools, which drain never dispatches. Their
     /// recovery allowance is one retry, within the existing budget and deadline.
     unrun_output: bool,

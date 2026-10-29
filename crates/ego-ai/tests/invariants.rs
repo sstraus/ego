@@ -397,6 +397,7 @@ async fn one_turn(
 struct TurnFixture {
     registry: Vec<Arc<dyn Tool>>,
     tier: Option<ego_ai::service_tier::ServiceTier>,
+    interactive: bool,
 }
 
 async fn turn_over_http(
@@ -408,7 +409,11 @@ async fn turn_over_http(
     retry_pause: Arc<dyn ego_core::turn::RetryPause>,
     fixture: TurnFixture,
 ) -> (ego_core::turn::TurnOutcome, SessionState) {
-    let TurnFixture { registry, tier } = fixture;
+    let TurnFixture {
+        registry,
+        tier,
+        interactive,
+    } = fixture;
     turn_over_http_with_question(
         slug,
         row,
@@ -416,16 +421,24 @@ async fn turn_over_http(
         http,
         retry,
         retry_pause,
-        (
-            registry
+        QuestionTurnFixture {
+            registry: registry
                 .into_iter()
                 .map(ego_core::turn::RegisteredTool::Effect)
                 .collect(),
-            None,
+            elicitor: None,
             tier,
-        ),
+            interactive,
+        },
     )
     .await
+}
+
+struct QuestionTurnFixture {
+    registry: Vec<ego_core::turn::RegisteredTool>,
+    elicitor: Option<Arc<dyn ego_core::question::Elicitor>>,
+    tier: Option<ego_ai::service_tier::ServiceTier>,
+    interactive: bool,
 }
 
 async fn turn_over_http_with_question(
@@ -435,13 +448,14 @@ async fn turn_over_http_with_question(
     http: Arc<dyn Http>,
     retry: u32,
     retry_pause: Arc<dyn ego_core::turn::RetryPause>,
-    question: (
-        Vec<ego_core::turn::RegisteredTool>,
-        Option<Arc<dyn ego_core::question::Elicitor>>,
-        Option<ego_ai::service_tier::ServiceTier>,
-    ),
+    question: QuestionTurnFixture,
 ) -> (ego_core::turn::TurnOutcome, SessionState) {
-    let (registry, elicitor, tier) = question;
+    let QuestionTurnFixture {
+        registry,
+        elicitor,
+        tier,
+        interactive,
+    } = question;
     let slug = ModelSlug::parse(slug).expect("a constant this file controls");
     // Through the catalogue rather than around it: "configuration" is the
     // claim, and a row handed straight to the generator would prove only that
@@ -482,6 +496,7 @@ async fn turn_over_http_with_question(
     let foreign: Arc<NoForeign> = Arc::new(NoForeign);
     let gate = SharedBudgetGate::new(BudgetGate::new(usd("10")));
 
+    let (_ingress, mut control) = ego_core::turn::interactive_control();
     let mut loop_ = TurnLoop::new(
         Session {
             id: SessionId::new(),
@@ -539,6 +554,9 @@ async fn turn_over_http_with_question(
         loop_ = loop_.with_elicitor(elicitor);
     }
 
+    if interactive {
+        loop_ = loop_.with_interactive_control(&mut control);
+    }
     let outcome = loop_
         .run("list the files")
         .await
@@ -996,6 +1014,7 @@ impl ego_core::turn::RetryPause for RecordedBodyPause {
 async fn dropped_codex_turn(
     prefix: &str,
     retry: u32,
+    interactive: bool,
 ) -> (
     ego_core::turn::TurnOutcome,
     SessionState,
@@ -1059,6 +1078,7 @@ async fn dropped_codex_turn(
         pause.clone(),
         TurnFixture {
             registry: vec![Arc::new(NeverRunTool)],
+            interactive,
             ..Default::default()
         },
     )
@@ -1073,7 +1093,7 @@ async fn dropped_codex_turn(
 async fn codex_dropped_body_before_output_retries_without_changing_cache_identity() {
     // Catches: an answered, truncated body is excluded from no-output retries.
     let (outcome, state, requests, delays) =
-        dropped_codex_turn(": body will be dropped\n\n", 6).await;
+        dropped_codex_turn(": body will be dropped\n\n", 6, false).await;
     assert_eq!(outcome.exit_reason, ExitReason::Completed);
     assert_eq!(answer(&state), "ok");
     assert_eq!(requests.len(), 2);
@@ -1103,7 +1123,7 @@ async fn codex_dropped_body_after_text_does_not_replay_and_has_uncertain_notice(
         .split("data: {\"type\":\"response.completed\"")
         .next()
         .unwrap();
-    let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6).await;
+    let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6, false).await;
     assert_eq!(answer(&state), "ok");
     assert_eq!(requests.len(), 1);
     assert!(delays.is_empty());
@@ -1117,13 +1137,44 @@ async fn codex_dropped_body_after_text_does_not_replay_and_has_uncertain_notice(
 }
 
 #[tokio::test]
+async fn codex_dropped_body_after_interactive_text_retries_identical_request_once() {
+    // Catches: the real decoder's partial text blocks recovery or changes the replayed request.
+    let prefix = CODEX_TEXT
+        .split("data: {\"type\":\"response.completed\"")
+        .next()
+        .unwrap();
+    let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6, true).await;
+    assert_eq!(outcome.exit_reason, ExitReason::Completed);
+    assert_eq!(answer(&state), "ok");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(delays, [std::time::Duration::from_secs(1)]);
+    let bodies: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            let end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            serde_json::from_slice::<serde_json::Value>(&request[end + 4..]).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        bodies[0], bodies[1],
+        "partial text is not input to recovery"
+    );
+    assert!(
+        state
+            .items
+            .values()
+            .any(|item| item.kind == ItemKind::Assistant && item.text == "ok\n\n[interrupted]")
+    );
+}
+
+#[tokio::test]
 async fn codex_dropped_body_after_unrun_tool_bytes_retries_without_executing_partial_call() {
     // Catches: a parsed-but-unrun tool still blocks recovery, or executes its partial arguments.
     let prefix = CODEX_TOOL
         .split("data: {\"type\":\"response.completed\"")
         .next()
         .unwrap();
-    let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6).await;
+    let (outcome, state, requests, delays) = dropped_codex_turn(prefix, 6, false).await;
     assert_eq!(outcome.exit_reason, ExitReason::Completed);
     assert_eq!(answer(&state), "ok");
     assert_eq!(requests.len(), 2);
@@ -1140,7 +1191,7 @@ async fn codex_dropped_body_after_unrun_tool_bytes_retries_without_executing_par
 #[tokio::test]
 async fn codex_dropped_body_respects_zero_retry_and_settles_known_without_output() {
     // Catches: a provider mapping retries behind the turn owner's explicit zero allowance.
-    let (outcome, _, requests, delays) = dropped_codex_turn(": dropped\n\n", 0).await;
+    let (outcome, _, requests, delays) = dropped_codex_turn(": dropped\n\n", 0, false).await;
     assert_eq!(outcome.exit_reason, ExitReason::Provider);
     assert_eq!(requests.len(), 1);
     assert!(delays.is_empty());
@@ -1394,17 +1445,18 @@ async fn question_wait_turn(fail_after_answer: bool, available: bool) {
         Arc::new(QuestionHttp(sockets.clone())),
         6,
         pause.clone(),
-        (
-            vec![ego_core::turn::RegisteredTool::HumanInput(Arc::new(
+        QuestionTurnFixture {
+            registry: vec![ego_core::turn::RegisteredTool::HumanInput(Arc::new(
                 ego_core::question::AskQuestionTool,
             ))],
-            Some(Arc::new(WaitingQuestion {
+            elicitor: Some(Arc::new(WaitingQuestion {
                 state: sockets.clone(),
                 live_during_wait: live.clone(),
                 available,
             })),
-            None,
-        ),
+            tier: None,
+            interactive: false,
+        },
     )
     .await;
     assert_eq!(
