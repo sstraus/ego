@@ -35,6 +35,7 @@ pub mod osc;
 pub mod permission_diff;
 pub(crate) mod prompt_echo;
 pub(crate) mod replay;
+mod shell;
 pub mod stream;
 pub mod style;
 pub mod table;
