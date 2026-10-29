@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 
 mod support;
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression-root");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/session-scope-root");
 const WAIT: Duration = Duration::from_secs(5);
 #[cfg(not(windows))]
 const MCP_COMMAND: &str = "/bin/true";
