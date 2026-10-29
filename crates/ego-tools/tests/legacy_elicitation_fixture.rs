@@ -1,5 +1,4 @@
-//! The fixture was captured from the version-2 writer at fa3b66a7 on rb.
-//! Command and output: ~/Gits/.tmp/example-evidence-b.log.
+//! The fixture was captured from the version-2 continuation writer.
 
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::suspension::{ContinuationJournal, ContinuationState};

@@ -529,7 +529,7 @@ mod permit {
         }
     }
 
-    /// regression. Plausible bug: the grant hint is attached to every refused
+    /// Plausible bug: the grant hint is attached to every refused
     /// read outside the workspace, so a model that tried `~/.ssh/id_rsa` or an
     /// `.env` is handed a ready-made `ego roots add` for a credential the
     /// credential defaults keep denied anyway.

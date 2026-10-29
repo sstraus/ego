@@ -309,8 +309,7 @@ fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
 // Catches: adjacent status frames with different clocks or token counts survive.
 #[test]
 fn readable_discards_concatenated_working_repaints() {
-    // Recorded from rb result 20261029T042025Z-53407 and the RED
-    // (20261029T061159Z-5592), after the existing escape-stripping boundary.
+    // Recorded adjacent status frames after the existing escape-stripping boundary.
     for row in [
         "◓ Working 1s · ↓ ~5 tokens · Esc to interrupt◑ Working 2s · ↓ ~5 tokens · Esc to interrupt",
         "◓ Working 1s · Esc to interrupt◓ Working 1s · ↓ ~5 tokens · Esc to interrupt",
