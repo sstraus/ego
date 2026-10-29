@@ -4,7 +4,7 @@
 //! Resolve tests use real persisted session logs. Formatting and ordering use
 //! literal metadata so their expected policy remains independent of the store.
 //!
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 
 use std::path::{Path, PathBuf};
 

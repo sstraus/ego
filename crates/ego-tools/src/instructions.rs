@@ -3,7 +3,7 @@
 //! The `std::fs` half of `ego_core::config`'s instruction discovery; the
 //! decision half — which paths, in what order, under what trust — is pure and
 //! lives there. See
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 //!
 //! This is not `OsFs`. That one is the **model-controlled** seam a tool
 //! reaches through a permit; this one is trusted-side and runs before a loop,

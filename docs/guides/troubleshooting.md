@@ -71,14 +71,14 @@ rather than fixing the missing grant. System ceilings can prevent this recovery.
 
 ## `cargo: command not found`
 
-This was observed when macOS confinement hid the cargo/mbx toolchain outside the
+This was observed when macOS confinement hid the Cargo toolchain outside the
 workspace. It can also mean cargo is not installed or is absent from PATH. Check
 command resolution in the user's shell first. If it resolves there but not inside
 ego, inspect the perimeter. A read/read-write root does not grant exec.
 
 Use `ego config edit` and extend the user or selected profile's `exec_paths` array
-with the existing canonical tool directories. For a rustup/mbx installation,
-these can include the mbx shim and binary directories, `~/.cargo/bin`'s resolved
+with the existing canonical tool directories. For a rustup installation,
+these can include `~/.cargo/bin`'s resolved
 target directory, and the selected `~/.rustup/toolchains/...` directory. Use actual
 absolute paths, not literal `~` strings. Grant separate read roots for toolchain
 resources and read-write roots for the caches/build outputs the task needs.
@@ -202,9 +202,7 @@ steps: they were proposals, not evidence of shipped behavior.
 macOS and Linux have OS-specific confinement adapters; guarantees require host
 capability evidence and the actual admitted production path. Windows listener,
 process ownership, and private-state support exist, but Windows filesystem/network
-confinement and the final cross-platform matrix remain open work. An unconfined
-acknowledgement is not proof of confinement. This documentation task verifies
-its own macOS build and does not claim native Windows/Linux execution.
+confinement remain unsupported. An unconfined acknowledgement does not establish confinement.
 
 ## Diagnostics
 
@@ -223,5 +221,4 @@ remain sensitive. Codex requests use one lineage routing key in both
 
 Source: [doctor](../../crates/ego-cli/src/doctor.rs),
 [diagnostics](../../crates/ego-cli/src/diagnostics.rs),
-[confinement diagnostics](../../crates/ego-cli/src/confinement_diagnostics.rs), and
-[platform research](../internals/22-windows-runtime-requirements.md).
+[confinement diagnostics](../../crates/ego-cli/src/confinement_diagnostics.rs).

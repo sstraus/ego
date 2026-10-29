@@ -487,7 +487,7 @@ impl Confinement {
     /// Whether this confines at least as much as `ceiling` does.
     ///
     /// The only question a ceiling is ever asked
-    /// (`ARCHITECTURE.md`).
+    /// (`docs/architecture.md`).
     /// Explicit strict levels narrow Adaptive authority. This orders selections,
     /// not backend capability guarantees, which are checked separately.
     pub const fn within(self, ceiling: Self) -> bool {

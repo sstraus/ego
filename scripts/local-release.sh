@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and atomically replace the local executable, including with mbx target views.
+# Build and atomically replace the local executable using Cargo artifact paths.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$HOME/.local/bin/ego"

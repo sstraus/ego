@@ -1,6 +1,6 @@
 //! The turn loop: the one component that runs a turn and writes the log.
 //!
-//! See `ARCHITECTURE.md`. Named `turn` rather than
+//! See `docs/architecture.md`. Named `turn` rather than
 //! the plan's `loop`, which is a keyword and would spell every reference
 //! `r#loop`.
 //!
@@ -263,7 +263,7 @@ where
 }
 
 /// A cooperative cancellation signal
-/// (`ARCHITECTURE.md` §4).
+/// (`docs/architecture.md` §4).
 ///
 /// A concrete type and not a trait: there is exactly one way to implement
 /// "someone asked to stop", and a trait would buy an indirection for it. Not
@@ -5072,7 +5072,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 cause: cause.clone(),
                 effect_known: !drained.replay_unsafe || reported.is_some(),
             });
-            // maintainer decision 2026-10-25: opaque reasoning and parsed calls
+            // operator decision 2026-10-25: opaque reasoning and parsed calls
             // have no local effect until ToolUse dispatch. Recover once, but
             // never replay visible output or provider content of unknown effect.
             let retryable = stop == StopReason::Error

@@ -1,4 +1,4 @@
-: captured-client-derived from earendil-works/pi@4af9d21d3b4d664e4a29fcabfec85171077248e3 (read 2026-08-24)
+: captured-client-derived from subscription client contract (recorded 2026-08-24; not live provider evidence)
 : provider openai-codex, ego 0.1.0
 data: {"type":"response.output_text.delta","delta":"ok"}
 

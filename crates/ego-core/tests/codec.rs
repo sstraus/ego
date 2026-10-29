@@ -539,7 +539,7 @@ mod codec {
                     // `UsageUpdated` written before attempts were attributed
                     // still decodes, which is the whole reason the field is
                     // optional rather than required
-                    // (`ARCHITECTURE.md`).
+                    // (`docs/architecture.md`).
                     attempt: None,
                 },
             },
@@ -675,7 +675,7 @@ mod codec {
     /// This used to be called "written by a past build", and that name
     /// overclaimed: the fixture is regenerated whenever the durable format
     /// moves, so it has only ever proved that *this* build reads *this*
-    /// fixture. `ARCHITECTURE.md` §3 makes
+    /// fixture. `docs/architecture.md` §3 makes
     /// the gap explicit rather than leaving it in a test name — v1 logs are
     /// not readable by a v2 build, deliberately, because none exist outside
     /// this repository. If that ever stops being true, this is the test that
@@ -708,7 +708,7 @@ mod codec {
     }
 
     /// `Usage` gained two fields in
-    /// `ARCHITECTURE.md`
+    /// `docs/architecture.md`
     /// — one for cache writes at an extended retention, one for the share of
     /// the output the provider attributed to reasoning — and that ADR's
     /// argument for leaving `CODEC_VERSION` alone is that both decode when
@@ -845,7 +845,7 @@ mod codec {
     }
 
     /// `ToolCallStarted` gained `call_id` in
-    /// `ARCHITECTURE.md`, as an `Option` with a
+    /// `docs/architecture.md`, as an `Option` with a
     /// serde default rather than a required field plus a `CODEC_VERSION`
     /// bump. This is the claim that decision rests on: a payload written
     /// before the field existed still decodes, and decodes to the only honest

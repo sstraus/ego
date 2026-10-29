@@ -155,7 +155,7 @@ fn fields_that_have_nothing_to_say_are_omitted() {
 /// two tools, and the results answering them. OpenAI wants the calls attached
 /// to the assistant message and each result in its own `tool` message naming
 /// the id — a shape `Message` could not express at all before
-/// `ARCHITECTURE.md`.
+/// `docs/guides/providers.md`.
 #[test]
 fn a_tool_round_trip_reaches_the_wire_in_the_shape_the_schema_asks_for() {
     let mut req = golden_request();
@@ -1157,7 +1157,7 @@ async fn openrouter_quoted_bearer_credentials_do_not_reach_diagnostics() {
     }
 }
 
-/// regression case. OpenRouter wraps an upstream failure as a generic
+/// regression. OpenRouter wraps an upstream failure as a generic
 /// "Provider returned error" and puts the upstream's name and body in
 /// `error.metadata`. Keep the name for attribution and omit the raw body,
 /// which may contain credentials.

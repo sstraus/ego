@@ -120,7 +120,11 @@ fn not_found(program: &OsStr) -> ProcessError {
     }
 }
 
-fn resolve(program: &OsStr, cwd: &Path, env: &[(OsString, OsString)]) -> Option<PathBuf> {
+pub(crate) fn resolve(
+    program: &OsStr,
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+) -> Option<PathBuf> {
     let path = Path::new(program);
     if program.is_empty() {
         return None;

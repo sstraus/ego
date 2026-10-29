@@ -1,25 +1,7 @@
-//! No request ego builds claims to be somebody else's client.
-//!
-//! maintainer ruled on 2026-09-05 that ego ships no impersonation. The Claude Code
-//! `user-agent` / `x-app` / `claude-code-…` beta and the Copilot Chat editor
-//! headers are gone from the defaults, and an operator whose vendor refuses
-//! ego's own identity supplies them through `[auth.<provider>.headers]`
-//! themselves —
-//! `ARCHITECTURE.md`
-//! §1 and §3 as amended, and `ARCHITECTURE.md` §7.8 for the
-//! recipe. Prose is not a guard; this is, in the same spirit as
-//! `tests/deprecated_spellings.rs`: it fails in the pull request that
-//! reintroduces a disguise rather than in a review that might not happen.
-//!
-//! # Headers, and only headers
-//!
-//! The claim is about who ego *says it is*, which a request carries in its
-//! headers. A published OAuth client id is a different fact with a decision of
-//! its own — `NOUS_CLIENT` is `hermes-cli` because Nous registers no other
-//! client, and `2026-08-22-pi-and-hermes-are-the-inclusion-test.md` already
-//! ruled on client ids — so the scan reads header names and values and never a
-//! URL or a form field. Widening it would make this file fail for a rule it
-//! does not own, which is how a guard gets deleted.
+//! Default requests use ego identity rather than another application identity.
+//! Operator-supplied headers are separate from published OAuth client IDs.
+//! These tests check headers only; client IDs and protocol fields retain their
+//! provider-defined values. See `docs/guides/providers.md`.
 
 use ego_ai::http::{HttpError, HttpResponse};
 use ego_ai::oauth::{BuiltInFlow, provider_auth};
@@ -177,7 +159,7 @@ fn no_request_a_default_row_builds_names_another_vendors_client() {
         "a default provider row is presenting somebody else's client identity.\n\
          ego ships its own identity only; a vendor that gates on its own client \
          is an operator's `[auth.<provider>.headers]` decision, not a built-in \
-         (`ARCHITECTURE.md` §7.8).\n\n{}",
+         (`docs/guides/providers.md` §7.8).\n\n{}",
         all.join("\n")
     );
 }
@@ -310,7 +292,7 @@ async fn a_vendor_refusing_egos_identity_is_quoted_and_answered_with_the_recipe(
         assert!(message.contains(said), "{status}: {message}");
         assert!(
             message.contains("[auth.<provider>.headers]")
-                && message.contains("ARCHITECTURE.md"),
+                && message.contains("docs/guides/providers.md"),
             "{status}: {message}"
         );
     }

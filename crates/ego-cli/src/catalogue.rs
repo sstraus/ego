@@ -6,7 +6,7 @@
 //! its own way. A list whose first row is not the row `ego resume` would pick
 //! is a list that lies about what the next command does.
 //!
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 
 use std::path::Path;
 

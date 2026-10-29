@@ -1,6 +1,6 @@
 //! The permission rule grammar.
 //!
-//! `ARCHITECTURE.md`. Test
+//! `docs/architecture.md`. Test
 //! names are prefixed `rule_` so `cargo test -p ego-core rule` selects them:
 //! cargo's filter matches the test path, not the file name.
 

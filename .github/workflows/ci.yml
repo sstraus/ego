@@ -6,18 +6,6 @@
 # construction, so "it passed locally" and "it passed in CI" cannot come apart
 # through a flag that was added in one place and not the other.
 #
-# NOT YET RUNNING. `AGENTS.md` records "No remote until maintainer decides", so this
-# repository has no remote and nothing has ever executed this file. It is
-# committed anyway because the alternative — writing it on the day a remote
-# appears — is writing it under time pressure, and because the `justfile` half
-# of it is useful today regardless. See regression case for the decision this is
-# waiting on.
-#
-# The `windows-latest` leg is expected to fail until regression case and
-# regression_case land native Windows confinement and process ownership. That is
-# honest rather than convenient: a matrix that omitted Windows would report
-# green for a platform the product does not yet support.
-
 name: gate
 
 on:
@@ -41,9 +29,6 @@ jobs:
     name: gate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
-      # Do not cancel Linux because Windows failed. Until regression_case lands,
-      # Windows failing is the expected state, and fail-fast would hide every
-      # other platform's answer behind it.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -60,13 +45,7 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
-      # The temp directory is set here rather than in test code, because it is a
-      # property of the machine a suite runs on and not of the suite. Several
-      # tests write an executable to a temp path and exec it; on a developer
-      # Mac that path is scanned by Defender and costs ~26s per exec, and on a
-      # Windows runner the default temp path is fine but the variable names are
-      # different. Pointing all three at a workspace-local directory makes the
-      # three platforms agree and keeps the knowledge out of the crates.
+      # Keep executable test fixtures in a workspace-local temporary directory.
       - name: Point the temp directory at the workspace
         shell: bash
         run: |

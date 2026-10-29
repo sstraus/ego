@@ -3057,7 +3057,7 @@ fn macos_mdkb_stats_exits_as_outside_ego_in_an_indexed_workspace() {
     );
 }
 
-/// Acceptance on the coordinator machine: the tools maintainer named run under
+/// Acceptance on the coordinator machine: the tools operator named run under
 /// `workspace` with profile exec paths, offline so a script cannot reach the
 /// TUIC socket, from a scratch workspace so nothing real is written.
 /// Run by hand: `cargo nextest run -p ego-tools --test exec_contract --run-ignored only`.
@@ -3076,7 +3076,10 @@ fn macos_coordinator_tools_run_under_workspace_with_profile_exec_paths() {
         .parent()
         .and_then(|bin| bin.parent())
         .expect("wiz plugin root");
-    let tools = canon(&home.join("workspace/example-project/tools"));
+    let tools = canon(&std::path::PathBuf::from(
+        std::env::var_os("EGO_TEST_TOOLS_DIRECTORY")
+            .expect("set EGO_TEST_TOOLS_DIRECTORY to the external tools directory"),
+    ));
     let exec_paths = [
         canon(std::path::Path::new("/opt/homebrew")),
         // The PATH directories themselves: bash finds `tuic` and `mdkb` there.

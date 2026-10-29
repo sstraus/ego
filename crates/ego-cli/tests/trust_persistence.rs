@@ -3,7 +3,7 @@
 //!
 //! Driven through a real pseudo-terminal because the question only exists
 //! where a human seat does. See
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 
 mod support;
 

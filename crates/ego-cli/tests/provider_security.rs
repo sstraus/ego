@@ -110,7 +110,7 @@ fn an_acp_host_is_handed_the_status_of_a_refused_catalogue_and_none_of_its_body(
         }),
     );
     // The message and `data` together: a refused catalogue is a known
-    // failure since regression case, so its cause is in the message and there
+    // failure since regression, so its cause is in the message and there
     // is no executor diagnostic to repeat in `data`.
     let error = answered
         .get("error")

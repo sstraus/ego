@@ -15,7 +15,7 @@ ego-mcp.workspace = true
 fd-lock = "4.0.4"
 futures = "0.3.34"
 getrandom = "0.3.4"
-# `0.4` and not `0.4.20`, the version `ARCHITECTURE.md` names: a caret range
+# `0.4` and not `0.4.20`, the version `docs/architecture.md` names: a caret range
 # lets the MSRV-aware resolver pick the newest release our declared floor
 # allows, instead of a number here having to be kept level with that floor by
 # hand. It held us at `0.4.19` while the workspace declared 1.86, because

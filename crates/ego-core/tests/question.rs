@@ -1,4 +1,4 @@
-//! contract for regression case's core-owned question lifecycle.
+//! contract for regression's core-owned question lifecycle.
 //!
 //! These tests exercise the durable event boundary rather than a
 //! host-specific prompt helper. The question's identity is the `ItemId` on

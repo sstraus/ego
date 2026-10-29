@@ -1,7 +1,7 @@
 //! Two providers that agree about nothing on the wire, settling through one
 //! `ego-core` path.
 //!
-//! See `ARCHITECTURE.md` §8, whose rule
+//! See `docs/guides/providers.md` §8, whose rule
 //! this file exists to make falsifiable:
 //!
 //! > Adding a second provider-reported decoder must require no change to

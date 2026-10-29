@@ -3,7 +3,7 @@
 //! A session that starts untrusted in silence — because nothing in the
 //! workspace was worth asking about, or because the answer was remembered —
 //! needs somewhere to say so. See
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 
 use ego_cli::repl::status::{
     SeatFacts, SelectionFacts, StatusLine, StatusSegmentName, SurfaceSnapshot,

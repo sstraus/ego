@@ -1,7 +1,7 @@
 //! Markdown, rendered by the harness — because nobody else can.
 //!
 //! The captures behind
-//! `ARCHITECTURE.md` settle
+//! `docs/architecture.md` settle
 //! what would otherwise be a matter of taste. A model emits
 //! `**Step 13.5 spedito** (` a9b84ad `)`; what reaches the terminal is
 //! `ESC[1mStep 13.5 spedito ESC[22m ( ESC[38;2;174;185;213ma9b84ad ESC[39m )`.

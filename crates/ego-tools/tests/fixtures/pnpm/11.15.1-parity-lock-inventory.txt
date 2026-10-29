@@ -5,7 +5,7 @@ ROOT /private/tmp/pnpm-store-operation-locks-1000 exists=True
 /private/tmp/pnpm-store-operation-locks-1000/5881d278b1420855581019e2793e09521395755afcb13dce86b9add172d3cb55.lock: mode=0o600 uid=1000 size=0 mtime_ns=1009843202000000000
 /private/tmp/pnpm-store-operation-locks-1000/all-stores.lock: mode=0o600 uid=1000 size=0 mtime_ns=1009843201000000000
 /private/tmp/pnpm-store-operation-locks-1000/f77f0fbc2ec4cb4663dd7bb96827a288d084cffbcd9104623c7a9d5db5954115.lock: mode=0o600 uid=1000 size=0 mtime_ns=1009843230000000000
-ROOT /home/example/workspace exists=True
+ROOT /home/example/Library/pnpm/package-manager-store/v11/tmp/engine-locks exists=True
 sha256(/home/example/Library/pnpm/package-manager-store/v11)=5881d278b1420855581019e2793e09521395755afcb13dce86b9add172d3cb55; file_exists=True
 sha256(/home/example/Library/pnpm/package-manager-store)=5435879815cc569db1b13110b59b9e7470feee48295e9c290cfada54f55e58e5; file_exists=False
 sha256(/home/example/Library/pnpm/store/v11)=2c4de4c0bae53a12eb6be9add2395441a0f822f8bbcba8aa7a0cdab63cdf9961; file_exists=True
@@ -22,6 +22,6 @@ AFTER ROOT /private/tmp/pnpm-store-operation-locks-1000 exists=True
 /private/tmp/pnpm-store-operation-locks-1000/ab7e608001576010520bacc0dcbdb67edfda3b37ebec8e8613d5e5f20e5bf6d5.lock: mode=0o600 uid=1000 size=0
 /private/tmp/pnpm-store-operation-locks-1000/all-stores.lock: mode=0o600 uid=1000 size=0
 /private/tmp/pnpm-store-operation-locks-1000/f77f0fbc2ec4cb4663dd7bb96827a288d084cffbcd9104623c7a9d5db5954115.lock: mode=0o600 uid=1000 size=0
-AFTER ROOT /home/example/workspace exists=True
+AFTER ROOT /home/example/Library/pnpm/package-manager-store/v11/tmp/engine-locks exists=True
 AFTER lsof exact lock files: exit=1
 

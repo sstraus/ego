@@ -6,7 +6,7 @@ mod backend;
 mod bwrap;
 mod denial;
 mod editor_process;
-mod identity;
+pub(crate) mod identity;
 #[cfg(target_os = "linux")]
 mod landlock;
 mod null;
@@ -1040,11 +1040,11 @@ mod tests {
         let initial = RunConfinement::new(
             Confinement::Off,
             false,
-            CanonPath::new("/home/example/workspace"),
+            CanonPath::new("/home/example/Gits"),
         )
         .expect("absolute workspace");
         let rooted = initial.clone().with_roots(vec![ProfileRoot::new(
-            CanonPath::new("/home/example/workspace"),
+            CanonPath::new("/home/example/Gits"),
             RootAccess::ReadWrite,
         )]);
         let admitted = policy_digest(&initial, &backend).expect("initial digest");
@@ -1057,7 +1057,7 @@ mod tests {
             policy_digest(&initial, &historical_backend)
                 .expect("historical digest")
                 .as_str(),
-            "cfcf897964188137affec341edbfa33e68d65592e2183aae868bec7f0250a0be"
+            "2b61fd9385e12499ee14ff58305b1b10e895d4547b2aeab988ffcaacffe27fb2"
         );
         assert_eq!(
             admitted,

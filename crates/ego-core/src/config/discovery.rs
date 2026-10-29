@@ -3,9 +3,9 @@
 //! `AGENTS.md`, from the supplied discovery root down to the current directory,
 //! including bounded relative imports, only in a workspace the trust gate let
 //! through. The CLI chooses `~/Gits` as the discovery root where applicable. See
-//! `ARCHITECTURE.md`
-//! and `ARCHITECTURE.md`
-//! and `ARCHITECTURE.md` I2.
+//! `docs/architecture.md`
+//! and `docs/architecture.md`
+//! and `docs/architecture.md` I2.
 //!
 //! Split the way everything in this crate is split: the *decision* is a pure
 //! function here, and the reading happens behind [`InstructionIo`], whose

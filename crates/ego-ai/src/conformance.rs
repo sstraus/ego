@@ -15,7 +15,7 @@ pub const FINAL_PROFILE_COUNT: usize = 11;
 /// gateway, so a gateway in front of it is not a case this repository has.
 ///
 /// `gemini` is here as of
-/// `ARCHITECTURE.md`.
+/// `docs/guides/providers.md`.
 /// It was the one implemented row left out of this array, and it was left out
 /// for the reason that ADR rejects: no sanitized live recording exists. Its
 /// absence was worse than the `openai` refusal it mirrored, because a row that

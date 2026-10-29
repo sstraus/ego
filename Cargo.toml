@@ -15,27 +15,7 @@ resolver = "3"
 [workspace.package]
 version = "0.4.0"
 edition = "2024"
-# Above edition 2024's own floor of 1.85 for three things, each of which was
-# the binding constraint in turn:
-#
-# 1.86 for trait upcasting: the turn loop holds a `&dyn Fs` and has to hand
-# `Tool::prepare` the narrower `&dyn PathResolver` it is a supertrait of. The
-# alternatives were an `as_resolver()` method on `Fs` that exists only to
-# launder a coercion, or storing both halves and letting them disagree.
-#
-# 1.88 for `agent-client-protocol` 2.0.0, which `ego acp` connects through.
-# Below it cargo resolved the runtime to 1.0.1, which pins the schema crate to
-# `=1.4.0` and conflicts irreconcilably with the version the projection needs
-# (commit df9e566). maintainer approved the raise.
-#
-# 1.88 again for let-chains, which the parser and the config loader use — see
-# `crates/ego-cli/src/cli.rs` and `src/config.rs`. Stabilised in the same
-# release, so it costs nothing on top, but it means the floor cannot drop back
-# to 1.86 by removing the dependency alone.
-#
-# 1.95 for Reedline 0.51.0, whose host-break and repaint handles are the final
-# live-surface control boundary. The repository-local copy preserves that
-# authoritative floor; see the 2026-08-25 live-surface dependency ADR.
+# Minimum Rust version required by the workspace and vendored terminal libraries.
 rust-version = "1.95.0"
 license = "MIT"
 publish = false
@@ -53,10 +33,7 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 
-# Line tables keep file:line in panic backtraces and drop only the variable and
-# type data a debugger uses. Cold `cargo test --workspace --no-run` on the box:
-# full DWARF passed 36 GiB of target/ after 800 s with 117 of 274 test binaries
-# linked (a complete run reached 76 GiB); line tables finish in 487 s at 25 GiB.
+# Keep source locations in backtraces with smaller debug artifacts.
 [profile.dev]
 debug = "line-tables-only"
 

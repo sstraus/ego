@@ -1,6 +1,6 @@
 //! ACP sandbox denials through the real host: a command the sandbox refuses a
 //! path outside the workspace becomes a question, and the answer decides
-//! whether the command runs again (regression case).
+//! whether the command runs again (regression).
 
 #![cfg(target_os = "macos")]
 

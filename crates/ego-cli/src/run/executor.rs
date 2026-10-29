@@ -22,7 +22,7 @@ use super::*;
 /// Retries an ACP turn spends on a transient provider failure that showed
 /// nothing, before it settles as a known failure.
 ///
-/// maintainer decision 2026-10-05 (regression case): a human watching an AI chat is
+/// operator decision 2026-10-05 (regression): a human watching an AI chat is
 /// served better by six visible retries with backoff than by a turn that dies
 /// on the first overload. A headless `ego run` keeps `--retry 0` by default,
 /// because a script owns its own retry policy and reads exit 4 for it.

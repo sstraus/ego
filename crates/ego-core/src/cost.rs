@@ -516,10 +516,10 @@ pub struct PricingRevision(pub String);
 /// §Consequences.
 ///
 /// **Exactly the sources that exist.** A bounded run first uses an operator's
-/// quote, then the cached third-party table from story `regression_case`; `None`
+/// quote, then the cached third-party table from story `regression`; `None`
 /// records that no lookup was needed. Every variant has a producer. The
 /// provider-published source was removed with its sole xAI API-key resolver by
-/// Story `regression_case`, because a variant nothing can produce is a claim the code
+/// Story `regression`, because a variant nothing can produce is a claim the code
 /// cannot back.
 ///
 /// **The wire form is the variant's name** (`#[serde(tag = "source")]`), so an
@@ -565,7 +565,7 @@ pub enum RateSource {
 /// *not* the same type. A `PricingRevision` names a price list; a
 /// subscription and a locally served model have none, and labelling their
 /// figures as though a table produced them is the confusion
-/// `ARCHITECTURE.md` §4 refused. This
+/// `docs/architecture.md` §4 refused. This
 /// names the policy that says "not metered in currency" — which is
 /// checkable, where a fabricated all-zero price list is not.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -578,7 +578,7 @@ pub struct MeteringRevision(pub String);
 /// from a captured response if you know *where on the wire* it was read.
 /// `field` is data — the name of a place — never something anything
 /// dispatches on: `ego-core` cannot name a wire format
-/// (`ARCHITECTURE.md` §8), and every
+/// (`docs/architecture.md` §8), and every
 /// decoder that can read a cost feeds the same
 /// [`AiEvent::ProviderCost`](crate::generator::port::AiEvent::ProviderCost).
 ///

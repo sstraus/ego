@@ -73,7 +73,7 @@ fn file_var_and_attach_are_accepted_by_the_run_grammar() {
         "--file".into(),
         agent.to_str().unwrap().into(),
         "--var".into(),
-        "name=maintainer".into(),
+        "name=operator".into(),
         "--attach".into(),
         image.to_str().unwrap().into(),
     ])
@@ -86,7 +86,7 @@ fn file_var_and_attach_are_accepted_by_the_run_grammar() {
         );
     }
     assert!(
-        !debug.contains("name=maintainer") && !debug.contains("maintainer"),
+        !debug.contains("name=operator") && !debug.contains("operator"),
         "parsed invocation Debug leaked supplied variable value: {debug}"
     );
 }
@@ -105,7 +105,7 @@ fn agent_file_substitutes_only_declared_variables_and_keeps_body_as_prompt() {
             "--file",
             file.to_str().unwrap(),
             "--var",
-            "name=maintainer",
+            "name=operator",
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "--output",
@@ -116,7 +116,7 @@ fn agent_file_substitutes_only_declared_variables_and_keeps_body_as_prompt() {
     assert_eq!(stub.generations().len(), 1);
     let body = stub.generations().remove(0);
     assert!(
-        body.to_string().contains("Hello maintainer."),
+        body.to_string().contains("Hello operator."),
         "substituted body missing: {body}"
     );
     assert!(
@@ -403,21 +403,21 @@ fn variable_declarations_placeholders_and_supplied_values_must_be_equal() {
         (
             "version: 1\nvars: [name]",
             "Hello {{other}}",
-            "name=maintainer",
+            "name=operator",
             2,
             0,
         ),
         (
             "version: 1\nvars: [name]",
             "Hello {{name}}",
-            "other=maintainer",
+            "other=operator",
             2,
             0,
         ),
         (
             "version: 1\nvars: [name]",
             "Hello {{name}}",
-            "name=maintainer\nname=Again",
+            "name=operator\nname=Again",
             2,
             0,
         ),
@@ -425,7 +425,7 @@ fn variable_declarations_placeholders_and_supplied_values_must_be_equal() {
         (
             "version: 1\nvars: [name]",
             "literal body",
-            "name=maintainer",
+            "name=operator",
             2,
             0,
         ),

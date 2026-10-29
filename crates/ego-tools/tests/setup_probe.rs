@@ -435,7 +435,7 @@ fn setup_inventory_observes_recorded_operator_cache_source_without_creating_cach
             .join("Library/Application Support/mbx/config.toml");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         // Recorded from the operator mbx config on 2026-10-15; only the cache_dir field is relevant.
-        std::fs::write(&config, r#"cache_dir = "/home/example/workspace""#).unwrap();
+        std::fs::write(&config, r#"cache_dir = "/home/example/Gits/.mbx""#).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -459,7 +459,7 @@ fn setup_inventory_observes_recorded_operator_cache_source_without_creating_cach
     let workspace =
         std::path::PathBuf::from(std::env::var_os("EGO_SETUP_CATALOGUE_WORKSPACE").unwrap());
     let probes = ego_tools::setup::inventory(&workspace);
-    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { path, reason } if path == std::path::Path::new("/home/example/workspace") && reason.contains("bounded operator TOML"))));
+    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { path, reason } if path == std::path::Path::new("/home/example/Gits/.mbx") && reason.contains("bounded operator TOML"))));
     #[cfg(target_os = "macos")]
     assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("developer selection"))));
 }

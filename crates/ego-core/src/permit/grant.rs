@@ -430,7 +430,7 @@ pub enum PolicyDenied {
     /// construction — its own doc says the origin "is metadata that `rules ls`
     /// shows" — and a run that ends at exit 3 has no second invocation in
     /// which to show it. See
-    /// `ARCHITECTURE.md`.
+    /// `docs/architecture.md`.
     Denied {
         tool: String,
         op: OpName,
@@ -1415,7 +1415,7 @@ impl PolicyEngine {
     }
 
     /// Decide what a prepared call may do, and hand back the grant that says
-    /// so (`ARCHITECTURE.md` §1).
+    /// so (`docs/architecture.md` §1).
     ///
     /// This is the method that makes this an engine rather than a stamp. The
     /// scope is derived *from the call*, so a permit can never allow more
@@ -1430,7 +1430,7 @@ impl PolicyEngine {
     /// else's problem: nothing here awaits, opens anything or reads a clock.
     ///
     /// The order is fixed
-    /// (`ARCHITECTURE.md` §6), first
+    /// (`docs/architecture.md` §6), first
     /// match wins, and it is evaluated **per operation**. The sole exception
     /// is a structurally supporting foreign transport after every opaque
     /// identity is allowed; its authority is the same delegation, not a
@@ -1858,7 +1858,7 @@ impl PolicyEngine {
     /// **Private to `grant.rs`, and that is the load-bearing half of
     /// Invariant W.** It used to be `pub`, reserved for "a later bypass mode
     /// (`--yolo`) minting a deliberately wide grant". §1 of
-    /// `ARCHITECTURE.md` removed that
+    /// `docs/architecture.md` removed that
     /// use: bypass is a decision *whether to ask*, and a bypassed call is
     /// still scoped from the call, so nothing anywhere needs a wide grant.
     /// What was left was a public widening primitive kept for its own sake —
@@ -2076,7 +2076,7 @@ fn scope_of(call: &PreparedCall) -> Scope {
 /// These tests live inside `grant.rs` rather than under `tests/` because
 /// they need [`PolicyEngine::mint`], and `mint` is private to this module —
 /// that privacy is half of §2 of
-/// `ARCHITECTURE.md`, and a test
+/// `docs/architecture.md`, and a test
 /// binary that could reach it would be proof it is not private at all. What
 /// they check is what a `Scope` *means* once minted: the four path lists do
 /// not imply one another, `is_or_under` is component-wise and not a string

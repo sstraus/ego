@@ -1,7 +1,7 @@
 //! Fetching the litellm table: once, conditionally, and never storing
 //! something that is not a table.
 //!
-//! `ARCHITECTURE.md` §6 puts the fetch in
+//! `docs/guides/providers.md` §6 puts the fetch in
 //! this crate, because it owns `Http`, and §7 settles what the run does when it
 //! fails. What is tested here is only the exchange — whether the cache is
 //! *consulted* is `Metering::ceiling_needs_rates`, one layer up, and whether

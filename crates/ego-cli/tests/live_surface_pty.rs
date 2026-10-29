@@ -1031,7 +1031,12 @@ fn recorded_stdout_only_exec_expands_once_in_pty() {
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, 0, "tuic-bg: you will get BG DONE;");
+    until_normalized(
+        &reader,
+        &mut output,
+        0,
+        "background: completion notification",
+    );
     until_prompt_from(&reader, &mut output, 0);
     drain_until_quiet(&reader, &mut output);
     let start = output.len();
@@ -1041,17 +1046,17 @@ fn recorded_stdout_only_exec_expands_once_in_pty() {
         &reader,
         &mut output,
         start,
-        "  tuic-bg: you will get BG DONE; end your turn now",
+        "  background: completion notification will follow",
     );
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let expanded = normalized(&output[start..]);
     for marker in [
         "✓ $ bash",
-        "tuic bg: pid=12345",
-        "log=/Users/",
-        "wake=/Users/",
-        "tuic-bg:",
+        "background: pid=12345",
+        "log=/workspace/",
+        "wake=/workspace/",
+        "background:",
     ] {
         assert_eq!(expanded.matches(marker).count(), 1, "{expanded}");
     }
@@ -1706,9 +1711,9 @@ fn a_turn_in_a_tuic_pane_tells_tuic_its_title_intent_busy_and_idle() {
 #[cfg(not(windows))]
 #[test]
 fn image_removal_wait_rejects_incomplete_repaint() {
-    // Completed empty frame captured from the real rb transcript in regression_case.
+    // Completed empty frame captured from the real rb transcript in regression.
     let empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
-    // Captured from the native image-removal PTY run in regression_case. The
+    // Captured from the native image-removal PTY run in regression. The
     // status row is part of the prompt, not text in the editor buffer.
     let status_empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96mfixture-vision \xc2\xb7 off \xc2\xb7 auto \xc2\xb7 ctx ?\r\n> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
     assert_eq!(
@@ -3422,7 +3427,7 @@ fn until_draft_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, s
 
 #[test]
 fn draft_ready_wait_rejects_typed_and_incomplete_repaints() {
-    // Captured from the failing real rb PTY transcript in regression case.
+    // Captured from the failing real rb PTY transcript in regression.
     let empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
     let typed = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b[37munsent draft\x1b[0m\x1b7\x1b8\x1b[?25h";
     for transient in [typed.as_slice(), &empty[..empty.len() - 6]] {

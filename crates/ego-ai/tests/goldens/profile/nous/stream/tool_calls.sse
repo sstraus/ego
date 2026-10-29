@@ -1,4 +1,4 @@
-: captured-client-derived from NousResearch/hermes-agent@a0ca7c19204e514f9590ce3b812e029b315ab9e9 (read 2026-08-24)
+: captured-client-derived from subscription client contract (recorded 2026-08-24; not live provider evidence)
 : provider nous, ego 0.1.0
 data: {"id":"chatcmpl-nous-tools","object":"chat.completion.chunk","model":"hermes-3-70b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}],"usage":null}
 

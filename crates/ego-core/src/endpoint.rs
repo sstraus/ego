@@ -4,7 +4,7 @@
 //! speaks over stdio to a parent that already had the right to run it, so
 //! "who may connect" was never a question ego had to answer. An inbound
 //! endpoint makes it one, and
-//! `ARCHITECTURE.md`
+//! `docs/architecture.md`
 //! puts the answer here, above every host protocol, rather than once inside
 //! each of them.
 //!

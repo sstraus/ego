@@ -1,5 +1,5 @@
 //! Authority widening of the rules `suggest_remember` offers to a human who
-//! answers `a` (regression case, criterion 8). Each test names the bug it
+//! answers `a` (regression, criterion 8). Each test names the bug it
 //! catches; every assertion is about what the stored rule would later cover.
 
 use std::ffi::OsString;

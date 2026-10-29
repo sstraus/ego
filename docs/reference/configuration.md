@@ -158,7 +158,7 @@ The default status template is `{{ compact }}\n{{ prompt }}`. The prompt must
 render once on its own line. MiniJinja `{% filter priority(integer) %}` blocks drop as
 whole units in ascending priority order when a row is too wide. Text before the
 prompt goes above the buffer, and text after it goes below. Critical operational
-state remains visible even if omitted. See [CLI section 6.5](../../CLI.mdregression case-status-line)
+state remains visible even if omitted. See [CLI section 6.5](../guides/interactive.md)
 for the variables, filters, limits and fallback diagnostics. The unreleased
 `segments` key is no longer accepted.
 

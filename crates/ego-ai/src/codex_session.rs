@@ -1,5 +1,4 @@
-//! Codex continuation, pinned to Pi 4954d760504c11df9b2cbdc040346107b6a8153d,
-//! packages/ai/src/api/openai-codex-responses.ts:1426-1478.
+//! Session-scoped Codex WebSocket continuation.
 //! Retain only successful connection-local state; durable reasoning uses core history.
 use std::sync::Arc;
 

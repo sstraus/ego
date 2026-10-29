@@ -85,7 +85,7 @@ fn a_prefixed_key_resolves_from_the_same_two_halves() {
 
 /// An absent rate decodes as **absent**, never as zero.
 ///
-/// `gpt-5` states no cache-write rate. `ARCHITECTURE.md`
+/// `gpt-5` states no cache-write rate. `docs/guides/providers.md`
 /// §9 requires an absent figure to decode as absent, and `cost.rs:335-339`
 /// says why: a price list saying zero per token and a row that has no
 /// per-token price at all are different facts, and once they share a spelling

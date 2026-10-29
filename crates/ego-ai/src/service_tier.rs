@@ -1,5 +1,5 @@
 //! Catalogue policy from captured provider documentation, 2026-10-16.
-//! See ARCHITECTURE.md Unknown support fails closed.
+//! See docs/guides/providers.md. Unknown support fails closed.
 
 use ego_core::budget::PricingQuote;
 use ego_core::cost::Amount;

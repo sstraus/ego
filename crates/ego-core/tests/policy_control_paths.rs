@@ -1,4 +1,4 @@
-//! Allow-rule guard at the canonical policy boundary (regression case).
+//! Allow-rule guard at the canonical policy boundary (regression).
 
 use std::path::Path;
 

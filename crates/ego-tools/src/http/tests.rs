@@ -230,7 +230,7 @@ async fn offline_rejects_non_loopback_logical_and_selected_targets() {
     );
 }
 
-/// regression case — catches: a silent response bypasses the logical call
+/// regression — catches: a silent response bypasses the logical call
 /// deadline. Both absent headers and a stalled SSE body must be bounded.
 #[tokio::test]
 async fn regression_case_silent_provider_is_bounded_by_the_logical_call_deadline() {

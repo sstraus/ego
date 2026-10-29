@@ -74,7 +74,7 @@ pub const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 ///
 /// It sets a versioned base, not a request endpoint: a row carries a base and the
 /// mapping joins its own path onto it
-/// (`ARCHITECTURE.md`
+/// (`docs/architecture.md`
 /// §2). Both variables name a *server*, which is what a base is, so this is
 /// also the spelling an operator already has in them.
 fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
@@ -109,7 +109,7 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
 ///
 /// Every row, unconditionally. A row names the variable its credential lives
 /// in and never reads it
-/// (`ARCHITECTURE.md` §3), so a
+/// (`docs/architecture.md` §3), so a
 /// machine with no `OPENAI_API_KEY` still *has* an OpenAI row — it simply
 /// cannot authenticate against it yet, which is a different sentence and a
 /// different error.
@@ -119,11 +119,11 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
 /// and forced [`resolve`] to name one provider by hand to say the true thing.
 ///
 /// The API-key `xai` candidate remains absent. The distinct `xai-oauth` row
-/// is present because the Pi ∪ Hermes inclusion decision explicitly promotes
+/// is present because the subscription provider catalogue explicitly includes
 /// that subscription contract without collapsing its metering into the API
 /// key row. Gemini used to be absent for want of acceptance evidence and is
 /// now present:
-/// `ARCHITECTURE.md`.
+/// `docs/architecture.md`.
 pub(crate) fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
@@ -249,7 +249,7 @@ pub(crate) fn judge_thinking(
 /// place a credential is read. What comes back beside the model is the
 /// resolved value itself, so the check here and the header sent later cannot
 /// disagree about whether a key exists — they are the same read
-/// (`ARCHITECTURE.md`
+/// (`docs/architecture.md`
 /// §6).
 ///
 /// Returned beside the [`ResolvedModel`] rather than inside it, and that is
@@ -1602,7 +1602,7 @@ mod tests {
 
     /// The API-key candidate is still not runnable.
     ///
-    /// `ARCHITECTURE.md`
+    /// `docs/architecture.md`
     /// §9 draws the line at selectability: a provider assembled from a
     /// published document has offline evidence and no acceptance evidence, and
     /// its legacy endpoint is now vendor-deprecated. Adding that candidate to
@@ -1636,8 +1636,8 @@ mod tests {
 
     /// An Anthropic request assembles from the builtin catalogue alone.
     ///
-    /// The other half of story `regression_case`'s fourth criterion, kept as an
-    /// in-process assertion after story `regression_case` moved the child-process
+    /// The other half of story `regression`'s fourth criterion, kept as an
+    /// in-process assertion after story `regression` moved the child-process
     /// half onto this same row.
     ///
     /// The layers are assembled here, with both file layers explicitly empty

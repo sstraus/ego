@@ -223,7 +223,7 @@ impl Repair {
 /// line at index 0 has established a valid prefix of zero bytes, and a
 /// caller that then truncates to that length deletes the entire session —
 /// which is what this store did, reporting it as an ordinary `Repair`. See
-/// `ARCHITECTURE.md` §1.
+/// `docs/architecture.md` §1.
 ///
 /// So the header is answered here, before anything is allowed to remove a
 /// byte. `read` and `recover` both come through this function so the two
@@ -1591,7 +1591,7 @@ impl JsonlStore {
             // only, which makes the header the *least* protected line in the
             // file. The conclusion survives on the write-once clause alone;
             // the deleted clause was never checked. ADR §2 of
-            // `ARCHITECTURE.md`.
+            // `docs/architecture.md`.
             created: projected_meta.created,
             updated: projected_meta.updated,
             title: projected_meta.title,

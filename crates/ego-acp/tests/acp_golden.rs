@@ -1148,7 +1148,7 @@ mod acp_golden {
     /// counterpart to `AssistantMessage`), so both map to a thought chunk.
     ///
     /// The v1 chunk also carries `_meta.ego.salience = "activity"` — story
-    /// regression_case treats a reasoning trace as non-primary content, same as
+    /// regression treats a reasoning trace as non-primary content, same as
     /// tool activity, not the card-level content an out-of-turn notice is.
     /// v2 gets no meta here: this story only wires salience into the v1
     /// projection (see `project_notice_v1`, v1-only); v2 delivery is

@@ -1,7 +1,7 @@
 //! The turn loop: what a turn writes down, and what it does when something
 //! goes wrong.
 //!
-//! See `ARCHITECTURE.md` and
+//! See `docs/architecture.md` and
 //! `plans/m0b-vertical-slice.md` Step 10.
 
 use std::cell::RefCell;
@@ -5842,7 +5842,7 @@ mod turn {
         );
     }
 
-    /// Bug regression_case: a read outside the workspace ended the whole turn with
+    /// Bug regression: a read outside the workspace ended the whole turn with
     /// `PermissionRequired`, so the model never saw the refusal and an AI Chat
     /// turn died on a file its instructions referenced. The refusal is a
     /// failed tool result and the next generation answers.
@@ -6017,7 +6017,7 @@ mod turn {
         }
     }
 
-    /// Critic regression_case. Plausible bug: the refused read short-circuits the
+    /// Critic regression. Plausible bug: the refused read short-circuits the
     /// batch, so the sibling that follows it is closed unstarted or never
     /// answered.
     #[test]
@@ -6043,7 +6043,7 @@ mod turn {
         assert_eq!(tool_result_text(&calls["inside"]), "hello");
     }
 
-    /// Critic regression_case. Plausible bug: the refused read's `continue` swallows
+    /// Critic regression. Plausible bug: the refused read's `continue` swallows
     /// the next call's own denial, or lets the write run.
     #[test]
     fn a_write_that_needs_an_answer_after_a_refused_read_still_ends_the_turn() {
@@ -6094,7 +6094,7 @@ mod turn {
         assert_eq!(fx.generator.calls().len(), 2);
     }
 
-    /// Critic regression_case. Plausible bug: the exception widens to every refused
+    /// Critic regression. Plausible bug: the exception widens to every refused
     /// read, so an operator's deny rule no longer ends the run.
     #[test]
     fn a_deny_rule_on_a_read_inside_the_workspace_still_ends_the_turn() {
@@ -6129,7 +6129,7 @@ mod turn {
         assert!(!ok);
     }
 
-    /// Critic regression_case. Plausible bug: state left behind by the first refusal
+    /// Critic regression. Plausible bug: state left behind by the first refusal
     /// (a call left started, a double `ToolCallCompleted`, a decision recorded
     /// twice) breaks the next generation's refusal.
     #[test]
@@ -8117,7 +8117,7 @@ mod turn {
 
     // --- how this generation is metered, said out loud ---
     //
-    // `ARCHITECTURE.md` §6. Three of the
+    // `docs/architecture.md` §6. Three of the
     // four arrangements make a monetary `--budget` inert, and an operator who
     // set one has to be told that before the run rather than inferring it
     // from a limit that never fired.
@@ -11186,7 +11186,7 @@ mod turn {
 
             // A possibly-sent transient failure that already showed output
             // is terminal for automatic delivery, even though its error class
-            // would otherwise retry (maintainer decision 2026-10-05 retries only
+            // would otherwise retry (operator decision 2026-10-05 retries only
             // the possibly-sent attempts that showed nothing).
             let trace = GenerationTrace::default();
             let source = Arc::new(
@@ -11878,7 +11878,7 @@ mod turn {
                 .collect()
         }
 
-        /// regression case — catches: a possibly-sent transient failure that
+        /// regression — catches: a possibly-sent transient failure that
         /// showed nothing is never retried, and six immediate retries all
         /// land on a provider that is still overloaded.
         #[test]
@@ -11935,7 +11935,7 @@ mod turn {
             );
         }
 
-        /// regression case — catches: the interactive retry budget settles
+        /// regression — catches: the interactive retry budget settles
         /// known failure before a provider that recovers after 63 seconds.
         #[test]
         fn regression_case_recovers_after_the_interactive_retry_budget() {
@@ -12019,7 +12019,7 @@ mod turn {
             );
         }
 
-        /// regression case — catches: a recovery wait starts an extra paid
+        /// regression — catches: a recovery wait starts an extra paid
         /// request after the monotonic horizon has expired.
         #[test]
         fn regression_case_recovery_horizon_stops_without_another_attempt() {
@@ -12055,7 +12055,7 @@ mod turn {
             );
         }
 
-        /// regression case — catches: recovery bypasses cancellation or
+        /// regression — catches: recovery bypasses cancellation or
         /// replays already observed model output.
         #[test]
         fn regression_case_recovery_preserves_cancel_and_output_safety() {
@@ -12111,7 +12111,7 @@ mod turn {
             }
         }
 
-        /// regression case — catches: force-retry cancels the turn or leaves
+        /// regression — catches: force-retry cancels the turn or leaves
         /// the provider waiting until its backoff timer expires.
         #[test]
         fn regression_case_force_retry_releases_backoff_without_cancelling() {
@@ -12164,7 +12164,7 @@ mod turn {
             assert_eq!(trace.requests.lock().unwrap().len(), 2);
         }
 
-        /// regression case — catches: a provider-stated `Retry-After` ignored
+        /// regression — catches: a provider-stated `Retry-After` ignored
         /// in favour of the local backoff, or obeyed past the ceiling.
         #[test]
         fn a_retry_waits_for_the_providers_retry_after_and_a_long_one_stops_the_plan() {
@@ -12223,7 +12223,7 @@ mod turn {
             assert_eq!(outcome.exit_reason, ExitReason::Provider);
         }
 
-        /// regression case — catches: a retry that shows the user the same
+        /// regression — catches: a retry that shows the user the same
         /// text or runs the same tool call twice.
         #[test]
         fn an_attempt_that_showed_output_before_failing_is_not_retried() {
@@ -12311,7 +12311,7 @@ mod turn {
             }
         }
 
-        /// regression case — catches: a backoff wait the host cannot stop.
+        /// regression — catches: a backoff wait the host cannot stop.
         #[test]
         fn a_retry_wait_is_cancellable_by_the_host() {
             let trace = GenerationTrace::default();
@@ -15437,7 +15437,7 @@ fn retry_jitter_stays_bounded_and_never_shortens_provider_wait() {
     );
 }
 
-/// regression case — catches: long outages keep retrying at the old 60s
+/// regression — catches: long outages keep retrying at the old 60s
 /// ceiling instead of progressing to a jittered two-minute backoff.
 #[test]
 fn regression_case_progressive_backoff_reaches_two_minutes() {

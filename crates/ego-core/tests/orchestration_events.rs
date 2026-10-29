@@ -18,7 +18,7 @@ fn result_question_failure_and_nonzero_background_exit_are_cards_without_a_judge
     for text in [
         "RESULT child: done",
         "BLOCKED child: missing input",
-        "QUESTION maintainer: choose?",
+        "QUESTION operator: choose?",
         "failure: command rejected",
         "BG DONE exit=1",
         "unknown event",

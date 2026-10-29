@@ -1,18 +1,18 @@
 Filtering the log data using "composedMessage CONTAINS[c] "Sandbox:" AND composedMessage CONTAINS[c] "pnpm""
 Timestamp               Ty Process[PID:TID]
-2002-01-01 00:01:09.000 E  kernel[0:1000016] (Sandbox) Sandbox: touch(20000) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:01:09.000 E  kernel[0:1000016] (Sandbox) Sandbox: touch(20000) deny(1) file-write-create /home/example/Gits/.tmp/.ego-admission-Ex0004/home/Library/Caches/pnpm/dlx/probe
 2002-01-01 00:01:10.000 E  kernel[0:1000014] (Sandbox) Sandbox: pnpm(20001) deny(1) mach-lookup com.apple.securityd.xpc
-2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) 1 duplicate report for Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) 1 duplicate report for Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/workspace
+2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) 1 duplicate report for Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/Library/Keychains/login.keychain-db
+2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) 1 duplicate report for Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:11.000 E  kernel[0:1000017] (Sandbox) Sandbox: pnpm(20001) deny(1) file-read-metadata /home/example/Library/Keychains/login.keychain-db
 2002-01-01 00:01:11.000 E  kernel[0:1000014] (Sandbox) Sandbox: pnpm(20001) deny(1) mach-lookup com.apple.SecurityServer
 2002-01-01 00:01:12.000 E  kernel[0:1000014] (Sandbox) Sandbox: pnpm(20001) deny(1) mach-lookup com.apple.SystemConfiguration.DNSConfiguration
-2002-01-01 00:01:13.000 E  kernel[0:1000018] (Sandbox) Sandbox: touch(20002) deny(1) file-write-create /home/example/workspace
-2002-01-01 00:01:14.000 E  kernel[0:1000019] (Sandbox) Sandbox: touch(20003) deny(1) file-write-create /home/example/workspace
-2002-01-01 00:01:15.000 E  kernel[0:100001a] (Sandbox) Sandbox: touch(20004) deny(1) file-write-create /home/example/workspace
+2002-01-01 00:01:13.000 E  kernel[0:1000018] (Sandbox) Sandbox: touch(20002) deny(1) file-write-create /home/example/Gits/.tmp/.ego-admission-Ex0004/xdg-cache/pnpm/dlx/probe
+2002-01-01 00:01:14.000 E  kernel[0:1000019] (Sandbox) Sandbox: touch(20003) deny(1) file-write-create /home/example/Gits/.tmp/.ego-admission-Ex0004/home/Library/pnpm/store/probe
+2002-01-01 00:01:15.000 E  kernel[0:100001a] (Sandbox) Sandbox: touch(20004) deny(1) file-write-create /home/example/Gits/.tmp/.ego-admission-Ex0004/home/Library/Caches/pnpm/dlx/probe
 2002-01-01 00:01:16.000 E  kernel[0:100001b] (Sandbox) Sandbox: pnpm(20005) deny(1) system-socket domain:32 type:2 protocol:2
 2002-01-01 00:01:17.000 E  kernel[0:1000015] (Sandbox) 11 duplicate reports for Sandbox: pnpm(20005) deny(1) system-socket domain:32 type:2 protocol:2
 

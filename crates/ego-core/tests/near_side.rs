@@ -1,6 +1,6 @@
 //! The near side of the provider seam names no provider and no protocol.
 //!
-//! `ARCHITECTURE.md` §5
+//! `docs/architecture.md` §5
 //! calls this the *necessary* condition of its three invariants, and it is
 //! necessary in the strict sense: passing proves nothing on its own, and
 //! failing proves the seam has been crossed. The *sufficient* condition — that
@@ -45,7 +45,7 @@ const NEAR_SIDE: &[&str] = &[
 /// Every provider id and protocol name this build could be tempted to branch
 /// on.
 ///
-/// The six providers of `ARCHITECTURE.md`
+/// The six providers of `docs/architecture.md`
 /// §1, plus the two wire-level spellings that identify a protocol without
 /// naming a vendor: a path only one family serves, and a header only one
 /// family sends. Matched case-insensitively, so `OpenAI`, `openai` and
@@ -105,7 +105,7 @@ fn the_near_side_names_no_provider_and_no_protocol() {
          A difference between providers belongs in `ego-ai`: a model fact in \
          `ModelCapabilities`, a transport fact in the row's headers, or a wire \
          format of its own \
-         (`ARCHITECTURE.md` §4).\n\n{}",
+         (`docs/architecture.md` §4).\n\n{}",
         breaches.join("\n")
     );
 }

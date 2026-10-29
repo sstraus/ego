@@ -5,11 +5,6 @@
 # A change to a flag here changes CI in the same commit, and a green local run
 # and a green CI run are the same claim.
 #
-# On this machine `cargo` resolves to the mbx shim when
-# `~/Library/Application Support/mbx/bin` is on PATH, which is how concurrent
-# builds share one artifact cache instead of holding every core. Nothing here
-# depends on that: the recipes call `cargo`, and the shim is a PATH decision.
-#
 # Note on comments below: `just` takes the single comment line immediately above
 # a recipe as its `--list` description. Anything longer is separated by a blank
 # line so that `just --list` stays readable.
@@ -27,7 +22,7 @@ python := if os() == "windows" { "python" } else { "python3" }
 
 # Fail if the builtin model catalogue is not what its generator writes.
 catalogue-check:
-    {{ python }} -B .agents/skills/model-catalogue-refresh/scripts/catalogue.py check
+    {{ python }} -B scripts/catalogue.py check
 
 # Rewrite formatting in place.
 fmt:

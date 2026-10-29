@@ -9,7 +9,7 @@
 //! agree.
 //!
 //! They are not ports in the sense
-//! `ARCHITECTURE.md` means:
+//! `docs/architecture.md` means:
 //! nothing here is a boundary this crate owns. They are the *adapters* that
 //! answer ports `ego-acp` and `ego-mcp` own, and one adapter can answer both.
 //!

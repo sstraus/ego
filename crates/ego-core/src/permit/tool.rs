@@ -578,7 +578,7 @@ fn base64(bytes: &[u8]) -> String {
 /// willingness to act: `io.read(p)` succeeds exactly when the permit covers
 /// `p`. Handing the permit over as well gave a tool a second, unchecked
 /// handle on its own grant, and gave a caller two values to pair — which is
-/// what `ARCHITECTURE.md` §3 exists to
+/// what `docs/architecture.md` §3 exists to
 /// prevent. The permit now lives inside the `GuardedFs` and dies with it.
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;

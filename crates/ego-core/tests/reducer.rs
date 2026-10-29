@@ -1421,7 +1421,7 @@ mod reducer {
 
     // --- the attempt ledger ------------------------------------------------
     //
-    // See `ARCHITECTURE.md`. The
+    // See `docs/architecture.md`. The
     // reducer is total, so "refused" means the variant's effect is not
     // applied and a typed `Refusal` is recorded — the envelope bookkeeping
     // still happens either way.

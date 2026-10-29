@@ -1,5 +1,5 @@
 //! `FakeGenerator`: a scriptable `Generator` for tests and for the
-//! eval/replay seam (U3, `ARCHITECTURE.md`) — record a real session's
+//! eval/replay seam (U3, `docs/architecture.md`) — record a real session's
 //! `AiEvent` stream once, then replay it deterministically without a
 //! network call.
 

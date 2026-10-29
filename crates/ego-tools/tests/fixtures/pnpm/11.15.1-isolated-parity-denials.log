@@ -3,12 +3,12 @@ Timestamp               Ty Process[PID:TID]
 2002-01-01 00:01:18.000 E  kernel[0:100001e] (Sandbox) Sandbox: pnpm(20010) deny(1) system-socket domain:32 type:2 protocol:2
 2002-01-01 00:01:19.000 E  kernel[0:100001c] (Sandbox) 11 duplicate reports for Sandbox: pnpm(20010) deny(1) system-socket domain:32 type:2 protocol:2
 2002-01-01 00:01:20.000 E  kernel[0:100001c] (Sandbox) Sandbox: pnpm(20011) deny(1) mach-lookup com.apple.securityd.xpc
-2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) 1 duplicate report for Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) 1 duplicate report for Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/workspace
-2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/workspace
+2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) 1 duplicate report for Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/Library/Keychains/login.keychain-db
+2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) 1 duplicate report for Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/Library/Keychains
+2002-01-01 00:01:21.000 E  kernel[0:100001f] (Sandbox) Sandbox: pnpm(20011) deny(1) file-read-metadata /home/example/Library/Keychains/login.keychain-db
 2002-01-01 00:01:21.000 E  kernel[0:100001d] (Sandbox) Sandbox: pnpm(20011) deny(1) mach-lookup com.apple.SecurityServer
 2002-01-01 00:01:22.000 E  kernel[0:100001c] (Sandbox) Sandbox: pnpm(20011) deny(1) mach-lookup com.apple.SystemConfiguration.DNSConfiguration
 

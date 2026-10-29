@@ -281,7 +281,7 @@ pub struct Plan {
     ///
     /// The control plane otherwise always succeeds, so the only provider
     /// failure observable from outside is a *generation* one — and story
-    /// `regression_case` is about the *pre-turn* half, where the catalogue request
+    /// `regression` is about the *pre-turn* half, where the catalogue request
     /// carries the operator's credential and the answer's bytes must not be
     /// relayed into what a terminal or an ACP host is shown.
     pub tags_refusal: Option<(u16, String)>,
@@ -715,7 +715,7 @@ fn json(stream: &mut TcpStream, value: &serde_json::Value) -> std::io::Result<()
 
 /// Re-spell one complete chat-completions transcript as Anthropic Messages.
 ///
-/// The reply builders above speak one dialect, and after story `regression_case` the
+/// The reply builders above speak one dialect, and after story `regression` the
 /// hosted row these tests select is `anthropic`, which speaks another. The
 /// alternative was a second spelling of every fixture at all fifty-odd call
 /// sites, where the *semantics* — this answer, these tokens, this tool call —

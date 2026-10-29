@@ -1436,7 +1436,7 @@ mod edit {
 
     #[test]
     fn edit_prepares_a_read_and_a_write_of_the_file_it_names() {
-        // `ARCHITECTURE.md` Step C, first invariant. The operation
+        // `docs/architecture.md` Step C, first invariant. The operation
         // carries the substitution rather than the resulting bytes, because
         // the resulting bytes are not knowable here — and because "replace
         // this text with that text in this file" is the reviewable sentence
@@ -1615,7 +1615,7 @@ mod edit {
         );
     }
 
-    /// regression case. Catches: a linked checkout created after session admission
+    /// regression. Catches: a linked checkout created after session admission
     /// gets a bare write refusal that gives no operator-only recovery action.
     #[test]
     fn linked_worktree_edit_is_admitted_or_names_exact_write_grant() {

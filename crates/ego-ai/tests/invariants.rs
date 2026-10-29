@@ -1,6 +1,6 @@
 //! The two invariants of the provider seam, proved from outside it.
 //!
-//! `ARCHITECTURE.md` §5
+//! `docs/guides/providers.md` §5
 //! states three, and each has a *necessary* condition and a *sufficient* one.
 //! The necessary one — that the near side names no provider and no protocol —
 //! is a grep, and it lives in `crates/ego-core/tests/near_side.rs` because the
@@ -1179,8 +1179,8 @@ impl Tool for NeverRunTool {
 async fn fast_contract_catches_missing_wire_tier_and_unmultiplied_turn_cost() {
     use ego_ai::service_tier::ServiceTier;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    // Real loopback HTTP, no model calls. The tariff is captured in
-    // ARCHITECTURE.md
+    // Real loopback HTTP, no model calls. The expected tariff is a fixed
+    // regression oracle for the service-tier calculation.
     for (tier, expected) in [
         (ServiceTier::Standard, "0.0000453"),
         (ServiceTier::Fast, "0.0000906"),

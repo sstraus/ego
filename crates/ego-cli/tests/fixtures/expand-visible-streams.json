@@ -12,7 +12,7 @@
     "kind": {
       "kind": "ToolCallStarted",
       "name": "exec",
-      "args": "{\"argv\":[\"bash\",\"-lc\",\"/home/example/workspace /home/example/workspace -- bash /home/example/workspace\"],\"cwd\":\"/home/example/workspace\",\"timeout_ms\":10000,\"background\":false}",
+      "args": "{\"argv\":[\"bash\",\"-lc\",\"/workspace/tools/background.sh /workspace/output/validation.log -- bash /workspace/tools/validate.sh\"],\"cwd\":\"/workspace/project\",\"timeout_ms\":10000,\"background\":false}",
       "call_id": "call_example_capture_0002"
     }
   },
@@ -76,7 +76,7 @@
       "result": {
         "content": [
           {
-            "text": "tuic bg: pid=12345 log=/home/example/workspace wake=/home/example/workspace\ntuic-bg: you will get BG DONE; end your turn now\n",
+            "text": "background: pid=12345\nlog=/workspace/output/validation.log\nwake=/workspace/output/validation.log.wake\nbackground: completion notification will follow\n",
             "provenance": {
               "source": "process",
               "stream": "stdout",
@@ -84,7 +84,7 @@
               "truncated": false,
               "omitted_bytes": 0
             },
-            "full_output": "c10475db71c79d32d68ee03a598cf625edd3df6529757005b871cec275ae278d:125"
+            "full_output": "4c99238af41bf7b5d761616890191485258ccd632392ca78efcbaac30419d6ed:150"
           },
           {
             "text": "",

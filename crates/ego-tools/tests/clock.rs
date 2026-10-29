@@ -1,6 +1,6 @@
 //! `SystemClock`: the only wall-clock reader in the workspace.
 //!
-//! See `ARCHITECTURE.md` §2.
+//! See `docs/architecture.md` §2.
 
 use ego_core::event::time::{Clock, Timestamp};
 use ego_tools::clock::SystemClock;

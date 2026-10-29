@@ -50,7 +50,7 @@ fn recorded_live_children_are_projected_in_tracking_order_with_bounded_rows() {
         SESSIONS,
         CHILDREN,
         &Filter {
-            root: Some("/home/example/workspace".into()),
+            root: Some("/workspace/project".into()),
         },
     )
     .unwrap();

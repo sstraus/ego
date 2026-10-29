@@ -8,9 +8,9 @@
 //!
 //! [`WireFormat`] is the seam, and it exists now because both conditions its
 //! absence was waiting on have been met.
-//! `ARCHITECTURE.md` §1 retired the
+//! `docs/guides/providers.md` §1 retired the
 //! original reason — a trait extracted from one implementation invents the
-//! second one's requirements — when maintainer set the target at six providers, and
+//! second one's requirements — when operator set the target at six providers, and
 //! §6 put the extraction behind regression case and 035 because those move
 //! `GenRequest` and `AiEvent`, the types the signature is made of. Both have
 //! landed, so the signature is written against types that have stopped moving.
@@ -85,7 +85,7 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
     /// mechanism for "no per-provider branch in shared code": the target
     /// carries a base and a list of headers and **no provider identity**, so
     /// a mapping that wanted to branch on who it serves has nothing to branch
-    /// on (`ARCHITECTURE.md`
+    /// on (`docs/guides/providers.md`
     /// §2). A provider that needs a different body is a different value of
     /// this trait — §4 allows a model fact, a transport fact or another
     /// mapping, and no fourth option and no flag.
@@ -120,7 +120,7 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
 /// Deliberately carries no provider id: a mapping that cannot learn who it is
 /// serving cannot branch on it, and "no per-provider branch in shared code"
 /// stops being a rule anyone has to remember
-/// (`ARCHITECTURE.md`
+/// (`docs/guides/providers.md`
 /// §2).
 ///
 /// The fields are private and the ADR's sketch has them public. The data and
@@ -616,7 +616,7 @@ impl ErrorBody {
 /// a hint that displaced the body would hide the case where the vendor *did*
 /// explain itself.
 const IDENTITY_HINT: &str = "if this provider gates on a client identity ego \
-     does not ship, `ARCHITECTURE.md` §7.8 is the \
+     does not ship, `docs/guides/providers.md` §7.8 is the \
      `[auth.<provider>.headers]` recipe";
 
 pub(crate) async fn read_error_body(

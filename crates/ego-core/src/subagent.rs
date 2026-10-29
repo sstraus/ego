@@ -251,7 +251,7 @@ impl ChildResultEvidence {
 /// parent's journal, blobs, artifacts and configuration — and it is named once.
 ///
 /// The rule of thumb this enacts, recorded in
-/// `ARCHITECTURE.md`: one
+/// `docs/architecture.md`: one
 /// real implementation and one fake is not a boundary, it is a function.
 pub trait ChildHost: Send + Sync {
     /// The parent's durable record of one subagent invocation.

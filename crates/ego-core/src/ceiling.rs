@@ -1,6 +1,6 @@
 //! What a ceiling is written as, and what a resolved one holds.
 //!
-//! `ARCHITECTURE.md` §§4 and 8.
+//! `docs/architecture.md` §§4 and 8.
 //!
 //! ## Why the grammar lives here and not on the flag
 //!

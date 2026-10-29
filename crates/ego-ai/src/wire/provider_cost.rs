@@ -1,8 +1,8 @@
 //! Reading the money a provider states it will charge for one request.
 //!
-//! See `ARCHITECTURE.md` §5 and §8.
+//! See `docs/guides/providers.md` §5 and §8.
 //!
-//! maintainer's constraint on this path is that it be **wire-format independent**:
+//! operator's constraint on this path is that it be **wire-format independent**:
 //! one mechanism, fed by any provider that states a cost, never an OpenRouter
 //! special case and never an xAI one. The ADR states the testable form of it:
 //!

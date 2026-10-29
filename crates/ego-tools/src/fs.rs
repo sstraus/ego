@@ -2,7 +2,7 @@
 //!
 //! The only *model-controlled* filesystem adapter in the workspace — the
 //! session store touches `std::fs` too, but behind a seam no tool can reach
-//! (`ARCHITECTURE.md` §7).
+//! (`docs/architecture.md` §7).
 //! Nothing here consults a `Permit`: this is the raw seam, held by the turn
 //! loop and wrapped in `GuardedFs` before a tool ever sees it.
 
@@ -392,7 +392,7 @@ impl Walk<'_> {
     /// A symlink: resolved, reported if it lands on a file, and never
     /// descended into.
     ///
-    /// This is the no-follow rule (`ARCHITECTURE.md`
+    /// This is the no-follow rule (`docs/architecture.md`
     /// §4). A walk resolves many paths where a read resolves one, so a
     /// symlinked directory inside an in-scope root is an escape the root check
     /// cannot see; refusing to enter one closes it and makes cycles impossible

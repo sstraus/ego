@@ -165,7 +165,7 @@ async fn a_non_200_ends_in_the_shared_terminal_events() {
         )
         .collect()
         .await;
-    // The three terminal events plus the host-safe cause (regression case).
+    // The three terminal events plus the host-safe cause (regression).
     assert_eq!(events.len(), 4);
     assert!(matches!(events[2], AiEvent::ProviderFailure { .. }));
     assert!(matches!(events[3], AiEvent::Stop(StopReason::Error)));

@@ -1,7 +1,7 @@
 //! What turns `provider/model` into a [`ResolvedModel`], as a choice the row
 //! makes rather than a branch the caller writes.
 //!
-//! `ARCHITECTURE.md` §4
+//! `docs/guides/providers.md` §4
 //! names the line this replaces: `crates/ego-cli/src/model.rs` asked
 //! `if slug.provider == catalogue::OLLAMA` and called one of two functions.
 //! That branch is the same mistake the wire seam was built to remove, one

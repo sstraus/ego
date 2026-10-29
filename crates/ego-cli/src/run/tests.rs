@@ -2128,7 +2128,7 @@ fn prompt_submitted(text: &str) -> PublicEvent {
     }
 }
 
-/// catches: maintainer being notified, and the tab badged as waiting, for a request
+/// catches: operator being notified, and the tab badged as waiting, for a request
 /// that a judge or a stored rule settles by itself. The request event is raised
 /// before that decision, so it must announce nothing; the terminal owner
 /// announces the wait when it actually puts the question (`Osc::awaiting`).

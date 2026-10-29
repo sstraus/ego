@@ -1,6 +1,6 @@
 //! The public OpenAI Responses mapping, and the Chat endpoint it replaced.
 //!
-//! `ARCHITECTURE.md`
+//! `docs/guides/providers.md`
 //! asks for two different things and this file proves both. One is that the
 //! public row speaks the public Responses contract. The other is negative and
 //! is the reason the ADR was written: that **nothing** of the private Codex

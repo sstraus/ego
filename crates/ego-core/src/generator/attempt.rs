@@ -1,6 +1,6 @@
 //! Generation attempts: what a retry keeps, and whether it may retry at all.
 //!
-//! See `ARCHITECTURE.md`.
+//! See `docs/architecture.md`.
 //!
 //! A *generation* is one logical request plan. An *attempt* is one journey to
 //! the wire, with its own admission and settlement.
@@ -104,7 +104,7 @@ impl AttemptRef {
     }
 }
 
-/// Whether a request may have reached the provider (`ARCHITECTURE.md` §2.4,
+/// Whether a request may have reached the provider (`docs/architecture.md` §2.4,
 /// `ARCHITECTURE.md` §3.1).
 ///
 /// Ordered deliberately: `DefinitelyUnsent` is the *more* certain state, and
@@ -177,7 +177,7 @@ pub enum UsageReport {
 ///
 /// Durable, and safe to decode without a guard: every [`StopReason`] is
 /// terminal since `Pending` was removed
-/// (`ARCHITECTURE.md`), so there is no
+/// (`docs/architecture.md`), so there is no
 /// non-terminal value for a decoded outcome to hold. This type used to reject
 /// one in its constructor and refuse to derive `Deserialize` because of it;
 /// deleting the variant deleted both guards rather than adding a third.
@@ -334,7 +334,7 @@ impl Drop for GenerationAttempt {
 /// disagree.
 ///
 /// The three cases, and why each is not the other
-/// (`ARCHITECTURE.md` §5):
+/// (`docs/architecture.md` §5):
 ///
 /// - **Quote settlement** prices the observed usage. No usage frame means no
 ///   quantity to price, so the cost is unknown and the gate charges its

@@ -4,16 +4,14 @@ Use εgo to work with a model in your current repository. You control the model,
 workspace trust, tool permission, and confinement. A model credential alone does
 not grant tools access to your machine.
 
-Release `0.4.0` is being prepared, not published. See the
-[release notes](../release-notes/0.4.0.md) and
-[installation overview](../../README.md#install) for the planned binary assets
-and checksum procedure. The source procedure below works without publication.
+See the [installation overview](../../README.md#install) for release assets and
+checksum verification, and the [release notes](../release-notes/0.4.0.md) for changes.
 
 ## Build and install from source
 
 The workspace requires Rust 1.95 or newer (`Cargo.toml`). Install from a complete
 checkout; the CLI uses a repository-local patched Reedline in `vendor/reedline`.
-The repository has not published a stable binary or crates.io package.
+Workspace crates are not published to crates.io.
 
 ```sh
 cargo install --locked --path crates/ego-cli --root "$PWD/.ego-bin"
@@ -22,9 +20,7 @@ ego --help
 ```
 
 `.ego-bin` is a local install prefix, not configuration or session storage. Remove
-that prefix when you no longer want the installation. Do not commit it. On this
-project's development Mac, prefix PATH with the existing mbx shim directory and
-check `mbx doctor` before Cargo; mbx chooses build targets and preserves caches.
+that prefix when you no longer want the installation. Do not commit it.
 
 ## Choose a model
 

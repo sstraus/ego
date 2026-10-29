@@ -1,5 +1,5 @@
 //! `ModelCapabilities`: the versioned record ARCH §3.1 and I5
-//! (`ARCHITECTURE.md`) require before treating a shared HTTP shape
+//! (`docs/architecture.md`) require before treating a shared HTTP shape
 //! as equivalent conversation semantics.
 //!
 //! A provider row is configuration, not proof two models behave the same in
@@ -292,7 +292,7 @@ pub enum CancelSemantics {
     Immediate,
 }
 
-/// Prompt/response cache retention, pi's `CacheRetention` (`ARCHITECTURE.md`
+/// Prompt/response cache retention, the cache retention setting (`docs/architecture.md`
 /// §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -305,7 +305,7 @@ pub enum CacheRetention {
 /// Which [`ThinkingLevel`]s a model accepts on the wire.
 ///
 /// Three states rather than an `Option`, decided in
-/// `ARCHITECTURE.md` §4 after Codex refused
+/// `docs/architecture.md` §4 after Codex refused
 /// the `Option` this repository first proposed. `None` would have had to mean
 /// "nothing stated, so send anything", and an absent field read as a
 /// permissive fact is the mistake

@@ -1,6 +1,6 @@
 //! `exec(...)` patterns: a token vector, never a string.
 //!
-//! `ARCHITECTURE.md` §6. The
+//! `docs/architecture.md` §6. The
 //! pattern is tokenised once, at parse time, so that `git   *` and `git *`
 //! are one rule with one ID; matching then runs token by token against a
 //! canonical argv. A pattern is never re-rendered into a shell string, for

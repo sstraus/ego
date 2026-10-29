@@ -104,4 +104,4 @@ Sources: [root discovery](../../crates/ego-cli/src/capability_roots.rs),
 [loader](../../crates/ego-cli/src/skill.rs),
 [domain skill service](../../crates/ego-core/src/skill.rs),
 [skill tests](../../crates/ego-cli/src/skill/tests.rs), and
-[retained format research](../internals/20-agent-skills.md).
+retained format research.

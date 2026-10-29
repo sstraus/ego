@@ -1381,7 +1381,7 @@ fn host_context_timestamp_refresh_does_not_duplicate_captured_inventory() {
     assert_eq!(
         serde_json::to_string(&calls[2].messages)
             .unwrap()
-            .matches("gh-metrics")
+            .matches("repository-01")
             .count(),
         2,
         "one repository name and one path, not repeated inventories"
@@ -1440,7 +1440,7 @@ fn host_context_repository_and_inbox_deltas_preserve_resume_prefix() {
     assert!(blocks[2].contains("a new inbox message") && blocks[2].contains("nextSince"));
     for delta in &blocks[1..] {
         assert!(
-            !delta.contains("gh-metrics"),
+            !delta.contains("repository-01"),
             "unchanged repository inventory leaked into delta"
         );
         assert!(

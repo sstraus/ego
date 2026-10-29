@@ -1,6 +1,6 @@
 //! Path patterns: canonicalisation and matching.
 //!
-//! `ARCHITECTURE.md` §5.
+//! `docs/architecture.md` §5.
 //! Two constructs and one meaning each — `*` within a segment, `**` across
 //! whole segments — defined here rather than inherited from a glob crate,
 //! because the two things that differ between glob libraries are exactly

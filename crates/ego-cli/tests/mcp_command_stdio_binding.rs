@@ -1,4 +1,4 @@
-//! A command run keeps one stdio MCP child across tool calls (regression case).
+//! A command run keeps one stdio MCP child across tool calls (regression).
 #![cfg(unix)]
 
 mod support;

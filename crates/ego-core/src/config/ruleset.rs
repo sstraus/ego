@@ -1,6 +1,6 @@
 //! The resolved ruleset: rules paired with the layers that carry them.
 //!
-//! `ARCHITECTURE.md` decision 2.
+//! `docs/architecture.md` decision 2.
 //! [`PermCfg`](super::PermCfg) stays the *layer* schema — what one file
 //! deserialises into. This is the *resolved* form, and the difference is the
 //! whole point: by the time `resolve` has merged six layers, the question

@@ -1,13 +1,8 @@
 # Builds the `ego` executable for every platform, on every push to the trunk
 # and on every `v*` tag. A tag additionally publishes a GitHub Release.
 #
-# Modelled on TUICommander's `release.yml` (the `remote-daemon` matrix): one
-# matrix, one `cargo build --release --target`, no reusable-workflow layers.
-# Nothing is signed or notarized. Publishing uses GITHUB_TOKEN; stable tags
-# also dispatch to the shared Homebrew tap with HOMEBREW_TAP_TOKEN.
-#
-# NOT YET RUNNING. This repository has no remote (see ci.yml). Validate with
-# actionlint; the first real run is the first real proof.
+# Publishing uses GITHUB_TOKEN. Stable tags also dispatch a Homebrew tap update.
+# Release binaries are not signed or notarized.
 #
 # Keep RUST_VERSION in step with the toolchain the gate runs on. It is pinned
 # so a new stable cannot change what ships.
@@ -88,7 +83,7 @@ jobs:
         if: startsWith(matrix.platform, 'ubuntu')
         run: scripts/check-glibc.sh target/${{ matrix.target }}/release/ego 2.35
 
-      # Keep the original target-triple archives alongside TUIC-style binaries.
+      # Keep the original target-triple archives alongside platform-specific binaries.
       - name: Package
         shell: bash
         run: scripts/package-release.sh '${{ matrix.target }}' '${{ matrix.name }}'

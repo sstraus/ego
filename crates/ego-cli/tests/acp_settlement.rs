@@ -263,7 +263,7 @@ fn pausing_a_streaming_stdio_turn_settles_with_the_held_code() {
     host.finish();
 }
 
-/// regression case: the live host run cancelled a streaming turn and its next
+/// regression: the live host run cancelled a streaming turn and its next
 /// prompt failed. Catches: a cancelled streaming generation leaving the
 /// session unable to run, or the next request carrying the half-finished turn
 /// in a shape the provider rejects.
@@ -329,7 +329,7 @@ fn cancelling_a_streaming_stdio_turn_leaves_the_session_able_to_run_the_next_pro
     host.finish();
 }
 
-/// regression case — catches: an ACP seat stops after six failed attempts,
+/// regression — catches: an ACP seat stops after six failed attempts,
 /// or its force action is unavailable while a prompt response is outstanding.
 #[test]
 fn regression_case_acp_recovers_without_a_new_prompt_and_force_retry_is_routable() {

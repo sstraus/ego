@@ -2,7 +2,7 @@
 //! filesystem a policy grant is exercised against.
 //!
 //! Kept as three stages rather than one `run(name, args)` future, for the
-//! reason `ARCHITECTURE.md` gives for rejecting a
+//! reason `docs/architecture.md` gives for rejecting a
 //! `ToolRunner` port: M1 has to append a permission request *between*
 //! authorising and executing, and a single future has no such between.
 
@@ -815,7 +815,7 @@ impl<'a> Tools<'a> {
     /// layer down: the value already names what it refused, and discarding the
     /// type at the seam left the loop unable to tell "policy said no" from
     /// "the tool broke". Those are different outcomes now — see `CLI.md` §4.4
-    /// and `ARCHITECTURE.md`.
+    /// and `docs/architecture.md`.
     ///
     /// Three outcomes rather than two, and the third is the one the loop must
     /// not collapse: a call nobody in this run can answer is not a call that

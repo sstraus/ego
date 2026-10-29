@@ -3,8 +3,7 @@
 Hooks add lifecycle checks and source-tagged feedback. They are subtractive:
 a hook can block or escalate work, but cannot grant a permit or relax a sandbox,
 system deny, offline boundary, or budget. mdkb session warmup and prompt-specific recall use a
-separate context source, not a `SessionStart` or `UserPromptSubmit` hook result. See
-[the prompt-context decision](../internals/decisions/2026-10-17-prompt-recall-context.md).
+separate context source, not a `SessionStart` or `UserPromptSubmit` hook result.
 
 `ego hooks ls` inspects system/user hooks without loading project configuration.
 `/hooks` inspects the active session's admitted catalogue, including trusted
@@ -41,7 +40,7 @@ Remove the key to disable it; unrelated lifecycle hooks are not changed.
 
 After an admitted model Stop, the source calls `mdkb hook stop` with the real
 `session_id` and an `episode_jsonl` string. This requires mdkb's inline Stop
-contract (regression case). The episode contains the current turn's durable user text,
+contract (the external hook API). The episode contains the current turn's durable user text,
 assistant text, and settled tool uses/results in item order. Tool result records
 retain their actual completion timestamps. Host context, private reasoning,
 images, audio and evidence blobs are not sent. Native tool input is retained;
@@ -112,5 +111,5 @@ Sources: [hook domain/schema](../../crates/ego-core/src/hook.rs),
 [event vocabulary](../../crates/ego-core/src/event/hook.rs),
 [OS adapters](../../crates/ego-tools/src/hook.rs), and
 [hook lifecycle tests](../../crates/ego-cli/tests/hook_lifecycle.rs).
-The [compatibility research](../internals/21-claude-hook-parity.md) is retained
+Compatibility notes are retained
 with its dated claims; use the current source schema for accepted fields.

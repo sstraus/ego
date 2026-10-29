@@ -2,7 +2,7 @@
 //!
 //! `ego-ai` owns the document codec and merge policy. This adapter owns only
 //! the paths, refresh lease, byte reads, and atomic publication described by
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 
 use std::io;
 use std::path::{Path, PathBuf};

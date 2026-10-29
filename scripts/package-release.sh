@@ -13,7 +13,7 @@ mkdir -p dist
 stage=$(mktemp -d "dist/.package.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/$archive"
-cp "target/$target/release/$exe" README.md "$stage/$archive/"
+cp "target/$target/release/$exe" README.md LICENSE "$stage/$archive/"
 cp "target/$target/release/$exe" "dist/$asset"
 if [[ -n $suffix ]]; then
   (cd "$stage" && 7z a -tzip "../$archive.zip" "$archive" > /dev/null)

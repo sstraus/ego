@@ -1,7 +1,7 @@
 //! `RuleId`: what makes `ego rules revoke` possible without the original
 //! context.
 //!
-//! `ARCHITECTURE.md` §8.
+//! `docs/architecture.md` §8.
 
 use sha2::{Digest, Sha256};
 use std::fmt;

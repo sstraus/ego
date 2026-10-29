@@ -89,7 +89,7 @@ pub struct AcpSessionControls {
     /// session starts on.
     ///
     /// A ceiling rather than a default:
-    /// `ARCHITECTURE.md`.
+    /// `docs/architecture.md`.
     /// The operator who spawned the process set it, and no message on this
     /// connection can move it.
     sandbox_ceiling: Confinement,

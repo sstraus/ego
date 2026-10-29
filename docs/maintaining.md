@@ -2,8 +2,7 @@
 
 The user documentation is one set of Markdown files. It can be read in the
 checkout or built as an mdBook, with a chapter sidebar, search, and print view.
-`SUMMARY.md` owns book navigation. Internal research and dated decisions remain
-in `internals/`; they are not user-guide chapters.
+`SUMMARY.md` owns book navigation.
 
 ## Requirements
 
@@ -70,15 +69,14 @@ version/status, first-run examples, and links consistent with these guides.
 The workspace version is in `[workspace.package]` in `Cargo.toml`. Workspace
 packages inherit it. Let Cargo refresh their lockfile versions; do not edit
 `Cargo.lock` by hand. A release preparation can select a new minor version;
-`0.4.0` is the current local preparation, not a publication claim.
+the manifest is the release version authority.
 
 Write notes in `release-notes/VERSION.md`, grouped by user-visible features,
-fixes, and breaking changes. Include story IDs and verify the changes against
+fixes, and breaking changes. Verify the changes against
 Git history and source. Keep dated captures and external dependency versions
 unchanged; they are evidence, not release declarations. Add the notes to
 `SUMMARY.md` and link them from README.
 
 The tag workflow reads that exact notes file and refuses a missing or empty file.
-A documentation build does not authorize a tag, push, release, tap update, or
-installed-binary replacement. Follow the authorization gates in
-[the release-flow report](internals/649-release-flow.md#publication-steps-require-maintainer-authorization).
+Publishing a tag runs the release workflow. Review the version, notes, asset
+checksums, and required repository permissions before publishing.

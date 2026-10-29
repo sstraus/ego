@@ -25,9 +25,13 @@ Spawn receipts are durable tool-completion evidence. The ACP pump supervises onl
 successful native spawn/consult rows belonging to its root; it observes outside
 model turns and bounds its idle resend with a durable cursor.
 
-This surface depends on the operator's installed TUICommander/orchestrator tools.
+This surface depends on the operator's installed TUICommander tools. Landing
+resolves an executable `tuic-land.sh` from `PATH` and binds its canonical path.
+The canonical filename must also be `tuic-land.sh`, because the coordinator
+policy uses that name to require human admission. A missing wrapper makes only
+the Land operation unavailable; it does not prevent other session operations.
 Deterministic source tests do not establish live paid-agent spawning, a real
-landing, or the outstanding multi-day observation proof.
+landing, or long-running operational reliability.
 
 Sources: [domain contract](../../crates/ego-core/src/orchestrator.rs),
 [OS adapter](../../crates/ego-tools/src/orchestrator.rs),
@@ -37,5 +41,4 @@ Sources: [domain contract](../../crates/ego-core/src/orchestrator.rs),
 unread-path inspection without a model turn. ACP cards append `notice_delivered`
 facts to the existing session stream after transport enqueue, fsyncing before the
 pump acknowledges its batch. Those facts are independent of conversation turns;
-transport acceptance does not establish host rendering. Measurement and live
-comparison tooling: [observation README](../../ARCHITECTURE.md).
+transport acceptance does not establish host rendering.

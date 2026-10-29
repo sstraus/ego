@@ -1,7 +1,7 @@
 //! The binding: the wire format, the transport and the attempt, joined.
 //!
 //! See `plans/m0b-vertical-slice.md` Step 13.5 and
-//! `ARCHITECTURE.md`.
+//! `docs/guides/providers.md`.
 //!
 //! This module composes and returns. It folds no delivery certainty and
 //! decides no stop reason, because both already have exactly one owner:
@@ -98,7 +98,7 @@ pub struct WireGenerator {
     ///
     /// The one copy in the process, and it lives here because this is the one
     /// thing that must send it — the row must not hold a secret
-    /// (`ARCHITECTURE.md` §3) and
+    /// (`docs/guides/providers.md` §3) and
     /// neither may a `ResolvedModel`, which is `Clone` and travels to the
     /// ledger.
     ///

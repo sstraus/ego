@@ -16,7 +16,7 @@
 //!   everything after it is still arriving.
 //!
 //! The third is what this does. It is also why the non-TTY path does none of
-//! it: `ARCHITECTURE.md` §2
+//! it: `docs/architecture.md` §2
 //! rules that a redirected run is a *different* rendering, and for a pipe the
 //! right rendering of the model's markdown is the model's markdown — byte for
 //! byte, so `ego run … > answer.md` is a markdown file and not a transcript of

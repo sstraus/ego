@@ -1,4 +1,49 @@
-
+//! What "and similar" means, as four checks a provider either passes or does
+//! not.
+//!
+//! `docs/guides/providers.md` §9.
+//! The rule it encodes is operator's: **no compatibility declared by commercial
+//! similarity.** A vendor's `openai-compatible` badge is not evidence, a URL
+//! ending in `/v1/chat/completions` is not evidence, and neither is a
+//! another client shipping the provider on that adapter. Membership means passing
+//! these, and nothing else.
+//!
+//! # Parameterised over providers, not over code paths
+//!
+//! Every profile gets its own fixtures even where several select the same
+//! adapter, and that is what makes them non-redundant rather than copies of
+//! one test: **a fixture is evidence about a provider's bytes, not about ego's
+//! code.** Two providers on one mapping are two claims, and only one of them
+//! can turn out false.
+//!
+//! # The four here, and the fifth that cannot be here
+//!
+//! 1. **Request** — the built `HttpRequest` matches the committed golden,
+//!    compared as JSON so key order is not pinned, with header *names*
+//!    asserted and values asserted absent.
+//! 2. **Stream** — exactly one `Stop`, and it is last; the tool transcript
+//!    yields a call with a non-empty id, a name, and arguments equal to the
+//!    concatenation of the streamed fragments, ending `Stop(ToolUse)`.
+//! 3. **Error** — a non-200 body yields `DeliveryObserved(PossiblySent)`, an
+//!    `Error` carrying what the provider said, and `Stop(Error)`.
+//! 4. **Usage** — exactly one `AiEvent::Usage`, and its parts partition the
+//!    provider's totals rather than double-counting the cache.
+//!
+//! The fifth — that the provider *accepts* the body check 1 pinned — cannot
+//! be made offline at all, because a fixture is a recording of a provider that
+//! already agreed. It is `crates/ego-cli/tests/smoke.rs`, which is also what
+//! writes these files.
+//!
+//! # A provider that passes four of five is not "similar enough"
+//!
+//! It is a candidate, and a candidate is not runnable: no row, so `--model`
+//! cannot select it. There is no partial membership, no
+//! `openai_completions_but_…` adapter id, and **no feature bit on the row that
+//! a decoder consults** — that last one is the per-provider branch under a new
+//! name. Which check fails decides what the candidate needs: 2, 3 or 4 is a
+//! decode difference and means its own adapter; 1 or 5 is a request difference
+//! and means a model fact, a profile header, or its own adapter, depending on
+//! what was rejected.
 
 use ego_ai::http::{HttpError, HttpResponse};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};

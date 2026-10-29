@@ -1,7 +1,7 @@
 //! One diagnosis, two renderings, and nothing changed by looking.
 //!
 //! The contract these hold is
-//! `ARCHITECTURE.md`,
+//! `docs/architecture.md`,
 //! and its testing section names exactly what has to be shown: identical
 //! semantic snapshots from both surfaces, deterministic order, exit folding,
 //! partial section failure, every redaction path, and proof that observing

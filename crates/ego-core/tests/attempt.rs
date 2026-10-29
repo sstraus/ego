@@ -1,7 +1,7 @@
 //! Generation attempts: the identity a retry keeps, the identity it does not,
 //! and the delivery certainty that decides whether a retry is safe at all.
 //!
-//! See `ARCHITECTURE.md` and
+//! See `docs/architecture.md` and
 //! `plans/m0b-vertical-slice.md` Steps 1-2.
 //!
 //! What these tests defend is one claim: **a generation and a wire attempt are
@@ -447,7 +447,7 @@ mod lifecycle {
     /// This replaces `pending_is_not_a_terminal_state`. That test proved
     /// `Outcome::new` rejected `StopReason::Pending` and that a `Stop(Pending)`
     /// frame folded to `Aborted`; the variant was removed in
-    /// `ARCHITECTURE.md`, so the guard
+    /// `docs/architecture.md`, so the guard
     /// it exercised no longer exists — "not finished yet" is now the absence
     /// of a `StopReason`, which is what this asserts. The round-trip below
     /// is the other half: every variant that *can* be decoded is terminal, so

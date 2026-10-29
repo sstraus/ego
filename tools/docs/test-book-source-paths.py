@@ -30,8 +30,8 @@ class SourcePathsTests(unittest.TestCase):
             "Parser (repository: `crates/ego-cli/src/cli.rs`) Design (repository: `CLI.md#flags`)",
         )
         self.assertEqual(
-            self.render("[Research](../internals/README.md)"),
-            "Research (repository: `ARCHITECTURE.md`)",
+            self.render("[Research](../architecture.md)"),
+            "Research (repository: `docs/architecture.md`)",
         )
 
     def test_code_formatted_link_labels_do_not_hide_checkout_targets(self):

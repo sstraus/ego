@@ -1,6 +1,6 @@
 //! What `--model P/M` resolves to, and what it refuses to invent.
 //!
-//! See `ARCHITECTURE.md` and
+//! See `docs/guides/providers.md` and
 //! `plans/m0b-vertical-slice.md` Step 13.5.
 //!
 //! The daemon is a stub that replays what a real Ollama 0.32.14 answered.
@@ -67,7 +67,7 @@ fn local_row() -> ProviderRow {
 
 /// A hosted row these tests can actually resolve.
 ///
-/// `anthropic` and not `openai`: since story `regression_case` the public OpenAI row
+/// `anthropic` and not `openai`: since story `regression` the public OpenAI row
 /// is unselectable pending live evidence, and `resolve` refuses it before a
 /// resolver is chosen. Every test here is about catalogue mechanics rather
 /// than about one vendor, so it uses a row the gate lets through.
@@ -165,7 +165,7 @@ fn hosted_rates() -> ResolvedRates {
 #[test]
 fn a_hosted_model_with_no_supplied_capabilities_is_refused_by_name() {
     // What this refusal is now about, after
-    // `ARCHITECTURE.md` §1: the model's
+    // `docs/guides/providers.md` §1: the model's
     // *shape*, not its price. A hosted provider publishes no capability
     // endpoint, so nothing here can discover the context window or the
     // output ceiling, and a request built against a guessed window is a
@@ -630,7 +630,7 @@ fn an_unmetered_local_model_needs_no_output_ceiling_to_bound_zero_spend() {
 // These two tests replace a pair that pinned the *all-zero `PricingQuote`*:
 // that every category was `Some(Amount::ZERO)` and never `None`, and that
 // the quote's `PricingRevision` named the policy. That subject no longer
-// exists — `ARCHITECTURE.md` §4 removed
+// exists — `docs/guides/providers.md` §4 removed
 // the all-zero quote precisely because "zero per token" and "no per-token
 // price at all" were sharing one spelling. What survives is the property the
 // pair was really defending, which is that a row nobody charges per token
@@ -839,7 +839,7 @@ fn a_provider_reported_row_with_no_rates_is_not_an_error() {
 
 // --- the row decides what resolves it ---
 //
-// `ARCHITECTURE.md` §4.
+// `docs/guides/providers.md` §4.
 // `crates/ego-cli/src/model.rs` used to ask `if slug.provider == OLLAMA` and
 // call one of two functions, so a second daemon meant a second arm in a crate
 // that should not have needed touching. These four are what make that branch

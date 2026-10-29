@@ -1,21 +1,10 @@
-# Recorded coordinator reads
+# Coordinator response fixtures
 
-`sessions.json` records the real TUIC `session action=list` response seen by
-example-coordinator on 2026-10-05: 18 rows. Remote `state` retains only shell state and
-activity time; prompt and question text were removed because they are not read
-by this adapter. Other response fields are retained.
+`sessions.json` and `inbox.json` retain the response shapes captured from
+TUICommander. `children.tsv` retains matching child identifiers and ordering.
+Personal paths, repository names, descriptions, and work labels are replaced
+with example values. IDs are retained only to preserve cross-response joins.
 
-`children.tsv` is a byte copy of `~/Gits/.tmp/coordinator/children.tsv` from the
-same work session. Six tracked IDs are live in the recording. The independent
-reference is `orchestrator/tools/coord-resume.sh`'s Children section: iterate
-the TSV in order, select `.session_id == sid`, and omit absent sessions.
-The Unread section uses `find results -maxdepth 1 -name '*.md' -newer stamp`;
-the integration test runs that real command over files with known OS mtimes.
-
-The original 30-row criterion was replaced on coordinator authority. No
-sessions were fabricated to reach that number.
-
-`inbox.json` records a real own-inbox TUIC reply on 2026-10-05 after example-coordinator
-sent itself the fixture RESULT. Message IDs, logical timestamp and envelope
-are the actual response. The sender is example-coordinator; the observation adapter
-creates a separate durable `ego-observer` identity instead of inheriting it.
+Tests compare tracked children with live session rows and enumerate unread
+result files with known filesystem timestamps. These are adapter fixtures,
+not evidence that a public installation has the original services or state.

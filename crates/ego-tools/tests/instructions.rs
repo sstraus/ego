@@ -285,13 +285,13 @@ fn the_port_reports_a_missing_file_as_absent_not_as_an_error() {
 fn external_home_and_sibling_imports_stage_the_exact_boss_layout() {
     let tree = Tree::new();
     let home = tree.dir("home");
-    let root = tree.dir("home/workspace/example-project");
+    let root = tree.dir("home/projects/agent");
     tree.write(
-        "home/workspace/example-project/AGENTS.md",
-        "@~/workspace/example-project/maintainer.md\n@../sibling.md\n",
+        "home/projects/agent/AGENTS.md",
+        "@~/projects/policies/POLICY.md\n@../sibling.md\n",
     );
-    let maintainer = tree.write("home/workspace/example-project/maintainer.md", "maintainer contract");
-    let sibling = tree.write("home/workspace/sibling.md", "Sibling contract");
+    let operator = tree.write("home/projects/policies/POLICY.md", "operator contract");
+    let sibling = tree.write("home/projects/sibling.md", "Sibling contract");
     let staged = ego_core::config::load_with_home(
         &OsInstructionIo,
         &root,
@@ -307,7 +307,7 @@ fn external_home_and_sibling_imports_stage_the_exact_boss_layout() {
             .iter()
             .map(|file| &file.path)
             .collect::<Vec<_>>(),
-        vec![&root.join("AGENTS.md"), &maintainer, &sibling]
+        vec![&root.join("AGENTS.md"), &operator, &sibling]
     );
     assert!(staged.skipped.is_empty());
     // The old contained-only entry point still cannot disclose these files.

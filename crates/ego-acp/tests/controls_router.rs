@@ -168,7 +168,7 @@ async fn a_session_publishes_its_controls_when_the_connection_owns_a_seat() {
 
 /// No seat is not an empty picker. A host must be able to tell "ego has no
 /// controls here" from "ego has controls and none are set", which is the same
-/// rule `ARCHITECTURE.md` §3 applies to absent usage and cost.
+/// rule `docs/architecture.md` §3 applies to absent usage and cost.
 #[tokio::test]
 async fn a_connection_without_a_seat_publishes_no_picker_at_all() {
     let mut connection = support::Connected::new(router(None));

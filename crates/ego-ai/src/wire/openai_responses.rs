@@ -2,7 +2,7 @@
 //!
 //! Deliberately a third Responses mapping rather than a branch in either
 //! existing one, because
-//! `ARCHITECTURE.md`
+//! `docs/guides/providers.md`
 //! says so and gives the reason: "Private Codex Responses differs in endpoint,
 //! identity, headers, and request/stream behavior; it is not evidence for
 //! public OpenAI." [`openai_codex_responses`](super::openai_codex_responses)

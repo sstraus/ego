@@ -150,7 +150,7 @@ impl SessionProfiles {
 /// reads it back from the header. An `Option` here would be a state no store
 /// in this build can produce, handed to `ego ls` and `ego resume` to write
 /// dead branches for. See
-/// `ARCHITECTURE.md` §1.
+/// `docs/architecture.md` §1.
 ///
 /// `created` and `updated` are never optional: both come from the durable
 /// entry timestamps and the header authored at session birth.
@@ -184,7 +184,7 @@ fn is_zero(value: &u32) -> bool {
 /// one addition and is neither of those: it is a store saying it does not
 /// serve that session at all, which any implementation scoped to a subset of
 /// sessions can say (see
-/// `ARCHITECTURE.md` §3).
+/// `docs/architecture.md` §3).
 #[derive(Debug)]
 pub enum StoreError {
     /// The underlying I/O failed: open, read, write, fsync or rename.
@@ -203,7 +203,7 @@ pub enum StoreError {
     /// remedy is different — the header is *there* and damaged, so the
     /// records under it are probably fine — and because tail repair must
     /// treat the two identically only in one respect: neither may cost a
-    /// byte. See `ARCHITECTURE.md`
+    /// byte. See `docs/architecture.md`
     /// §1.
     UnreadableHeader { reason: String },
     /// The log's header names a codec version this build does not implement.

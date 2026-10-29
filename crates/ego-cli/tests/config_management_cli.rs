@@ -106,7 +106,7 @@ fn root_grammar_accepts_only_the_frozen_config_forms() {
 }
 
 // Catches: `config set` receipt exposes the internal publication word, and an
-// unknown key error that does not say which key was wrong (regression case).
+// unknown key error that does not say which key was wrong (regression).
 #[test]
 fn set_prints_a_plain_receipt_and_an_unknown_key_error_names_the_key() {
     let fixture = Fixture::new();

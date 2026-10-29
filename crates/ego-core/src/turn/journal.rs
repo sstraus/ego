@@ -1,6 +1,6 @@
 //! The one place a `DomainEvent` is assembled, persisted and reduced.
 //!
-//! See `ARCHITECTURE.md` §5. Before this existed,
+//! See `docs/architecture.md` §5. Before this existed,
 //! eight test files built their own `Envelope`, and they disagreed with each
 //! other — `tests/public_golden.rs:167` gives a permission its own `ItemId`
 //! while `tests/reducer.rs:143` reuses the tool's. That is what a contract
@@ -42,7 +42,7 @@ use crate::store::session_store::{SessionStore, StoreError};
 /// moment of publication this journal holds the reduction *including* the
 /// event it is publishing, which is precisely what a consumer projecting
 /// cumulative figures needs and cannot obtain for itself in the right order.
-/// See `ARCHITECTURE.md`.
+/// See `docs/architecture.md`.
 pub struct Journal<'a> {
     session: SessionId,
     store: &'a dyn SessionStore,

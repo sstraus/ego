@@ -270,7 +270,7 @@ mod permit {
     }
 
     // --- policy: what a `PreparedCall` is actually authorised to do ---
-    // `ARCHITECTURE.md` §1.
+    // `docs/architecture.md` §1.
 
     /// The engine an operator gets when they configure nothing: `default`
     /// mode, no rules of their own.
@@ -443,7 +443,7 @@ mod permit {
         assert!(denied.to_string().contains("/etc/passwd"));
     }
 
-    /// regression case. Plausible bug: a bare "outside the workspace" refusal
+    /// regression. Plausible bug: a bare "outside the workspace" refusal
     /// leaves the model and the operator without the grant that lifts it, so
     /// the model falls back to `cat` under a perimeter the read tool does not
     /// share. A write refusal must not suggest a read grant.
@@ -552,7 +552,7 @@ mod permit {
         }
     }
 
-    /// Critic regression_case. Plausible bug: the exception for a refused read drops
+    /// Critic regression. Plausible bug: the exception for a refused read drops
     /// `list` or `search` (a model listing `~/.codex` still ends the run), or
     /// widens to a mutating or spawning op outside the workspace.
     #[test]
@@ -594,7 +594,7 @@ mod permit {
 
     // --- the evaluation order ---------------------------------------------
     //
-    // `ARCHITECTURE.md` §6. The order
+    // `docs/architecture.md` §6. The order
     // is the whole security property: what each step decides matters less
     // than which step gets asked first, so every test below pins a *pair* of
     // steps against each other rather than one step on its own.
@@ -1030,7 +1030,7 @@ mod permit {
     }
 
     // --- what a denial tells the operator about lifting it ---
-    // `ARCHITECTURE.md` §3, §5a.
+    // `docs/architecture.md` §3, §5a.
 
     /// An engine denying `raw`, with that rule carried by `origins`.
     fn denying(raw: &str, origins: &[Source]) -> PolicyEngine {
@@ -1141,7 +1141,7 @@ mod permit {
 
     // --- listing and searching: looking without reading -------------------
     //
-    // See `ARCHITECTURE.md`.
+    // See `docs/architecture.md`.
 
     fn list_call(root: &str, pattern: &str) -> PreparedCall {
         PreparedCall::new(
@@ -1497,7 +1497,7 @@ mod permit {
         assert!(!found.truncated);
     }
 
-    /// A filesystem that performs the exact mutation behind regression case:
+    /// A filesystem that performs the exact mutation behind regression:
     /// the scan observes an ordinary in-scope file, then that name becomes a
     /// symlink to an out-of-scope secret before search opens it.
     struct ScanThenEscapeFs {
@@ -1667,7 +1667,7 @@ mod permit {
 
     // --- Leg 2 of Invariant W: containment ------------------------------
     //
-    // `ARCHITECTURE.md` calls this leg
+    // `docs/architecture.md` calls this leg
     // **evidence, and not proof**, and that framing is load-bearing. Leg 1 is
     // decided by the compiler and is total. This is a check over a domain
     // somebody chose, and it is true of the domain it generated and silent

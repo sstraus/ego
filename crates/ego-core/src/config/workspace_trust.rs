@@ -1,7 +1,7 @@
 //! What a workspace offers to be trusted with, and which executable changes
 //! require another answer.
 //!
-//! See `ARCHITECTURE.md`.
+//! See `docs/architecture.md`.
 //! Split the way everything else in this crate is split: the *decisions* —
 //! what an inventory is, when two of them are the same, and whether a stored
 //! answer still applies — are pure and live here. Which paths get probed,

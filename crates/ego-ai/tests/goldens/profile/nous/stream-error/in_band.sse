@@ -1,3 +1,3 @@
-: captured-client-derived from NousResearch/hermes-agent@a0ca7c19204e514f9590ce3b812e029b315ab9e9 (read 2026-08-24)
+: captured-client-derived from subscription client contract (recorded 2026-08-24; not live provider evidence)
 : provider nous, ego 0.1.0
 data: {"error":{"message":"nous stream refused","type":"permission_error"}}

@@ -2,7 +2,7 @@
 //!
 //! It looks like [`openai_completions`](super::openai_completions) and it is
 //! not that format.
-//! `ARCHITECTURE.md` §8
+//! `docs/guides/providers.md` §8
 //! settles the question from a measurement rather than from the resemblance:
 //! a live daemon honours `max_tokens` and discards `max_completion_tokens`, so
 //! Ollama fails the family's first conformance check and is not a member of

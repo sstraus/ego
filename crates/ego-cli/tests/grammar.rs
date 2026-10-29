@@ -944,7 +944,7 @@ fn a2a_requires_listen_and_inherits_the_acp_sandbox_ceiling() {
 /// untrusted, and an untrusted resolution discards the Project and Local
 /// layers, so the config file an operator would have written the key into is
 /// read by nobody. See
-/// `ARCHITECTURE.md`.
+/// `docs/architecture.md`.
 #[test]
 fn acp_takes_a_confinement_ceiling_by_name() {
     for (spelling, expected) in [

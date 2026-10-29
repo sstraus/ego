@@ -474,7 +474,7 @@ mod generator {
     ///
     /// This replaces `generator_fake_pending_stop_is_not_terminal`, whose
     /// subject (`StopReason::Pending`) was removed in
-    /// `ARCHITECTURE.md`. `Deferred`
+    /// `docs/architecture.md`. `Deferred`
     /// is the remaining stop reason that assembles nothing, and it is the
     /// more interesting one, because it is genuinely terminal while still
     /// producing no `DomainEvent`.
@@ -906,7 +906,7 @@ mod generator {
         assert!(gaps.is_empty());
     }
 
-    // --- wire-format spelling of the pi-borrowed enums -----------------------
+    // --- wire-format spelling of the public enums -----------------------
 
     #[test]
     fn generator_thinking_level_serialises_pi_scale() {

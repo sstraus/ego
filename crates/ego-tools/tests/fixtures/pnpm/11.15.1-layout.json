@@ -1,8 +1,8 @@
 {
   "version": "11.15.1",
-  "store": "/home/example/workspace",
-  "global": "/home/example/workspace",
-  "bin": "/home/example/workspace",
+  "store": "/home/example/Library/pnpm/store/v11",
+  "global": "/home/example/Library/pnpm/global/v11",
+  "bin": "/home/example/Library/pnpm/bin",
   "package_manager_store_config": "undefined",
   "captured_at": "2002-01-01",
   "engine_store_entries": [

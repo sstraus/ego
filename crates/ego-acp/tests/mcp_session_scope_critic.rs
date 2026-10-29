@@ -1,4 +1,4 @@
-//! Adversarial contracts for session-scoped MCP admission (regression case).
+//! Adversarial contracts for session-scoped MCP admission (regression).
 //!
 //! Every request crosses the real router. The admitter, the admission and the
 //! seat are fakes of systems the router does not own; each test names the

@@ -601,7 +601,7 @@ fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
 /// and that name is now a claim it does not check. "Cannot be relaxed" was
 /// true of `resolve` while `resolve` ended with
 /// `allow.retain(|e| !deny.contains(e))`, and that line is gone
-/// (`ARCHITECTURE.md` §6): whether a
+/// (`docs/architecture.md` §6): whether a
 /// deny beats an allow is now decided per call, by the engine, against a
 /// canonical `PreparedCall`.
 ///
@@ -657,7 +657,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
     // for a reason that does not generalise — the two strings happened to be
     // equal. Change the allow to `list(src/**)` and the retain kept it,
     // while the deny it violates sat right beside it in the same `Effective`.
-    // See `ARCHITECTURE.md` §6.
+    // See `docs/architecture.md` §6.
     assert!(carries(&effective.permissions.allow, "list(**)"));
 }
 
@@ -909,7 +909,7 @@ fn config_bare_flag_forces_bare_even_when_trusted() {
 //
 // The pure half: which files, in what order, and — the part that matters —
 // that an untrusted workspace's files are never *touched*. See
-// `ARCHITECTURE.md`.
+// `docs/architecture.md`.
 
 mod instructions {
     use std::cell::RefCell;
@@ -1724,7 +1724,7 @@ fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     // denial. The old skip kept whichever origin arrived first, which is the
     // user's: the one line an operator can delete without effect.
     //
-    // `ARCHITECTURE.md`.
+    // `docs/architecture.md`.
     let overlapping = || PermCfg {
         judge: None,
         allow: vec![],

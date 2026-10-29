@@ -1,4 +1,4 @@
-//! Cross-consumer and attachment races for refused ACP sessions.
+//! Cross-consumer and attachment races for refused ACP sessions (#regression).
 
 use std::path::Path;
 use std::sync::Arc;

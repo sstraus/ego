@@ -1,6 +1,6 @@
 //! The one check no fixture can make: the provider accepted the body.
 //!
-//! `ARCHITECTURE.md` §9
+//! `docs/architecture.md` §9
 //! splits "the same contract" into five checks. Four are offline and live in
 //! `crates/ego-ai/tests/conformance.rs`, which replays committed transcripts. The fifth
 //! cannot be made offline **at all**, and that asymmetry is the honest core of
@@ -328,7 +328,7 @@ async fn send(
 ///
 /// SSE reserves a line beginning `:` for comments and every decoder skips
 /// them, so provenance travels *inside* the evidence rather than in a README
-/// beside it — which is the gap `ARCHITECTURE.md`
+/// beside it — which is the gap `docs/architecture.md:749-760`
 /// found in the harness it studied.
 fn transcript_fixture(profile: &Profile, model: &str, when: &str, transcript: &str) -> String {
     format!(

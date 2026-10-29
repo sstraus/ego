@@ -10,7 +10,7 @@
 #
 # Capability rows are not written here. `models.generated.toml` holds them, one per
 # current model, generated from the pinned models.dev snapshot and `policy.toml` by
-# `.agents/skills/model-catalogue-refresh`. maintainer decision 2026-10-11: the builtin
+# `scripts/catalogue.py`. operator decision 2026-10-11: the builtin
 # catalogue lists only current model generations (see `policy.toml` for what that
 # means per provider). A model of an older generation is not listed; an operator
 # states it in `/etc/ego/models.toml` or `$EGO_HOME/models.toml`, and a row ego
@@ -18,7 +18,7 @@
 #
 # **No prices.** A rate written from memory is a number the budget gate would
 # trust and nothing could check, and
-# `ARCHITECTURE.md` §1 forbids it.
+# `docs/architecture.md` §1 forbids it.
 # models.dev states a literal 0 for the coding plans, so the snapshot omits every
 # price. A run with a money ceiling and no operator rates therefore still refuses
 # with `NoPricingQuote`, which is the correct answer: unknown price is not free
@@ -40,13 +40,13 @@
 # catalogue and stays operator-supplied.
 #
 # `gemini` is selectable under the published-contract decision in
-# `ARCHITECTURE.md`.
-# `ARCHITECTURE.md` records the current capability,
+# `docs/architecture.md`.
+# `docs/architecture.md` records the current capability,
 # replay, and default-thinking evidence used by its built-in row.
 #
 # `openrouter` appears with no rows: it proxies hundreds of models from dozens of
 # vendors, changing weekly, so any handful chosen here would be arbitrary and
-# stale. maintainer decision 2026-10-11: OpenRouter stays dynamic and is not listed
+# stale. operator decision 2026-10-11: OpenRouter stays dynamic and is not listed
 # here.
 #
 # ## Revision
@@ -59,7 +59,7 @@
 
 # First-run policy refreshed on 2026-09-29 for gpt-6.1-sol, released that day;
 # availability is still observed.
-# See ARCHITECTURE.md
+# See docs/architecture.md.
 [default_model]
 openai = "openai/gpt-6.1-sol"
 openai-codex = "openai-codex/gpt-6.1-sol"
@@ -145,7 +145,7 @@ replacement = "anthropic/claude-sonnet-5-5"
 retired = "2025-07-21"
 
 # These slugs left the builtin catalogue on 2026-10-11 under the current-generation
-# rule (regression case): a newer model of the same tier replaced each.
+# rule (regression): a newer model of the same tier replaced each.
 [retired."anthropic/claude-sonnet-5"]
 replacement = "anthropic/claude-sonnet-5-5"
 retired = "2026-10-11"

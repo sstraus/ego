@@ -31,7 +31,7 @@ fn surface(used: Option<u64>) -> SurfaceSnapshot {
         SeatFacts::new(
             QueueStatus::default(),
             0,
-            "~/workspace/mdkb",
+            "~/projects/example",
             Trust::Trusted,
         ),
         Some(GitFacts::new("feat/configurable-embedder", true)),
@@ -119,7 +119,7 @@ fn context_colour_uses_exact_thresholds_and_obeys_no_colour() {
 fn cwd_abbreviates_components_but_not_a_home_prefix_collision() {
     let home = std::env::var("HOME").unwrap();
     let mut snapshot = surface(None);
-    snapshot.set_cwd(format!("{home}/workspace/mdkb"));
+    snapshot.set_cwd(format!("{home}/projects/example"));
     assert_eq!(
         StatusLine::render(&snapshot, &[S::Cwd], 120).text(),
         "~/G/p/mdkb"

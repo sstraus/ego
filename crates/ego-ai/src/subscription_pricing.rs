@@ -1,5 +1,5 @@
 //! Standard API equivalents, not subscription charges or budget rates.
-//! Source: official model pages captured 2026-10-16; see ARCHITECTURE.md
+//! Source: official model pages captured 2026-10-16; see docs/guides/providers.md.
 
 use ego_core::budget::PricingQuote;
 use ego_core::cost::{CurrencyCode, EquivalentPricing, PricingRevision};

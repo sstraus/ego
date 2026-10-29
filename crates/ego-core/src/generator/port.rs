@@ -106,7 +106,7 @@ pub enum AiEvent {
     /// produced a given figure except by reading the
     /// [`ProviderCostRevision`](crate::cost::ProviderCostRevision) that the
     /// *metering* carries. Adding a third decoder must not change this file.
-    /// See `ARCHITECTURE.md` §8.
+    /// See `docs/architecture.md` §8.
     ProviderCost { cost: Money },
     /// The transport's reading of whether the request bytes reached the
     /// provider.

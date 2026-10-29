@@ -1,4 +1,4 @@
-//! contract for regression case's interactive compaction boundary.
+//! contract for regression's interactive compaction boundary.
 //!
 //! `/compact` is a host-owned session command. It must not enter the normal
 //! prompt ingress, which owns ordinary user turns and their queue.

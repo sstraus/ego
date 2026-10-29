@@ -1,7 +1,7 @@
 //! A provider row: where to send a request, and what to authenticate it with.
 //!
 //! See `ARCHITECTURE.md` §3.1 and
-//! `ARCHITECTURE.md`.
+//! `docs/guides/providers.md`.
 //!
 //! A row is configuration. The credential inside it is not, and the
 //! difference is enforced by [`Secret`] rather than by field privacy: a row
@@ -43,7 +43,7 @@ pub type Secret = ProviderSecret;
 /// How a provider presents a credential, and where the credential is read
 /// from — the *strategy*, never the value.
 ///
-/// `ARCHITECTURE.md` §3. A row used
+/// `docs/guides/providers.md` §3. A row used
 /// to carry a resolved [`Secret`], which was not readable outside this module
 /// but was one `derive` away from being — and which made a row *impossible to
 /// build* without a credential, so a missing key made a provider vanish and
@@ -86,7 +86,7 @@ impl CredentialStrategy {
     /// header that carries it.
     ///
     /// **Once**, and that is the whole of
-    /// `ARCHITECTURE.md`
+    /// `docs/guides/providers.md`
     /// §6. The Step 13.5 ADR weighed resolving *in the row* against resolving
     /// *per request* and rejected the second, correctly: it makes every
     /// generation fallible for a condition decided at startup, and it would
@@ -321,7 +321,7 @@ pub enum CostExpectation {
 /// One provider profile: who it is, where it lives, how it authenticates,
 /// which shape its bytes take, and whether it states a charge.
 ///
-/// `ARCHITECTURE.md` §2. Everything
+/// `docs/guides/providers.md` §2. Everything
 /// here is configuration that varies per deployment, per key or per account;
 /// the code that varies per API shape is behind [`wire`](Self::wire) and
 /// nowhere else.
@@ -337,7 +337,7 @@ pub struct ProviderRow {
     /// [`RequestTarget::url`](crate::wire::RequestTarget::url). A row carrying
     /// the whole endpoint would be a row that could disagree with its own
     /// mapping about where the mapping lives
-    /// (`ARCHITECTURE.md`
+    /// (`docs/guides/providers.md`
     /// §2).
     ///
     /// **Always ends in `/`**, and the constructors guarantee it rather than
@@ -391,7 +391,7 @@ pub struct ProviderRow {
     ///
     /// Stated by every constructor rather than defaulted, because a new row
     /// that silently inherited "selectable" is precisely what
-    /// `ARCHITECTURE.md`
+    /// `docs/guides/providers.md`
     /// was written to stop.
     pub promotion: Promotion,
 }
@@ -429,7 +429,7 @@ pub enum Promotion {
 
 /// The base OpenAI serves its API under.
 pub const OPENAI_BASE: &str = "https://api.openai.com/v1/";
-/// Codex subscription backend (Pi's `openai-codex` base, path joined by the mapping).
+/// Codex subscription backend (base path joined by the mapping).
 pub const OPENAI_CODEX_BASE: &str = "https://chatgpt.com/backend-api/";
 /// The environment variable OpenAI's credential is read from.
 pub const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
@@ -580,11 +580,11 @@ impl ProviderRow {
                 var: OPENAI_KEY_VAR.to_string(),
             },
             // OpenAI reports token usage and no monetary total
-            // (`ARCHITECTURE.md` §6), so
+            // (`docs/guides/providers.md` §6), so
             // this row is priced from a supplied table or not at all.
             cost: None,
             // Selectable on a published contract, which
-            // `ARCHITECTURE.md`
+            // `docs/guides/providers.md`
             // amends the 2026-09-03 ADR to allow. Nothing here has been sent to
             // OpenAI and the deterministic fixtures still only establish checks
             // one to four — what changed is where the missing fifth check is
@@ -624,7 +624,7 @@ impl ProviderRow {
     /// measurement discipline found the one place the daemon's answers differ
     /// from the family's — it reads `max_tokens` and discards
     /// `max_completion_tokens` — and
-    /// `ARCHITECTURE.md`
+    /// `docs/guides/providers.md`
     /// §8 spends that fact rather than excusing it: a member that fails a
     /// conformance check is not a member. So this row names its own mapping,
     /// which shares the family's request projection and its whole decoder and
@@ -689,13 +689,13 @@ impl ProviderRow {
             id: "github-copilot".to_string(),
             base,
             http_profile,
-            // Pi's frozen Copilot Chat identity — `GitHubCopilotChat/0.35.0`,
+            // A frozen Copilot Chat identity — `GitHubCopilotChat/0.35.0`,
             // `vscode/1.107.0`, `copilot-chat/0.35.0`, `vscode-chat` — is not
             // here. It is a version gate on a VS Code extension, and ego is
             // not that extension. An operator who accepts GitHub's terms puts
             // those four back with `[auth.github-copilot.headers]`, where the
             // overlay replaces this row's `user-agent` by name
-            // (`ARCHITECTURE.md` §7.8).
+            // (`docs/guides/providers.md` §7.8).
             extra_headers: vec![(
                 "user-agent".to_string(),
                 crate::oauth::EGO_USER_AGENT.to_string(),
@@ -807,7 +807,7 @@ impl ProviderRow {
     /// "deprecated and have no effect", with full usage returned automatically
     /// in every response. So the projection is compatible, and the inert flag
     /// stays — it is current on the contract the mapping is derived from
-    /// (`ARCHITECTURE.md` §3).
+    /// (`docs/guides/providers.md` §3).
     ///
     /// The public models endpoint supplies current inventory and stated limits.
     /// Prices are never imported; actual charges come only from response usage.

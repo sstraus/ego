@@ -11,7 +11,7 @@
 //! These are what `ego` writes at a real terminal for one launch in each
 //! posture, committed, so a change to any of that shows up as a diff in a page
 //! of text a person can read. See
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 //!
 //! **They prove no bytes reach a terminal.** Like the render transcripts, this
 //! is a fixture, not an observation: the escape sequences are stripped and the

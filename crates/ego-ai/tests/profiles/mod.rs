@@ -1,6 +1,6 @@
 //! The profiles the conformance suite is parameterised over.
 //!
-//! `ARCHITECTURE.md` §9:
+//! `docs/guides/providers.md` §9:
 //! the suite runs **per provider**, not per code path, and every profile gets
 //! its own fixtures even where several select the same adapter. That is what
 //! makes the fixtures non-redundant rather than copies of one test — a fixture
@@ -278,10 +278,10 @@ pub const GEMINI: Profile = Profile {
 };
 
 /// Exact pinned client sources for the subscription profiles below.
-const PI_SOURCE: &str =
-    "earendil-works/pi@4af9d21d3b4d664e4a29fcabfec85171077248e3 (read 2026-08-24)";
-const HERMES_SOURCE: &str =
-    "NousResearch/hermes-agent@a0ca7c19204e514f9590ce3b812e029b315ab9e9 (read 2026-08-24)";
+const SUBSCRIPTION_SOURCE: &str =
+    "subscription client contract (recorded 2026-08-24; not live provider evidence)";
+const PORTAL_SOURCE: &str =
+    "subscription client contract (recorded 2026-08-24; not live provider evidence)";
 
 pub const OPENAI_CODEX: Profile = Profile {
     id: "openai-codex",
@@ -291,7 +291,7 @@ pub const OPENAI_CODEX: Profile = Profile {
     row: ProviderRow::openai_codex_default,
     wire: &OpenAiCodexResponses,
     provenance: Provenance::CapturedClientDerived,
-    source: PI_SOURCE,
+    source: SUBSCRIPTION_SOURCE,
     subscription: true,
     error_message_at: NESTED,
 };
@@ -304,7 +304,7 @@ pub const GITHUB_COPILOT: Profile = Profile {
     row: ProviderRow::github_copilot_default,
     wire: &GithubCopilotCompletions,
     provenance: Provenance::CapturedClientDerived,
-    source: PI_SOURCE,
+    source: SUBSCRIPTION_SOURCE,
     subscription: true,
     error_message_at: NESTED,
 };
@@ -330,7 +330,7 @@ pub const MINIMAX_OAUTH: Profile = Profile {
     row: ProviderRow::minimax_oauth_default,
     wire: &AnthropicMessages,
     provenance: Provenance::CapturedClientDerived,
-    source: HERMES_SOURCE,
+    source: PORTAL_SOURCE,
     subscription: true,
     error_message_at: NESTED,
 };
@@ -343,7 +343,7 @@ pub const NOUS: Profile = Profile {
     row: ProviderRow::nous_default,
     wire: &NousPortal,
     provenance: Provenance::CapturedClientDerived,
-    source: HERMES_SOURCE,
+    source: PORTAL_SOURCE,
     subscription: true,
     error_message_at: NESTED,
 };

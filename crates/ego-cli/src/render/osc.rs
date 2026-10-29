@@ -1,6 +1,6 @@
 //! The out-of-band half: what ego tells the host that is not text on a screen.
 //!
-//! `ARCHITECTURE.md` §4 sets
+//! `docs/architecture.md` §4 sets
 //! the rule: an unknown OSC is discarded by every emulator in the matrix, so
 //! the risk of emitting one is not garbage on screen — it is a capability
 //! claimed and never delivered. Every sequence here appears in that matrix,

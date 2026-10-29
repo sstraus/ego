@@ -1,8 +1,8 @@
-tuic bg: command=/bin/bash /home/example/workspace
+tuic bg: command=/bin/bash /home/example/Gits/.tmp/example-evidence-i.sh
 Observed engine lock owner='20013-1009843211000000000-0', mtime=1009843212.0000000
 Owner process check exit=1: ''
-Removed ONLY stale owner file /home/example/workspace and empty directory /home/example/workspace PID is absent. Persistent operation-lock files retained.
-Baseline cold: owned PID=20006 cwd=/home/example/workspace
+Removed ONLY stale owner file /home/example/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock/owner and empty directory /home/example/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock; PID is absent. Persistent operation-lock files retained.
+Baseline cold: owned PID=20006 cwd=/home/example/projects/agent/worktree/crates/ego-tools/.tmp-621-baseline-example07/workspace
 Baseline cold: exit=0 duration=2.200s stdout=b'' stderr=b''
-Baseline warm: owned PID=20007 cwd=/home/example/workspace
+Baseline warm: owned PID=20007 cwd=/home/example/projects/agent/worktree/crates/ego-tools/.tmp-621-baseline-example07/workspace
 Baseline warm: exit=0 duration=2.100s stdout=b'' stderr=b''

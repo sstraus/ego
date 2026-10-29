@@ -97,9 +97,9 @@ fn active_spawn_prepares_exact_tuic_request_with_the_standard_header() {
     assert_eq!(request["action"], "spawn");
     assert_eq!(request["model"], "gpt-6.1-sol");
     let prompt = request["prompt"].as_str().unwrap();
-    assert!(prompt.starts_with("Read and apply ~/.codex/SUBAGENT.md"));
+    assert!(prompt.starts_with("Read and apply the working directory's project instructions."));
     assert!(prompt.contains("Parent: tuic_session parent-identity"));
-    assert!(prompt.contains("BUILD POLICY"));
+    assert!(prompt.contains("Use the repository's documented build and test commands"));
     assert!(prompt.contains("exactly one final RESULT or BLOCKED"));
     assert!(prompt.ends_with(brief));
     assert!(active.prepare(json!({"operation":"spawn","role":"fable","name":"child","cwd":home.path(),"brief":brief}), &ctx).is_err());
@@ -108,21 +108,141 @@ fn active_spawn_prepares_exact_tuic_request_with_the_standard_header() {
 // Catches: native land bypasses the existing High card under yolo/allow rules.
 #[test]
 fn active_land_is_always_classified_as_a_human_card() {
+    if land_subprocess("active_land_is_always_classified_as_a_human_card", true) {
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
-    let wrapper = home
-        .path()
-        .join("workspace/example-project/tools/land/tuic-land.sh");
-    std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
-    std::fs::write(&wrapper, "").unwrap();
     let root = CanonPath::new(std::fs::canonicalize(home.path()).unwrap());
     let ctx = PrepareCtx {
         cwd: root.clone(),
         resolver: &OsFs,
     };
     let call = tool(Mode::Active, home.path(), Some("parent".into())).prepare(json!({"operation":"land","path":home.path(),"branch":"feature","message":"Merge feature"}), &ctx).unwrap();
+    let [Op::Spawn { spec }] = call.ops() else {
+        panic!("expected guarded spawn")
+    };
+    assert_eq!(
+        spec.argv()[0].as_os_str(),
+        std::fs::canonicalize(std::env::var_os("EGO_LAND_TEST_WRAPPER").unwrap())
+            .unwrap()
+            .as_os_str()
+    );
+    assert_eq!(
+        &spec.argv()[1..],
+        &[
+            home.path().as_os_str().to_owned(),
+            "feature".into(),
+            "Merge feature".into()
+        ]
+    );
     let policy = PolicyEngine::new(root, PermissionMode::Yolo, Ruleset::default())
         .with_coordinator_profile(true);
     assert!(matches!(policy.classify(call), Classification::Ask(_)));
+}
+
+// Catches: an absent optional Land wrapper breaks unrelated active operations.
+#[test]
+fn missing_land_is_unavailable_without_disabling_other_operations() {
+    if land_subprocess(
+        "missing_land_is_unavailable_without_disabling_other_operations",
+        false,
+    ) {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let ctx = PrepareCtx {
+        cwd: CanonPath::new(std::fs::canonicalize(home.path()).unwrap()),
+        resolver: &OsFs,
+    };
+    let active = tool(Mode::Active, home.path(), Some("parent".into()));
+    let error = active
+        .prepare(
+            json!({"operation":"land","path":home.path(),"branch":"feature","message":"Merge"}),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Land unavailable: tuic-land.sh not found on PATH"),
+        "{error}"
+    );
+    assert!(
+        active
+            .prepare(
+                json!({"operation":"say","session_id":"child","message":"Continue"}),
+                &ctx
+            )
+            .is_ok()
+    );
+}
+
+// Catches: canonicalizing a renamed symlink target bypasses basename-based High admission.
+#[cfg(unix)]
+#[test]
+fn renamed_land_symlink_cannot_lose_the_human_card() {
+    if land_subprocess("renamed_land_symlink_cannot_lose_the_human_card", true) {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let ctx = PrepareCtx {
+        cwd: CanonPath::new(std::fs::canonicalize(home.path()).unwrap()),
+        resolver: &OsFs,
+    };
+    let error = tool(Mode::Active, home.path(), Some("parent".into()))
+        .prepare(
+            json!({"operation":"land","path":home.path(),"branch":"feature","message":"Merge"}),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("resolved wrapper must be named tuic-land.sh"),
+        "{error}"
+    );
+}
+
+// Isolate PATH from parallel tests without mutating the process environment.
+fn land_subprocess(test: &str, installed: bool) -> bool {
+    if std::env::var_os("EGO_LAND_TEST_CHILD").is_some() {
+        return false;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let shadow = dir.path().join("shadow");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&shadow).unwrap();
+    let wrapper = bin.join("tuic-land.sh");
+    if installed {
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Catches: a non-executable earlier PATH entry shadows the executable.
+            std::fs::write(shadow.join("tuic-land.sh"), "not executable").unwrap();
+            if test == "renamed_land_symlink_cannot_lose_the_human_card" {
+                let target = bin.join("renamed-wrapper");
+                std::fs::rename(&wrapper, &target).unwrap();
+                std::os::unix::fs::symlink(target, &wrapper).unwrap();
+            }
+        }
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env("EGO_LAND_TEST_CHILD", "1")
+        .env("EGO_LAND_TEST_WRAPPER", &wrapper)
+        .env("PATH", std::env::join_paths([shadow, bin]).unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }
 
 fn receipt(id: &str) -> SpawnReceipt {

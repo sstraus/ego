@@ -1,6 +1,6 @@
 //! ACP v1 permission adapter: the connected host is the sole human seat.
 //!
-//! `ARCHITECTURE.md`
+//! `docs/architecture.md`
 //! makes the connected client the only person in an ACP-owned turn, and
 //! forbids the adapter from opening stdin when that client cannot answer.
 //! Everything below exists to keep both halves of that true: the question

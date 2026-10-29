@@ -1,6 +1,6 @@
 //! Splitting `head(pattern)` apart, and every way that can fail.
 //!
-//! `ARCHITECTURE.md` §1, §2
+//! `docs/architecture.md` §1, §2
 //! and §"Failure semantics". There is exactly one entry point —
 //! [`Rule::parse`](super::Rule::parse) — because a second one is how the
 //! flags path and the frontmatter path start disagreeing about what a rule

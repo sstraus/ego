@@ -1,7 +1,7 @@
 //! The provider-neutral conversation: what a valid tool-use history is, and
 //! what happens to one that a crash left half-finished.
 //!
-//! See `ARCHITECTURE.md`. The invariants tested
+//! See `docs/architecture.md`. The invariants tested
 //! here are the ones *every* wire format shares — a result answers an earlier
 //! call, exactly once, and no call is left hanging. Rules only one provider
 //! has (Anthropic's grouping and ordering; chat-completions' encodability)
@@ -472,11 +472,8 @@ mod rebuild {
     /// So the text says to look. That is the whole answer: **no
     /// `safe_to_repeat` on `ToolDescriptor`, no per-dispatch delivery
     /// certainty, no automatic replay and no automatic suppression** — the
-    /// generic machinery P21 sketches is built when something needs to make a
-    /// decision without a model in the loop, and here there is one. Pi
-    /// synthesizes "No result provided" and never replays; Hermes strips
-    /// dangling call tails on resume and forbids re-execution. Both leave the
-    /// judgement where this does.
+    /// generic machinery is needed only when a decision must be made without
+    /// a model in the loop. Here the model can inspect the actual state.
     ///
     /// Pinned because it is a behavioural contract and not a string: a message
     /// that stops telling the model to check is a message that has silently

@@ -190,21 +190,17 @@ Source owners: [prompt dispatch](../../crates/ego-acp/src/prompt_turn.rs),
 [Packaged stdio tests](../../crates/ego-cli/tests/acp_settlement.rs) cover
 cancellation during a permission wait or stream, durable holds after reconnect,
 a known HTTP 400 followed by another prompt, and restart after a killed
-generation. This documentation change reads those tests; it does not rerun them
-or replace the live host matrix.
+generation. Use live integration checks for host-specific behavior.
 
 ## Host verification boundary
 
-The accepted TUICommander proof boundary is the packaged production backend API
-and its named instance, not a hand-written client fixture or a screenshot. Source
-and deterministic adapter tests document behavior, but this documentation task
-does not complete the outstanding final host/product proof.
+Validate a host integration through its actual protocol connection and backend.
+Deterministic adapter tests do not establish every host's behavior or UI rendering.
 
 Sources: [ACP composition](../../crates/ego-cli/src/acp.rs),
 [ACP adapter crate](../../crates/ego-acp/src/),
-[permission adapter](../../crates/ego-cli/src/acp_permission.rs),
-[host-boundary decision](../internals/decisions/2026-09-11-tuicommander-backend-api-is-the-host-boundary.md),
-and [host proof tests](../../crates/ego-cli/tests/regression_case.rs).
+[permission adapter](../../crates/ego-cli/src/acp_permission.rs), and
+[host tests](../../crates/ego-cli/tests/regression_case.rs).
 
 ## Session profile ceiling
 

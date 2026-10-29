@@ -1,5 +1,5 @@
 //! §5's third rate source, composed: the cache, the fetch, and the six
-//! outcomes `ARCHITECTURE.md` §7 tabulates.
+//! outcomes `docs/architecture.md` §7 tabulates.
 //!
 //! This is the only place in the workspace where the three crates that own the
 //! pieces meet — `ego-tools` holds the cache because it owns `StoreIo`,

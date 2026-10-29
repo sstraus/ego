@@ -1,4 +1,4 @@
-: captured-client-derived from earendil-works/pi@4af9d21d3b4d664e4a29fcabfec85171077248e3 (read 2026-08-24)
+: captured-client-derived from subscription client contract (recorded 2026-08-24; not live provider evidence)
 : provider github-copilot, ego 0.1.0
 data: {"id":"chatcmpl-github-copilot-tools","object":"chat.completion.chunk","model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}],"usage":null}
 

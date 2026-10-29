@@ -1,6 +1,6 @@
-unsandboxed baseline: owned PID/PGID=20022, argv=['/opt/homebrew/bin/pnpm', 'exec', '/usr/bin/true'], PNPM_HOME=/home/example/workspace
+unsandboxed baseline: owned PID/PGID=20022, argv=['/opt/homebrew/bin/pnpm', 'exec', '/usr/bin/true'], PNPM_HOME=/home/example/projects/agent/worktree/crates/ego-tools/.621-unsandboxed-example10/pnpm
 unsandboxed baseline: timeout=False, exit=0, elapsed=2.300000000s, stdout=b'', stderr=b''
 fixture: waited dead PID=20025, signal-zero ESRCH; owner='20025-1009843233000000000-0'
-unsandboxed dead-owner witness: owned PID/PGID=20026, argv=['/opt/homebrew/bin/pnpm', 'exec', '/usr/bin/true'], PNPM_HOME=/home/example/workspace
+unsandboxed dead-owner witness: owned PID/PGID=20026, argv=['/opt/homebrew/bin/pnpm', 'exec', '/usr/bin/true'], PNPM_HOME=/home/example/projects/agent/worktree/crates/ego-tools/.621-unsandboxed-example10/pnpm
 unsandboxed dead-owner witness: timeout=True, exit=-9, elapsed=10.400000000s, stdout=b'', stderr=b''
 owner_after='20025-1009843233000000000-0'; owner_unchanged=True

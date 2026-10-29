@@ -1075,7 +1075,7 @@ fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
     );
 }
 
-/// regression case. A real file outside the workspace and outside every root:
+/// regression. A real file outside the workspace and outside every root:
 /// the refusal the model receives names the exact grant and the resume step,
 /// and the file contents never reach the model.
 #[test]
@@ -1170,7 +1170,7 @@ fn boundary_denied_write_returns_refusal_and_continues() {
     assert!(next.contains("refused_write"), "{next}");
 }
 
-/// regression case, the other half: the grant the refusal names works. Same
+/// regression, the other half: the grant the refusal names works. Same
 /// real file, refused first, then `ego roots add --access read`, then
 /// `ego resume` reads it.
 #[test]
@@ -1674,7 +1674,7 @@ fn the_session_flags_are_a_mutually_exclusive_group() {
 
 /// Exit 3, reached the only way a headless run can reach it: a tool asked for
 /// permission to write inside the workspace, and there is nobody to ask.
-/// Boundary refusals instead return to the model (regression case). This is
+/// Boundary refusals instead return to the model (regression). This is
 /// also §4.4's proof — the process is given no stdin at all, so a run that
 /// prompted would hang here and the test would never finish.
 #[test]
@@ -2428,7 +2428,7 @@ fn a_token_ceiling_alone_still_consults_no_rates() {
 /// built, sent, and charged to somebody's rate limit.
 ///
 /// It named an environment *variable* while this test ran on the `openai` row,
-/// whose credential is a plain `BearerFromEnv`. Story `regression_case` moved it to
+/// whose credential is a plain `BearerFromEnv`. Story `regression` moved it to
 /// `anthropic`, which accepts a subscription token as well as an API key and
 /// so cannot honestly name one variable — it names the command that settles
 /// either. The claim under test is unchanged and is the one that matters: the
@@ -2986,13 +2986,13 @@ fn a_usage_error_still_goes_to_stderr_and_exits_two() {
 
 /// The out-of-the-box hosted path: a key, and nothing else.
 ///
-/// Story `regression_case`'s whole problem statement in one run. Before the builtin
+/// Story `regression`'s whole problem statement in one run. Before the builtin
 /// catalogue, the equivalent hosted invocation answered "no capabilities are
 /// configured" — a true sentence about a product nobody could start,
 /// because the repository shipped neither `/etc/ego/models.toml`
 /// nor `$EGO_HOME/models.toml` and the only cure was to write one by hand.
 ///
-/// It ran on an older OpenAI Sol row until story `regression_case` moved that row to
+/// It ran on an older OpenAI Sol row until story `regression` moved that row to
 /// Responses and made it unselectable pending live evidence. The claim is the
 /// same one, made on the row that can still be selected.
 ///

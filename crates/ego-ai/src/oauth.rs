@@ -35,7 +35,7 @@ const USER_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:user_code";
 /// One constant rather than a literal per request, because the rule it carries
 /// is a single rule: ego names ego, on every flow and every provider, and a
 /// vendor's own client string is an operator's `[auth.<provider>.headers]`
-/// decision (`ARCHITECTURE.md` §7.8). A second spelling here is
+/// decision (`docs/guides/providers.md` §7.8). A second spelling here is
 /// how the first exception gets in.
 pub const EGO_USER_AGENT: &str = concat!("ego/", env!("CARGO_PKG_VERSION"));
 
@@ -1104,7 +1104,7 @@ pub fn provider_auth(provider: &str, credential: &str) -> Result<ProviderAuth, F
             // `x-api-key` and is presented as a Bearer instead, and
             // `oauth-2025-04-20` is the beta that makes Messages accept a
             // Bearer at all. That pair is the wire contract for this token
-            // type. Pi's `user-agent: claude-cli/…`, `x-app: cli` and
+            // type. A third-party `user-agent: claude-cli/…`, `x-app: cli` and
             // `claude-code-20250219` are not: they are Claude Code's identity,
             // which Anthropic's legal-and-compliance page reserves to its own
             // clients, and ego does not wear it.

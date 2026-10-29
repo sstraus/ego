@@ -21,7 +21,7 @@ pub struct GrepParams {
 /// Searches file contents. Holds `search` authority and no `read` authority:
 /// the guarded seam opens the files and this tool only supplies the
 /// judgement, so a grep approved to look for `TODO` cannot go read `.env`
-/// instead (`ARCHITECTURE.md`
+/// instead (`docs/architecture.md`
 /// §2).
 pub struct GrepTool;
 

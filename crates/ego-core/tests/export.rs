@@ -650,7 +650,7 @@ fn same_attempt_ref_across_invocations_is_rejected_without_bundle_or_source_muta
 
 /// The redaction gate is *field*-exhaustive, not just variant-exhaustive.
 ///
-/// `ARCHITECTURE.md`
+/// `docs/architecture.md`
 /// claims "exhaustive matching is the gate that makes a future event field
 /// fail compilation instead of leaking by default". A rest pattern silently
 /// weakens that to a *variant* gate: `EventKind::Error { kind, .. }` keeps

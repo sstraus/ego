@@ -172,10 +172,10 @@ fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
 fn external_import_disclosure_requires_content_bound_workspace_consent() {
     let places = Places::new();
     let home = places.home_path();
-    let maintainer = home.join("workspace/example-project/maintainer.md");
-    std::fs::create_dir_all(maintainer.parent().unwrap()).unwrap();
-    std::fs::write(&maintainer, "EXTERNAL-maintainer-477-ORIGINAL").unwrap();
-    places.file("AGENTS.md", "@~/workspace/example-project/maintainer.md\n");
+    let operator = home.join("projects/policies/POLICY.md");
+    std::fs::create_dir_all(operator.parent().unwrap()).unwrap();
+    std::fs::write(&operator, "REGRESSION-MARKER-ORIGINAL").unwrap();
+    places.file("AGENTS.md", "@~/projects/policies/POLICY.md\n");
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(text("OK")); 5],
         ..Plan::default()
@@ -200,11 +200,11 @@ fn external_import_disclosure_requires_content_bound_workspace_consent() {
         assert_eq!(
             stub.generations()[index]["messages"]
                 .to_string()
-                .contains("EXTERNAL-maintainer-477-ORIGINAL"),
+                .contains("REGRESSION-MARKER-ORIGINAL"),
             expected
         );
     }
-    std::fs::write(&maintainer, "EXTERNAL-maintainer-477-CHANGED").unwrap();
+    std::fs::write(&operator, "REGRESSION-MARKER-CHANGED").unwrap();
     let result = places
         .ego(&stub)
         .args([
@@ -221,7 +221,7 @@ fn external_import_disclosure_requires_content_bound_workspace_consent() {
     assert!(
         !stub.generations()[3]["messages"]
             .to_string()
-            .contains("EXTERNAL-maintainer-477")
+            .contains("REGRESSION-MARKER")
     );
 }
 

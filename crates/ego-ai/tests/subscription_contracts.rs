@@ -1,9 +1,6 @@
-//! Request contracts captured from the current Pi and Hermes clients.
+//! Recorded subscription request contracts; not live provider acceptance.
 //!
 //! These tests pin client-derived contracts, not live provider acceptance.
-//! Pi source: `earendil-works/pi@4af9d21d3b4d664e4a29fcabfec85171077248e3`.
-//! Hermes source: `NousResearch/hermes-agent@a0ca7c19204e514f9590ce3b812e029b315ab9e9`.
-//! Both were read 2026-08-24.
 
 use ego_ai::provider::{KIMI_CODING_BASE, ProviderRow};
 use ego_ai::wire::anthropic_messages::AnthropicMessages;

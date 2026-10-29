@@ -1,4 +1,4 @@
-//! regression case: how a provider-reported failure is classified, and what of
+//! regression: how a provider-reported failure is classified, and what of
 //! it a host may be shown.
 //!
 //! The live failure was an overloaded Codex backend: its stream carried an

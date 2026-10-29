@@ -109,11 +109,10 @@ because it returned 401. Missing or revoked credentials report a login hint.
 Explicit non-interactive refresh uses the same registration selection, plus
 `--refresh --issuer URL` and optional `--account ACCOUNT`.
 
-**Verification boundary:** regression case is code-landed, not live-login complete.
-Recorded public Linear and Asana discovery documents and local authorization
-server tests are source evidence. maintainer's real OAuth login, restart, and native
-credential-store attachment check remains pending. Do not read the native token
-store or claim this check passed from the local fixtures.
+OAuth behavior is covered by recorded public discovery documents and local
+authorization-server tests. These fixtures do not guarantee that a third-party
+service accepts a particular account or registration. Verify login and attachment
+with the actual service. Do not inspect or publish native credential-store contents.
 
 Sources: [CLI login and refresh](../../crates/ego-cli/src/mcp.rs),
 [OAuth protocol and runtime](../../crates/ego-mcp/src/oauth.rs),
@@ -149,7 +148,7 @@ Sources: [CLI MCP management](../../crates/ego-cli/src/mcp.rs),
 [inbound composition](../../crates/ego-cli/src/mcp_server.rs),
 [protocol crate](../../crates/ego-mcp/src/),
 [guarded registry](../../crates/ego-tools/src/mcp_registry.rs), and
-[historical contract analysis](../internals/19-current-mcp-and-collapsed-tools.md).
+historical contract analysis.
 
 ## Turn time
 

@@ -1,8 +1,8 @@
 # Reviewed, hand-kept policy for the generated builtin catalogue.
 #
-# `.agents/skills/model-catalogue-refresh/scripts/catalogue.py generate` reads this
+# `scripts/catalogue.py generate` reads this
 # file and `upstream/models.dev.json` and writes `models.generated.toml`.
-# maintainer decision 2026-10-11 (regression case): the builtin catalogue lists ONLY the
+# operator decision 2026-10-11 (regression): the builtin catalogue lists ONLY the
 # current model generations of each provider. An older model that a vendor still
 # serves is not listed; an operator states it in `models.toml` if needed.
 #
@@ -68,7 +68,7 @@ max_images = 100
 # `none`; the authenticated Codex models cache (2026-09-26) lists low..max for
 # gpt-6-sol, so `off` is dropped. The context is the
 # authenticated Codex cache value, 272,000
-# (ARCHITECTURE.md),
+# (docs/architecture.md),
 # not the API's 1,050,000. Default efforts from the authenticated Codex models
 # cache: gpt-6-sol medium (2026-09-26), gpt-6.1-sol low (2026-09-29).
 [provider.openai-codex]
@@ -138,7 +138,7 @@ max_height = 8000
 # (2026-09-02) plus the newest Pro and Flash-Lite, which the 3.8 generation has not
 # refreshed. Wire facts read 2026-09-08 from the Gemini 3.8 Flash, function-calling,
 # thinking and Interactions documentation
-# (ARCHITECTURE.md): parallel function calls,
+# (docs/architecture.md): parallel function calls,
 # signed thought blocks replayed within the provider, short caching, cooperative
 # cancel. Exact image admission limits stay unknown. Preview and live ids are not
 # verified against the `/v1` Interactions surface.
@@ -218,7 +218,7 @@ read = "2026-10-15"
 # Responses probe 2026-10-15: POST https://api.openai.com/v1/responses with
 # model=chat-latest, reasoning.effort=medium returned HTTP 200, status=completed,
 # reasoning.effort=medium and output_text=ok (16 total tokens). Only Medium is
-# measured; do not infer Off, Low or High. See ADR 2026-10-11, regression case.
+# measured; do not infer Off, Low or High. See ADR 2026-10-11, regression.
 reasoning = true
 reasoning_options = [{ type = "effort", values = ["medium"] }]
 limit = { context = 400000, output = 128000 }

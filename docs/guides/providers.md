@@ -49,9 +49,8 @@ name in this guide. They currently name `openai/gpt-6.1-sol`,
 availability. `ego models` and generation-time resolution check credentials and
 capabilities again.
 
-OpenAI and Gemini are selectable; old research that required a live recording
-before offering these public contracts was amended. Deterministic contract
-conformance is not a claim that this documentation run called every hosted vendor.
+OpenAI and Gemini are selectable. Offline contract tests do not prove live
+availability for every hosted provider.
 
 ## Codex transport
 
@@ -76,8 +75,7 @@ Sources: [Codex mapping](../../crates/ego-ai/src/wire/openai_codex_responses.rs)
 Existing [public boundary coverage](../../crates/ego-ai/tests/generator.rs)
 and [CLI generation coverage](../../crates/ego-cli/src/model.rs) protect
 same-session continuation and lineage invalidation. These are implementation
-claims, not measured cache-hit parity or latency improvements. regression case's
-live workload targets remain separate from the shipped transport.
+claims, not measured cache-hit parity or latency improvements.
 
 ## Subscription login
 
@@ -137,11 +135,7 @@ Names in the reserved `__ego_` namespace are also mapped to prevent an original
 name from impersonating an encoded name. Assignment is deterministic and checks
 collisions across the complete request, including historical tool names.
 
-Before installing a candidate binary for TUIC AI Chat, run
-`python3 scripts/ai-chat-smoke.py /absolute/path/to/ego`. The gate starts the
-candidate as `ego acp -C ~/Gits`, uses the real user profile, and relays the live
-TUIC MCP catalogue over ACP. It checks a new turn and a resumed turn for each
-available configured provider, starting with Codex subscription. Each turn must
-have a provider HTTP 200 and a non-empty reply. `--models` supplies an explicit
-model matrix when a configured provider needs login or a particular model must
-be verified. Evidence stays under `~/Gits/.tmp`; the gate never installs ego.
+For a host integration smoke check, start the candidate with `ego acp -C
+/workspace/project` and use the host's supported ACP connection. Verify a new
+turn and a resumed turn with a provider you have configured. Hosted checks can
+incur charges and require credentials; they are not part of the offline gate.

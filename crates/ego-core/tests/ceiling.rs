@@ -1,6 +1,6 @@
 //! What a ceiling is written as, and what resolving one produces.
 //!
-//! See `ARCHITECTURE.md` §§4 and 8. The
+//! See `docs/architecture.md` §§4 and 8. The
 //! grammar is tested here, in the crate that owns it, rather than beside the
 //! flag: it is one parser with two surfaces, and a table of spellings that
 //! lived next to `--budget` would say nothing about the config key that

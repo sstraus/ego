@@ -1,6 +1,6 @@
 //! Which protocol version this agent agrees to speak.
 //!
-//! See `ARCHITECTURE.md`, §3 as
+//! See `docs/architecture.md`, §3 as
 //! corrected by §6.
 //!
 //! ## The SDK owns the negotiation; we own the configuration

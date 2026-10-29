@@ -59,7 +59,7 @@ pub trait EventSink: Send + Sync {
     ///
     /// Called once per event, after it is durable and after it has been folded
     /// — so `state` always *includes* `event`, never precedes it. See
-    /// `ARCHITECTURE.md`.
+    /// `docs/architecture.md`.
     ///
     /// Most sinks ignore `state`: a line of JSONL is the event and nothing
     /// else. It is here for the consumer that cannot work without it — ACP's

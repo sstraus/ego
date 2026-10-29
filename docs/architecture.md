@@ -3,10 +3,8 @@
 The architecture explains where policy lives, where real effects occur, and why
 a host integration cannot bypass the same admission used by the CLI.
 
-[ARCHITECTURE.md](../ARCHITECTURE.md) remains the canonical design and roadmap;
-it stays at the repository root so existing project authorities remain stable.
-[SPEC.md](../SPEC.md) records product scope and [CLI.md](../CLI.md) records the
-command language. Implementation evidence comes from source and tests.
+[ARCHITECTURE.md](../ARCHITECTURE.md) describes the source structure and authority
+boundaries. [CLI.md](../CLI.md) describes command conventions.
 
 | Crate | Responsibility |
 | --- | --- |
@@ -21,6 +19,4 @@ command language. Implementation evidence comes from source and tests.
 
 Follow [concepts](concepts/README.md) for the work lifecycle,
 [permissions](guides/permissions.md) for authority, and
-[integrations](integrations/README.md) for host boundaries. Dated rationale is in
-[internals/decisions](internals/decisions/); retained research and evidence are
-indexed separately in [internals](internals/README.md).
+[integrations](integrations/README.md) for host boundaries.

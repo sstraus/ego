@@ -457,7 +457,7 @@ mod walking {
 
     #[test]
     fn scan_rooted_at_a_file_reports_not_a_directory() {
-        // The variant `ARCHITECTURE.md`
+        // The variant `docs/architecture.md`
         // §6 removed for having no caller. This is the caller it said it
         // would arrive with.
         let tree = Tree::new();
@@ -864,7 +864,7 @@ fn set_mode(at: &Path, mode: u32) {
 
 /// The two behaviours the grammar ADR reasoned about and did not measure.
 ///
-/// `ARCHITECTURE.md` §5
+/// `docs/architecture.md` §5
 /// decides against case folding and against Unicode normalisation, and names
 /// both residuals as *unverified on this machine* — believed to fail closed,
 /// with one experiment each. These are those experiments. They belong here

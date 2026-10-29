@@ -2,7 +2,7 @@
 //!
 //! # Why this is a third mapping
 //!
-//! `ARCHITECTURE.md` §4
+//! `docs/guides/providers.md` §4
 //! allows a provider to differ in exactly three places. Gemini's Interactions
 //! API differs in the request's *shape* and the stream's *event model*, like
 //! Anthropic — but it differs from Anthropic too, which is the point of having

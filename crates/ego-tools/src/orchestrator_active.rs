@@ -1,7 +1,7 @@
 //! Native active operations share the existing guarded process boundary.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ego_core::orchestrator::{ActiveRequest, Mode, SpawnReceipt};
@@ -12,10 +12,9 @@ use futures::future::BoxFuture;
 use serde_json::json;
 
 /// Keep an observe instance callable for refusal checks, even when not advertised.
-pub fn tool(mode: Mode, home: &Path, parent: Option<String>) -> Arc<dyn Tool> {
+pub fn tool(mode: Mode, _home: &Path, parent: Option<String>) -> Arc<dyn Tool> {
     Arc::new(Typed(ActiveTool {
         mode,
-        home: home.into(),
         parent,
         rework: None,
     }))
@@ -24,13 +23,12 @@ pub fn tool(mode: Mode, home: &Path, parent: Option<String>) -> Arc<dyn Tool> {
 /// Bind same-thread correction budgets reconstructed from this session's journal.
 pub fn tool_with_rework_limits(
     mode: Mode,
-    home: &Path,
+    _home: &Path,
     parent: Option<String>,
     limits: BTreeMap<String, u8>,
 ) -> Arc<dyn Tool> {
     Arc::new(Typed(ActiveTool {
         mode,
-        home: home.into(),
         parent,
         rework: Some(Mutex::new(limits)),
     }))
@@ -60,7 +58,6 @@ pub fn rework_limits(
 
 struct ActiveTool {
     mode: Mode,
-    home: PathBuf,
     parent: Option<String>,
     rework: Option<Mutex<BTreeMap<String, u8>>>,
 }
@@ -140,7 +137,7 @@ impl TypedTool for ActiveTool {
                         )
                     })?;
                     if *count >= 2 {
-                        return Err(ToolError::InvalidParams("this thread has exhausted its two rework requests; give maintainer the consolidated outcome".into()));
+                        return Err(ToolError::InvalidParams("this thread has exhausted its two rework requests; give operator the consolidated outcome".into()));
                     }
                     *count += 1;
                 }
@@ -187,10 +184,24 @@ impl TypedTool for ActiveTool {
                 }
                 nonempty(message)?;
                 let root = super::tools::resolve_target(ctx, path)?;
-                let wrapper = self
-                    .home
-                    .join("workspace/example-project/tools/land/tuic-land.sh");
+                let wrapper = super::exec::identity::resolve(
+                    std::ffi::OsStr::new("tuic-land.sh"),
+                    ctx.cwd.as_path(),
+                    &std::env::vars_os().collect::<Vec<_>>(),
+                )
+                .ok_or_else(|| {
+                    ToolError::InvalidParams(
+                        "Land unavailable: tuic-land.sh not found on PATH".into(),
+                    )
+                })?;
                 let wrapper = ctx.resolver.canonicalize(&wrapper)?;
+                // The coordinator policy identifies this High operation by basename.
+                // Reject renamed symlink targets rather than lose the human card.
+                if wrapper.as_path().file_name() != Some(std::ffi::OsStr::new("tuic-land.sh")) {
+                    return Err(ToolError::InvalidParams(
+                        "Land unavailable: resolved wrapper must be named tuic-land.sh".into(),
+                    ));
+                }
                 (
                     vec![
                         wrapper.as_path().as_os_str().to_owned(),

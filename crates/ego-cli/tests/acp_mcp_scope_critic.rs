@@ -1,5 +1,5 @@
 //! Adversarial contracts for the session-scoped stdio MCP scope (story
-//! regression_case) through the packaged binary and real stdio children.
+//! regression) through the packaged binary and real stdio children.
 
 #![cfg(unix)]
 

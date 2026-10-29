@@ -155,7 +155,7 @@ impl GenerationModelSource for EvalSource {
 
 /// Opt-in only: the Python orchestrator supplies cases, model and projection.
 #[test]
-#[ignore = "paid provider evaluation; run through evals/judge/run.py"]
+#[ignore = "paid provider evaluation; requires EGO_JUDGE_BRIDGE, EGO_JUDGE_CASES and EGO_JUDGE_OUTPUT"]
 fn live_judge_eval() {
     let model = std::env::var("EGO_JUDGE_MODEL").expect("provider/model");
     let projection = "production";

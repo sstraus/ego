@@ -110,7 +110,7 @@ fn every_current_snapshot_model_is_in_the_builtin_catalogue_with_the_snapshot_li
 }
 
 /// Catches: an older generation (or a hand-added row) surviving in the builtin
-/// catalogue after maintainer's 2026-10-11 decision that only current models are listed.
+/// catalogue after operator's 2026-10-11 decision that only current models are listed.
 #[test]
 fn the_builtin_catalogue_lists_nothing_beyond_the_current_generations() {
     let (snapshot, policy) = (snapshot(), policy());

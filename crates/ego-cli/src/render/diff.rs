@@ -1,6 +1,6 @@
 //! Two files, on two axes.
 //!
-//! `ARCHITECTURE.md` §2 is
+//! `docs/architecture.md` §2 is
 //! the whole of this module's shape, and it was read off a capture rather than
 //! invented: the diff writes **background** and only background; a foreground
 //! pass writes foreground. In the captured renderer that is what lets

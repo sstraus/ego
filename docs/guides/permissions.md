@@ -158,7 +158,7 @@ file is rewritten. Select those levels when their stricter or open reach is
 required. Adaptive
 currently requires macOS Seatbelt and successful native capability probes;
 explicit adaptive selections on unsupported platforms fail admission with explicit alternatives. It captures
-operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
+operator `CARGO_HOME`, `RUSTUP_HOME`, trusted build-cache configuration, validated git common
 and linked-worktree metadata, `TMPDIR`, an operator `CARGO_TARGET_DIR`, the pnpm
 home (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`), the
 pnpm cache (`XDG_CACHE_HOME` or `~/Library/Caches`, plus `/pnpm`) and the npm
@@ -315,8 +315,7 @@ Mode names, input aliases, and cycle order come from
 [the shared mode definition](../../crates/ego-core/src/config/layer.rs).
 [REPL actions](../../crates/ego-cli/src/repl/actions.rs) and
 [key handling](../../crates/ego-cli/src/repl/seat/edit_mode.rs) route direct and
-Shift+Tab selections through the same policy owner. This is the shipped story
-586 surface, not the rejected proposal for an extra manual-approval mode.
+Shift+Tab selections through the same policy owner. All input routes select the same supported modes.
 
 Sources: [policy engine](../../crates/ego-core/src/permit/grant.rs),
 [rule grammar](../../crates/ego-core/src/permit/rule/),
@@ -335,8 +334,7 @@ bounded task context, agent reasoning, recent call outcomes and action evidence.
 Commands are data, not instructions. Same-provider judges receive raw argv;
 cross-provider judges receive AST-backed redacted structure. Environment values
 and repository file contents are not included. Raw-call hashes bind execution;
-they do not replace the action description. See the
-[action-evidence decision](../internals/decisions/2026-10-10-judge-action-evidence.md).
+they do not replace the action description.
 
 Current recovery behavior is implemented in [root mutations](../../crates/ego-tools/src/config.rs),
 [remembered rules](../../crates/ego-core/src/config/rule_management.rs), and

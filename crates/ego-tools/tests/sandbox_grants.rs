@@ -1,5 +1,5 @@
 //! contract for a human widening the process sandbox by one path (story
-//! regression_case).
+//! regression).
 //!
 //! Real `sandbox-exec` children, a real filesystem, and a port that stands in
 //! for the host seat. The refusal text under test is whatever macOS `cat` and

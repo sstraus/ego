@@ -281,7 +281,7 @@ mod cost {
     /// And the zero is attributed to the *policy* that produced it, not to a
     /// price list: there is no table saying "zero per token" here, and
     /// spelling one would be the confusion
-    /// `ARCHITECTURE.md` §4 exists to
+    /// `docs/architecture.md` §4 exists to
     /// prevent.
     #[test]
     fn a_free_generation_is_known_zero_not_unknown() {

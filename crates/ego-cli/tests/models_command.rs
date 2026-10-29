@@ -682,7 +682,7 @@ fn unknown_provider_exits_two_before_any_transport() {
 
 /// A row nobody configured is listed, and says where it came from.
 ///
-/// Story `regression_case`'s fifth criterion, both halves in one run because the
+/// Story `regression`'s fifth criterion, both halves in one run because the
 /// interesting claim is the *difference* between them: the same command, the
 /// same provider, one file added, and only the overridden slug changes source.
 ///

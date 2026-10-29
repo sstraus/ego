@@ -1,6 +1,6 @@
 //! The one inbound listener: bind, accept, and establish who connected.
 //!
-//! `ARCHITECTURE.md`
+//! `docs/architecture.md`
 //! separates the endpoint from the protocol. [`ego_core::endpoint`] decides
 //! which endpoint kinds exist and which authentication each compels; this crate
 //! is the thin impure half that opens one and answers *who is on the other

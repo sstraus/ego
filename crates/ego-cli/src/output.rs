@@ -584,7 +584,6 @@ impl ProviderTurnNotices {
 }
 
 /// The default text mode: line-oriented, closer to a Unix tool than a TUI
-/// (`SPEC.md` §2.3, `ARCHITECTURE.md` §6).
 ///
 /// Assistant text is written as it streams, with no line of its own, so
 /// `ego run "…" > answer.txt` contains the answer and nothing else. Everything
@@ -1218,7 +1217,7 @@ pub struct Report {
     /// non-empty — a CI gate is a presence check" — so a key that appears only
     /// on exit 3 is additive under a rule that was written down rather than
     /// under one asserted here. See
-    /// `ARCHITECTURE.md` §4.
+    /// `docs/architecture.md` §4.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denied_by: Option<Authority>,
     pub turns: usize,

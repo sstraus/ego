@@ -1,4 +1,4 @@
-// Critic attacks on the known-full context refusal (regression case).
+// Critic attacks on the known-full context refusal (regression).
 use super::*;
 
 const CODEX_WINDOW: u64 = 272_000;

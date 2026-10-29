@@ -1,7 +1,7 @@
 //! The input-precedence algorithm of `CLI.md` §4.5, and the `@file`
 //! convention `--system` and `--schema` share.
 //!
-//! Ratified in `ARCHITECTURE.md`, whose
+//! Ratified in `docs/architecture.md`, whose
 //! §3.4 is the table [`assemble`] must grow into when `-f` lands: an agent
 //! file's body is the argv prompt's peer and the two together are *refused*
 //! rather than concatenated, while `--attach` never enters this algorithm at

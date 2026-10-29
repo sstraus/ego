@@ -2,7 +2,7 @@
 //! themselves. Executable authority invalidates a decision; instructions do
 //! not.
 //!
-//! See `ARCHITECTURE.md`.
+//! See `docs/architecture.md`.
 //! `ego-core` owns what each fact means and whether a stored answer still
 //! applies. This module owns trust inventory reads and the separate locked
 //! documents under `$EGO_HOME`. Records live outside the workspace on purpose:

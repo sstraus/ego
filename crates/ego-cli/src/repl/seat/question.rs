@@ -2185,7 +2185,7 @@ mod permission_edit_form_tests {
         let form = PermissionEditForm::new(
             exec_schema(),
             json!({
-                "argv": ["wiz-run", "stories-cli.js", "show", "regression_case"],
+                "argv": ["project-tool", "tasks.js", "show", "regression"],
                 "cwd": "/workspace",
                 "timeout_ms": 30000,
                 "environment": { "LANG": "C" }
@@ -2202,7 +2202,7 @@ mod permission_edit_form_tests {
                 (
                     "argv",
                     PermissionFieldKind::StringArray,
-                    "wiz-run stories-cli.js show regression_case"
+                    "project-tool tasks.js show regression"
                 ),
                 ("cwd", PermissionFieldKind::String, "/workspace"),
                 ("timeout_ms", PermissionFieldKind::Integer, "30000"),
@@ -2216,7 +2216,7 @@ mod permission_edit_form_tests {
         assert_eq!(
             form.validate().unwrap(),
             json!({
-                "argv": ["wiz-run", "stories-cli.js", "show", "regression_case"],
+                "argv": ["project-tool", "tasks.js", "show", "regression"],
                 "cwd": "/workspace",
                 "timeout_ms": 30000,
                 "environment": { "LANG": "C" }

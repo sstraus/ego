@@ -1,4 +1,4 @@
-//! contract for regression case: prompted clean-session compaction.
+//! contract for regression: prompted clean-session compaction.
 //!
 //! The operation itself is intentionally not duplicated here. These tests
 //! pin the core-owned grammar, durable event, reducer/history boundary and
@@ -119,7 +119,7 @@ fn checkpoint() -> String {
         "# Ordered next steps",
         "Run the focused gate.",
         "# Critical references",
-        "ARCHITECTURE.md",
+        "docs/architecture.md",
     ]
     .join("\n")
 }

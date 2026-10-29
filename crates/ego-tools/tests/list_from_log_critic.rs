@@ -1,4 +1,4 @@
-//! Critic cases for regression case: `JsonlStore::list` projects a session
+//! Critic cases for regression: `JsonlStore::list` projects a session
 //! from its log when the manifest is missing, unreadable or corrupt.
 
 use std::path::{Path, PathBuf};

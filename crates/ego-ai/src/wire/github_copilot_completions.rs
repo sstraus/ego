@@ -1,14 +1,12 @@
 //! GitHub Copilot's current Chat Completions subset.
 //!
 //! The JSON and SSE grammar are the shared Chat Completions contract. The two
-//! dynamic Copilot headers are not: Pi derives `X-Initiator` from the last
+//! dynamic Copilot headers are not: The adapter derives `X-Initiator` from the last
 //! message and always sends `Openai-Intent: conversation-edits`. That request
 //! difference owns this thin mapping instead of a provider-name branch inside
 //! [`openai_completions`](super::openai_completions).
 //!
-//! Captured-client-derived from
-//! `earendil-works/pi@4af9d21d3b4d664e4a29fcabfec85171077248e3`, read
-//! 2026-08-24. It is not represented as a live Copilot recording.
+//! Client-contract fixture recorded 2026-08-24. It is not represented as a live Copilot recording.
 
 use std::sync::Arc;
 

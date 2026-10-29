@@ -156,7 +156,7 @@ pub const PATH: &str = "chat/completions";
 /// A `GenRequest` this format cannot express without lying about it.
 ///
 /// Every variant is a case where the alternative would be to drop something
-/// the caller asked for and send the request anyway. `ARCHITECTURE.md`
+/// the caller asked for and send the request anyway. `docs/guides/providers.md`
 /// I5 is about exactly that: a shared HTTP shape is not equivalent semantics,
 /// and a silent mistranslation is worse than a refusal because nothing
 /// downstream can tell it happened.
@@ -205,7 +205,7 @@ impl From<Inexpressible> for RequestRefused {
 ///
 /// Split out because exactly one member's body differs, in exactly one field:
 /// Ollama reads `max_tokens` and discards `max_completion_tokens`
-/// (`ARCHITECTURE.md` §8).
+/// (`docs/guides/providers.md` §8).
 /// §4 place 3 makes that an adapter difference and offers no third option, so
 /// the difference is carried by *which mapping serialises this*, and never by
 /// a flag one shared mapping reads. `pub(crate)` for that reason and no other:
@@ -266,7 +266,7 @@ struct StreamOptions {
     /// OpenRouter retired a **precondition, not a spelling** — nothing
     /// succeeded it — so there is no second spelling to be carrying, which is
     /// the shape `AGENTS.md` forbids. Audited in
-    /// `ARCHITECTURE.md` §3 and guarded by
+    /// `docs/guides/providers.md` §3 and guarded by
     /// `tests/deprecated_spellings.rs`.
     include_usage: bool,
 }
@@ -582,7 +582,7 @@ pub fn openrouter_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressibl
     Ok(serde_json::to_vec(&body).expect("a JSON value serialises"))
 }
 
-/// The captured Pi/Hermes client projection for compatible endpoints.
+/// The captured client-contract projection for compatible endpoints.
 ///
 /// Copilot and Nous Portal agree on two omissions: they do not
 /// send a reasoning field when thinking is off, and their pinned clients do

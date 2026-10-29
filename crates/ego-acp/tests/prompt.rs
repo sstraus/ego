@@ -1386,7 +1386,7 @@ async fn a_prompt_for_an_unopened_session_is_refused() {
 /// A second prompt for a session whose turn is still running is refused, and
 /// no second turn starts.
 ///
-/// `ARCHITECTURE.md`
+/// `docs/architecture.md`
 /// §3. The refusal is not politeness: the registry holds one `CancelToken` per
 /// session, so admitting a second turn would replace the running turn's token
 /// with the queued turn's and leave the running one unreachable by

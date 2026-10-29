@@ -185,7 +185,7 @@ pub const BUILT: &[&str] = &[
 /// A command `CLI.md` §2 documents that this build does not implement, and the
 /// subsystem it is waiting on.
 ///
-/// Empty, because `ego doctor` was the last one and story `regression_case` built it.
+/// Empty, because `ego doctor` was the last one and story `regression` built it.
 /// Every command `CLI.md` §2 documents is now in [`BUILT`].
 ///
 /// It ships empty rather than being deleted, for the reason [`RETIRED`] ships
@@ -417,7 +417,7 @@ fn resume_command() -> clap::Command {
 
 /// Where the prompt comes from when it is not on the command line.
 ///
-/// `CLI.md` §2's stdin contract, which is Codex's: `-` reads the prompt from
+/// `CLI.md` §2's stdin contract, which is explicit: `-` reads the prompt from
 /// stdin, and with *both* an argv prompt and piped stdin, stdin is appended
 /// as a delimited context block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,7 +472,7 @@ pub enum SessionChoice {
     /// mistyped id succeed by silently starting an empty session, so the
     /// caller who asked to continue something would get a new thing wearing
     /// its name. See
-    /// `ARCHITECTURE.md` §3.
+    /// `docs/architecture.md` §3.
     Resume(Option<String>),
 }
 
@@ -642,7 +642,7 @@ pub struct DoctorArgs {
 ///
 /// `sandbox` is a ceiling and not a default. A connected host picks its own
 /// confinement per session and can only pick something at least this strong
-/// (`ARCHITECTURE.md`).
+/// (`docs/architecture.md`).
 /// `None` means the operator named none, and the resolved configuration
 /// stands.
 #[derive(Debug, Clone, PartialEq, Eq)]

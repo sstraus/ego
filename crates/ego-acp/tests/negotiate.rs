@@ -1,6 +1,6 @@
 //! The version this agent answers `initialize` with, as a table.
 //!
-//! `ARCHITECTURE.md` §6.3 is a
+//! `docs/architecture.md` §6.3 is a
 //! two-row table, and this file is that table read as a pure function. The same
 //! rows are driven through the real SDK router in `tests/initialize.rs`, and
 //! §6.4 says why one of the two is not enough: the SDK owns the negotiation, so

@@ -1,4 +1,4 @@
-//! Adversarial cases for `tool(<server>/*)` (regression case).
+//! Adversarial cases for `tool(<server>/*)` (regression).
 
 use std::path::Path;
 

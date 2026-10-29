@@ -1,4 +1,4 @@
-//! Durable elicitation round boundary regressions for regression case.
+//! Durable elicitation round boundary regressions for regression.
 
 use ego_core::question::{QuestionAnswer, QuestionRequest};
 use serde_json::json;

@@ -27,14 +27,11 @@ checks, and output paths. No hosted website is implied.
 | Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
 | Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
 | Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
-| Read the locally prepared release changes | [Release notes: 0.4.0](release-notes/0.4.0.md) |
+| Read the release changes | [Release notes: 0.4.0](release-notes/0.4.0.md) |
 | Understand crate responsibilities and design | [Architecture](architecture.md) |
 
 The [generated command reference](reference/cli.md) remains at its generator-owned
 path. [Configuration](reference/configuration.md) identifies the source schemas.
-[CLI.md](../CLI.md), [SPEC.md](../SPEC.md), and [ARCHITECTURE.md](../ARCHITECTURE.md)
-remain design authorities; they include planned behavior and older examples, so
-use the source-backed guides and current binary help for invocation details.
-
-[Internals](internals/README.md) contains dated design decisions and historical
-research. These are not installation instructions or current provider guarantees.
+[CLI.md](../CLI.md) describes command conventions, and
+[ARCHITECTURE.md](../ARCHITECTURE.md) describes crate and authority boundaries.
+Use the installed binary help for exact invocation details.

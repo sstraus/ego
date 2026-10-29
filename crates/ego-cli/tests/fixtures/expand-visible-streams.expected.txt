@@ -1,7 +1,7 @@
 
-✓ $ bash -lc '/home/example/workspace · exit 0 · (timeout 10.0s) · 139ms
+✓ $ bash -lc '/workspace/tools/background.sh… · exit 0 · (timeout 10.0s) · 139ms
   [stdout]
-  tuic bg: pid=12345
-  log=/home/example/workspace
-  wake=/home/example/workspace
-  tuic-bg: you will get BG DONE; end your turn now
+  background: pid=12345
+  log=/workspace/output/validation.log
+  wake=/workspace/output/validation.log.wake
+  background: completion notification will follow

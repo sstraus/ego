@@ -1,18 +1,18 @@
 //! Where the diagnostics this workspace already emits actually go.
 //!
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 //!
 //! Seven crates depend on `tracing` and there are seventy-four call sites. Until
 //! this module existed, every one of those events was constructed and dropped:
 //! no binary installed a subscriber, so `RUST_LOG` did nothing and code that
-//! looked like it was reporting was not. Story `regression_case` had already moved real
+//! looked like it was reporting was not. Story `regression` had already moved real
 //! evidence — upstream response bodies, removed from operator-visible errors
 //! because those errors reach an ACP host in `error.data` — behind that curtain,
 //! on the assumption that somebody would eventually draw it.
 //!
 //! ## Why an environment variable and not `-v`
 //!
-//! `CLI.md` §3 is the argument grammar of a *run*, and story `regression_case` froze
+//! `CLI.md` §3 is the argument grammar of a *run*, and story `regression` froze
 //! it with `-v`/`--verbose` recorded as excluded. A diagnostic level is not an
 //! argument of a run: it changes nothing the run does, is recorded in no
 //! evidence, and belongs in neither the generated reference nor the five
@@ -26,7 +26,7 @@
 //! Because at any level that is not silent, this would print credentials.
 //! `ego-ai`'s two body-logging sites may echo the operator's key back from a
 //! failing endpoint or a proxy's interception page, and for a served endpoint
-//! stderr is the host's log file — read, as the `regression_case` session put it, by an
+//! stderr is the host's log file — read, as the `regression` session put it, by an
 //! operator who is not necessarily the one who owns the key. So an unset
 //! `EGO_LOG` installs *nothing*, not a subscriber at level `off`, and the two
 //! body sites are additionally held behind a target of their own: see

@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# Catches platform/asset drift that breaks TUIC-style latest/download URLs.
+# Catches platform/asset drift that breaks platform-specific latest/download URLs.
 require 'yaml'
 require 'tmpdir'
 require 'fileutils'
@@ -22,12 +22,13 @@ abort 'Linux GLIBC floor is missing' unless build_steps.any? { |step| step['run'
 
 # Exercise the real packager with inert bytes, not a Rust build or installation.
 # Windows ZIP creation requires the runner's 7z; its naming is checked above.
-scratch = File.expand_path('~/Gits/.tmp')
+scratch = ENV.fetch('EGO_RELEASE_CHECK_TMPDIR', Dir.tmpdir)
 FileUtils.mkdir_p(scratch)
 Dir.mktmpdir('ego-release-check-', scratch) do |dir|
   FileUtils.mkdir_p(File.join(dir, 'scripts'))
   FileUtils.cp(File.join(root, 'scripts/package-release.sh'), File.join(dir, 'scripts'))
   File.write(File.join(dir, 'README.md'), "release fixture\n")
+  FileUtils.cp(File.join(root, 'LICENSE'), File.join(dir, 'LICENSE'))
   rows.each do |row|
     target, name = row.values_at('target', 'name')
     windows = target.include?('windows')

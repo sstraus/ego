@@ -545,7 +545,7 @@ fn host_mail_arriving_during_a_tool_call_reaches_the_next_generation() {
             "the prompt ended before the tool call: {frame}"
         );
     };
-    let mail = r#"{"messages":[{"id":"mail-17","from":"maintainer","body":"review the new branch","timestamp":17}],"nextSince":17}"#;
+    let mail = r#"{"messages":[{"id":"mail-17","from":"operator","body":"review the new branch","timestamp":17}],"nextSince":17}"#;
     mcp.updated_inbox(&mut host, mail);
     host.write_frame(serde_json::json!({
         "jsonrpc":"2.0","id":held["id"],"result":{

@@ -3,7 +3,7 @@
 //! `tests/faults.rs` proves `recover()` repairs each kill point correctly.
 //! What is proved here is about *composition*: what `open_writer` does on the
 //! way in, and what it costs to skip it — see
-//! `ARCHITECTURE.md`.
+//! `docs/architecture.md`.
 
 use std::path::PathBuf;
 use std::time::Duration;

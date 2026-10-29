@@ -1,6 +1,6 @@
 //! `models.toml`: where a hosted model's price and ceilings are *supplied*.
 //!
-//! `ARCHITECTURE.md` §1 forbids this
+//! `docs/architecture.md` §1 forbids this
 //! repository from writing down a hosted price — "a price written from memory
 //! is not a cheaper version of a price, it is a number the budget gate will
 //! trust and that nothing can check" — and says the hosted path "works as soon
@@ -41,7 +41,7 @@
 //!
 //! ## Why a run with no money ceiling ignores the prices in it
 //!
-//! `ARCHITECTURE.md` §5 gates every rate
+//! `docs/architecture.md` §5 gates every rate
 //! source on a ceiling existing: "none of them is consulted at all unless a
 //! ceiling is configured". This file is the first of the three, so the gate
 //! starts here.
@@ -86,7 +86,7 @@ const BUILTIN: &str = include_str!("../catalogue/models.toml");
 
 /// The capability rows generated from the pinned models.dev snapshot.
 ///
-/// Written by `.agents/skills/model-catalogue-refresh` from
+/// Written by `scripts/catalogue.py` from
 /// `catalogue/policy.toml` and `catalogue/upstream/models.dev.json`; a row here
 /// is never edited by hand, and a slug that [`BUILTIN`] also states is a build
 /// error ([`builtin`] panics on it).
@@ -149,11 +149,11 @@ struct Retired {
 #[serde(deny_unknown_fields)]
 struct Supplied {
     capabilities: ModelCapabilities,
-    /// Optional, per `ARCHITECTURE.md` §3.
+    /// Optional, per `docs/architecture.md` §3.
     /// A run that configures no ceiling needs no prices, so a `[model."x"]`
     /// entry with capabilities alone is a complete entry and resolves.
     /// Capabilities are not optional beside it, and the asymmetry is the
-    /// ruling's: maintainer ruled about prices.
+    /// ruling's: operator ruled about prices.
     #[serde(default)]
     pricing: Option<Quote>,
 }

@@ -7,7 +7,7 @@
 //! is reported `not_checked` with the reason and the command that would get it
 //! — which is the whole difference between a diagnosis and a guess.
 //!
-//! See `ARCHITECTURE.md`.
+//! See `docs/architecture.md`.
 
 use std::path::PathBuf;
 

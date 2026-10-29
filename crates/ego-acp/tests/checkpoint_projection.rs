@@ -1,4 +1,4 @@
-//! contract for regression case ACP projections.
+//! contract for regression ACP projections.
 //!
 //! ACP has no checkpoint-author role. A model-generated checkpoint must not
 //! be misreported as either a human or an agent message.

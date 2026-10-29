@@ -549,7 +549,7 @@ Tests: `crates/ego-acp/tests/listener_transport.rs::authenticated_websocket_fact
 
 ## Not implemented
 
-The router and [current product contract](../internals/06-acp.md) exclude:
+The router and current product contract exclude:
 
 - Client filesystem `fs/read_text_file` and `fs/write_text_file`, and client
   `terminal/*` effects. ego executes through its own rooted tools instead.

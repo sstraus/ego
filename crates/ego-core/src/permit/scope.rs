@@ -25,14 +25,14 @@ use crate::store::evidence::EvidenceRead;
 /// directory is not thereby allowed to read what it finds there. Knowing that
 /// `.env` exists and knowing what is in it are different authorities, and
 /// collapsing them would mean a glob that can exfiltrate a workspace
-/// (`ARCHITECTURE.md` §1).
+/// (`docs/architecture.md` §1).
 /// **The fields are `pub(super)`, not `pub`.** `Scope` is public because a
 /// `rules explain` and the audit event both have to render one, and it is
 /// readable through the accessors below. What no longer exists is the ability
 /// to *compose* one from outside `crate::permit`: a `Scope` literal is a
 /// statement about what some permit may do, and until this was closed any
 /// holder of a `&PolicyEngine` could write that statement itself and mint it
-/// (`ARCHITECTURE.md` §2).
+/// (`docs/architecture.md` §2).
 ///
 /// Rust has no per-file visibility, so `pub(super)` is the tightest bound
 /// available and it admits the whole `permit` module rather than `grant.rs`

@@ -1,4 +1,4 @@
-//! contract for regression case: one ordered, versioned model snapshot.
+//! contract for regression: one ordered, versioned model snapshot.
 
 use ego_ai::catalogue::{
     CachedDiscoveryModel, CachedDiscoverySlice, DiscoveryCacheV2, FactFreshness, ModelAvailability,
