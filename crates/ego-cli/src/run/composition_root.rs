@@ -191,16 +191,7 @@ impl CliPrepared {
         {
             return Ok(());
         }
-        use futures::StreamExt;
-        let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
-            .map_err(|e| RunExecutorError::new(e.to_string()))?
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| RunExecutorError::new(e.to_string()))?;
-        let limits = ego_tools::orchestrator_active::rework_limits(&entries)
-            .map_err(RunExecutorError::new)?;
+        let limits = self.orchestrator_rework_limits().await?;
         let home = std::env::var_os("HOME")
             .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
         let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
@@ -215,6 +206,18 @@ impl CliPrepared {
             }
         }
         Ok(())
+    }
+
+    async fn orchestrator_rework_limits(&self) -> Result<BTreeMap<String, u8>, RunExecutorError> {
+        use futures::StreamExt;
+        let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
+            .map_err(|e| RunExecutorError::new(e.to_string()))?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RunExecutorError::new(e.to_string()))?;
+        ego_tools::orchestrator_active::rework_limits(&entries).map_err(RunExecutorError::new)
     }
 
     pub(super) async fn prepare(
