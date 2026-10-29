@@ -116,9 +116,7 @@ fn failed_rescan_tool_preflight_does_not_publish_the_candidate() {
         Ok(_) => panic!("invalid model tool selection must refuse the rescan"),
     };
     assert!(
-        error
-            .exit_reason()
-            .contains("could not rebuild model tools")
+        matches!(error, RunTermination::Failed { message } if message.contains("could not rebuild model tools"))
     );
     let after = fixture.catalogue.capture().unwrap();
     assert_eq!(before.snapshot_digest(), after.snapshot_digest());
