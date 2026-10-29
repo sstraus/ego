@@ -37,19 +37,17 @@ const LAUNCHES: [(&str, Option<&str>); 3] = [
     ("untrusted", Some("no")),
 ];
 
-fn stub() -> Stub {
-    Stub::start(Plan {
-        completions: (0..2)
-            .map(|_| Reply::Sse(text("a launch transcript")))
-            .collect(),
-        ..Plan::default()
-    })
-}
-
 /// One launch, normalised down to what a person would read off the screen.
 fn transcript(case: &str, answer: Option<&str>) -> String {
+    transcript_with_reply(case, answer, Reply::Sse(text("a launch transcript")))
+}
+
+fn transcript_with_reply(case: &str, answer: Option<&str>, reply: Reply) -> String {
     let places = Places::new();
-    let stub = stub();
+    let stub = Stub::start(Plan {
+        completions: vec![reply; 2],
+        ..Plan::default()
+    });
     if answer.is_some() {
         places.ego(&stub).file("AGENTS.md", "# a project speaks\n");
     }
@@ -179,10 +177,19 @@ fn is_prompt_repaint(line: &str) -> bool {
 }
 
 fn is_thinking_repaint(line: &str) -> bool {
-    let Some((frame, elapsed)) = line.split_once(" Working ") else {
-        return false;
-    };
-    if !["◐", "◓", "◑", "◒"].contains(&frame) || elapsed.is_empty() {
+    // Cursor-only updates lose their boundaries when escapes are stripped.
+    // Validate every adjacent frame, not one duration containing other frames.
+    let mut frames = line.split(['◐', '◓', '◑', '◒']);
+    frames.next() == Some("")
+        && frames.all(|frame| {
+            frame
+                .strip_prefix(" Working ")
+                .is_some_and(is_thinking_elapsed)
+        })
+}
+
+fn is_thinking_elapsed(elapsed: &str) -> bool {
+    if elapsed.is_empty() {
         return false;
     }
     // Replace numeric runs, not words: a real answer after a status-like prefix
@@ -290,6 +297,24 @@ fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
     assert_eq!(readable(raw), "hello\na launch transcript\n");
 }
 
+// Catches: adjacent status frames with different clocks or token counts survive.
+#[test]
+fn readable_discards_concatenated_working_repaints() {
+    // Recorded from rb result 20261029T042025Z-53407 and the regression case RED
+    // (20261029T061159Z-5592), after the existing escape-stripping boundary.
+    for row in [
+        "◓ Working 1s · ↓ ~5 tokens · Esc to interrupt◑ Working 2s · ↓ ~5 tokens · Esc to interrupt",
+        "◓ Working 1s · Esc to interrupt◓ Working 1s · ↓ ~5 tokens · Esc to interrupt",
+    ] {
+        assert_eq!(
+            readable(&format!("hello\n{row}\na launch transcript\n")),
+            "hello\na launch transcript\n",
+        );
+        let answer = format!("{row} is an example, not a repaint");
+        assert_eq!(readable(&answer), format!("{answer}\n"));
+    }
+}
+
 // Catches: live progress leaking into goldens, or filtering real answer text.
 #[test]
 fn readable_discards_extended_working_repaints_but_keeps_real_answers() {
@@ -369,6 +394,25 @@ fn the_first_launch_says_what_it_is_committed_to_saying() {
              cargo test -p ego-cli --test launch_transcripts -- --ignored"
         );
     }
+}
+
+// Catches: changing elapsed-time frames concatenate and leak into the golden.
+#[test]
+fn the_first_launch_keeps_its_wording_after_one_second_of_working() {
+    let committed = std::fs::read_to_string(golden_path("nothing-to-trust"))
+        .expect("the committed launch transcript");
+    assert_eq!(
+        transcript_with_reply(
+            "nothing-to-trust",
+            None,
+            Reply::Paced {
+                head: String::new(),
+                tail: text("a launch transcript"),
+                pause: std::time::Duration::from_millis(1100),
+            },
+        ),
+        committed,
+    );
 }
 
 /// Not a test — the way the files above are written. `--ignored` so it never
